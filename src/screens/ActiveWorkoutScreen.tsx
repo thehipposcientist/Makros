@@ -75,9 +75,11 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
   }, [exercises]);
 
   const handleLogSet = async () => {
+    console.log('[LOG_SET] handleLogSet called with weight:', logWeight, 'reps:', logReps, 'exercise index:', logExIdx);
     const weightNum = parseFloat(logWeight);
     const repsNum   = parseInt(logReps, 10);
     if (!logWeight || !logReps || isNaN(weightNum) || isNaN(repsNum) || repsNum <= 0) {
+      console.warn('[LOG_SET] Invalid input validation failed');
       Alert.alert('Invalid Input', 'Please enter valid weight and reps.');
       return;
     }
@@ -85,30 +87,54 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
     // Capture synchronously before any state updates
     const exIdx = logExIdx;
     const ex    = exercises[exIdx];
+    console.log('[LOG_SET] Processing set for exercise:', ex.name, 'current sets:', ex.sets.length, 'target sets:', ex.targetSets);
 
     const newSet: CompletedSet = { setNumber: ex.sets.length + 1, reps: repsNum, weightLbs: weightNum };
     const updatedSets = [...ex.sets, newSet];
+    console.log('[LOG_SET] Created new set:', newSet, 'updated sets count:', updatedSets.length);
 
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, sets: updatedSets } : e));
+    console.log('[LOG_SET] Updated exercises state with new set');
     setLogModalVisible(false);
+    console.log('[LOG_SET] Closed log modal');
     setActiveExIdx(exIdx);  // keep card expanded so tip appears
+    console.log('[LOG_SET] Set active exercise index to:', exIdx);
     setAiErrorIdx(null);
+    console.log('[LOG_SET] Cleared AI error index');
 
     // Fetch AI tip for the next set
     const setsLogged = updatedSets.length;
     if (setsLogged < ex.targetSets) {
+      console.log('[AI] Starting AI recommendation fetch for exercise:', ex.name, 'set:', setsLogged + 1);
       setAiLoadingIdx(exIdx);
       try {
         const token = await AsyncStorage.getItem('authToken');
-        if (!token) throw new Error('Not authenticated');
+        console.log('[AI] Retrieved auth token:', token ? 'present' : 'missing');
+        if (!token) {
+          console.warn('[AI] No auth token found, throwing error');
+          throw new Error('Not authenticated');
+        }
+        console.log('[AI] Calling getWeightRecommendation API...');
         const rec = await getWeightRecommendation(token, ex.name, goal, updatedSets, setsLogged + 1);
+        console.log('[AI] API call successful, received recommendation:', rec);
         const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-        setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e));
-      } catch {
+        console.log('[AI] Formatted tip text:', tip);
+        setExercises(prev => {
+          const newExercises = prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e);
+          console.log('[AI] Updated exercises state, recommendation set for exercise index:', exIdx);
+          return newExercises;
+        });
+      } catch (error) {
+        console.error('[AI] Failed to get recommendation - full error:', error);
+        console.error('[AI] Error message:', error?.message);
+        console.error('[AI] Error stack:', error?.stack);
         setAiErrorIdx(exIdx);
       } finally {
+        console.log('[AI] Setting aiLoadingIdx to null');
         setAiLoadingIdx(null);
       }
+    } else {
+      console.log('[AI] Skipping recommendation - all sets completed for this exercise');
     }
   };
 

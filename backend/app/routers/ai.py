@@ -9,6 +9,14 @@ from app.models import User
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
+# Helper function to get OpenAI model from env
+def get_openai_model():
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# Helper function to get OpenAI API key from env
+def get_openai_api_key():
+    return os.getenv("OPENAI_API_KEY")
+
 
 # ─── Request schema (mirrors frontend UserProfile) ────────────────────────────
 
@@ -158,7 +166,7 @@ def lookup_food_macros(
     current_user: User = Depends(get_current_user),
 ):
     """Given a food name, return its macros per standard serving."""
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
@@ -169,7 +177,7 @@ def lookup_food_macros(
     client = OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=get_openai_model(),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a nutrition expert. Respond with valid JSON only."},
@@ -193,7 +201,7 @@ def lookup_equipment_info(
     current_user: User = Depends(get_current_user),
 ):
     """Given an equipment name, return primary muscle groups it targets."""
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
@@ -204,7 +212,7 @@ def lookup_equipment_info(
     client = OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=get_openai_model(),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a fitness expert. Respond with valid JSON only."},
@@ -228,7 +236,7 @@ def recommend_weight(
 ):
     """Given recent sets for an exercise, return the next weight/rep recommendation."""
     print(f"[BACKEND] Received weight recommendation request for {body.exerciseName}, set {body.nextSetNumber}")
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         print("[BACKEND] ERROR: OpenAI API key not configured")
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
@@ -242,7 +250,7 @@ def recommend_weight(
     try:
         print(f"[BACKEND] Calling OpenAI for {body.exerciseName} recommendation...")
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=get_openai_model(),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are an expert strength coach. Respond with valid JSON only."},
@@ -272,7 +280,7 @@ def generate_plans(
     req: PlanRequest,
     current_user: User = Depends(get_current_user),
 ):
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
@@ -280,7 +288,7 @@ def generate_plans(
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=get_openai_model(),
             response_format={"type": "json_object"},
             messages=[
                 {
