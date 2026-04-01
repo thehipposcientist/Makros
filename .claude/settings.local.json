@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(cd:*)",
+      "Bash(npx expo:*)",
+      "Bash(node -e \"const p=require\\(''./node_modules/react-native/package.json''\\); console.log\\(''RN:'', p.version\\)\")",
+      "Bash(node -e \"const p=require\\(''./node_modules/expo/package.json''\\); console.log\\(''Expo:'', p.version\\)\")",
+      "Bash(npx expo-doctor:*)",
+      "Bash(python -m venv venv)",
+      "Bash(py --version)",
+      "Bash(where python:*)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(pip install:*)",
+      "Bash(timeout 5 uvicorn app.main:app --reload)",
+      "Bash(timeout 6 uvicorn app.main:app --reload)",
+      "Bash(npx tsc:*)",
+      "Bash(rm -f workoutpal.db)",
+      "Bash(timeout 8 uvicorn app.main:app --reload)",
+      "Bash(timeout 8 uvicorn app.main:app)"
+    ]
+  }
+}

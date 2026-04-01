@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "Makros",
+    "slug": "makros",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {},
+    "scheme": "makros",
+    "newArchEnabled": false,
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
