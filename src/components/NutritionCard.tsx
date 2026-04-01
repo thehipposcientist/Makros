@@ -3,31 +3,56 @@ import { DailyNutritionPlan, MealSuggestion } from '../types';
 import { colors, radius } from '../constants/theme';
 
 interface NutritionCardProps {
+  title?: string;
   nutritionPlan: DailyNutritionPlan;
   checkedMeals?: Record<string, boolean>;
   onToggleMeal?: (mealType: string) => void;
   onEditMeal?:   (mealType: string, meal: MealSuggestion) => void;
+  onAddSnack?: () => void;
+  onRemoveMeal?: (mealType: string) => void;
+  onRestoreMeal?: (mealType: string) => void;
 }
 
 export default function NutritionCard({
+  title,
   nutritionPlan,
   checkedMeals = {},
   onToggleMeal,
   onEditMeal,
+  onAddSnack,
+  onRemoveMeal,
+  onRestoreMeal,
 }: NutritionCardProps) {
-  const { breakfast, lunch, dinner, targets } = nutritionPlan;
+  const { breakfast, lunch, dinner, snack, targets } = nutritionPlan;
+  const removed = new Set(nutritionPlan.removedMeals ?? []);
+
+  const allMeals: Array<{ key: string; emoji: string; meal: MealSuggestion | undefined }> = [
+    { key: 'breakfast', emoji: '🌅', meal: breakfast },
+    { key: 'lunch', emoji: '🥗', meal: lunch },
+    { key: 'dinner', emoji: '🍽️', meal: dinner },
+    { key: 'snack', emoji: '🥜', meal: snack },
+  ];
+  const visibleMeals = allMeals.filter(m => m.meal && !removed.has(m.key)) as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
+  const hiddenMeals = allMeals.filter(m => m.meal && removed.has(m.key)) as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
 
   // Sum actual macros across all meals
   const actual = {
-    calories: Math.round(breakfast.calories + lunch.calories + dinner.calories),
-    protein:  Math.round(breakfast.protein  + lunch.protein  + dinner.protein),
-    carbs:    Math.round((breakfast.carbs ?? 0) + (lunch.carbs ?? 0) + (dinner.carbs ?? 0)),
-    fat:      Math.round((breakfast.fat   ?? 0) + (lunch.fat  ?? 0) + (dinner.fat   ?? 0)),
+    calories: Math.round(visibleMeals.reduce((sum, m) => sum + m.meal.calories, 0)),
+    protein:  Math.round(visibleMeals.reduce((sum, m) => sum + m.meal.protein, 0)),
+    carbs:    Math.round(visibleMeals.reduce((sum, m) => sum + (m.meal.carbs ?? 0), 0)),
+    fat:      Math.round(visibleMeals.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
   };
 
   return (
     <View style={styles.card}>
-      <Text style={styles.title}>Daily Nutrition</Text>
+      <View style={styles.titleRow}>
+        <Text style={styles.title}>{title ? `${title} Nutrition` : 'Daily Nutrition'}</Text>
+        {!snack && onAddSnack && (
+          <TouchableOpacity style={styles.addSnackBtn} onPress={onAddSnack}>
+            <Text style={styles.addSnackBtnText}>+ Snack</Text>
+          </TouchableOpacity>
+        )}
+      </View>
 
       {/* Actual vs target for each macro */}
       <View style={styles.macrosGrid}>
@@ -63,24 +88,30 @@ export default function NutritionCard({
 
       {/* Meals */}
       <View style={styles.meals}>
-        <MealRow
-          emoji="🌅" mealType="breakfast" meal={breakfast}
-          checked={!!checkedMeals.breakfast}
-          onToggle={onToggleMeal}
-          onEdit={onEditMeal}
-        />
-        <MealRow
-          emoji="🥗" mealType="lunch" meal={lunch}
-          checked={!!checkedMeals.lunch}
-          onToggle={onToggleMeal}
-          onEdit={onEditMeal}
-        />
-        <MealRow
-          emoji="🍽️" mealType="dinner" meal={dinner}
-          checked={!!checkedMeals.dinner}
-          onToggle={onToggleMeal}
-          onEdit={onEditMeal}
-        />
+        {visibleMeals.map(({ key, emoji, meal }) => (
+          <MealRow
+            key={key}
+            emoji={emoji}
+            mealType={key}
+            meal={meal}
+            checked={!!checkedMeals[key]}
+            onToggle={onToggleMeal}
+            onEdit={onEditMeal}
+            onRemove={onRemoveMeal}
+          />
+        ))}
+        {hiddenMeals.length > 0 && (
+          <View style={styles.hiddenMealRow}>
+            <Text style={styles.hiddenMealText}>Removed: {hiddenMeals.map(m => m.meal.meal).join(', ')}</Text>
+            <View style={styles.restoreWrap}>
+              {hiddenMeals.map(m => (
+                <TouchableOpacity key={m.key} style={styles.restoreBtn} onPress={() => onRestoreMeal?.(m.key)}>
+                  <Text style={styles.restoreBtnText}>Restore {m.meal.meal}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
       </View>
 
       <View style={styles.footer}>
@@ -132,13 +163,14 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit }: {
+function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove }: {
   emoji: string;
   mealType: string;
   meal: MealSuggestion;
   checked: boolean;
   onToggle?: (mealType: string) => void;
   onEdit?:   (mealType: string, meal: MealSuggestion) => void;
+  onRemove?: (mealType: string) => void;
 }) {
   return (
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
@@ -158,6 +190,14 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit }: {
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             style={styles.editBtn}>
             <Text style={styles.editBtnText}>Edit  ›</Text>
+          </TouchableOpacity>
+        )}
+        {onRemove && (
+          <TouchableOpacity
+            onPress={() => onRemove(mealType)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.removeMealBtn}>
+            <Text style={styles.removeMealBtnText}>Remove</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -196,7 +236,17 @@ const styles = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: colors.accent,
   },
-  title: { fontSize: 18, fontWeight: '700', color: colors.textPrimary, marginBottom: 14 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  title: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
+  addSnackBtn: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  addSnackBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
 
   // Macro grid
   macrosGrid: {
@@ -251,11 +301,32 @@ const styles = StyleSheet.create({
 
   editBtn:     { paddingHorizontal: 6 },
   editBtnText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  removeMealBtn: { paddingHorizontal: 6 },
+  removeMealBtnText: { fontSize: 12, color: colors.error, fontWeight: '600' },
 
   mealFoods:     { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
   mealFoodsDone: { color: colors.textMuted },
 
   mealBadges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  hiddenMealRow: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+    gap: 8,
+  },
+  hiddenMealText: { fontSize: 12, color: colors.textSecondary },
+  restoreWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  restoreBtn: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  restoreBtnText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
   pill: {
     backgroundColor: colors.background, borderRadius: radius.sm,
     borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4,

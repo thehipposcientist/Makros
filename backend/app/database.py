@@ -15,7 +15,7 @@ engine = create_engine(
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, Equipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet
+    from app.models import Exercise, Food, Equipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState
     
     SQLModel.metadata.create_all(engine)
     from app.seed import seed_exercises, seed_foods, seed_equipment, seed_goals

@@ -4,7 +4,6 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { login, register } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
@@ -44,7 +43,6 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         await register(email.trim(), username.trim(), password);
       }
       const { access_token } = await login(email.trim(), password);
-      await AsyncStorage.setItem('authToken', access_token);
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');

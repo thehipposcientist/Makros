@@ -2,16 +2,27 @@ import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
 } from 'react-native';
-import { WorkoutSession } from '../types';
+import { WorkoutSession, UserProfile } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR } from '../utils/workoutHistory';
+import { getGoalEstimate } from '../utils/goalEstimate';
+import { useMetaData } from '../hooks/useMetaData';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 interface ProgressScreenProps {
   onBack: () => void;
+  authToken: string;
+  userProfile: UserProfile;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+interface StrengthPoint {
+  key: string;
+  label: string;
+  score: number;
+}
 
 function formatDate(isoString: string): string {
   const d = new Date(isoString);
@@ -24,19 +35,72 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-export default function ProgressScreen({ onBack }: ProgressScreenProps) {
+function strengthForSession(session: WorkoutSession): number {
+  return session.exercises.reduce((total, ex) => {
+    if (ex.sets.length === 0) return total;
+    const bestSet = ex.sets.reduce((best, set) => {
+      const bestScore = best.weightLbs * best.reps;
+      const setScore = set.weightLbs * set.reps;
+      return setScore > bestScore ? set : best;
+    }, ex.sets[0]);
+    return total + bestSet.weightLbs * bestSet.reps;
+  }, 0);
+}
+
+function buildStrengthTrend(history: WorkoutSession[]): StrengthPoint[] {
+  const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
+  const recent = sorted.slice(-8);
+  return recent.map(s => {
+    const d = new Date(s.date);
+    return {
+      key: s.id,
+      label: `${d.getMonth() + 1}/${d.getDate()}`,
+      score: Math.round(strengthForSession(s)),
+    };
+  });
+}
+
+export default function ProgressScreen({ onBack, authToken, userProfile }: ProgressScreenProps) {
+  const meta = useMetaData();
   const [tab, setTab] = useState<'prs' | 'history'>('prs');
   const [prs, setPrs] = useState<PR[]>([]);
   const [history, setHistory] = useState<WorkoutSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const [insights, setInsights] = useState<any | null>(null);
+  const [guardrails, setGuardrails] = useState<string[]>([]);
+  const [coachMemory, setCoachMemory] = useState<any[]>([]);
+  const [progressionHint, setProgressionHint] = useState<string>('');
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory()]).then(([p, h]) => {
       setPrs(p);
       setHistory(h);
       setLoading(false);
+      if (authToken && p.length > 0) {
+        getProgressionInsights(authToken, p[0].exerciseName)
+          .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
+          .catch(() => null);
+      }
     });
+    if (authToken) {
+      getInsights(authToken).then(setInsights).catch(() => null);
+      getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
+      getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+    }
   }, []);
+
+  const strengthTrend = buildStrengthTrend(history);
+  const overallStrength = strengthTrend.length
+    ? Math.round(strengthTrend.reduce((sum, p) => sum + p.score, 0) / strengthTrend.length)
+    : 0;
+
+  const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
+  const currentWeight = userProfile.physicalStats.weightLbs;
+  const targetWeight = userProfile.goalDetails.targetWeightLbs;
+  const estimate = getGoalEstimate(userProfile, meta.goalConfig);
+  const lostOrGained = Math.abs(currentWeight - startWeight);
+  const direction = currentWeight <= startWeight ? 'down' : 'up';
+  const remainingLbs = targetWeight != null ? Math.abs(currentWeight - targetWeight) : null;
 
   return (
     <View style={styles.container}>
@@ -67,6 +131,50 @@ export default function ProgressScreen({ onBack }: ProgressScreenProps) {
         </View>
       ) : tab === 'prs' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
+            <View style={styles.insightsCard}>
+              <Text style={styles.insightsTitle}>Coach Insights</Text>
+              {insights?.adherence && (
+                <Text style={styles.insightsLine}>
+                  7-day adherence: workouts {insights.adherence.workout_7d_pct}%
+                  {insights.adherence.meal_7d_pct != null ? ` · meals ${insights.adherence.meal_7d_pct}%` : ''}
+                </Text>
+              )}
+              {guardrails.map((w, i) => (
+                <Text key={i} style={styles.guardrailText}>• {w}</Text>
+              ))}
+              {coachMemory.map((m, i) => (
+                <Text key={i} style={styles.memoryText}>{m.summary}</Text>
+              ))}
+              {progressionHint ? <Text style={styles.progressionHint}>Progression: {progressionHint}</Text> : null}
+            </View>
+          )}
+
+          <View style={styles.weightCard}>
+            <Text style={styles.weightTitle}>Weight Progress</Text>
+            <View style={styles.weightRow}>
+              <View style={styles.weightMetric}>
+                <Text style={styles.weightMetricLabel}>Initial</Text>
+                <Text style={styles.weightMetricValue}>{startWeight} lbs</Text>
+              </View>
+              <View style={styles.weightMetric}>
+                <Text style={styles.weightMetricLabel}>Current</Text>
+                <Text style={styles.weightMetricValue}>{currentWeight} lbs</Text>
+              </View>
+              <View style={styles.weightMetric}>
+                <Text style={styles.weightMetricLabel}>Change</Text>
+                <Text style={styles.weightMetricValue}>{lostOrGained.toFixed(1)} lbs {direction}</Text>
+              </View>
+            </View>
+            {targetWeight != null && (
+              <Text style={styles.weightEta}>
+                Target: {targetWeight} lbs
+                {remainingLbs != null ? `  ·  ${remainingLbs.toFixed(1)} lbs remaining` : ''}
+                {estimate ? `  ·  ${estimate.label}` : ''}
+              </Text>
+            )}
+          </View>
+
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>🏋️</Text>
@@ -102,6 +210,27 @@ export default function ProgressScreen({ onBack }: ProgressScreenProps) {
             </View>
           ) : (
             <>
+              <View style={styles.graphCard}>
+                <View style={styles.graphHeader}>
+                  <Text style={styles.graphTitle}>Overall Strength</Text>
+                  <Text style={styles.graphScore}>{overallStrength}</Text>
+                </View>
+                <Text style={styles.graphSubtitle}>Combined top-set score per session (weight × reps)</Text>
+                <View style={styles.graphBars}>
+                  {strengthTrend.map(point => {
+                    const maxScore = Math.max(...strengthTrend.map(p => p.score), 1);
+                    const h = Math.max(8, Math.round((point.score / maxScore) * 88));
+                    return (
+                      <View key={point.key} style={styles.graphBarCol}>
+                        <Text style={styles.graphBarValue}>{point.score}</Text>
+                        <View style={[styles.graphBar, { height: h }]} />
+                        <Text style={styles.graphBarLabel}>{point.label}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+
               <Text style={styles.sectionLabel}>{history.length} sessions logged</Text>
               {history.map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
@@ -188,6 +317,61 @@ const styles = StyleSheet.create({
   prWeight: { fontSize: 22, fontWeight: '800', color: colors.primary },
   prUnit:   { fontSize: 11, color: colors.textSecondary, marginTop: -4 },
   prReps:   { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+
+  insightsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 12,
+  },
+  insightsTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
+  insightsLine: { fontSize: 12, color: colors.textSecondary, marginBottom: 4 },
+  guardrailText: { fontSize: 12, color: colors.warning, marginBottom: 3 },
+  memoryText: { fontSize: 12, color: colors.textSecondary, marginBottom: 3 },
+  progressionHint: { fontSize: 12, color: colors.primary, marginTop: 4, fontWeight: '600' },
+
+  weightCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 12,
+  },
+  weightTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginBottom: 10 },
+  weightRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+  weightMetric: {
+    flex: 1,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  weightMetricLabel: { fontSize: 11, color: colors.textSecondary, marginBottom: 2 },
+  weightMetricValue: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
+  weightEta: { fontSize: 12, color: colors.textSecondary },
+
+  graphCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 12,
+  },
+  graphHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },
+  graphTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  graphScore: { fontSize: 20, fontWeight: '800', color: colors.primary },
+  graphSubtitle: { fontSize: 12, color: colors.textSecondary, marginBottom: 10 },
+  graphBars: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 6, minHeight: 120 },
+  graphBarCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', gap: 4 },
+  graphBarValue: { fontSize: 10, color: colors.textMuted },
+  graphBar: { width: '75%', backgroundColor: colors.primary, borderRadius: 6 },
+  graphBarLabel: { fontSize: 10, color: colors.textSecondary },
 
   sessionCard: {
     backgroundColor: colors.surface, borderRadius: radius.md,

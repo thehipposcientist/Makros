@@ -81,6 +81,12 @@ export async function addSkippedDay(date: string, focus: string): Promise<void> 
   }
 }
 
+export async function removeSkippedDay(date: string): Promise<void> {
+  const days = await getSkippedDays();
+  const nextDays = days.filter(day => day.date !== date);
+  await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(nextDays));
+}
+
 // ── Personal Records ──────────────────────────────────────────────────────────
 
 export interface PR {

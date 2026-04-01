@@ -1,15 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform,
+  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
 import { getWeightRecommendation, logWorkoutDone } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 interface ActiveWorkoutScreenProps {
+  authToken: string;
   workout: WorkoutDay;
   goal: string;
   onFinish: (session: WorkoutSession) => void;
@@ -22,7 +22,7 @@ function formatTime(seconds: number): string {
   return `${m}:${s}`;
 }
 
-export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel }: ActiveWorkoutScreenProps) {
+export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish, onCancel }: ActiveWorkoutScreenProps) {
   const startTime = useRef(Date.now());
   const [elapsed, setElapsed] = useState(0);
 
@@ -31,6 +31,7 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
       name: ex.name,
       targetSets: ex.sets,
       targetReps: ex.reps,
+      targetRestSeconds: ex.restSeconds,
       equipment: typeof ex.equipment === 'string' ? ex.equipment : String(ex.equipment),
       sets: [],
       aiRecommendation: undefined,
@@ -44,6 +45,10 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
   const [logExIdx, setLogExIdx] = useState<number>(0);
   const [logWeight, setLogWeight] = useState('');
   const [logReps, setLogReps] = useState('');
+
+  // Auto rest timer between sets
+  const [restRemaining, setRestRemaining] = useState(0);
+  const [restForExercise, setRestForExercise] = useState<string | null>(null);
 
   // Per-exercise AI state
   const [aiLoadingIdx, setAiLoadingIdx] = useState<number | null>(null);
@@ -59,6 +64,22 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (restRemaining <= 0) return;
+    const interval = setInterval(() => {
+      setRestRemaining(prev => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          Vibration.vibrate([0, 250, 120, 250]);
+          Alert.alert('Rest Complete', `${restForExercise ?? 'Current exercise'} — ready for the next set.`);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [restRemaining, restForExercise]);
+
   // Pre-fill from history when modal opens
   const openLogModal = useCallback(async (exIdx: number) => {
     setLogExIdx(exIdx);
@@ -73,6 +94,14 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
       setLogReps(String(last.reps));
     }
   }, [exercises]);
+
+  const adjustRestSeconds = useCallback((exIdx: number, delta: number) => {
+    setExercises(prev => prev.map((ex, i) => {
+      if (i !== exIdx) return ex;
+      const next = Math.max(15, Math.min(300, (ex.targetRestSeconds || 60) + delta));
+      return { ...ex, targetRestSeconds: next };
+    }));
+  }, []);
 
   const handleLogSet = async () => {
     console.log('[LOG_SET] handleLogSet called with weight:', logWeight, 'reps:', logReps, 'exercise index:', logExIdx);
@@ -102,20 +131,29 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
     setAiErrorIdx(null);
     console.log('[LOG_SET] Cleared AI error index');
 
+    // Start rest timer automatically if more sets remain for this exercise.
+    if (updatedSets.length < ex.targetSets) {
+      const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
+      setRestForExercise(ex.name);
+      setRestRemaining(restSeconds);
+    } else {
+      setRestRemaining(0);
+      setRestForExercise(null);
+    }
+
     // Fetch AI tip for the next set
     const setsLogged = updatedSets.length;
     if (setsLogged < ex.targetSets) {
       console.log('[AI] Starting AI recommendation fetch for exercise:', ex.name, 'set:', setsLogged + 1);
       setAiLoadingIdx(exIdx);
       try {
-        const token = await AsyncStorage.getItem('authToken');
-        console.log('[AI] Retrieved auth token:', token ? 'present' : 'missing');
-        if (!token) {
+        console.log('[AI] Retrieved auth token:', authToken ? 'present' : 'missing');
+        if (!authToken) {
           console.warn('[AI] No auth token found, throwing error');
           throw new Error('Not authenticated');
         }
         console.log('[AI] Calling getWeightRecommendation API...');
-        const rec = await getWeightRecommendation(token, ex.name, goal, updatedSets, setsLogged + 1);
+        const rec = await getWeightRecommendation(authToken, ex.name, goal, updatedSets, setsLogged + 1);
         console.log('[AI] API call successful, received recommendation:', rec);
         const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
         console.log('[AI] Formatted tip text:', tip);
@@ -124,7 +162,7 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
           console.log('[AI] Updated exercises state, recommendation set for exercise index:', exIdx);
           return newExercises;
         });
-      } catch (error) {
+      } catch (error: any) {
         console.error('[AI] Failed to get recommendation - full error:', error);
         console.error('[AI] Error message:', error?.message);
         console.error('[AI] Error stack:', error?.stack);
@@ -151,9 +189,8 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
     await saveWorkoutSession(session);
     // Also persist completion to backend DB so it survives cache clears
     try {
-      const token = await AsyncStorage.getItem('authToken');
-      if (token) {
-        await logWorkoutDone(token, dateKey(now), workout.focus, elapsed);
+      if (authToken) {
+        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed);
       }
     } catch {}
     onFinish(session);
@@ -189,6 +226,17 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
         }]} />
       </View>
 
+      {restRemaining > 0 && (
+        <View style={styles.restBanner}>
+          <Text style={styles.restBannerText}>
+            Rest {formatTime(restRemaining)}{restForExercise ? ` • ${restForExercise}` : ''}
+          </Text>
+          <TouchableOpacity onPress={() => setRestRemaining(0)}>
+            <Text style={styles.restSkipText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Exercise list */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         {exercises.map((ex, i) => {
@@ -220,6 +268,19 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
 
               {isActive && (
                 <View style={styles.exerciseDetail}>
+
+                  <View style={styles.restAdjustRow}>
+                    <Text style={styles.restAdjustLabel}>Rest target</Text>
+                    <View style={styles.restAdjustControls}>
+                      <TouchableOpacity style={styles.restAdjustBtn} onPress={() => adjustRestSeconds(i, -15)}>
+                        <Text style={styles.restAdjustBtnText}>-15s</Text>
+                      </TouchableOpacity>
+                      <Text style={styles.restAdjustValue}>{Math.max(15, ex.targetRestSeconds || 60)}s</Text>
+                      <TouchableOpacity style={styles.restAdjustBtn} onPress={() => adjustRestSeconds(i, 15)}>
+                        <Text style={styles.restAdjustBtnText}>+15s</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
 
                   {ex.sets.length > 0 && (
                     <View style={styles.setsLog}>
@@ -376,6 +437,22 @@ const styles = StyleSheet.create({
   progressBarTrack: { height: 3, backgroundColor: colors.border, marginHorizontal: 16, borderRadius: 2, marginBottom: 16 },
   progressBarFill:  { height: 3, backgroundColor: colors.primary, borderRadius: 2 },
 
+  restBanner: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  restBannerText: { fontSize: 13, color: colors.textPrimary, fontWeight: '700' },
+  restSkipText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+
   scroll:        { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
 
@@ -394,6 +471,30 @@ const styles = StyleSheet.create({
   setsBadgeTextDone:{ color: colors.background },
 
   exerciseDetail: { marginTop: 14, gap: 10 },
+
+  restAdjustRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  restAdjustLabel: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  restAdjustControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  restAdjustBtn: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  restAdjustBtnText: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
+  restAdjustValue: { minWidth: 48, textAlign: 'center', fontSize: 13, fontWeight: '700', color: colors.primary },
 
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },

@@ -51,12 +51,8 @@ export default function Index() {
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }
 
-    // Restore previous session if token exists
-    const token = await AsyncStorage.getItem('authToken');
-    if (token) {
-      setAuthToken(token);
-      await loadProfile(token);
-    }
+    // Keep auth session in memory only so a full app close requires login again.
+    await AsyncStorage.removeItem('authToken');
     setIsLoading(false);
   };
 
@@ -124,6 +120,7 @@ export default function Index() {
   if (activeWorkout) {
     return (
       <ActiveWorkoutScreen
+        authToken={authToken}
         workout={activeWorkout}
         goal={userProfile.goal}
         onFinish={handleWorkoutFinish}
@@ -133,12 +130,13 @@ export default function Index() {
   }
 
   if (showProgress) {
-    return <ProgressScreen onBack={() => setShowProgress(false)} />;
+    return <ProgressScreen authToken={authToken} userProfile={userProfile} onBack={() => setShowProgress(false)} />;
   }
 
   return (
     <>
       <HomeScreen
+        authToken={authToken}
         userProfile={userProfile}
         onSignOut={handleSignOut}
         onEditProfile={() => setIsEditing(true)}

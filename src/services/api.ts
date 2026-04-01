@@ -162,6 +162,14 @@ export async function getGoals() {
   return request<any[]>('/meta/goals');
 }
 
+export async function getExercises(params?: { muscle?: string; equipment?: string }) {
+  const qp = new URLSearchParams();
+  if (params?.muscle) qp.set('muscle', params.muscle);
+  if (params?.equipment) qp.set('equipment', params.equipment);
+  const suffix = qp.toString() ? `?${qp.toString()}` : '';
+  return request<any[]>(`/meta/exercises${suffix}`);
+}
+
 export async function getPaces(goal?: string) {
   const params = goal ? `?goal=${goal}` : '';
   return request<any[]>(`/meta/paces${params}`);
@@ -196,5 +204,72 @@ export async function getGoalConfig() {
     lifestyle_goals: string[];
     timeline_weeks: Record<string, Record<string, number>>;
   }>('/meta/goal-config');
+}
+
+export async function getDayState(token: string, dayKey: string) {
+  return request<any>(`/profile/day-state/${dayKey}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function upsertDayState(
+  token: string,
+  dayKey: string,
+  payload: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any },
+) {
+  return request('/profile/day-state/' + dayKey, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function submitWeeklyCheckin(
+  token: string,
+  body: { checkin_date: string; weight_lbs: number; waist_in?: number; energy: number; sleep: number; adherence: number; notes?: string },
+) {
+  return request('/profile/checkin', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getInsights(token: string) {
+  return request('/profile/insights', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getGuardrails(token: string) {
+  return request<{ warnings: string[] }>('/profile/guardrails', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getCoachMemory(token: string) {
+  return request<any[]>('/profile/coach-memory', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getProgressionInsights(token: string, exerciseName: string) {
+  return request<any>(`/workouts/progression/${encodeURIComponent(exerciseName)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getGroceryList(token: string, days = 3) {
+  return request<{ days: number; items: Array<{ food: string; frequency: number }> }>(`/meals/grocery-list?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getMealSwap(token: string, meal_type: string, foods: string[]) {
+  const foodsQuery = foods.map(f => `foods=${encodeURIComponent(f)}`).join('&');
+  return request<{ meal_type: string; original: string[]; suggested: string[] }>(`/meals/swap?meal_type=${encodeURIComponent(meal_type)}&${foodsQuery}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 

@@ -184,7 +184,11 @@ function upperLowerDays(gym: boolean, db: boolean, pu: boolean, count: number): 
 }
 
 // Nutrition generation logic
-export function generateDailyNutrition(profile: UserProfile, availableFoods: FoodItem[] = []): DailyNutritionPlan {
+export function generateDailyNutrition(
+  profile: UserProfile,
+  availableFoods: FoodItem[] = [],
+  seedKey?: string
+): DailyNutritionPlan {
   const targets = calculateNutritionTargets(profile);
 
   // Build a name→item map from the provided foods + custom foods
@@ -195,13 +199,22 @@ export function generateDailyNutrition(profile: UserProfile, availableFoods: Foo
   const breakfastCalories = targets.calories * 0.25;
   const lunchCalories     = targets.calories * 0.35;
   const dinnerCalories    = targets.calories * 0.4;
+  const baseSeed = seedKey ?? `random-${Date.now()}-${Math.random()}`;
 
   return {
-    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, foodMap),
-    lunch:     generateMealSuggestion('Lunch',     lunchCalories,     profile.foodsAvailable, foodMap),
-    dinner:    generateMealSuggestion('Dinner',    dinnerCalories,     profile.foodsAvailable, foodMap),
+    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, foodMap, `${baseSeed}|Breakfast|${profile.goal}|${profile.goalDetails.pace}`),
+    lunch:     generateMealSuggestion('Lunch',     lunchCalories,     profile.foodsAvailable, foodMap, `${baseSeed}|Lunch|${profile.goal}|${profile.goalDetails.pace}`),
+    dinner:    generateMealSuggestion('Dinner',    dinnerCalories,    profile.foodsAvailable, foodMap, `${baseSeed}|Dinner|${profile.goal}|${profile.goalDetails.pace}`),
     targets,
   };
+}
+
+export function generateDailyNutritionForDate(
+  profile: UserProfile,
+  availableFoods: FoodItem[] = [],
+  dateKey: string
+): DailyNutritionPlan {
+  return generateDailyNutrition(profile, availableFoods, `date:${dateKey}`);
 }
 
 const HIGH_PROTEIN_GOALS = new Set(['muscle_gain', 'body_recomp', 'strength', 'toning']);
@@ -273,11 +286,26 @@ function classifyFood(item: FoodItem): 'protein' | 'carb' | 'fat' | 'veg' {
   return 'veg';
 }
 
+function hashString(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function seededIndex(length: number, seed: string, salt: string): number {
+  if (length <= 1) return 0;
+  return hashString(`${seed}|${salt}`) % length;
+}
+
 function generateMealSuggestion(
   mealType: string,
   calorieTarget: number,
   foodsAvailable: string[],
-  foodMap: Record<string, FoodItem> = {}
+  foodMap: Record<string, FoodItem> = {},
+  seed = ''
 ): MealSuggestion {
   // Resolve food items — use selected foods if available, otherwise defaults
   const candidates = foodsAvailable.length > 0 ? foodsAvailable : DEFAULT_MEAL_FOODS[mealType] ?? [];
@@ -293,9 +321,13 @@ function generateMealSuggestion(
   // Pick one food per preferred role for this meal
   const roles = MEAL_ROLE_PREFERENCES[mealType] ?? ['protein', 'carb', 'veg'];
   const picked: FoodItem[] = [];
-  for (const role of roles) {
+  for (let i = 0; i < roles.length; i++) {
+    const role = roles[i];
     const pool = byRole[role];
-    if (pool.length) picked.push(pool[Math.floor(Math.random() * pool.length)]);
+    if (pool.length) {
+      const idx = seededIndex(pool.length, seed, `${role}|${i}|${mealType}`);
+      picked.push(pool[idx]);
+    }
   }
 
   // If we ended up with no known foods, fall back to defaults

@@ -9,6 +9,7 @@ const PACE_LBS_PER_WEEK: Record<string, Record<string, number>> = {
 
 export interface GoalEstimate {
   weeks: number;
+  days: number;
   date: Date;
   label: string;
 }
@@ -34,12 +35,21 @@ export function getGoalEstimate(profile: UserProfile, goalConfig: GoalConfig): G
 
   if (!weeks || weeks <= 0) return null;
 
+  const days = Math.max(1, Math.ceil(weeks * 7));
   const date = new Date();
-  date.setDate(date.getDate() + weeks * 7);
+  date.setDate(date.getDate() + days);
+
+  let label = '';
+  if (days < 14) {
+    label = days === 1 ? '1 day away' : `${days} days away`;
+  } else {
+    label = weeks === 1 ? '1 week away' : `${weeks} weeks away`;
+  }
 
   return {
     weeks,
+    days,
     date,
-    label: weeks === 1 ? '1 week away' : `${weeks} weeks away`,
+    label,
   };
 }

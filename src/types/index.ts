@@ -113,6 +113,8 @@ export interface DailyNutritionPlan {
   breakfast: MealSuggestion;
   lunch: MealSuggestion;
   dinner: MealSuggestion;
+  snack?: MealSuggestion;
+  removedMeals?: string[];
   targets: NutritionTargets;
 }
 
@@ -134,6 +136,7 @@ export interface SessionExercise {
   name: string;
   targetSets: number;
   targetReps: string;
+  targetRestSeconds: number;
   equipment: string;
   sets: CompletedSet[];
   aiRecommendation?: string; // e.g. "Try 165 lbs for 8 reps"

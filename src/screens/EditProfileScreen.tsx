@@ -237,7 +237,13 @@ export default function EditProfileScreen({ profile, onSave, onCancel }: EditPro
     onSave({
       ...profile,
       goal,
-      goalDetails: { pace, targetWeightLbs, timelineWeeks },
+      // Preserve goal start metadata so editing current weight does not reset "initial" weight.
+      goalDetails: {
+        ...profile.goalDetails,
+        pace,
+        targetWeightLbs,
+        timelineWeeks,
+      },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
       equipment,
@@ -265,7 +271,7 @@ export default function EditProfileScreen({ profile, onSave, onCancel }: EditPro
         <TouchableOpacity onPress={onCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Text style={styles.cancelText}>Cancel</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>Edit Preferences</Text>
+        <Text style={styles.title}>Edit Plan</Text>
         <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Text style={styles.saveText}>Save</Text>
         </TouchableOpacity>

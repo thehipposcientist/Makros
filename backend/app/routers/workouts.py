@@ -39,6 +39,63 @@ def _build_session_response(session_row: WorkoutSession, db: Session) -> dict:
     return {**session_row.model_dump(), "exercises": exercise_data}
 
 
+@router.get("/progression/{exercise_name}")
+def progression_insights(
+    exercise_name: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Returns progression trend and plateau hint for a given exercise name."""
+    sessions = db.exec(
+        select(WorkoutSession)
+        .where(WorkoutSession.user_id == current_user.id)
+        .order_by(WorkoutSession.workout_date.desc())
+    ).all()
+
+    points = []
+    for s in sessions:
+        ex_rows = db.exec(
+            select(WorkoutExercise)
+            .where(WorkoutExercise.session_id == s.id)
+            .where(WorkoutExercise.name.ilike(exercise_name))
+        ).all()
+        for ex in ex_rows:
+            sets = db.exec(
+                select(ExerciseSet)
+                .where(ExerciseSet.exercise_id == ex.id)
+                .where(ExerciseSet.completed == True)
+            ).all()
+            if not sets:
+                continue
+            best = max(sets, key=lambda x: (x.actual_weight_lbs or 0) * (x.actual_reps or 0))
+            score = (best.actual_weight_lbs or 0) * (best.actual_reps or 0)
+            points.append({
+                "date": str(s.workout_date),
+                "weight_lbs": best.actual_weight_lbs or 0,
+                "reps": best.actual_reps or 0,
+                "score": round(score, 1),
+            })
+
+    points = sorted(points, key=lambda p: p["date"])
+    recent = points[-6:]
+
+    plateau = False
+    suggestion = "Keep progressive overload with small weight or rep increases."
+    if len(recent) >= 4:
+        best_before_last3 = max((p["score"] for p in recent[:-3]), default=0)
+        best_last3 = max((p["score"] for p in recent[-3:]), default=0)
+        plateau = best_last3 <= best_before_last3
+        if plateau:
+            suggestion = "Plateau detected: reduce load by 5-10% for one week, then rebuild with +1 rep progression."
+
+    return {
+        "exercise": exercise_name,
+        "recent": recent,
+        "plateau": plateau,
+        "suggestion": suggestion,
+    }
+
+
 # ─── Workout completion ───────────────────────────────────────────────────────
 
 @router.post("/complete", status_code=201)

@@ -1,16 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
-import { generateWorkoutPlan, generateDailyNutrition } from '../utils/planGenerator';
+import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getGoalEstimate } from '../utils/goalEstimate';
-import { getAIPlans, getWorkoutStatus } from '../services/api';
+import { getAIPlans, getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, getSkippedDays, addSkippedDay,
-  todayKey, dateKey, SkippedDay,
+  isTodayWorkoutDone, todayKey, dateKey,
 } from '../utils/workoutHistory';
-import { getMealChecks, saveMealChecks, MealChecks } from '../utils/mealTracker';
+import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
@@ -18,6 +16,7 @@ import MealEditModal from '../components/MealEditModal';
 import { colors, radius } from '../constants/theme';
 
 interface HomeScreenProps {
+  authToken: string;
   userProfile: UserProfile | null;
   onSignOut: () => void;
   onEditProfile: () => void;
@@ -30,6 +29,11 @@ interface ScheduleItem {
   date: Date;
   workout: WorkoutDay | null;
   isRest: boolean;
+}
+
+interface MealDay {
+  key: string;
+  date: Date;
 }
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -71,6 +75,23 @@ function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number): Schedul
   return schedule;
 }
 
+function getNextMealDays(count: number): MealDay[] {
+  const out: MealDay[] = [];
+  const now = new Date();
+  for (let i = 0; i < count; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    out.push({ key: dateKey(d), date: d });
+  }
+  return out;
+}
+
+function mealDayLabel(date: Date, index: number): string {
+  if (index === 0) return 'Today';
+  if (index === 1) return 'Tomorrow';
+  return `${DAY_NAMES[date.getDay()]} · ${MONTH_NAMES[date.getMonth()]} ${date.getDate()}`;
+}
+
 // ── Goal progress banner ───────────────────────────────────────────────────────
 
 function GoalProgressBanner({ userProfile, goalLabel, goalConfig }: {
@@ -87,6 +108,7 @@ function GoalProgressBanner({ userProfile, goalLabel, goalConfig }: {
 
   let progressPct = 0;
   let leftLabel = '', rightLabel = '', midLabel = '';
+  let weightSummary: { start: number; current: number; remaining: number } | null = null;
 
   if (isWeightGoal && goalDetails.targetWeightLbs) {
     const start   = goalDetails.startWeightLbs ?? physicalStats.weightLbs;
@@ -98,6 +120,11 @@ function GoalProgressBanner({ userProfile, goalLabel, goalConfig }: {
     leftLabel     = `${start} lbs`;
     rightLabel    = `${target} lbs`;
     midLabel      = `${current} lbs now`;
+    weightSummary = {
+      start,
+      current,
+      remaining: Math.abs(current - target),
+    };
   } else if (isTimelineGoal && goalDetails.timelineWeeks) {
     const startDate    = goalDetails.goalStartedAt ? new Date(goalDetails.goalStartedAt) : new Date();
     const weeksElapsed = Math.max(0, (Date.now() - startDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
@@ -140,6 +167,23 @@ function GoalProgressBanner({ userProfile, goalLabel, goalConfig }: {
           <Text style={bs.meterLabel}>{rightLabel}</Text>
         </View>
       </View>
+
+      {weightSummary && (
+        <View style={bs.quickRow}>
+          <View style={bs.quickStat}>
+            <Text style={bs.quickLabel}>Initial</Text>
+            <Text style={bs.quickValue}>{weightSummary.start} lbs</Text>
+          </View>
+          <View style={bs.quickStat}>
+            <Text style={bs.quickLabel}>Current</Text>
+            <Text style={bs.quickValue}>{weightSummary.current} lbs</Text>
+          </View>
+          <View style={bs.quickStat}>
+            <Text style={bs.quickLabel}>Remaining</Text>
+            <Text style={bs.quickValue}>{weightSummary.remaining.toFixed(1)} lbs</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -159,48 +203,109 @@ const bs = StyleSheet.create({
   meterLabels:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   meterLabel:   { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
   meterLabelMid:{ fontSize: 10, color: colors.accent, fontWeight: '700' },
+  quickRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 2,
+  },
+  quickStat: {
+    flex: 1,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  quickLabel: { fontSize: 10, color: colors.textSecondary, marginBottom: 1 },
+  quickValue: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, onSignOut, onEditProfile, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
   const meta = useMetaData();
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
-  const [nutritionPlan, setNutritionPlan] = useState<DailyNutritionPlan | null>(null);
+  const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
   const [activeTab, setActiveTab]         = useState<'workout' | 'meals'>('workout');
   const [menuOpen, setMenuOpen]           = useState(false);
   const [expandedDay, setExpandedDay]     = useState<number>(0);
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiSource, setAiSource]           = useState<'ai' | 'local'>('local');
+  const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
+  const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
+  const [exerciseLibrary, setExerciseLibrary] = useState<any[]>([]);
 
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
 
   // Meal tracking
-  const [checkedMeals, setCheckedMeals]   = useState<MealChecks>({});
-  const [editingMeal, setEditingMeal]     = useState<{ type: string; meal: MealSuggestion } | null>(null);
+  const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
+  const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
+  const [currentDate, setCurrentDate] = useState(todayKey());
+  const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set([todayKey()]));
+  const [groceryPreview, setGroceryPreview] = useState<Array<{ food: string; frequency: number }>>([]);
+
+  const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
+    if (!authToken) return;
+    try {
+      const currentChecks = checkedMealsByDate[dayKey] ?? {};
+      const currentPlan = nutritionPlansByDate[dayKey] ?? null;
+      const isSkipped = skippedDates.has(dayKey);
+      await upsertDayState(authToken, dayKey, {
+        skipped_focus: patch.skipped_focus !== undefined ? patch.skipped_focus : (isSkipped ? 'skipped' : null),
+        meal_checks: patch.meal_checks ?? currentChecks,
+        nutrition_plan: patch.nutrition_plan ?? currentPlan,
+      });
+    } catch {
+      // Keep app responsive even if backend persistence fails
+    }
+  }, [authToken, checkedMealsByDate, nutritionPlansByDate, skippedDates]);
 
   useEffect(() => {
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
-  }, [userProfile]);
+  }, [userProfile, authToken, meta.allFoods.length]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const nowKey = todayKey();
+      if (nowKey !== currentDate) {
+        setCurrentDate(nowKey);
+        loadDayStatus();
+        if (userProfile) loadPlans(userProfile);
+      }
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [currentDate, userProfile, authToken, meta.allFoods.length]);
 
   const loadDayStatus = async () => {
     const today = todayKey();
-    const [skipped, checks] = await Promise.all([
-      getSkippedDays(),
-      getMealChecks(today),
-    ]);
-    setSkippedDates(new Set(skipped.map(s => s.date)));
-    setCheckedMeals(checks);
+    const mealDays = getNextMealDays(3);
+    const checkMap: Record<string, MealChecks> = {};
+    const skipped = new Set<string>();
+
+    if (authToken) {
+      const states = await Promise.all(mealDays.map(d => getDayState(authToken, d.key).catch(() => null)));
+      mealDays.forEach((d, i) => {
+        const s = states[i] as any;
+        checkMap[d.key] = s?.meal_checks ?? {};
+        if (s?.skipped_focus) skipped.add(d.key);
+      });
+    } else {
+      const checksList = await Promise.all(mealDays.map(d => getMealChecks(d.key)));
+      mealDays.forEach((d, i) => { checkMap[d.key] = checksList[i] as MealChecks; });
+    }
+
+    setSkippedDates(skipped);
+    setCheckedMealsByDate(checkMap);
 
     // Check workout completion from backend DB (not AsyncStorage)
     try {
-      const token = await AsyncStorage.getItem('authToken');
-      if (token) {
-        const status = await getWorkoutStatus(token, today);
+      if (authToken) {
+        const status = await getWorkoutStatus(authToken, today);
         setTodayDone(status.done);
       } else {
         // Fallback to local if no token
@@ -212,36 +317,144 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
   };
 
   const loadPlans = async (profile: UserProfile) => {
-    // Show local plan immediately while AI loads
-    setWorkoutPlan(generateWorkoutPlan(profile));
-    setNutritionPlan(generateDailyNutrition(profile, meta.allFoods));
+    // Use local/backend persisted plan by default; AI refresh is user-triggered.
+    const baseWorkout = generateWorkoutPlan(profile);
+    setWorkoutPlan(baseWorkout);
+    const mealDays = getNextMealDays(3);
+    const localEntries = await Promise.all(
+      mealDays.map(async d => {
+        if (authToken) {
+          const remote = await getDayState(authToken, d.key).catch(() => null) as any;
+          if (remote?.nutrition_plan) return [d.key, remote.nutrition_plan as DailyNutritionPlan] as const;
+        }
+        const saved = await getSavedNutritionPlan(d.key);
+        return [d.key, saved ?? generateDailyNutritionForDate(profile, meta.allFoods, d.key)] as const;
+      })
+    );
+    setNutritionPlansByDate(Object.fromEntries(localEntries));
     setAiSource('local');
 
-    const token = await AsyncStorage.getItem('authToken');
-    if (!token) return;
-    setAiLoading(true);
-    try {
-      const plans = await getAIPlans(token, profile);
-      setWorkoutPlan(plans.workout_plan);
-      setNutritionPlan(plans.nutrition_plan);
-      setAiSource('ai');
-    } catch { /* keep local fallback */ } finally {
-      setAiLoading(false);
+    if (authToken) {
+      try {
+        const grocery = await getGroceryList(authToken, 3);
+        setGroceryPreview(grocery.items.slice(0, 8));
+      } catch {
+        setGroceryPreview([]);
+      }
+    } else {
+      setGroceryPreview([]);
     }
   };
 
-  const handleToggleMeal = useCallback(async (mealType: string) => {
-    const today = todayKey();
-    const next = { ...checkedMeals, [mealType]: !checkedMeals[mealType] };
-    setCheckedMeals(next);
-    await saveMealChecks(today, next);
-  }, [checkedMeals]);
+  const handleGenerateAIPlan = useCallback(async () => {
+    if (!authToken || !userProfile) {
+      Alert.alert('Sign in required', 'Please sign in to generate an AI plan.');
+      return;
+    }
+    const mealDays = getNextMealDays(3);
+    setAiLoading(true);
+    try {
+      const plans = await getAIPlans(authToken, userProfile);
+      setWorkoutPlan(plans.workout_plan);
+      setNutritionPlansByDate(prev => {
+        const next = { ...prev };
+        for (const d of mealDays) {
+          next[d.key] = next[d.key] ?? plans.nutrition_plan;
+        }
+        next[mealDays[0].key] = plans.nutrition_plan;
+        return next;
+      });
+      setAiSource('ai');
+      Alert.alert('Plan Updated', 'Your plan was refreshed with AI.');
+    } catch {
+      Alert.alert('AI unavailable', 'Could not refresh plan right now.');
+    } finally {
+      setAiLoading(false);
+    }
+  }, [authToken, userProfile]);
 
-  const handleMealSave = useCallback((mealType: string, updated: MealSuggestion) => {
-    if (!nutritionPlan) return;
-    const next: DailyNutritionPlan = { ...nutritionPlan, [mealType]: updated };
-    setNutritionPlan(next);
-  }, [nutritionPlan]);
+  const openExerciseLibrary = useCallback(async () => {
+    setShowExerciseLibrary(true);
+    if (exerciseLibrary.length > 0) return;
+    setExerciseLibraryLoading(true);
+    try {
+      const rows = await getExercises();
+      setExerciseLibrary(rows);
+    } catch {
+      setExerciseLibrary([]);
+    } finally {
+      setExerciseLibraryLoading(false);
+    }
+  }, [exerciseLibrary.length]);
+
+  const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
+    const current = checkedMealsByDate[date] ?? {};
+    const next = { ...current, [mealType]: !current[mealType] };
+    setCheckedMealsByDate(prev => ({ ...prev, [date]: next }));
+    await saveMealChecks(date, next);
+    await persistDayState(date, { meal_checks: next });
+  }, [checkedMealsByDate, persistDayState]);
+
+  const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      nextPlan = { ...current, [mealType]: updated } as DailyNutritionPlan;
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+  }, [persistDayState]);
+
+  const handleAddSnack = useCallback(async (date: string) => {
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current || current.snack) return prev;
+      nextPlan = {
+        ...current,
+        snack: {
+          meal: 'Snack',
+          foods: ['Greek yogurt', 'Banana'],
+          calories: 220,
+          protein: 15,
+          carbs: 28,
+          fat: 4,
+        },
+      };
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+  }, [persistDayState]);
+
+  const handleRemoveMeal = useCallback(async (date: string, mealType: string) => {
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      const removed = new Set(current.removedMeals ?? []);
+      removed.add(mealType);
+      nextPlan = { ...current, removedMeals: Array.from(removed) };
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+  }, [persistDayState]);
+
+  const handleRestoreMeal = useCallback(async (date: string, mealType: string) => {
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      const removed = (current.removedMeals ?? []).filter(m => m !== mealType);
+      nextPlan = { ...current, removedMeals: removed };
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+  }, [persistDayState]);
 
   const handleSkipToday = useCallback(async (focus: string) => {
     Alert.alert(
@@ -254,21 +467,28 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
           style: 'destructive',
           onPress: async () => {
             const today = todayKey();
-            await addSkippedDay(today, focus);
             setSkippedDates(prev => new Set([...prev, today]));
+            await persistDayState(today, { skipped_focus: focus });
           },
         },
       ]
     );
-  }, []);
+  }, [persistDayState]);
 
-  if (!userProfile || !workoutPlan || !nutritionPlan) return <View style={styles.container} />;
+  const handleUnskipDay = useCallback(async (date: string) => {
+    setSkippedDates(prev => {
+      const next = new Set(prev);
+      next.delete(date);
+      return next;
+    });
+    await persistDayState(date, { skipped_focus: null });
+  }, [persistDayState]);
+
+  if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label ?? userProfile.goal;
   const schedule  = get7DaySchedule(workoutPlan, userProfile.daysPerWeek);
-  const { targets } = nutritionPlan;
-  const todaySkipped = skippedDates.has(todayKey());
-
+  const mealDays = getNextMealDays(3);
   return (
     <View style={styles.container}>
 
@@ -298,13 +518,6 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
         </View>
       )}
 
-      {/* Stats row */}
-      <View style={styles.statsRow}>
-        <StatBox label="Training Days" value={`${userProfile.daysPerWeek}/wk`} />
-        <StatBox label="Calories"      value={String(targets.calories)} />
-        <StatBox label="Protein"       value={`${targets.protein}g`} />
-      </View>
-
       {/* Goal progress banner */}
       <GoalProgressBanner userProfile={userProfile} goalLabel={goalLabel} goalConfig={meta.goalConfig} />
 
@@ -321,45 +534,114 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
       {/* Tab content */}
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'workout' ? (
-          schedule.map((item, i) => {
-            const key = dateKey(item.date);
-            const isToday     = i === 0;
-            const isCompleted = isToday && todayDone;
-            const isSkipped   = skippedDates.has(key);
-            return (
-              <DayCard
-                key={i}
-                item={item}
-                isToday={isToday}
-                isCompleted={isCompleted}
-                isSkipped={isSkipped}
-                expanded={expandedDay === i}
-                onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
-                onStartWorkout={onStartWorkout}
-                onSkip={handleSkipToday}
-              />
-            );
-          })
+          <>
+            <View style={styles.compactNotesRow}>
+              <View style={styles.compactNoteChip}>
+                <Text style={styles.compactNoteText}>{userProfile.daysPerWeek} days a week</Text>
+              </View>
+              <View style={styles.compactNoteChip}>
+                <Text style={styles.compactNoteText}>{userProfile.workoutDurationMinutes} min sessions</Text>
+              </View>
+              <View style={styles.compactNoteChip}>
+                <Text style={styles.compactNoteText}>
+                  Rest {Math.round((schedule[0]?.workout?.exercises?.reduce((sum, ex) => sum + (ex.restSeconds || 0), 0) || 60) /
+                    Math.max(1, schedule[0]?.workout?.exercises?.length || 1))}s avg
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.aiRefreshBtn} onPress={handleGenerateAIPlan} disabled={aiLoading}>
+              {aiLoading
+                ? <ActivityIndicator size="small" color={colors.background} />
+                : <Text style={styles.aiRefreshBtnText}>Update Plan with AI</Text>}
+            </TouchableOpacity>
+            {schedule.map((item, i) => {
+              const key = dateKey(item.date);
+              const isToday     = i === 0;
+              const isCompleted = isToday && todayDone;
+              const isSkipped   = skippedDates.has(key);
+              return (
+                <DayCard
+                  key={i}
+                  item={item}
+                  isToday={isToday}
+                  isCompleted={isCompleted}
+                  isSkipped={isSkipped}
+                  expanded={expandedDay === i}
+                  onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
+                  onStartWorkout={onStartWorkout}
+                  onSkip={handleSkipToday}
+                  onUnskip={() => handleUnskipDay(key)}
+                />
+              );
+            })}
+          </>
         ) : (
-          <NutritionCard
-            nutritionPlan={nutritionPlan}
-            checkedMeals={checkedMeals}
-            onToggleMeal={handleToggleMeal}
-            onEditMeal={(mealType, meal) => setEditingMeal({ type: mealType, meal })}
-          />
+          <>
+            {groceryPreview.length > 0 && (
+              <View style={styles.groceryCard}>
+                <Text style={styles.groceryTitle}>3-Day Grocery Preview</Text>
+                <View style={styles.groceryChips}>
+                  {groceryPreview.map(item => (
+                    <View key={item.food} style={styles.groceryChip}>
+                      <Text style={styles.groceryChipText}>{item.food} x{item.frequency}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            {mealDays.map((d, idx) => {
+              const plan = nutritionPlansByDate[d.key];
+              if (!plan) return null;
+              const isExpanded = expandedMealDays.has(d.key);
+              const meals = [plan.breakfast, plan.lunch, plan.dinner, plan.snack].filter(Boolean) as MealSuggestion[];
+              const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
+              return (
+                <View key={d.key} style={styles.mealAccordionCard}>
+                  <TouchableOpacity
+                    style={styles.mealAccordionHeader}
+                    onPress={() => setExpandedMealDays(prev => {
+                      const next = new Set(prev);
+                      if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
+                      return next;
+                    })}
+                    activeOpacity={0.8}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.mealAccordionTitle}>{mealDayLabel(d.date, idx)}</Text>
+                      <Text style={styles.mealAccordionMeta}>{Math.round(totalCalories)} cal total</Text>
+                    </View>
+                    <Text style={styles.mealAccordionChevron}>{isExpanded ? '▲' : '▼'}</Text>
+                  </TouchableOpacity>
+
+                  {isExpanded && (
+                    <NutritionCard
+                      nutritionPlan={plan}
+                      checkedMeals={checkedMealsByDate[d.key] ?? {}}
+                      onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
+                      onEditMeal={(mealType, meal) => setEditingMeal({ dateKey: d.key, type: mealType, meal })}
+                      onAddSnack={() => handleAddSnack(d.key)}
+                      onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
+                      onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
+                    />
+                  )}
+                </View>
+              );
+            })}
+          </>
         )}
       </ScrollView>
 
       {/* Meal edit modal */}
-      {editingMeal && nutritionPlan && (
+      {editingMeal && nutritionPlansByDate[editingMeal.dateKey] && (
         <MealEditModal
           visible={!!editingMeal}
           mealType={editingMeal.type}
           meal={editingMeal.meal}
-          nutritionPlan={nutritionPlan}
+          nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
           allFoods={meta.allFoods}
           foodCategories={meta.foodCategories}
-          onSave={(updated) => handleMealSave(editingMeal.type, updated)}
+          onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
         />
       )}
@@ -370,43 +652,62 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
           <View style={styles.menuDropdown}>
             <Text style={styles.menuHeading}>Settings</Text>
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onViewAccount(); }}>
-              <Text style={styles.menuItemIcon}>👤</Text>
               <Text style={styles.menuItemText}>Account</Text>
             </TouchableOpacity>
             <View style={styles.menuDivider} />
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onViewProgress(); }}>
-              <Text style={styles.menuItemIcon}>📊</Text>
               <Text style={styles.menuItemText}>View Progress</Text>
             </TouchableOpacity>
             <View style={styles.menuDivider} />
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); openExerciseLibrary(); }}>
+              <Text style={styles.menuItemText}>Exercise Library</Text>
+            </TouchableOpacity>
+            <View style={styles.menuDivider} />
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onEditProfile(); }}>
-              <Text style={styles.menuItemIcon}>✏️</Text>
-              <Text style={styles.menuItemText}>Edit Profile</Text>
+              <Text style={styles.menuItemText}>Edit Plan</Text>
             </TouchableOpacity>
             <View style={styles.menuDivider} />
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onSignOut(); }}>
-              <Text style={styles.menuItemIcon}>🚪</Text>
               <Text style={[styles.menuItemText, { color: colors.error }]}>Sign Out</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <Modal visible={showExerciseLibrary} transparent animationType="slide" onRequestClose={() => setShowExerciseLibrary(false)}>
+        <View style={styles.libraryBackdrop}>
+          <View style={styles.librarySheet}>
+            <View style={styles.libraryHeader}>
+              <Text style={styles.libraryTitle}>Exercise Library</Text>
+              <TouchableOpacity onPress={() => setShowExerciseLibrary(false)}>
+                <Text style={styles.libraryClose}>Close</Text>
+              </TouchableOpacity>
+            </View>
+
+            {exerciseLibraryLoading ? (
+              <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
+            ) : (
+              <ScrollView contentContainerStyle={styles.libraryList}>
+                {exerciseLibrary.map((ex) => (
+                  <View key={String(ex.id ?? ex.name)} style={styles.libraryItem}>
+                    <Text style={styles.libraryItemName}>{ex.name}</Text>
+                    <Text style={styles.libraryItemMeta}>
+                      {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
+                      {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
+                    </Text>
+                    {ex.description ? <Text style={styles.libraryItemDesc}>{ex.description}</Text> : null}
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────────
-
-function StatBox({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.statBox}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
-}
-
-function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onStartWorkout, onSkip }: {
+function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
   item: ScheduleItem;
   isToday: boolean;
   isCompleted: boolean;
@@ -415,6 +716,7 @@ function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onS
   onPress: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onSkip: (focus: string) => void;
+  onUnskip: () => void;
 }) {
   const dow     = isToday ? 'Today' : DAY_NAMES[item.date.getDay()];
   const dateStr = `${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`;
@@ -452,6 +754,12 @@ function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onS
           <View style={styles.skippedBadge}>
             <Text style={styles.skippedBadgeText}>Skipped</Text>
           </View>
+        </View>
+        <Text style={styles.skippedHint}>You can restore this workout if you skipped it by mistake.</Text>
+        <View style={styles.actionRow}>
+          <TouchableOpacity style={styles.unskipBtn} onPress={onUnskip}>
+            <Text style={styles.unskipBtnText}>Unskip Workout</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -527,10 +835,26 @@ const styles = StyleSheet.create({
   aiBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginBottom: 10, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   aiText:   { fontSize: 12, color: colors.textSecondary, flex: 1 },
 
-  statsRow:  { flexDirection: 'row', gap: 10, marginHorizontal: 16, marginBottom: 12 },
-  statBox:   { flex: 1, backgroundColor: colors.surface, borderRadius: radius.md, padding: 12, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
-  statValue: { fontSize: 18, fontWeight: '700', color: colors.primary, marginBottom: 2 },
-  statLabel: { fontSize: 11, color: colors.textSecondary },
+  compactNotesRow: { flexDirection: 'row', gap: 8, marginBottom: 12, flexWrap: 'wrap' },
+  compactNoteChip: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  compactNoteText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+
+  aiRefreshBtn: {
+    alignSelf: 'flex-start',
+    marginBottom: 12,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  aiRefreshBtnText: { color: colors.background, fontSize: 13, fontWeight: '700' },
 
   tabs:          { flexDirection: 'row', marginHorizontal: 16, marginBottom: 12, backgroundColor: colors.surface, borderRadius: radius.md, padding: 4, borderWidth: 1, borderColor: colors.border },
   tab:           { flex: 1, paddingVertical: 10, borderRadius: radius.sm, alignItems: 'center' },
@@ -561,6 +885,7 @@ const styles = StyleSheet.create({
 
   skippedBadge:     { backgroundColor: colors.warning + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.warning },
   skippedBadgeText: { fontSize: 12, color: colors.warning, fontWeight: '600' },
+  skippedHint:      { fontSize: 12, color: colors.textMuted, marginTop: 10 },
 
   restBadge:     { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
   restBadgeText: { fontSize: 12, color: colors.textSecondary, fontWeight: '500' },
@@ -574,6 +899,8 @@ const styles = StyleSheet.create({
   actionRow:       { flexDirection: 'row', gap: 10, marginTop: 12 },
   skipBtn:         { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.warning },
   skipBtnText:     { color: colors.warning, fontSize: 13, fontWeight: '700' },
+  unskipBtn:       { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.primary, flex: 1 },
+  unskipBtnText:   { color: colors.primary, fontSize: 13, fontWeight: '700' },
   startWorkoutBtn: { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', flex: 1 },
   startWorkoutBtnText: { color: colors.background, fontSize: 15, fontWeight: '700', letterSpacing: 0.3 },
 
@@ -582,11 +909,75 @@ const styles = StyleSheet.create({
   exerciseSummaryName:   { fontSize: 13, color: colors.textPrimary, fontWeight: '500', flex: 1 },
   exerciseSummaryDetail: { fontSize: 12, color: colors.primary, fontWeight: '600' },
 
+  mealAccordionCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  mealAccordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: colors.surface,
+  },
+  mealAccordionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  mealAccordionChevron: { fontSize: 11, color: colors.textMuted, marginLeft: 8 },
+
+  groceryCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    marginBottom: 10,
+  },
+  groceryTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
+  groceryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  groceryChip: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  groceryChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 90, paddingRight: 16 },
   menuDropdown:  { backgroundColor: colors.surface, borderRadius: radius.lg, minWidth: 200, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
   menuHeading:   { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.8, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10 },
-  menuItem:      { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14 },
-  menuItemIcon:  { fontSize: 18 },
+  menuItem:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14 },
   menuItemText:  { fontSize: 15, fontWeight: '500', color: colors.textPrimary },
   menuDivider:   { height: 1, backgroundColor: colors.border, marginHorizontal: 16 },
+
+  libraryBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  librarySheet: {
+    maxHeight: '78%',
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 14,
+  },
+  libraryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 10 },
+  libraryTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
+  libraryClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
+  libraryList: { paddingHorizontal: 16, paddingBottom: 28 },
+  libraryItem: {
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: 12,
+    marginBottom: 8,
+  },
+  libraryItemName: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
+  libraryItemMeta: { fontSize: 12, color: colors.primary, marginBottom: 4 },
+  libraryItemDesc: { fontSize: 12, color: colors.textSecondary },
 });

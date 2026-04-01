@@ -3,10 +3,65 @@ from sqlmodel import Session, select
 from datetime import date
 
 from app.database import get_session
-from app.models import User, Meal, MealItem, MealCreate
+from app.models import User, Meal, MealItem, MealCreate, UserDayState
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/meals", tags=["meals"])
+
+
+@router.get("/grocery-list")
+def grocery_list(
+    days: int = Query(default=3, ge=1, le=14),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Build grocery list from saved day-state nutrition plans over next N days."""
+    from datetime import date, timedelta
+
+    start = date.today()
+    end = start + timedelta(days=days - 1)
+    states = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id)
+        .where(UserDayState.day_key >= start)
+        .where(UserDayState.day_key <= end)
+        .order_by(UserDayState.day_key)
+    ).all()
+
+    counts: dict[str, int] = {}
+    for s in states:
+        plan = s.nutrition_plan or {}
+        for key in ["breakfast", "lunch", "dinner", "snack"]:
+            meal = plan.get(key)
+            if not meal:
+                continue
+            for food in meal.get("foods", []):
+                counts[food] = counts.get(food, 0) + 1
+
+    items = sorted([{"food": k, "frequency": v} for k, v in counts.items()], key=lambda x: (-x["frequency"], x["food"]))
+    return {"days": days, "items": items}
+
+
+@router.post("/swap")
+def meal_swap(
+    meal_type: str,
+    foods: list[str],
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Suggest simple swap candidates from the user's available foods in preferences."""
+    from app.models import UserPreferences
+
+    prefs = db.exec(select(UserPreferences).where(UserPreferences.user_id == current_user.id)).first()
+    available = prefs.foods_available if prefs else []
+    suggestions = [f for f in available if f not in foods][:6]
+    if not suggestions:
+        suggestions = foods[:]
+    return {
+        "meal_type": meal_type,
+        "original": foods,
+        "suggested": suggestions,
+    }
 
 
 def _build_meal_response(meal: Meal, db: Session) -> dict:

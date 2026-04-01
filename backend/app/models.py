@@ -55,6 +55,50 @@ class UserPreferences(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class UserCoachingState(SQLModel, table=True):
+    __tablename__ = "user_coaching_state"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    calorie_adjustment: int = Field(default=0)  # daily calories delta from baseline
+    volume_adjustment_pct: int = Field(default=0)  # training volume delta percentage
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class UserDayState(SQLModel, table=True):
+    __tablename__ = "user_day_state"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    day_key: date = Field(index=True)
+    skipped_focus: str | None = Field(default=None)
+    meal_checks: dict = Field(default={}, sa_column=Column(JSON))
+    nutrition_plan: dict | None = Field(default=None, sa_column=Column(JSON))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class WeeklyCheckIn(SQLModel, table=True):
+    __tablename__ = "weekly_checkins"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    checkin_date: date = Field(index=True)
+    weight_lbs: float
+    waist_in: float | None = Field(default=None)
+    energy: int = Field(default=3)
+    sleep: int = Field(default=3)
+    adherence: int = Field(default=3)
+    notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CoachMemory(SQLModel, table=True):
+    __tablename__ = "coach_memory"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    event_type: str = Field(index=True)  # e.g. checkin_adjustment, guardrail
+    summary: str
+    details: dict | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Exercise library (seeded reference data) ─────────────────────────────────
 
 class Exercise(SQLModel, table=True):
@@ -243,6 +287,22 @@ class OnboardingSync(SQLModel):
     profile: ProfileUpsert
     goal: GoalUpsert
     preferences: PreferencesUpsert
+
+
+class DayStateUpsert(SQLModel):
+    skipped_focus: str | None = None
+    meal_checks: dict = {}
+    nutrition_plan: dict | None = None
+
+
+class WeeklyCheckInCreate(SQLModel):
+    checkin_date: date
+    weight_lbs: float
+    waist_in: float | None = None
+    energy: int = 3
+    sleep: int = 3
+    adherence: int = 3
+    notes: str | None = None
 
 class SetCreate(SQLModel):
     set_number: int
