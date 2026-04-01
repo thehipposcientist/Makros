@@ -14,6 +14,7 @@ interface HomeScreenProps {
   userProfile: UserProfile | null;
   onSignOut: () => void;
   onEditProfile: () => void;
+  onStartWorkout: (workout: WorkoutDay) => void;
 }
 
 interface ScheduleItem {
@@ -71,7 +72,7 @@ function get5DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number): Schedul
   return schedule;
 }
 
-export default function HomeScreen({ userProfile, onSignOut, onEditProfile }: HomeScreenProps) {
+export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onStartWorkout }: HomeScreenProps) {
   const [workoutPlan, setWorkoutPlan] = useState<WorkoutPlan | null>(null);
   const [nutritionPlan, setNutritionPlan] = useState<DailyNutritionPlan | null>(null);
   const [activeTab, setActiveTab] = useState<'workout' | 'meals'>('workout');
@@ -194,6 +195,7 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile }: Ho
               isToday={i === 0}
               expanded={expandedDay === i}
               onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
+              onStartWorkout={onStartWorkout}
             />
           ))
         ) : (
@@ -238,11 +240,12 @@ function StatBox({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DayCard({ item, isToday, expanded, onPress }: {
+function DayCard({ item, isToday, expanded, onPress, onStartWorkout }: {
   item: ScheduleItem;
   isToday: boolean;
   expanded: boolean;
   onPress: () => void;
+  onStartWorkout: (workout: WorkoutDay) => void;
 }) {
   const dow = isToday ? 'Today' : DAY_NAMES[item.date.getDay()];
   const dateStr = `${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`;
@@ -281,7 +284,14 @@ function DayCard({ item, isToday, expanded, onPress }: {
       {expanded && (
         <View style={styles.expandedContent}>
           {isToday ? (
-            <WorkoutCard workout={item.workout!} />
+            <>
+              <WorkoutCard workout={item.workout!} />
+              <TouchableOpacity
+                style={styles.startWorkoutBtn}
+                onPress={() => onStartWorkout(item.workout!)}>
+                <Text style={styles.startWorkoutBtnText}>▶  Start Workout</Text>
+              </TouchableOpacity>
+            </>
           ) : (
             <View style={styles.exerciseSummaryList}>
               {item.workout!.exercises.map((ex, i) => (
@@ -372,6 +382,9 @@ const styles = StyleSheet.create({
   exerciseSummaryRow:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
   exerciseSummaryName: { fontSize: 13, color: colors.textPrimary, fontWeight: '500', flex: 1 },
   exerciseSummaryDetail: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+
+  startWorkoutBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
+  startWorkoutBtnText: { color: colors.background, fontSize: 15, fontWeight: '700', letterSpacing: 0.3 },
 
   // Modal / Menu
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 90, paddingRight: 16 },

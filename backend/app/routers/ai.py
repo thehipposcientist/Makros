@@ -39,6 +39,17 @@ class FoodLookupRequest(BaseModel):
 class EquipmentLookupRequest(BaseModel):
     name: str
 
+class CompletedSetIn(BaseModel):
+    setNumber: int
+    reps: int
+    weightLbs: float
+
+class WeightRecommendRequest(BaseModel):
+    exerciseName: str
+    goal: str
+    lastSets: list[CompletedSetIn]
+    nextSetNumber: int
+
 
 # ─── Prompt builder ───────────────────────────────────────────────────────────
 
@@ -208,6 +219,52 @@ def lookup_equipment_info(
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Lookup failed: {str(e)}")
+
+
+@router.post("/recommend-weight")
+def recommend_weight(
+    body: WeightRecommendRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Given recent sets for an exercise, return the next weight/rep recommendation."""
+    print(f"[BACKEND] Received weight recommendation request for {body.exerciseName}, set {body.nextSetNumber}")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("[BACKEND] ERROR: OpenAI API key not configured")
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    sets_str = '; '.join(
+        f"Set {s.setNumber}: {s.weightLbs} lbs × {s.reps} reps"
+        for s in body.lastSets
+    )
+
+    client = OpenAI(api_key=api_key)
+    try:
+        print(f"[BACKEND] Calling OpenAI for {body.exerciseName} recommendation...")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are an expert strength coach. Respond with valid JSON only."},
+                {"role": "user", "content": (
+                    f'Exercise: {body.exerciseName}\n'
+                    f'User goal: {body.goal}\n'
+                    f'Sets completed so far: {sets_str}\n'
+                    f'This is set number {body.nextSetNumber}.\n\n'
+                    'Based on the sets completed and goal, recommend the weight and reps for the next set. '
+                    'Be concise and motivational. Return JSON:\n'
+                    '{"weightLbs": number, "reps": number, "tip": "one short sentence"}'
+                )},
+            ],
+            temperature=0.4,
+            max_tokens=100,
+        )
+        result = json.loads(response.choices[0].message.content)
+        print(f"[BACKEND] OpenAI response: {result}")
+        return result
+    except Exception as e:
+        print(f"[BACKEND] ERROR: OpenAI call failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Recommendation failed: {str(e)}")
 
 
 @router.post("/plans")

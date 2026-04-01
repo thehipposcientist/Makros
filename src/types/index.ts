@@ -118,6 +118,32 @@ export interface DailyPlan {
   nutrition: DailyNutritionPlan;
 }
 
+// ─── Workout session tracking ─────────────────────────────────────────────────
+
+export interface CompletedSet {
+  setNumber: number;
+  reps: number;
+  weightLbs: number;
+}
+
+export interface SessionExercise {
+  name: string;
+  targetSets: number;
+  targetReps: string;
+  equipment: string;
+  sets: CompletedSet[];
+  aiRecommendation?: string; // e.g. "Try 165 lbs for 8 reps"
+}
+
+export interface WorkoutSession {
+  id: string;
+  date: string;           // ISO date string
+  focus: string;
+  durationSeconds: number;
+  exercises: SessionExercise[];
+  completed: boolean;
+}
+
 // ─── Navigation types ─────────────────────────────────────────────────────────
 
 export type RootStackParamList = {

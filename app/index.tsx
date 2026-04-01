@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { UserProfile } from '../src/types';
-import { getMe, getMyProfile, syncOnboarding } from '../src/services/api';
+import { UserProfile, WorkoutDay, WorkoutSession } from '../src/types';
+import { getMyProfile, syncOnboarding } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
+import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 
 export default function Index() {
   const [isLoading, setIsLoading] = useState(true);
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing] = useState(false);
+  const [activeWorkout, setActiveWorkout] = useState<WorkoutDay | null>(null);
 
   useEffect(() => {
     initApp();
@@ -46,7 +48,6 @@ export default function Index() {
   const handleProfileComplete = async (profile: UserProfile) => {
     await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     setUserProfile(profile);
-    // Sync to backend (best-effort — don't block the user if it fails)
     if (authToken) {
       syncOnboarding(authToken, profile).catch(() => null);
     }
@@ -67,6 +68,14 @@ export default function Index() {
     if (authToken) syncOnboarding(authToken, updated).catch(() => null);
   };
 
+  const handleStartWorkout = (workout: WorkoutDay) => {
+    setActiveWorkout(workout);
+  };
+
+  const handleWorkoutFinish = (_session: WorkoutSession) => {
+    setActiveWorkout(null);
+  };
+
   if (isLoading) {
     return <View style={{ flex: 1, backgroundColor: '#0D0D0D' }} />;
   }
@@ -83,5 +92,23 @@ export default function Index() {
     return <EditProfileScreen profile={userProfile} onSave={handleSaveProfile} onCancel={() => setIsEditing(false)} />;
   }
 
-  return <HomeScreen userProfile={userProfile} onSignOut={handleSignOut} onEditProfile={handleEditProfile} />;
+  if (activeWorkout) {
+    return (
+      <ActiveWorkoutScreen
+        workout={activeWorkout}
+        goal={userProfile.goal}
+        onFinish={handleWorkoutFinish}
+        onCancel={() => setActiveWorkout(null)}
+      />
+    );
+  }
+
+  return (
+    <HomeScreen
+      userProfile={userProfile}
+      onSignOut={handleSignOut}
+      onEditProfile={handleEditProfile}
+      onStartWorkout={handleStartWorkout}
+    />
+  );
 }

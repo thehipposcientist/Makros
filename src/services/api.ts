@@ -18,6 +18,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       headers: { 'Content-Type': 'application/json', ...options.headers },
     });
     const data = await res.json();
+    console.log('[api]', 'Response status:', res.status, 'Body:', data);
     if (!res.ok) {
       // FastAPI 422 returns detail as an array of validation errors
       const detail = Array.isArray(data.detail)
@@ -27,6 +28,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     return data as T;
   } catch (e: any) {
+    console.error('[api]', 'Request failed:', e.message);
     if (e.message === 'Network request failed') {
       throw new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
     }
@@ -113,6 +115,20 @@ export async function getAIPlans(token: string, profile: import('../types').User
       equipment:      profile.equipment,
       foodsAvailable: profile.foodsAvailable,
     }),
+  });
+}
+
+export async function getWeightRecommendation(
+  token: string,
+  exerciseName: string,
+  goal: string,
+  lastSets: import('../types').CompletedSet[],
+  nextSetNumber: number,
+): Promise<{ weightLbs: number; reps: number; tip: string }> {
+  return request('/ai/recommend-weight', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber }),
   });
 }
 
