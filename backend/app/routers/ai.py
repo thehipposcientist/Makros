@@ -53,6 +53,23 @@ class WeightRecommendRequest(BaseModel):
     nextSetNumber: int
 
 
+class TrainerQuestionRequest(BaseModel):
+    question: str
+    profile: dict
+    workoutPlan: dict | None = None
+    nutritionPlan: dict | None = None
+    progress: dict | None = None
+    conversation: list[dict] | None = None
+
+
+class WorkoutCoachQuestionRequest(BaseModel):
+    question: str
+    workout: dict
+    activeExerciseName: str | None = None
+    currentSetNumber: int | None = None
+    loggedSets: list[dict] | None = None
+
+
 # ─── Prompt builder ───────────────────────────────────────────────────────────
 
 def compute_tdee_and_targets(req: PlanRequest) -> dict:
@@ -331,3 +348,125 @@ def generate_plans(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+
+
+@router.post("/trainer-question")
+def ask_trainer_question(
+    body: TrainerQuestionRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """General trainer Q&A with broad plan/profile/progress context for plan updates and troubleshooting."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    q = body.question.strip()
+    if len(q) < 6:
+        raise HTTPException(status_code=400, detail="Question is too short")
+
+    context_blob = {
+        "profile": body.profile,
+        "workoutPlan": body.workoutPlan,
+        "nutritionPlan": body.nutritionPlan,
+        "progress": body.progress,
+    }
+    convo = body.conversation or []
+    trimmed_convo = convo[-12:]
+
+    client = OpenAI(api_key=api_key)
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert strength coach and injury-aware trainer. "
+                        "Use provided profile/plan/progress context to give practical, safe advice. "
+                        "If pain/injury red flags are present, advise reducing load and seeking a clinician. "
+                        "When user asks for plan changes, include concrete updated plan objects. "
+                        "Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Recent conversation (most recent last):\n"
+                        f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
+                        "User question:\n"
+                        f"{q}\n\n"
+                        "Context JSON:\n"
+                        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+                        "Return this JSON schema exactly:\n"
+                        "{\"answer\": string, \"action_items\": [string], \"needs_plan_update\": boolean, \"safety_note\": string, \"updated_workout_plan\": object|null, \"updated_nutrition_plan\": object|null}"
+                    ),
+                },
+            ],
+            temperature=0.4,
+            max_tokens=500,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Trainer question failed: {str(e)}")
+
+
+@router.post("/workout-question")
+def ask_workout_question(
+    body: WorkoutCoachQuestionRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Workout-session scoped coach Q&A focused on form, pain flags, and execution cues."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    q = body.question.strip()
+    if len(q) < 4:
+        raise HTTPException(status_code=400, detail="Question is too short")
+
+    context_blob = {
+        "workout": body.workout,
+        "activeExerciseName": body.activeExerciseName,
+        "currentSetNumber": body.currentSetNumber,
+        "loggedSets": body.loggedSets or [],
+    }
+
+    client = OpenAI(api_key=api_key)
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an in-workout coach. Scope is limited to form cues, muscle targeting cues, "
+                        "load/rep adjustment, pain/injury caution, and immediate substitutions. "
+                        "If the user asks unrelated nutrition/lifestyle topics, reply briefly that this in-workout coach "
+                        "only handles form/injury/execution and suggest using Ask Trainer from Home for broader planning. "
+                        "Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Workout question:\n"
+                        f"{q}\n\n"
+                        "Context JSON:\n"
+                        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+                        "Return this JSON schema exactly:\n"
+                        "{\"answer\": string, \"quick_cues\": [string], \"adjustment\": string, \"safety_note\": string}"
+                    ),
+                },
+            ],
+            temperature=0.3,
+            max_tokens=350,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Workout question failed: {str(e)}")

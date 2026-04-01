@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getGoalEstimate } from '../utils/goalEstimate';
-import { getAIPlans, getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises, askTrainerQuestion } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, todayKey, dateKey,
+  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory,
 } from '../utils/workoutHistory';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
 import { MealSuggestion } from '../types';
@@ -34,6 +34,21 @@ interface ScheduleItem {
 interface MealDay {
   key: string;
   date: Date;
+}
+
+interface TrainerChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface ExerciseLibraryItem {
+  id?: number;
+  name: string;
+  description?: string | null;
+  primary_muscle?: string;
+  secondary_muscles?: string[];
+  equipment?: string;
+  is_compound?: boolean;
 }
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -90,6 +105,36 @@ function mealDayLabel(date: Date, index: number): string {
   if (index === 0) return 'Today';
   if (index === 1) return 'Tomorrow';
   return `${DAY_NAMES[date.getDay()]} · ${MONTH_NAMES[date.getMonth()]} ${date.getDate()}`;
+}
+
+function humanizeToken(value?: string | null): string {
+  if (!value) return '';
+  return String(value)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function joinParts(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? '';
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
+}
+
+function buildExerciseGuide(ex: ExerciseLibraryItem) {
+  const primary = humanizeToken(ex.primary_muscle) || 'the target muscle';
+  const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
+  const equipment = humanizeToken(ex.equipment) || 'the available equipment';
+  const supportText = secondary.length ? ` with help from ${joinParts(secondary)}` : '';
+
+  return {
+    howTo: ex.description
+      ? ex.description
+      : `Move the weight with control, keep your body stable, and use ${equipment.toLowerCase()} in a smooth range of motion.` ,
+    hits: `This exercise mainly trains ${primary.toLowerCase()}${supportText}.`,
+    why: ex.is_compound
+      ? `It hits ${primary.toLowerCase()} because multiple joints are moving together, which lets ${primary.toLowerCase()} work hard while nearby muscles assist and stabilize.`
+      : `It hits ${primary.toLowerCase()} because the movement keeps tension focused there instead of spreading the work across many muscle groups.`,
+  };
 }
 
 // ── Goal progress banner ───────────────────────────────────────────────────────
@@ -231,11 +276,15 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
   const [activeTab, setActiveTab]         = useState<'workout' | 'meals'>('workout');
   const [menuOpen, setMenuOpen]           = useState(false);
   const [expandedDay, setExpandedDay]     = useState<number>(0);
-  const [aiLoading, setAiLoading]         = useState(false);
-  const [aiSource, setAiSource]           = useState<'ai' | 'local'>('local');
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
-  const [exerciseLibrary, setExerciseLibrary] = useState<any[]>([]);
+  const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
+  const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [showTrainerModal, setShowTrainerModal] = useState(false);
+  const [trainerInput, setTrainerInput] = useState('');
+  const [trainerLoading, setTrainerLoading] = useState(false);
+  const [trainerChat, setTrainerChat] = useState<TrainerChatMessage[]>([]);
+  const [trainerUpdateSummary, setTrainerUpdateSummary] = useState<string | null>(null);
 
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
@@ -332,7 +381,6 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
       })
     );
     setNutritionPlansByDate(Object.fromEntries(localEntries));
-    setAiSource('local');
 
     if (authToken) {
       try {
@@ -345,33 +393,6 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
       setGroceryPreview([]);
     }
   };
-
-  const handleGenerateAIPlan = useCallback(async () => {
-    if (!authToken || !userProfile) {
-      Alert.alert('Sign in required', 'Please sign in to generate an AI plan.');
-      return;
-    }
-    const mealDays = getNextMealDays(3);
-    setAiLoading(true);
-    try {
-      const plans = await getAIPlans(authToken, userProfile);
-      setWorkoutPlan(plans.workout_plan);
-      setNutritionPlansByDate(prev => {
-        const next = { ...prev };
-        for (const d of mealDays) {
-          next[d.key] = next[d.key] ?? plans.nutrition_plan;
-        }
-        next[mealDays[0].key] = plans.nutrition_plan;
-        return next;
-      });
-      setAiSource('ai');
-      Alert.alert('Plan Updated', 'Your plan was refreshed with AI.');
-    } catch {
-      Alert.alert('AI unavailable', 'Could not refresh plan right now.');
-    } finally {
-      setAiLoading(false);
-    }
-  }, [authToken, userProfile]);
 
   const openExerciseLibrary = useCallback(async () => {
     setShowExerciseLibrary(true);
@@ -386,6 +407,139 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
       setExerciseLibraryLoading(false);
     }
   }, [exerciseLibrary.length]);
+
+  const summarizeTrainerUpdate = useCallback((
+    prevWorkout: WorkoutPlan,
+    nextWorkout: WorkoutPlan | null,
+    prevNutrition: DailyNutritionPlan | null,
+    nextNutrition: DailyNutritionPlan | null,
+  ): string => {
+    const notes: string[] = [];
+
+    if (nextWorkout) {
+      const prevDays = prevWorkout.days.length;
+      const nextDays = nextWorkout.days.length;
+      if (prevDays !== nextDays) notes.push(`Workout days: ${prevDays} → ${nextDays}`);
+
+      const prevExercises = prevWorkout.days.reduce((sum, d) => sum + d.exercises.length, 0);
+      const nextExercises = nextWorkout.days.reduce((sum, d) => sum + d.exercises.length, 0);
+      if (prevExercises !== nextExercises) notes.push(`Weekly exercises: ${prevExercises} → ${nextExercises}`);
+    }
+
+    if (prevNutrition && nextNutrition) {
+      const prevCal = prevNutrition.targets.calories;
+      const nextCal = nextNutrition.targets.calories;
+      if (prevCal !== nextCal) notes.push(`Calories: ${prevCal} → ${nextCal}`);
+
+      const prevProtein = prevNutrition.targets.protein;
+      const nextProtein = nextNutrition.targets.protein;
+      if (prevProtein !== nextProtein) notes.push(`Protein: ${prevProtein}g → ${nextProtein}g`);
+    }
+
+    return notes.length ? notes.join(' • ') : 'Trainer updated exercise/nutrition structure.';
+  }, []);
+
+  const handleAskTrainer = useCallback(async () => {
+    const q = trainerInput.trim();
+    if (!q) return;
+    if (!authToken || !userProfile || !workoutPlan) {
+      Alert.alert('Unavailable', 'Please sign in and load your plan first.');
+      return;
+    }
+
+    const userMsg: TrainerChatMessage = { role: 'user', content: q };
+    const nextChat = [...trainerChat, userMsg];
+    setTrainerChat(nextChat);
+    setTrainerInput('');
+    setTrainerLoading(true);
+
+    try {
+      const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+      const workoutHistory = await loadWorkoutHistory();
+      const recentHistory = workoutHistory.slice(0, 40).map((s) => ({
+        date: s.date,
+        focus: s.focus,
+        durationSeconds: s.durationSeconds,
+        completed: s.completed,
+        exercises: s.exercises.map((ex) => ({
+          name: ex.name,
+          targetSets: ex.targetSets,
+          targetReps: ex.targetReps,
+          targetRestSeconds: ex.targetRestSeconds,
+          setsLogged: ex.sets.length,
+          bestSet: ex.sets.reduce<{ weightLbs: number; reps: number } | null>((best, set) => {
+            if (!best) return { weightLbs: set.weightLbs, reps: set.reps };
+            const bestScore = best.weightLbs * best.reps;
+            const currentScore = set.weightLbs * set.reps;
+            return currentScore > bestScore ? { weightLbs: set.weightLbs, reps: set.reps } : best;
+          }, null),
+        })),
+      }));
+
+      const sessionsLast30d = workoutHistory.filter((s) => {
+        const ts = new Date(s.date).getTime();
+        return Number.isFinite(ts) && (Date.now() - ts) <= 30 * 24 * 60 * 60 * 1000;
+      }).length;
+
+      const totalSetsLogged = workoutHistory.reduce(
+        (sum, s) => sum + s.exercises.reduce((setSum, ex) => setSum + ex.sets.length, 0),
+        0
+      );
+
+      const progress = {
+        goal: userProfile.goal,
+        todayDone,
+        skippedDays: Array.from(skippedDates),
+        daysPerWeek: userProfile.daysPerWeek,
+        durationMinutes: userProfile.workoutDurationMinutes,
+        sessionsLast30d,
+        totalSessions: workoutHistory.length,
+        totalSetsLogged,
+        workoutHistory: recentHistory,
+      };
+
+      const resp = await askTrainerQuestion(authToken, {
+        question: q,
+        profile: userProfile,
+        workoutPlan,
+        nutritionPlan: todayPlan,
+        progress,
+        conversation: nextChat.slice(-12),
+      });
+
+      const actionLines = (resp.action_items ?? []).slice(0, 4).map((x: string) => `• ${x}`).join('\n');
+      const combined = [
+        resp.answer,
+        actionLines ? `\n${actionLines}` : '',
+        resp.safety_note ? `\nSafety: ${resp.safety_note}` : '',
+      ].join('');
+
+      setTrainerChat(prev => [...prev, { role: 'assistant', content: combined }]);
+
+      const hasUpdate = !!resp.updated_workout_plan || !!resp.updated_nutrition_plan;
+      if (resp.needs_plan_update && hasUpdate) {
+        const prevWorkout = workoutPlan;
+        const nextWorkout = (resp.updated_workout_plan as WorkoutPlan | undefined) ?? null;
+        const nextNutrition = (resp.updated_nutrition_plan as DailyNutritionPlan | undefined) ?? null;
+
+        if (resp.updated_workout_plan) {
+          setWorkoutPlan(resp.updated_workout_plan as WorkoutPlan);
+        }
+        if (resp.updated_nutrition_plan) {
+          const today = todayKey();
+          setNutritionPlansByDate(prev => ({ ...prev, [today]: resp.updated_nutrition_plan as DailyNutritionPlan }));
+          await saveNutritionPlan(today, resp.updated_nutrition_plan as DailyNutritionPlan);
+          await persistDayState(today, { nutrition_plan: resp.updated_nutrition_plan });
+        }
+        setTrainerUpdateSummary(summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, nextNutrition));
+        setTrainerChat(prev => [...prev, { role: 'assistant', content: 'I applied those trainer updates to your current plan.' }]);
+      }
+    } catch (e: any) {
+      setTrainerChat(prev => [...prev, { role: 'assistant', content: `Could not answer right now. ${e?.message ?? ''}` }]);
+    } finally {
+      setTrainerLoading(false);
+    }
+  }, [trainerInput, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, trainerChat, persistDayState]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     const current = checkedMealsByDate[date] ?? {};
@@ -505,19 +659,6 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
         </TouchableOpacity>
       </View>
 
-      {/* AI status */}
-      {aiLoading && (
-        <View style={styles.aiBanner}>
-          <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.aiText}>Generating your personalised plan with AI…</Text>
-        </View>
-      )}
-      {!aiLoading && aiSource === 'ai' && (
-        <View style={styles.aiBanner}>
-          <Text style={styles.aiText}>✨  Plan generated by AI</Text>
-        </View>
-      )}
-
       {/* Goal progress banner */}
       <GoalProgressBanner userProfile={userProfile} goalLabel={goalLabel} goalConfig={meta.goalConfig} />
 
@@ -549,10 +690,8 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                 </Text>
               </View>
             </View>
-            <TouchableOpacity style={styles.aiRefreshBtn} onPress={handleGenerateAIPlan} disabled={aiLoading}>
-              {aiLoading
-                ? <ActivityIndicator size="small" color={colors.background} />
-                : <Text style={styles.aiRefreshBtnText}>Update Plan with AI</Text>}
+            <TouchableOpacity style={styles.askTrainerBtn} onPress={() => setShowTrainerModal(true)}>
+              <Text style={styles.askTrainerBtnText}>Ask Trainer</Text>
             </TouchableOpacity>
             {schedule.map((item, i) => {
               const key = dateKey(item.date);
@@ -689,19 +828,115 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
             ) : (
               <ScrollView contentContainerStyle={styles.libraryList}>
                 {exerciseLibrary.map((ex) => (
-                  <View key={String(ex.id ?? ex.name)} style={styles.libraryItem}>
+                  <TouchableOpacity key={String(ex.id ?? ex.name)} style={styles.libraryItem} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
                     <Text style={styles.libraryItemName}>{ex.name}</Text>
                     <Text style={styles.libraryItemMeta}>
                       {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
                       {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
                     </Text>
                     {ex.description ? <Text style={styles.libraryItemDesc}>{ex.description}</Text> : null}
-                  </View>
+                    <Text style={styles.libraryItemLink}>Tap for form guide</Text>
+                  </TouchableOpacity>
                 ))}
               </ScrollView>
             )}
           </View>
         </View>
+      </Modal>
+
+      <Modal visible={!!selectedExercise} transparent animationType="slide" onRequestClose={() => setSelectedExercise(null)}>
+        <View style={styles.libraryBackdrop}>
+          <View style={styles.detailSheet}>
+            <View style={styles.libraryHeader}>
+              <Text style={styles.libraryTitle}>{selectedExercise?.name ?? 'Exercise'}</Text>
+              <TouchableOpacity onPress={() => setSelectedExercise(null)}>
+                <Text style={styles.libraryClose}>Close</Text>
+              </TouchableOpacity>
+            </View>
+
+            {selectedExercise && (() => {
+              const guide = buildExerciseGuide(selectedExercise);
+              return (
+                <ScrollView contentContainerStyle={styles.detailContent}>
+                  <View style={styles.detailTopCard}>
+                    <Text style={styles.detailMeta}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
+                    {selectedExercise.secondary_muscles?.length ? (
+                      <Text style={styles.detailMeta}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
+                    ) : null}
+                    {selectedExercise.equipment ? <Text style={styles.detailMeta}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
+                  </View>
+
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>How To Perform It</Text>
+                    <Text style={styles.detailSectionText}>{guide.howTo}</Text>
+                  </View>
+
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>What It Hits</Text>
+                    <Text style={styles.detailSectionText}>{guide.hits}</Text>
+                  </View>
+
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>Why It Hits That</Text>
+                    <Text style={styles.detailSectionText}>{guide.why}</Text>
+                  </View>
+                </ScrollView>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showTrainerModal} transparent animationType="slide" onRequestClose={() => setShowTrainerModal(false)}>
+        <KeyboardAvoidingView
+          style={styles.libraryBackdrop}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 24 : 0}
+        >
+          <View style={styles.trainerSheet}>
+            <View style={styles.libraryHeader}>
+              <Text style={styles.libraryTitle}>Ask Trainer</Text>
+              <TouchableOpacity onPress={() => setShowTrainerModal(false)}>
+                <Text style={styles.libraryClose}>Close</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.trainerHint}>Ask about progress stalls, pain, substitutions, or plan changes.</Text>
+
+            {trainerUpdateSummary && (
+              <View style={styles.trainerSummaryCard}>
+                <Text style={styles.trainerSummaryTitle}>Latest Applied Changes</Text>
+                <Text style={styles.trainerSummaryText}>{trainerUpdateSummary}</Text>
+              </View>
+            )}
+
+            <ScrollView contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled">
+              {trainerChat.length === 0 ? (
+                <Text style={styles.trainerEmpty}>Example: "My elbow hurts on pressing. Can you modify my upper day?"</Text>
+              ) : (
+                trainerChat.map((m, idx) => (
+                  <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? styles.trainerBubbleUser : styles.trainerBubbleAssistant]}>
+                    <Text style={styles.trainerBubbleText}>{m.content}</Text>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+
+            <View style={styles.trainerInputRow}>
+              <TextInput
+                value={trainerInput}
+                onChangeText={setTrainerInput}
+                placeholder="Ask trainer..."
+                placeholderTextColor={colors.textMuted}
+                style={styles.trainerInput}
+                multiline
+              />
+              <TouchableOpacity style={styles.trainerSendBtn} onPress={handleAskTrainer} disabled={trainerLoading}>
+                {trainerLoading ? <ActivityIndicator size="small" color={colors.background} /> : <Text style={styles.trainerSendText}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -846,7 +1081,7 @@ const styles = StyleSheet.create({
   },
   compactNoteText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
 
-  aiRefreshBtn: {
+  askTrainerBtn: {
     alignSelf: 'flex-start',
     marginBottom: 12,
     backgroundColor: colors.primary,
@@ -854,7 +1089,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
-  aiRefreshBtnText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+  askTrainerBtnText: { color: colors.background, fontSize: 13, fontWeight: '700' },
 
   tabs:          { flexDirection: 'row', marginHorizontal: 16, marginBottom: 12, backgroundColor: colors.surface, borderRadius: radius.md, padding: 4, borderWidth: 1, borderColor: colors.border },
   tab:           { flex: 1, paddingVertical: 10, borderRadius: radius.sm, alignItems: 'center' },
@@ -980,4 +1215,121 @@ const styles = StyleSheet.create({
   libraryItemName: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
   libraryItemMeta: { fontSize: 12, color: colors.primary, marginBottom: 4 },
   libraryItemDesc: { fontSize: 12, color: colors.textSecondary },
+  libraryItemLink: { fontSize: 12, color: colors.accent, fontWeight: '700', marginTop: 8 },
+
+  detailSheet: {
+    maxHeight: '82%',
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 14,
+  },
+  detailContent: { paddingHorizontal: 16, paddingBottom: 28, gap: 10 },
+  detailTopCard: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    gap: 4,
+  },
+  detailMeta: { fontSize: 12, color: colors.textSecondary },
+  detailSection: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+  },
+  detailSectionTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
+  detailSectionText: { fontSize: 13, lineHeight: 20, color: colors.textSecondary },
+
+  trainerSheet: {
+    maxHeight: '86%',
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 14,
+    paddingBottom: 12,
+  },
+  trainerHint: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  trainerSummaryCard: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+  },
+  trainerSummaryTitle: { fontSize: 11, color: colors.textSecondary, fontWeight: '700', marginBottom: 4, textTransform: 'uppercase' },
+  trainerSummaryText: { fontSize: 12, color: colors.textPrimary },
+  trainerChatList: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  trainerEmpty: {
+    fontSize: 12,
+    color: colors.textMuted,
+    backgroundColor: colors.surfaceRaised,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 10,
+  },
+  trainerBubble: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 10,
+  },
+  trainerBubbleUser: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+    alignSelf: 'flex-end',
+    maxWidth: '90%',
+  },
+  trainerBubbleAssistant: {
+    backgroundColor: colors.surfaceRaised,
+    borderColor: colors.border,
+    alignSelf: 'flex-start',
+    maxWidth: '95%',
+  },
+  trainerBubbleText: { fontSize: 13, color: colors.textPrimary },
+  trainerInputRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  trainerInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    maxHeight: 120,
+    color: colors.textPrimary,
+    backgroundColor: colors.background,
+  },
+  trainerSendBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    minWidth: 64,
+    paddingVertical: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trainerSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
 });

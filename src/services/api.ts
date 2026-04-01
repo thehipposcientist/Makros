@@ -273,3 +273,45 @@ export async function getMealSwap(token: string, meal_type: string, foods: strin
   });
 }
 
+export async function askTrainerQuestion(
+  token: string,
+  payload: {
+    question: string;
+    profile: any;
+    workoutPlan?: any;
+    nutritionPlan?: any;
+    progress?: any;
+    conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  },
+): Promise<{
+  answer: string;
+  action_items: string[];
+  needs_plan_update: boolean;
+  safety_note: string;
+  updated_workout_plan?: any | null;
+  updated_nutrition_plan?: any | null;
+}> {
+  return request('/ai/trainer-question', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function askWorkoutQuestion(
+  token: string,
+  payload: {
+    question: string;
+    workout: any;
+    activeExerciseName?: string;
+    currentSetNumber?: number;
+    loggedSets?: any[];
+  },
+): Promise<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }> {
+  return request('/ai/workout-question', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+

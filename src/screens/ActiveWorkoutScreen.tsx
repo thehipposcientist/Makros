@@ -5,8 +5,13 @@ import {
 } from 'react-native';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
-import { getWeightRecommendation, logWorkoutDone } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
+
+interface WorkoutCoachMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 interface ActiveWorkoutScreenProps {
   authToken: string;
@@ -55,6 +60,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
   const [aiErrorIdx, setAiErrorIdx]     = useState<number | null>(null);
 
   const [finishModalVisible, setFinishModalVisible] = useState(false);
+  const [coachModalVisible, setCoachModalVisible] = useState(false);
+  const [coachInput, setCoachInput] = useState('');
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachChat, setCoachChat] = useState<WorkoutCoachMessage[]>([]);
 
   // Timer
   useEffect(() => {
@@ -198,6 +207,39 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
 
   const completedCount = exercises.filter(e => e.sets.length >= e.targetSets).length;
 
+  const handleAskWorkoutCoach = useCallback(async () => {
+    const q = coachInput.trim();
+    if (!q) return;
+
+    const userMsg: WorkoutCoachMessage = { role: 'user', content: q };
+    setCoachChat(prev => [...prev, userMsg]);
+    setCoachInput('');
+    setCoachLoading(true);
+
+    try {
+      const active = exercises[activeExIdx];
+      const resp = await askWorkoutQuestion(authToken, {
+        question: q,
+        workout,
+        activeExerciseName: active?.name,
+        currentSetNumber: (active?.sets?.length ?? 0) + 1,
+        loggedSets: active?.sets ?? [],
+      });
+      const cues = (resp.quick_cues ?? []).slice(0, 3).map((x: string) => `• ${x}`).join('\n');
+      const content = [
+        resp.answer,
+        cues ? `\n${cues}` : '',
+        resp.adjustment ? `\nAdjustment: ${resp.adjustment}` : '',
+        resp.safety_note ? `\nSafety: ${resp.safety_note}` : '',
+      ].join('');
+      setCoachChat(prev => [...prev, { role: 'assistant', content }]);
+    } catch (e: any) {
+      setCoachChat(prev => [...prev, { role: 'assistant', content: `Could not answer right now. ${e?.message ?? ''}` }]);
+    } finally {
+      setCoachLoading(false);
+    }
+  }, [coachInput, exercises, activeExIdx, authToken, workout]);
+
   return (
     <View style={styles.container}>
 
@@ -216,6 +258,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
           [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: onCancel }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.coachBtn} onPress={() => setCoachModalVisible(true)}>
+          <Text style={styles.coachBtnText}>Ask Coach</Text>
         </TouchableOpacity>
       </View>
 
@@ -418,6 +463,50 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
           </View>
         </View>
       </Modal>
+
+      <Modal visible={coachModalVisible} transparent animationType="slide" onRequestClose={() => setCoachModalVisible(false)}>
+        <KeyboardAvoidingView
+          style={styles.modalBackdrop}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 24 : 0}
+        >
+          <View style={styles.coachSheet}>
+            <View style={styles.coachHeader}>
+              <Text style={styles.coachTitle}>Workout Coach</Text>
+              <TouchableOpacity onPress={() => setCoachModalVisible(false)}>
+                <Text style={styles.coachClose}>Close</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.coachHint}>This chat is for form, pain flags, and in-session adjustments.</Text>
+
+            <ScrollView contentContainerStyle={styles.coachChatList} keyboardShouldPersistTaps="handled">
+              {coachChat.length === 0 ? (
+                <Text style={styles.coachEmpty}>Example: "I feel this in my elbow not chest. What cues should I use?"</Text>
+              ) : (
+                coachChat.map((m, idx) => (
+                  <View key={idx} style={[styles.coachBubble, m.role === 'user' ? styles.coachBubbleUser : styles.coachBubbleAssistant]}>
+                    <Text style={styles.coachBubbleText}>{m.content}</Text>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+
+            <View style={styles.coachInputRow}>
+              <TextInput
+                value={coachInput}
+                onChangeText={setCoachInput}
+                placeholder="Ask about form or pain..."
+                placeholderTextColor={colors.textMuted}
+                style={styles.coachInput}
+                multiline
+              />
+              <TouchableOpacity style={styles.coachSendBtn} onPress={handleAskWorkoutCoach} disabled={coachLoading}>
+                {coachLoading ? <ActivityIndicator size="small" color={colors.background} /> : <Text style={styles.coachSendText}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -433,6 +522,8 @@ const styles = StyleSheet.create({
   progressSub:  { fontSize: 11, color: colors.textSecondary },
   cancelBtn:    { padding: 8, backgroundColor: colors.surface, borderRadius: radius.full, borderWidth: 1, borderColor: colors.border },
   cancelBtnText:{ fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
+  coachBtn: { paddingHorizontal: 10, paddingVertical: 8, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.primary },
+  coachBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
 
   progressBarTrack: { height: 3, backgroundColor: colors.border, marginHorizontal: 16, borderRadius: 2, marginBottom: 16 },
   progressBarFill:  { height: 3, backgroundColor: colors.primary, borderRadius: 2 },
@@ -547,4 +638,47 @@ const styles = StyleSheet.create({
   finishConfirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', width: '100%', marginTop: 8 },
   finishConfirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
   finishCancelText:  { fontSize: 14, color: colors.textMuted, marginTop: 4 },
+
+  coachSheet: {
+    maxHeight: '82%',
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 14,
+    paddingBottom: 12,
+  },
+  coachHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8 },
+  coachTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
+  coachClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
+  coachHint: { fontSize: 12, color: colors.textSecondary, paddingHorizontal: 16, marginBottom: 8 },
+  coachChatList: { paddingHorizontal: 16, paddingBottom: 10, gap: 8 },
+  coachEmpty: {
+    fontSize: 12,
+    color: colors.textMuted,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: 10,
+  },
+  coachBubble: { borderRadius: radius.md, borderWidth: 1, padding: 10 },
+  coachBubbleUser: { backgroundColor: colors.primary, borderColor: colors.primary, alignSelf: 'flex-end', maxWidth: '90%' },
+  coachBubbleAssistant: { backgroundColor: colors.surfaceRaised, borderColor: colors.border, alignSelf: 'flex-start', maxWidth: '95%' },
+  coachBubbleText: { fontSize: 13, color: colors.textPrimary },
+  coachInputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
+  coachInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    maxHeight: 110,
+    backgroundColor: colors.background,
+    color: colors.textPrimary,
+  },
+  coachSendBtn: { backgroundColor: colors.primary, borderRadius: radius.md, minWidth: 64, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
+  coachSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
 });
