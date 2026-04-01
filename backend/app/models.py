@@ -117,6 +117,18 @@ class PaceOption(SQLModel, table=True):
     description: str
 
 
+# ─── Workout completion tracking ─────────────────────────────────────────────
+
+class WorkoutCompletion(SQLModel, table=True):
+    __tablename__ = "workout_completions"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    workout_date: date
+    focus_label: str
+    duration_seconds: int = Field(default=0)
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Workouts ─────────────────────────────────────────────────────────────────
 
 class WorkoutSession(SQLModel, table=True):

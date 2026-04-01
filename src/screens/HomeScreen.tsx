@@ -4,16 +4,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
 import { generateWorkoutPlan, generateDailyNutrition } from '../utils/planGenerator';
 import { getGoalEstimate } from '../utils/goalEstimate';
-import { getAIPlans } from '../services/api';
+import { getAIPlans, getWorkoutStatus } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, getSkippedDays, addSkippedDay,
   todayKey, dateKey, SkippedDay,
 } from '../utils/workoutHistory';
-import {
-  getMealChecks, saveMealChecks, MealChecks,
-  getSavedNutritionPlan, saveNutritionPlan,
-} from '../utils/mealTracker';
+import { getMealChecks, saveMealChecks, MealChecks } from '../utils/mealTracker';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
@@ -192,27 +189,33 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
 
   const loadDayStatus = async () => {
     const today = todayKey();
-    const [done, skipped, checks] = await Promise.all([
-      isTodayWorkoutDone(),
+    const [skipped, checks] = await Promise.all([
       getSkippedDays(),
       getMealChecks(today),
     ]);
-    setTodayDone(done);
     setSkippedDates(new Set(skipped.map(s => s.date)));
     setCheckedMeals(checks);
+
+    // Check workout completion from backend DB (not AsyncStorage)
+    try {
+      const token = await AsyncStorage.getItem('authToken');
+      if (token) {
+        const status = await getWorkoutStatus(token, today);
+        setTodayDone(status.done);
+      } else {
+        // Fallback to local if no token
+        setTodayDone(await isTodayWorkoutDone());
+      }
+    } catch {
+      setTodayDone(await isTodayWorkoutDone());
+    }
   };
 
   const loadPlans = async (profile: UserProfile) => {
+    // Show local plan immediately while AI loads
     setWorkoutPlan(generateWorkoutPlan(profile));
     setNutritionPlan(generateDailyNutrition(profile, meta.allFoods));
     setAiSource('local');
-
-    // Restore any manually-edited meals for today
-    const savedNutrition = await getSavedNutritionPlan(todayKey());
-    if (savedNutrition) {
-      setNutritionPlan(savedNutrition);
-      return; // use saved edits, skip AI regeneration
-    }
 
     const token = await AsyncStorage.getItem('authToken');
     if (!token) return;
@@ -222,7 +225,7 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
       setWorkoutPlan(plans.workout_plan);
       setNutritionPlan(plans.nutrition_plan);
       setAiSource('ai');
-    } catch { /* keep local */ } finally {
+    } catch { /* keep local fallback */ } finally {
       setAiLoading(false);
     }
   };
@@ -234,11 +237,10 @@ export default function HomeScreen({ userProfile, onSignOut, onEditProfile, onSt
     await saveMealChecks(today, next);
   }, [checkedMeals]);
 
-  const handleMealSave = useCallback(async (mealType: string, updated: MealSuggestion) => {
+  const handleMealSave = useCallback((mealType: string, updated: MealSuggestion) => {
     if (!nutritionPlan) return;
     const next: DailyNutritionPlan = { ...nutritionPlan, [mealType]: updated };
     setNutritionPlan(next);
-    await saveNutritionPlan(todayKey(), next);
   }, [nutritionPlan]);
 
   const handleSkipToday = useCallback(async (focus: string) => {

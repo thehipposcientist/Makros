@@ -5,8 +5,8 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise } from '../utils/workoutHistory';
-import { getWeightRecommendation } from '../services/api';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
+import { getWeightRecommendation, logWorkoutDone } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 interface ActiveWorkoutScreenProps {
@@ -139,15 +139,23 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
   };
 
   const handleFinish = async () => {
+    const now = new Date();
     const session: WorkoutSession = {
       id: `${Date.now()}`,
-      date: new Date().toISOString(),
+      date: now.toISOString(),
       focus: workout.focus,
       durationSeconds: elapsed,
       exercises,
       completed: true,
     };
     await saveWorkoutSession(session);
+    // Also persist completion to backend DB so it survives cache clears
+    try {
+      const token = await AsyncStorage.getItem('authToken');
+      if (token) {
+        await logWorkoutDone(token, dateKey(now), workout.focus, elapsed);
+      }
+    } catch {}
     onFinish(session);
   };
 

@@ -39,6 +39,18 @@ export default function Index() {
   useEffect(() => { initApp(); }, []);
 
   const initApp = async () => {
+    // Clear stale local caches that should come from the backend
+    const CACHE_VERSION = '3';
+    const storedVersion = await AsyncStorage.getItem('cacheVersion');
+    if (storedVersion !== CACHE_VERSION) {
+      await AsyncStorage.multiRemove([
+        'workoutHistory', 'skippedWorkouts',
+        'mealChecks', 'mealEdits',
+        'metaData_v1',
+      ]);
+      await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
+    }
+
     // Restore previous session if token exists
     const token = await AsyncStorage.getItem('authToken');
     if (token) {

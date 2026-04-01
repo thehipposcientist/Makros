@@ -11,16 +11,13 @@ function getBaseUrl(): string {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
-  console.log('[api]', options.method ?? 'GET', url);
   try {
     const res = await fetch(url, {
       ...options,
       headers: { 'Content-Type': 'application/json', ...options.headers },
     });
     const data = await res.json();
-    console.log('[api]', 'Response status:', res.status, 'Body:', data);
     if (!res.ok) {
-      // FastAPI 422 returns detail as an array of validation errors
       const detail = Array.isArray(data.detail)
         ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
         : (data.detail ?? 'Request failed');
@@ -28,7 +25,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     return data as T;
   } catch (e: any) {
-    console.error('[api]', 'Request failed:', e.message);
     if (e.message === 'Network request failed') {
       throw new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
     }
@@ -169,6 +165,28 @@ export async function getGoals() {
 export async function getPaces(goal?: string) {
   const params = goal ? `?goal=${goal}` : '';
   return request<any[]>(`/meta/paces${params}`);
+}
+
+export async function logWorkoutDone(
+  token: string,
+  workout_date: string,
+  focus_label: string,
+  duration_seconds: number,
+) {
+  return request('/workouts/complete', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ workout_date, focus_label, duration_seconds }),
+  });
+}
+
+export async function getWorkoutStatus(
+  token: string,
+  workout_date: string,
+): Promise<{ done: boolean }> {
+  return request(`/workouts/status?workout_date=${workout_date}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 
 export async function getGoalConfig() {

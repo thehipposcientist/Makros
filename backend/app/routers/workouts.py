@@ -1,13 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from datetime import datetime, date, timezone
+from pydantic import BaseModel
 
 from app.database import get_session
 from app.models import (
     User, WorkoutSession, WorkoutExercise, ExerciseSet,
-    WorkoutSessionCreate, SetLog,
+    WorkoutSessionCreate, SetLog, WorkoutCompletion,
 )
 from app.auth import get_current_user
+
+
+class WorkoutCompleteRequest(BaseModel):
+    workout_date: date
+    focus_label: str
+    duration_seconds: int = 0
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
@@ -30,6 +37,52 @@ def _build_session_response(session_row: WorkoutSession, db: Session) -> dict:
         exercise_data.append({**ex.model_dump(), "sets": [s.model_dump() for s in sets]})
 
     return {**session_row.model_dump(), "exercises": exercise_data}
+
+
+# ─── Workout completion ───────────────────────────────────────────────────────
+
+@router.post("/complete", status_code=201)
+def mark_workout_complete(
+    body: WorkoutCompleteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Record that the current user completed a workout on a given date."""
+    # Upsert: remove any existing completion for this user+date, then insert fresh
+    existing = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == body.workout_date)
+    ).first()
+    if existing:
+        existing.focus_label      = body.focus_label
+        existing.duration_seconds = body.duration_seconds
+        existing.completed_at     = datetime.now(timezone.utc)
+        db.add(existing)
+    else:
+        db.add(WorkoutCompletion(
+            user_id=current_user.id,
+            workout_date=body.workout_date,
+            focus_label=body.focus_label,
+            duration_seconds=body.duration_seconds,
+        ))
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/status")
+def get_workout_status(
+    workout_date: date = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Returns whether the user has a completed workout on the given date."""
+    completion = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == workout_date)
+    ).first()
+    return {"done": completion is not None}
 
 
 # ─── Create ───────────────────────────────────────────────────────────────────

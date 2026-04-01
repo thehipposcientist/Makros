@@ -21,7 +21,10 @@
       "Bash(python reseed.py)",
       "Bash(python -c \"from app.routers.ai import build_prompt; print\\(''OK''\\)\")",
       "Bash(python -c \":*)",
-      "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")"
+      "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")",
+      "Bash(python -c \"from app.main import app; print\\(''OK''\\)\")",
+      "Bash(python -c \"from app.routers.workouts import router; print\\(''workouts OK''\\)\")",
+      "Bash(python:*)"
     ]
   }
 }
