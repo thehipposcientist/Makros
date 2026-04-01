@@ -203,7 +203,9 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
                 </View>
                 <View style={[styles.setsBadge, isDone && styles.setsBadgeDone]}>
                   <Text style={[styles.setsBadgeText, isDone && styles.setsBadgeTextDone]}>
-                    {ex.sets.length}/{ex.targetSets}
+                    {ex.sets.length > ex.targetSets
+                      ? `${ex.targetSets}+${ex.sets.length - ex.targetSets}`
+                      : `${ex.sets.length}/${ex.targetSets}`}
                   </Text>
                 </View>
               </View>
@@ -259,6 +261,9 @@ export default function ActiveWorkoutScreen({ workout, goal, onFinish, onCancel 
                   {isDone && (
                     <View style={styles.doneRow}>
                       <Text style={styles.doneText}>All sets complete!</Text>
+                      <TouchableOpacity style={styles.addSetBtn} onPress={() => openLogModal(i)}>
+                        <Text style={styles.addSetBtnText}>+ Add Set</Text>
+                      </TouchableOpacity>
                     </View>
                   )}
                 </View>
@@ -398,8 +403,10 @@ const styles = StyleSheet.create({
   logSetBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' },
   logSetBtnText: { color: colors.background, fontSize: 15, fontWeight: '700' },
 
-  doneRow:  { alignItems: 'center', paddingVertical: 8 },
-  doneText: { fontSize: 13, color: colors.primary, fontWeight: '600' },
+  doneRow:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, gap: 12 },
+  doneText:     { fontSize: 13, color: colors.primary, fontWeight: '600' },
+  addSetBtn:    { borderWidth: 1, borderColor: colors.primary, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 6 },
+  addSetBtnText:{ fontSize: 13, color: colors.primary, fontWeight: '600' },
 
   finishBtn:         { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8, borderWidth: 1, borderColor: colors.primary },
   finishBtnDisabled: { borderColor: colors.border, opacity: 0.5 },

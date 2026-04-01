@@ -7,8 +7,18 @@ import {
   NutritionTargets,
   MealSuggestion,
 } from '../types';
-import { FOOD_MACROS, FoodItem } from '../constants/foods';
-import { GYM_MACHINE_ITEMS, BARBELL_ITEMS, DUMBBELL_ITEMS } from '../constants/equipment';
+import { FoodItem } from '../hooks/useMetaData';
+
+// ─── Equipment classification sets (kept local — plan-generator logic only) ──
+
+const GYM_MACHINE_ITEMS = new Set([
+  'Cable machine', 'Leg press', 'Smith machine', 'Lat pulldown',
+  'Chest press machine', 'Seated row machine', 'Leg extension', 'Leg curl',
+  'Shoulder press machine', 'Hack squat machine', 'Leg press v-squat', 'Leverage machines',
+]);
+
+const BARBELL_ITEMS = new Set(['Barbell', 'Squat rack', 'Power rack', 'Smith machine']);
+const DUMBBELL_ITEMS = new Set(['Dumbbells', 'Kettlebell']);
 
 // ─── Equipment helpers ────────────────────────────────────────────────────────
 
@@ -174,23 +184,22 @@ function upperLowerDays(gym: boolean, db: boolean, pu: boolean, count: number): 
 }
 
 // Nutrition generation logic
-export function generateDailyNutrition(profile: UserProfile): DailyNutritionPlan {
+export function generateDailyNutrition(profile: UserProfile, availableFoods: FoodItem[] = []): DailyNutritionPlan {
   const targets = calculateNutritionTargets(profile);
 
-  // Merge standard + custom food macros for lookup
-  const customMacros: Record<string, FoodItem> = {};
-  for (const f of (profile.customFoods ?? [])) {
-    customMacros[f.name] = f;
-  }
+  // Build a name→item map from the provided foods + custom foods
+  const foodMap: Record<string, FoodItem> = {};
+  for (const f of availableFoods) foodMap[f.name.toLowerCase()] = f;
+  for (const f of (profile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as FoodItem;
 
   const breakfastCalories = targets.calories * 0.25;
-  const lunchCalories = targets.calories * 0.35;
-  const dinnerCalories = targets.calories * 0.4;
+  const lunchCalories     = targets.calories * 0.35;
+  const dinnerCalories    = targets.calories * 0.4;
 
   return {
-    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, customMacros),
-    lunch: generateMealSuggestion('Lunch', lunchCalories, profile.foodsAvailable, customMacros),
-    dinner: generateMealSuggestion('Dinner', dinnerCalories, profile.foodsAvailable, customMacros),
+    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, foodMap),
+    lunch:     generateMealSuggestion('Lunch',     lunchCalories,     profile.foodsAvailable, foodMap),
+    dinner:    generateMealSuggestion('Dinner',    dinnerCalories,     profile.foodsAvailable, foodMap),
     targets,
   };
 }
@@ -268,19 +277,17 @@ function generateMealSuggestion(
   mealType: string,
   calorieTarget: number,
   foodsAvailable: string[],
-  customMacros: Record<string, FoodItem> = {}
+  foodMap: Record<string, FoodItem> = {}
 ): MealSuggestion {
   // Resolve food items — use selected foods if available, otherwise defaults
   const candidates = foodsAvailable.length > 0 ? foodsAvailable : DEFAULT_MEAL_FOODS[mealType] ?? [];
 
   // Separate candidates into macro roles, keeping only known foods
   const byRole: Record<string, FoodItem[]> = { protein: [], carb: [], fat: [], veg: [] };
-  const unknown: string[] = [];
 
   for (const name of candidates) {
-    const item = FOOD_MACROS[name] ?? customMacros[name];
+    const item = foodMap[name.toLowerCase()];
     if (item) byRole[classifyFood(item)].push(item);
-    else unknown.push(name);
   }
 
   // Pick one food per preferred role for this meal
@@ -299,13 +306,17 @@ function generateMealSuggestion(
       meal: mealType,
       foods: fallbackNames,
       calories: totalCal,
-      protein: Math.round(totalCal * 0.3 / 4),
+      protein: Math.round(totalCal * 0.30 / 4),
+      carbs:   Math.round(totalCal * 0.45 / 4),
+      fat:     Math.round(totalCal * 0.30 / 9),
     };
   }
 
   // Sum raw macros from one serving of each picked food
-  let rawCal  = picked.reduce((s, f) => s + f.calories, 0);
-  let rawProt = picked.reduce((s, f) => s + f.protein,  0);
+  let rawCal   = picked.reduce((s, f) => s + f.calories, 0);
+  let rawProt  = picked.reduce((s, f) => s + f.protein,  0);
+  let rawCarbs = picked.reduce((s, f) => s + (f.carbs ?? 0), 0);
+  let rawFat   = picked.reduce((s, f) => s + (f.fat   ?? 0), 0);
 
   // Scale all items proportionally to hit the calorie target
   const scale = rawCal > 0 ? calorieTarget / rawCal : 1;
@@ -314,6 +325,8 @@ function generateMealSuggestion(
     meal: mealType,
     foods: picked.map(f => f.name),
     calories: Math.round(calorieTarget),
-    protein: Math.round(rawProt * scale),
+    protein:  Math.round(rawProt  * scale),
+    carbs:    Math.round(rawCarbs * scale),
+    fat:      Math.round(rawFat   * scale),
   };
 }

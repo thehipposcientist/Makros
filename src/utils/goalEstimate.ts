@@ -1,5 +1,5 @@
 import { UserProfile } from '../types';
-import { WEIGHT_GOALS, TIMELINE_GOALS, TIMELINE_WEEKS } from '../constants/goals';
+import { GoalConfig } from '../hooks/useMetaData';
 
 const PACE_LBS_PER_WEEK: Record<string, Record<string, number>> = {
   fat_loss:    { conservative: 0.5,  moderate: 1.0,  aggressive: 1.5 },
@@ -10,23 +10,26 @@ const PACE_LBS_PER_WEEK: Record<string, Record<string, number>> = {
 export interface GoalEstimate {
   weeks: number;
   date: Date;
-  label: string; // e.g. "14 weeks away"
+  label: string;
 }
 
-export function getGoalEstimate(profile: UserProfile): GoalEstimate | null {
+export function getGoalEstimate(profile: UserProfile, goalConfig: GoalConfig): GoalEstimate | null {
   const { goal, goalDetails, physicalStats } = profile;
   const { pace, targetWeightLbs } = goalDetails;
 
+  const weightGoals   = new Set(goalConfig.weight_goals);
+  const timelineGoals = new Set(goalConfig.timeline_goals);
+
   let weeks: number | null = null;
 
-  if (WEIGHT_GOALS.has(goal) && targetWeightLbs != null && targetWeightLbs > 0) {
+  if (weightGoals.has(goal) && targetWeightLbs != null && targetWeightLbs > 0) {
     const lbsPerWeek = PACE_LBS_PER_WEEK[goal]?.[pace];
     if (lbsPerWeek && lbsPerWeek > 0) {
       const delta = Math.abs(physicalStats.weightLbs - targetWeightLbs);
       weeks = Math.ceil(delta / lbsPerWeek);
     }
-  } else if (TIMELINE_GOALS.has(goal)) {
-    weeks = TIMELINE_WEEKS[goal]?.[pace] ?? null;
+  } else if (timelineGoals.has(goal)) {
+    weeks = goalConfig.timeline_weeks[goal]?.[pace] ?? null;
   }
 
   if (!weeks || weeks <= 0) return null;

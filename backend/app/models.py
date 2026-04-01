@@ -4,7 +4,7 @@ from datetime import datetime, date, timezone
 
 from app.enums import (
     GoalType, GoalPace, Gender, MealType,
-    EquipmentType, MuscleGroup, WorkoutSource, MealSource,
+    EquipmentType, MuscleGroup, WorkoutSource, MealSource, FoodCategory,
 )
 
 
@@ -67,6 +67,54 @@ class Exercise(SQLModel, table=True):
     is_compound: bool = Field(default=False)
     description: str | None = Field(default=None)
     is_custom: bool = Field(default=False)
+
+
+# ─── Food library (seeded reference data) ────────────────────────────────────
+
+class Food(SQLModel, table=True):
+    __tablename__ = "foods"
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    category: FoodCategory = Field(sa_column=Column(SAEnum(FoodCategory), nullable=False))
+    unit: str  # e.g. "100g", "1 cup", "1 medium"
+    calories: float
+    protein: float  # grams
+    carbs: float    # grams
+    fat: float      # grams
+    is_custom: bool = Field(default=False)
+
+
+# ─── Equipment library (seeded reference data) ───────────────────────────────
+
+class Equipment(SQLModel, table=True):
+    __tablename__ = "equipment"
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    category: str  # e.g. "Bodyweight & Home", "Free Weights", etc.
+    icon: str      # emoji
+    is_custom: bool = Field(default=False)
+
+
+# ─── Goal options (seeded reference data) ────────────────────────────────────
+
+class GoalOption(SQLModel, table=True):
+    __tablename__ = "goal_options"
+    id: int | None = Field(default=None, primary_key=True)
+    value: str = Field(unique=True, index=True)
+    label: str
+    icon: str
+    description: str
+
+
+class PaceOption(SQLModel, table=True):
+    __tablename__ = "pace_options"
+    id: int | None = Field(default=None, primary_key=True)
+    goal_value: str  # which goal this pace applies to
+    value: str       # e.g. "conservative"
+    label: str
+    icon: str
+    rate: str        # e.g. "~0.5 lbs/week"
+    description: str
 
 
 # ─── Workouts ─────────────────────────────────────────────────────────────────

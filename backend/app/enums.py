@@ -66,3 +66,13 @@ class WorkoutSource(str, Enum):
 class MealSource(str, Enum):
     GENERATED = "generated"
     LOGGED    = "logged"
+
+
+class FoodCategory(str, Enum):
+    PROTEINS        = "proteins"
+    PLANT_PROTEINS  = "plant_proteins"
+    GRAINS_CARBS    = "grains_carbs"
+    VEGETABLES      = "vegetables"
+    FRUITS          = "fruits"
+    DAIRY           = "dairy"
+    FATS_OILS       = "fats_oils"

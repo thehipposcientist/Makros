@@ -11,7 +11,7 @@ import { colors, radius } from '../constants/theme';
 const logo = require('../../assets/images/logo.png');
 
 interface AuthScreenProps {
-  onAuthenticated: (token: string) => void;
+  onAuthenticated: (token: string, isNewUser: boolean) => void;
 }
 
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
@@ -39,12 +39,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     }
     setLoading(true);
     try {
-      if (mode === 'signup') {
+      const isNewUser = mode === 'signup';
+      if (isNewUser) {
         await register(email.trim(), username.trim(), password);
       }
       const { access_token } = await login(email.trim(), password);
       await AsyncStorage.setItem('authToken', access_token);
-      onAuthenticated(access_token);
+      onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
     } finally {

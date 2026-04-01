@@ -43,8 +43,10 @@ export interface PhysicalStats {
 
 export interface GoalDetails {
   pace: GoalPace;
-  targetWeightLbs?: number; // for fat_loss, toning, muscle_gain
-  timelineWeeks?: number;   // derived from pace for performance/recomp goals
+  targetWeightLbs?: number;  // for fat_loss, toning, muscle_gain
+  timelineWeeks?: number;    // derived from pace for performance/recomp goals
+  startWeightLbs?: number;   // weight at goal start — used for progress meter
+  goalStartedAt?: string;    // ISO date when goal was set — used for timeline meter
 }
 
 export interface CustomFoodItem {
@@ -103,6 +105,8 @@ export interface MealSuggestion {
   foods: string[];
   calories: number;
   protein: number;
+  carbs?: number;
+  fat?: number;
 }
 
 export interface DailyNutritionPlan {

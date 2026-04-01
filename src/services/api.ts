@@ -87,21 +87,6 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
   }
 }
 
-export async function lookupFoodMacros(token: string, name: string) {
-  return request<{ name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }>('/ai/lookup-food', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name }),
-  });
-}
-
-export async function lookupEquipmentInfo(token: string, name: string) {
-  return request<{ name: string; muscleGroups: string[]; category: string }>('/ai/lookup-equipment', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name }),
-  });
-}
 
 export async function getAIPlans(token: string, profile: import('../types').UserProfile) {
   return request<{ workout_plan: import('../types').WorkoutPlan; nutrition_plan: import('../types').DailyNutritionPlan }>('/ai/plans', {
@@ -158,3 +143,40 @@ export async function syncOnboarding(token: string, profile: import('../types').
     }),
   });
 }
+
+// ============================================================================
+// Meta API Endpoints — Reference Data (Foods, Equipment, Goals, Paces)
+// ============================================================================
+
+export async function getFoods(category?: string) {
+  const params = category ? `?category=${category}` : '';
+  return request<any[]>(`/meta/foods${params}`);
+}
+
+export async function getFoodCategories() {
+  return request<Record<string, { label: string; icon: string }>>('/meta/food-categories');
+}
+
+export async function getEquipment(category?: string) {
+  const params = category ? `?category=${category}` : '';
+  return request<any[]>(`/meta/equipment${params}`);
+}
+
+export async function getGoals() {
+  return request<any[]>('/meta/goals');
+}
+
+export async function getPaces(goal?: string) {
+  const params = goal ? `?goal=${goal}` : '';
+  return request<any[]>(`/meta/paces${params}`);
+}
+
+export async function getGoalConfig() {
+  return request<{
+    weight_goals: string[];
+    timeline_goals: string[];
+    lifestyle_goals: string[];
+    timeline_weeks: Record<string, Record<string, number>>;
+  }>('/meta/goal-config');
+}
+

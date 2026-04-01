@@ -41,12 +41,6 @@ class PlanRequest(BaseModel):
     equipment: list[str]
     foodsAvailable: list[str]
 
-class FoodLookupRequest(BaseModel):
-    name: str
-
-class EquipmentLookupRequest(BaseModel):
-    name: str
-
 class CompletedSetIn(BaseModel):
     setNumber: int
     reps: int
@@ -61,6 +55,82 @@ class WeightRecommendRequest(BaseModel):
 
 # ─── Prompt builder ───────────────────────────────────────────────────────────
 
+def compute_tdee_and_targets(req: PlanRequest) -> dict:
+    """Compute TDEE and macro targets using Mifflin-St Jeor + goal adjustment."""
+    ps = req.physicalStats
+    weight_kg = ps.weightLbs / 2.205
+    height_cm = (ps.heightFeet * 12 + ps.heightInches) * 2.54
+
+    # Mifflin-St Jeor BMR
+    base = 10 * weight_kg + 6.25 * height_cm - 5 * ps.age
+    if ps.gender == 'male':
+        bmr = base + 5
+    elif ps.gender == 'female':
+        bmr = base - 161
+    else:
+        bmr = base - 78  # average for nonbinary / prefer not to say
+
+    # Activity multiplier
+    if req.daysPerWeek <= 1:   multiplier = 1.2
+    elif req.daysPerWeek <= 3: multiplier = 1.375
+    elif req.daysPerWeek <= 5: multiplier = 1.55
+    else:                      multiplier = 1.725
+
+    tdee = round(bmr * multiplier)
+
+    # Goal-based calorie adjustment
+    pace = req.goalDetails.pace
+    adjustments = {
+        'fat_loss':             {'conservative': -250, 'moderate': -500, 'aggressive': -750},
+        'toning':               {'conservative': -200, 'moderate': -350, 'aggressive': -500},
+        'muscle_gain':          {'conservative':  150, 'moderate':  300, 'aggressive':  500},
+        'body_recomp':          {'conservative': -100, 'moderate':    0, 'aggressive':  100},
+        'strength':             {'conservative':  200, 'moderate':  350, 'aggressive':  500},
+        'endurance':            {'conservative':  100, 'moderate':  200, 'aggressive':  300},
+        'athletic_performance': {'conservative':  150, 'moderate':  250, 'aggressive':  400},
+    }
+    adjustment = adjustments.get(req.goal, {}).get(pace, 0)
+    calories = max(1200, tdee + adjustment)
+
+    # Protein: 1.0 g/lb for high-protein goals, 0.75 g/lb otherwise
+    high_protein_goals = {'muscle_gain', 'body_recomp', 'strength', 'toning'}
+    protein_per_lb = 1.0 if req.goal in high_protein_goals else 0.75
+    protein = round(ps.weightLbs * protein_per_lb)
+
+    # Carbs: 45% of calories; Fat: 30% of calories
+    carbs = round((calories * 0.45) / 4)
+    fat   = round((calories * 0.30) / 9)
+
+    # Per-meal calorie split: 25% breakfast, 35% lunch, 40% dinner
+    breakfast_cal = round(calories * 0.25)
+    lunch_cal     = round(calories * 0.35)
+    dinner_cal    = calories - breakfast_cal - lunch_cal  # remainder to avoid rounding drift
+
+    # Per-meal protein split: same ratio as calories
+    breakfast_prot = round(protein * 0.25)
+    lunch_prot     = round(protein * 0.35)
+    dinner_prot    = protein - breakfast_prot - lunch_prot
+
+    # Per-meal carbs/fat split (proportional)
+    breakfast_carbs = round(carbs * 0.25)
+    lunch_carbs     = round(carbs * 0.35)
+    dinner_carbs    = carbs - breakfast_carbs - lunch_carbs
+
+    breakfast_fat = round(fat * 0.25)
+    lunch_fat     = round(fat * 0.35)
+    dinner_fat    = fat - breakfast_fat - lunch_fat
+
+    return {
+        'calories': calories, 'protein': protein, 'carbs': carbs, 'fat': fat,
+        'breakfast_cal': breakfast_cal, 'breakfast_prot': breakfast_prot,
+        'breakfast_carbs': breakfast_carbs, 'breakfast_fat': breakfast_fat,
+        'lunch_cal': lunch_cal, 'lunch_prot': lunch_prot,
+        'lunch_carbs': lunch_carbs, 'lunch_fat': lunch_fat,
+        'dinner_cal': dinner_cal, 'dinner_prot': dinner_prot,
+        'dinner_carbs': dinner_carbs, 'dinner_fat': dinner_fat,
+    }
+
+
 def build_prompt(req: PlanRequest) -> str:
     ps = req.physicalStats
     height_str = f"{ps.heightFeet}'{ps.heightInches}\""
@@ -72,7 +142,6 @@ def build_prompt(req: PlanRequest) -> str:
     has_machines  = any(e in ['Cable machine', 'Leg press', 'Lat pulldown', 'Chest press machine', 'Seated row machine', 'Leg extension', 'Leg curl'] for e in req.equipment)
     has_pullupbar = 'Pull-up bar' in req.equipment or has_barbell or has_machines
     has_bench     = any(e in ['Flat bench', 'Incline bench'] for e in req.equipment)
-    bodyweight_only = not has_barbell and not has_dumbbells and not has_machines
 
     forbidden = []
     if not has_barbell:   forbidden.append("barbells or barbell exercises (squat, deadlift, bench press with barbell)")
@@ -81,6 +150,8 @@ def build_prompt(req: PlanRequest) -> str:
     if not has_pullupbar: forbidden.append("pull-up bar")
     if not has_bench:     forbidden.append("flat or incline bench")
     forbidden_str = '; '.join(forbidden) if forbidden else 'none'
+
+    t = compute_tdee_and_targets(req)
 
     return f"""You are an expert fitness coach and registered dietitian.
 Generate a personalised weekly workout plan and a daily nutrition plan for this user.
@@ -96,6 +167,12 @@ USER PROFILE
 - FORBIDDEN (user does NOT have these): {forbidden_str}
 - Foods in kitchen: {foods_str}
 
+MACRO TARGETS (computed from user stats — use EXACTLY these numbers, do not change them):
+  Daily totals  → {t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
+  Breakfast     → {t['breakfast_cal']} cal / {t['breakfast_prot']}g protein / {t['breakfast_carbs']}g carbs / {t['breakfast_fat']}g fat
+  Lunch         → {t['lunch_cal']} cal / {t['lunch_prot']}g protein / {t['lunch_carbs']}g carbs / {t['lunch_fat']}g fat
+  Dinner        → {t['dinner_cal']} cal / {t['dinner_prot']}g protein / {t['dinner_carbs']}g carbs / {t['dinner_fat']}g fat
+
 INSTRUCTIONS
 - Workout plan: provide exactly {req.daysPerWeek} training day objects.
   Each exercise must have realistic sets, reps (as a string like "8-10"), and rest seconds.
@@ -103,9 +180,9 @@ INSTRUCTIONS
   If the forbidden list says "no barbells", do NOT include barbell exercises — use dumbbells or bodyweight alternatives.
   If bodyweight only, every exercise must be doable with zero equipment.
   Number of exercises per session should match approximately {req.workoutDurationMinutes} minutes (roughly 8 min per exercise).
-- Nutrition plan: calculate calories and macros based on their stats and goal.
+- Nutrition plan: use the EXACT macro targets listed above — do NOT recalculate or substitute different numbers.
   Suggest meals using ONLY the foods they listed (or close substitutes if list is empty).
-  Each meal needs a realistic calorie and protein count.
+  Each meal must include calories, protein, carbs, and fat matching the per-meal targets above.
 
 Return ONLY valid JSON matching this exact schema, no extra text:
 
@@ -131,103 +208,40 @@ Return ONLY valid JSON matching this exact schema, no extra text:
   }},
   "nutrition_plan": {{
     "targets": {{
-      "calories": 2000,
-      "protein": 150,
-      "carbs": 200,
-      "fat": 65
+      "calories": {t['calories']},
+      "protein": {t['protein']},
+      "carbs": {t['carbs']},
+      "fat": {t['fat']}
     }},
     "breakfast": {{
       "meal": "Breakfast",
       "foods": ["string"],
-      "calories": 500,
-      "protein": 35
+      "calories": {t['breakfast_cal']},
+      "protein": {t['breakfast_prot']},
+      "carbs": {t['breakfast_carbs']},
+      "fat": {t['breakfast_fat']}
     }},
     "lunch": {{
       "meal": "Lunch",
       "foods": ["string"],
-      "calories": 700,
-      "protein": 50
+      "calories": {t['lunch_cal']},
+      "protein": {t['lunch_prot']},
+      "carbs": {t['lunch_carbs']},
+      "fat": {t['lunch_fat']}
     }},
     "dinner": {{
       "meal": "Dinner",
       "foods": ["string"],
-      "calories": 800,
-      "protein": 65
+      "calories": {t['dinner_cal']},
+      "protein": {t['dinner_prot']},
+      "carbs": {t['dinner_carbs']},
+      "fat": {t['dinner_fat']}
     }}
   }}
 }}"""
 
 
 # ─── Endpoint ─────────────────────────────────────────────────────────────────
-
-@router.post("/lookup-food")
-def lookup_food_macros(
-    body: FoodLookupRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """Given a food name, return its macros per standard serving."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="name is required")
-
-    client = OpenAI(api_key=api_key)
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are a nutrition expert. Respond with valid JSON only."},
-                {"role": "user", "content": (
-                    f'Return the macros for "{name}" per one standard serving as JSON:\n'
-                    '{"name": "string", "unit": "string (e.g. 100g, 1 cup)", '
-                    '"calories": number, "protein": number, "carbs": number, "fat": number}'
-                )},
-            ],
-            temperature=0.2,
-            max_tokens=150,
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Lookup failed: {str(e)}")
-
-
-@router.post("/lookup-equipment")
-def lookup_equipment_info(
-    body: EquipmentLookupRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """Given an equipment name, return primary muscle groups it targets."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="name is required")
-
-    client = OpenAI(api_key=api_key)
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are a fitness expert. Respond with valid JSON only."},
-                {"role": "user", "content": (
-                    f'For the gym equipment "{name}", return:\n'
-                    '{"name": "string", "muscleGroups": ["string"], "category": "string"}'
-                )},
-            ],
-            temperature=0.2,
-            max_tokens=150,
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Lookup failed: {str(e)}")
-
 
 @router.post("/recommend-weight")
 def recommend_weight(

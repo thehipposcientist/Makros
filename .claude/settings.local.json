@@ -17,7 +17,11 @@
       "Bash(npx tsc:*)",
       "Bash(rm -f workoutpal.db)",
       "Bash(timeout 8 uvicorn app.main:app --reload)",
-      "Bash(timeout 8 uvicorn app.main:app)"
+      "Bash(timeout 8 uvicorn app.main:app)",
+      "Bash(python reseed.py)",
+      "Bash(python -c \"from app.routers.ai import build_prompt; print\\(''OK''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")"
     ]
   }
 }

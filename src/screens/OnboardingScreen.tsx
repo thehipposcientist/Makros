@@ -10,26 +10,22 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
+  ActivityIndicator,
 } from 'react-native';
 import { colors, radius } from '../constants/theme';
-import { FOOD_CATEGORIES } from '../constants/foods';
-import { EQUIPMENT_CATEGORIES } from '../constants/equipment';
+import {
+  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails,
+} from '../types';
+import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 
 const logo = require('../../assets/images/logo.png');
-import {
-  Goal, GoalPace, Gender, Equipment, UserProfile, PhysicalStats, GoalDetails,
-} from '../types';
-import {
-  GOAL_OPTIONS, PACE_OPTIONS, TIMELINE_WEEKS,
-  WEIGHT_GOALS, TIMELINE_GOALS, LIFESTYLE_GOALS,
-} from '../constants/goals';
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
 type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods';
 
-function getSteps(goal: Goal): StepKey[] {
-  if (LIFESTYLE_GOALS.has(goal)) {
+function getSteps(goal: Goal, lifestyleGoals: Set<string>): StepKey[] {
+  if (lifestyleGoals.has(goal)) {
     return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
   }
   return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
@@ -42,6 +38,12 @@ interface OnboardingScreenProps {
 }
 
 export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
+  const meta = useMetaData();
+
+  const weightGoals   = new Set(meta.goalConfig.weight_goals);
+  const timelineGoals = new Set(meta.goalConfig.timeline_goals);
+  const lifestyleGoals= new Set(meta.goalConfig.lifestyle_goals);
+
   // Step tracking
   const [currentStep, setCurrentStep] = useState(0);
 
@@ -69,7 +71,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   // Step 6 — Foods
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
 
-  const steps = getSteps(goal);
+  const steps = getSteps(goal, lifestyleGoals);
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
 
@@ -82,7 +84,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const validate = (): string | null => {
     switch (currentStepKey) {
       case 'goalDetails':
-        if (WEIGHT_GOALS.has(goal) && targetWeight) {
+        if (weightGoals.has(goal) && targetWeight) {
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
         }
@@ -117,7 +119,6 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
     if (error) { Alert.alert('Hold on', error); return; }
 
     if (currentStep < totalSteps - 1) {
-      // When goal changes on step 0, reset pace so it's fresh for the new goal
       if (currentStepKey === 'goal') setPace('moderate');
       setCurrentStep(s => s + 1);
     } else {
@@ -132,25 +133,27 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const handleComplete = () => {
     const goalDetails: GoalDetails = {
       pace,
-      targetWeightLbs: WEIGHT_GOALS.has(goal) && targetWeight ? parseFloat(targetWeight) : undefined,
-      timelineWeeks: TIMELINE_GOALS.has(goal) ? TIMELINE_WEEKS[goal][pace] : undefined,
+      targetWeightLbs: weightGoals.has(goal) && targetWeight ? parseFloat(targetWeight) : undefined,
+      timelineWeeks:   timelineGoals.has(goal)
+        ? (meta.goalConfig.timeline_weeks[goal]?.[pace] ?? undefined)
+        : undefined,
     };
 
     const physicalStats: PhysicalStats = {
-      weightLbs: parseFloat(weightLbs),
-      heightFeet: parseInt(heightFeet),
+      weightLbs:    parseFloat(weightLbs),
+      heightFeet:   parseInt(heightFeet),
       heightInches: parseInt(heightInches),
-      age: parseInt(age),
-      gender: gender as Gender,
+      age:          parseInt(age),
+      gender:       gender as Gender,
     };
 
     onComplete({
       goal,
       goalDetails,
       physicalStats,
-      daysPerWeek: parseInt(daysPerWeek),
+      daysPerWeek:            parseInt(daysPerWeek),
       workoutDurationMinutes: workoutDuration,
-      equipment: selectedEquipment,
+      equipment:              selectedEquipment,
       foodsAvailable,
       customFoods: [],
     });
@@ -162,30 +165,34 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>What's Your Goal?</Text>
       <Text style={styles.stepDescription}>Choose the one that best matches what you want to achieve</Text>
-      <View style={styles.goalGrid}>
-        {GOAL_OPTIONS.map(opt => {
-          const active = goal === opt.value;
-          return (
-            <TouchableOpacity
-              key={opt.value}
-              style={[styles.goalCard, active && styles.goalCardActive]}
-              onPress={() => setGoal(opt.value)}
-              activeOpacity={0.75}
-            >
-              <Text style={styles.goalIcon}>{opt.icon}</Text>
-              <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{opt.label}</Text>
-              <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{opt.description}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      {meta.loading ? (
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+      ) : (
+        <View style={styles.goalGrid}>
+          {meta.goals.map(opt => {
+            const active = goal === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={[styles.goalCard, active && styles.goalCardActive]}
+                onPress={() => setGoal(opt.value as Goal)}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.goalIcon}>{opt.icon}</Text>
+                <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{opt.label}</Text>
+                <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{opt.description}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
     </View>
   );
 
   const renderGoalDetailsStep = () => {
-    const paceOpts = PACE_OPTIONS[goal] ?? PACE_OPTIONS['strength'];
-    const showTargetWeight = WEIGHT_GOALS.has(goal);
-    const goalLabel = GOAL_OPTIONS.find(g => g.value === goal)?.label ?? '';
+    const paceOpts = pacesForGoal(goal, meta.paces);
+    const showTargetWeight = weightGoals.has(goal);
+    const goalLabel = meta.goals.find(g => g.value === goal)?.label ?? '';
 
     return (
       <View style={styles.stepContainer}>
@@ -221,7 +228,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
               <TouchableOpacity
                 key={opt.value}
                 style={[styles.paceCard, active && styles.paceCardActive]}
-                onPress={() => setPace(opt.value)}
+                onPress={() => setPace(opt.value as GoalPace)}
                 activeOpacity={0.75}
               >
                 <Text style={styles.paceIcon}>{opt.icon}</Text>
@@ -361,7 +368,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
               style={[styles.paceCard, workoutDuration === opt.value && styles.paceCardActive]}
               onPress={() => setWorkoutDuration(opt.value)}>
               <Text style={[styles.paceLabel, workoutDuration === opt.value && styles.paceLabelActive]}>{opt.label}</Text>
-              <Text style={[styles.paceDesc,  workoutDuration === opt.value && styles.paceDescActive]}>{opt.desc}</Text>
+              <Text style={[styles.paceDesc, workoutDuration === opt.value && styles.paceDescActive]}>{opt.desc}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -376,26 +383,30 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
         Select everything you have access to
         {selectedEquipment.length > 0 ? `  ·  ${selectedEquipment.length} selected` : ''}
       </Text>
-      {EQUIPMENT_CATEGORIES.map(category => (
-        <View key={category.label} style={styles.foodCategory}>
-          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
-          <View style={styles.foodChips}>
-            {category.items.map(item => {
-              const selected = selectedEquipment.includes(item.name);
-              return (
-                <TouchableOpacity
-                  key={item.name}
-                  style={[styles.foodChip, selected && styles.foodChipActive]}
-                  onPress={() => toggleEquipment(item.name)}>
-                  <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
-                    {item.name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+      {meta.loading ? (
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+      ) : (
+        meta.equipmentCategories.map(category => (
+          <View key={category.label} style={styles.foodCategory}>
+            <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+            <View style={styles.foodChips}>
+              {category.items.map(item => {
+                const selected = selectedEquipment.includes(item.name);
+                return (
+                  <TouchableOpacity
+                    key={item.name}
+                    style={[styles.foodChip, selected && styles.foodChipActive]}
+                    onPress={() => toggleEquipment(item.name)}>
+                    <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                      {item.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
-        </View>
-      ))}
+        ))
+      )}
     </View>
   );
 
@@ -413,26 +424,30 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
         {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
       </Text>
 
-      {FOOD_CATEGORIES.map(category => (
-        <View key={category.label} style={styles.foodCategory}>
-          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
-          <View style={styles.foodChips}>
-            {category.foods.map(food => {
-              const selected = foodsAvailable.includes(food.name);
-              return (
-                <TouchableOpacity
-                  key={food.name}
-                  style={[styles.foodChip, selected && styles.foodChipActive]}
-                  onPress={() => toggleFood(food.name)}>
-                  <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
-                    {food.name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+      {meta.loading ? (
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+      ) : (
+        meta.foodCategories.map(category => (
+          <View key={category.key} style={styles.foodCategory}>
+            <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+            <View style={styles.foodChips}>
+              {category.foods.map(food => {
+                const selected = foodsAvailable.includes(food.name);
+                return (
+                  <TouchableOpacity
+                    key={food.name}
+                    style={[styles.foodChip, selected && styles.foodChipActive]}
+                    onPress={() => toggleFood(food.name)}>
+                    <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                      {food.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
-        </View>
-      ))}
+        ))
+      )}
 
       <Text style={styles.hint}>Skip to use default meal suggestions</Text>
     </View>
@@ -503,7 +518,6 @@ const styles = StyleSheet.create({
   stepTitle: { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
   stepDescription: { fontSize: 15, color: colors.textSecondary, lineHeight: 22, marginBottom: 24 },
 
-  // Goal grid
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   goalCard: { width: '48%', padding: 14, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
@@ -513,7 +527,6 @@ const styles = StyleSheet.create({
   goalDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
   goalDescActive: { color: colors.primaryLight },
 
-  // Pace cards
   paceCards: { flexDirection: 'row', gap: 8, marginTop: 8 },
   paceCard: { flex: 1, padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
   paceCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
@@ -525,7 +538,6 @@ const styles = StyleSheet.create({
   paceDesc: { fontSize: 10, color: colors.textMuted, textAlign: 'center', lineHeight: 13 },
   paceDescActive: { color: colors.primaryLight },
 
-  // Form fields
   fieldGroup: { marginBottom: 20 },
   fieldLabel: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 8 },
   optional: { fontWeight: '400', color: colors.textMuted },
@@ -535,25 +547,15 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
     padding: 14, fontSize: 16, backgroundColor: colors.surface, color: colors.textPrimary,
   },
-  multilineInput: { minHeight: 100, textAlignVertical: 'top' },
   unit: { fontSize: 14, color: colors.textSecondary, fontWeight: '500', minWidth: 40 },
   hint: { fontSize: 13, color: colors.textMuted, marginTop: 8 },
 
-  // Gender
   genderRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   genderButton: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: radius.full, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
   genderButtonActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   genderText: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
   genderTextActive: { color: colors.primary, fontWeight: '600' },
 
-  // Equipment
-  equipmentGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  equipmentButton: { width: '48%', paddingVertical: 16, borderRadius: radius.md, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
-  equipmentButtonActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
-  equipmentIcon: { fontSize: 28, marginBottom: 4 },
-  equipmentLabel: { fontSize: 14, fontWeight: '500', color: colors.textSecondary },
-
-  // Food selection
   foodCategory:      { marginBottom: 18 },
   foodCategoryLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 },
   foodChips:         { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -562,7 +564,6 @@ const styles = StyleSheet.create({
   foodChipText:      { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
   foodChipTextActive:{ color: colors.primary, fontWeight: '600' },
 
-  // Buttons
   buttons: { flexDirection: 'row', gap: 12, marginTop: 8 },
   backButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.surface, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
   buttonDisabled: { opacity: 0.4 },
