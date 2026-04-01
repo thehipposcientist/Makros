@@ -176,7 +176,7 @@ class GoalUpsert(SQLModel):
 
 class PreferencesUpsert(SQLModel):
     days_per_week: int
-    equipment: list[EquipmentType]
+    equipment: list[str]          # specific item names e.g. "Dumbbells", "Pull-up bar"
     foods_available: list[str]
 
 class OnboardingSync(SQLModel):

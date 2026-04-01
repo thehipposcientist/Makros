@@ -9,7 +9,13 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Image,
 } from 'react-native';
+import { colors, radius } from '../constants/theme';
+import { FOOD_CATEGORIES } from '../constants/foods';
+import { EQUIPMENT_CATEGORIES } from '../constants/equipment';
+
+const logo = require('../../assets/images/logo.png');
 import {
   Goal, GoalPace, Gender, Equipment, UserProfile, PhysicalStats, GoalDetails,
 } from '../types';
@@ -55,18 +61,19 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
 
   // Step 4 — Training days
   const [daysPerWeek, setDaysPerWeek] = useState('3');
+  const [workoutDuration, setWorkoutDuration] = useState(60);
 
   // Step 5 — Equipment
-  const [selectedEquipment, setSelectedEquipment] = useState<Equipment[]>(['home']);
+  const [selectedEquipment, setSelectedEquipment] = useState<string[]>([]);
 
   // Step 6 — Foods
-  const [foodsAvailable, setFoodsAvailable] = useState('');
+  const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
 
   const steps = getSteps(goal);
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
 
-  const toggleEquipment = (eq: Equipment) => {
+  const toggleEquipment = (eq: string) => {
     setSelectedEquipment(prev =>
       prev.includes(eq) ? prev.filter(e => e !== eq) : [...prev, eq]
     );
@@ -142,8 +149,10 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       goalDetails,
       physicalStats,
       daysPerWeek: parseInt(daysPerWeek),
+      workoutDurationMinutes: workoutDuration,
       equipment: selectedEquipment,
-      foodsAvailable: foodsAvailable.split(',').map(f => f.trim()).filter(Boolean),
+      foodsAvailable,
+      customFoods: [],
     });
   };
 
@@ -194,7 +203,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
               <TextInput
                 style={[styles.input, { flex: 1 }]}
                 placeholder="e.g. 160"
-                placeholderTextColor="#999"
+                placeholderTextColor={colors.textMuted}
                 keyboardType="decimal-pad"
                 value={targetWeight}
                 onChangeText={setTargetWeight}
@@ -238,7 +247,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
           <TextInput
             style={[styles.input, { flex: 1 }]}
             placeholder="e.g. 185"
-            placeholderTextColor="#999"
+            placeholderTextColor={colors.textMuted}
             keyboardType="decimal-pad"
             value={weightLbs}
             onChangeText={setWeightLbs}
@@ -250,11 +259,11 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>Height</Text>
         <View style={styles.heightRow}>
-          <View style={styles.inlineInput}>
+          <View style={[styles.inlineInput, { flex: 1 }]}>
             <TextInput
               style={[styles.input, { flex: 1 }]}
               placeholder="5"
-              placeholderTextColor="#999"
+              placeholderTextColor={colors.textMuted}
               keyboardType="number-pad"
               value={heightFeet}
               onChangeText={setHeightFeet}
@@ -266,7 +275,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
             <TextInput
               style={[styles.input, { flex: 1 }]}
               placeholder="10"
-              placeholderTextColor="#999"
+              placeholderTextColor={colors.textMuted}
               keyboardType="number-pad"
               value={heightInches}
               onChangeText={setHeightInches}
@@ -283,7 +292,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
           <TextInput
             style={[styles.input, { flex: 1 }]}
             placeholder="e.g. 27"
-            placeholderTextColor="#999"
+            placeholderTextColor={colors.textMuted}
             keyboardType="number-pad"
             value={age}
             onChangeText={setAge}
@@ -317,15 +326,23 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
     </View>
   );
 
+  const DURATION_OPTIONS = [
+    { value: 30,  label: '30 min', desc: 'Express' },
+    { value: 45,  label: '45 min', desc: 'Standard' },
+    { value: 60,  label: '60 min', desc: 'Full' },
+    { value: 75,  label: '75 min', desc: 'Extended' },
+    { value: 90,  label: '90 min', desc: 'Deep' },
+  ];
+
   const renderTrainingDaysStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Training Days</Text>
-      <Text style={styles.stepDescription}>How many days per week can you commit to training?</Text>
+      <Text style={styles.stepTitle}>Training Schedule</Text>
+      <Text style={styles.stepDescription}>How many days per week can you commit?</Text>
       <View style={styles.inlineInput}>
         <TextInput
           style={[styles.input, { flex: 1 }]}
           placeholder="3"
-          placeholderTextColor="#999"
+          placeholderTextColor={colors.textMuted}
           keyboardType="number-pad"
           value={daysPerWeek}
           onChangeText={setDaysPerWeek}
@@ -334,48 +351,90 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
         <Text style={styles.unit}>days/week</Text>
       </View>
       <Text style={styles.hint}>Recommended: 3–4 days for optimal recovery</Text>
+
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>How long per session?</Text>
+        <View style={styles.paceCards}>
+          {DURATION_OPTIONS.map(opt => (
+            <TouchableOpacity
+              key={opt.value}
+              style={[styles.paceCard, workoutDuration === opt.value && styles.paceCardActive]}
+              onPress={() => setWorkoutDuration(opt.value)}>
+              <Text style={[styles.paceLabel, workoutDuration === opt.value && styles.paceLabelActive]}>{opt.label}</Text>
+              <Text style={[styles.paceDesc,  workoutDuration === opt.value && styles.paceDescActive]}>{opt.desc}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
     </View>
   );
 
   const renderEquipmentStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Available Equipment</Text>
-      <Text style={styles.stepDescription}>Select everything you have access to</Text>
-      <View style={styles.equipmentGrid}>
-        {([
-          { value: 'home',       icon: '🏠', label: 'Home' },
-          { value: 'gym',        icon: '🏋️', label: 'Gym' },
-          { value: 'dumbbells',  icon: '⚡', label: 'Dumbbells' },
-          { value: 'bodyweight', icon: '🤸', label: 'Bodyweight' },
-          { value: 'other',      icon: '🎯', label: 'Other' },
-        ] as { value: Equipment; icon: string; label: string }[]).map(eq => (
-          <TouchableOpacity
-            key={eq.value}
-            style={[styles.equipmentButton, selectedEquipment.includes(eq.value) && styles.equipmentButtonActive]}
-            onPress={() => toggleEquipment(eq.value)}
-          >
-            <Text style={styles.equipmentIcon}>{eq.icon}</Text>
-            <Text style={styles.equipmentLabel}>{eq.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+      <Text style={styles.stepDescription}>
+        Select everything you have access to
+        {selectedEquipment.length > 0 ? `  ·  ${selectedEquipment.length} selected` : ''}
+      </Text>
+      {EQUIPMENT_CATEGORIES.map(category => (
+        <View key={category.label} style={styles.foodCategory}>
+          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+          <View style={styles.foodChips}>
+            {category.items.map(item => {
+              const selected = selectedEquipment.includes(item.name);
+              return (
+                <TouchableOpacity
+                  key={item.name}
+                  style={[styles.foodChip, selected && styles.foodChipActive]}
+                  onPress={() => toggleEquipment(item.name)}>
+                  <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                    {item.name}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      ))}
     </View>
   );
 
+  const toggleFood = (food: string) => {
+    setFoodsAvailable(prev =>
+      prev.includes(food) ? prev.filter(f => f !== food) : [...prev, food]
+    );
+  };
+
   const renderFoodsStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Favourite Foods</Text>
-      <Text style={styles.stepDescription}>Enter foods you enjoy (comma separated, optional)</Text>
-      <TextInput
-        style={[styles.input, styles.multilineInput]}
-        placeholder="e.g. chicken, rice, broccoli, eggs"
-        placeholderTextColor="#999"
-        value={foodsAvailable}
-        onChangeText={setFoodsAvailable}
-        multiline
-        numberOfLines={4}
-      />
-      <Text style={styles.hint}>Leave blank to use default meal suggestions</Text>
+      <Text style={styles.stepTitle}>What's in your kitchen?</Text>
+      <Text style={styles.stepDescription}>
+        Select foods you have available — your meal plan will be built around these
+        {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
+      </Text>
+
+      {FOOD_CATEGORIES.map(category => (
+        <View key={category.label} style={styles.foodCategory}>
+          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+          <View style={styles.foodChips}>
+            {category.foods.map(food => {
+              const selected = foodsAvailable.includes(food.name);
+              return (
+                <TouchableOpacity
+                  key={food.name}
+                  style={[styles.foodChip, selected && styles.foodChipActive]}
+                  onPress={() => toggleFood(food.name)}>
+                  <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                    {food.name}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      ))}
+
+      <Text style={styles.hint}>Skip to use default meal suggestions</Text>
     </View>
   );
 
@@ -396,7 +455,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
-          <Text style={styles.logo}>makros</Text>
+          <Image source={logo} style={styles.logo} resizeMode="contain" />
           <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}</Text>
         </View>
 
@@ -430,75 +489,84 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 24, paddingBottom: 48 },
   header: { marginTop: 16, marginBottom: 16 },
-  logo: { fontSize: 28, fontWeight: '800', color: '#007AFF', letterSpacing: -0.5 },
-  stepCounter: { fontSize: 13, color: '#999', marginTop: 4 },
+  logo: { width: 160, height: 52 },
+  stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 
   progressBar: { flexDirection: 'row', gap: 6, marginBottom: 32 },
-  progressSegment: { flex: 1, height: 3, borderRadius: 2, backgroundColor: '#e0e0e0' },
-  progressSegmentActive: { backgroundColor: '#007AFF' },
+  progressSegment: { flex: 1, height: 3, borderRadius: 2, backgroundColor: colors.border },
+  progressSegmentActive: { backgroundColor: colors.primary },
 
   stepContainer: { marginBottom: 24 },
-  stepTitle: { fontSize: 26, fontWeight: '700', color: '#000', marginBottom: 8 },
-  stepDescription: { fontSize: 15, color: '#666', lineHeight: 22, marginBottom: 24 },
+  stepTitle: { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
+  stepDescription: { fontSize: 15, color: colors.textSecondary, lineHeight: 22, marginBottom: 24 },
 
   // Goal grid
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  goalCard: { width: '48%', padding: 14, borderRadius: 14, borderWidth: 2, borderColor: '#e0e0e0', backgroundColor: '#f9f9f9' },
-  goalCardActive: { borderColor: '#007AFF', backgroundColor: '#E8F4FF' },
+  goalCard: { width: '48%', padding: 14, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
+  goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   goalIcon: { fontSize: 26, marginBottom: 6 },
-  goalLabel: { fontSize: 14, fontWeight: '700', color: '#000', marginBottom: 4 },
-  goalLabelActive: { color: '#007AFF' },
-  goalDesc: { fontSize: 12, color: '#888', lineHeight: 16 },
-  goalDescActive: { color: '#4a90d9' },
+  goalLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
+  goalLabelActive: { color: colors.primary },
+  goalDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
+  goalDescActive: { color: colors.primaryLight },
 
   // Pace cards
   paceCards: { flexDirection: 'row', gap: 8, marginTop: 8 },
-  paceCard: { flex: 1, padding: 12, borderRadius: 14, borderWidth: 2, borderColor: '#e0e0e0', backgroundColor: '#f9f9f9', alignItems: 'center' },
-  paceCardActive: { borderColor: '#007AFF', backgroundColor: '#E8F4FF' },
+  paceCard: { flex: 1, padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
+  paceCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   paceIcon: { fontSize: 24, marginBottom: 6 },
-  paceLabel: { fontSize: 12, fontWeight: '700', color: '#000', textAlign: 'center', marginBottom: 2 },
-  paceLabelActive: { color: '#007AFF' },
-  paceRate: { fontSize: 11, fontWeight: '600', color: '#666', textAlign: 'center', marginBottom: 4 },
-  paceRateActive: { color: '#007AFF' },
-  paceDesc: { fontSize: 10, color: '#999', textAlign: 'center', lineHeight: 13 },
-  paceDescActive: { color: '#4a90d9' },
+  paceLabel: { fontSize: 12, fontWeight: '700', color: colors.textPrimary, textAlign: 'center', marginBottom: 2 },
+  paceLabelActive: { color: colors.primary },
+  paceRate: { fontSize: 11, fontWeight: '600', color: colors.textSecondary, textAlign: 'center', marginBottom: 4 },
+  paceRateActive: { color: colors.primary },
+  paceDesc: { fontSize: 10, color: colors.textMuted, textAlign: 'center', lineHeight: 13 },
+  paceDescActive: { color: colors.primaryLight },
 
   // Form fields
   fieldGroup: { marginBottom: 20 },
-  fieldLabel: { fontSize: 14, fontWeight: '600', color: '#333', marginBottom: 8 },
-  optional: { fontWeight: '400', color: '#999' },
+  fieldLabel: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 8 },
+  optional: { fontWeight: '400', color: colors.textMuted },
   inlineInput: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   heightRow: { flexDirection: 'row', gap: 12 },
   input: {
-    borderWidth: 1, borderColor: '#e0e0e0', borderRadius: 12,
-    padding: 14, fontSize: 16, backgroundColor: '#f9f9f9', color: '#000',
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    padding: 14, fontSize: 16, backgroundColor: colors.surface, color: colors.textPrimary,
   },
   multilineInput: { minHeight: 100, textAlignVertical: 'top' },
-  unit: { fontSize: 14, color: '#666', fontWeight: '500', minWidth: 40 },
-  hint: { fontSize: 13, color: '#999', marginTop: 8 },
+  unit: { fontSize: 14, color: colors.textSecondary, fontWeight: '500', minWidth: 40 },
+  hint: { fontSize: 13, color: colors.textMuted, marginTop: 8 },
 
   // Gender
   genderRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  genderButton: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 2, borderColor: '#e0e0e0', backgroundColor: '#f9f9f9' },
-  genderButtonActive: { borderColor: '#007AFF', backgroundColor: '#E8F4FF' },
-  genderText: { fontSize: 14, color: '#666', fontWeight: '500' },
-  genderTextActive: { color: '#007AFF', fontWeight: '600' },
+  genderButton: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: radius.full, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
+  genderButtonActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  genderText: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
+  genderTextActive: { color: colors.primary, fontWeight: '600' },
 
   // Equipment
   equipmentGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  equipmentButton: { width: '48%', paddingVertical: 16, borderRadius: 12, borderWidth: 2, borderColor: '#e0e0e0', backgroundColor: '#f9f9f9', alignItems: 'center' },
-  equipmentButtonActive: { borderColor: '#007AFF', backgroundColor: '#E8F4FF' },
+  equipmentButton: { width: '48%', paddingVertical: 16, borderRadius: radius.md, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
+  equipmentButtonActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   equipmentIcon: { fontSize: 28, marginBottom: 4 },
-  equipmentLabel: { fontSize: 14, fontWeight: '500', color: '#666' },
+  equipmentLabel: { fontSize: 14, fontWeight: '500', color: colors.textSecondary },
+
+  // Food selection
+  foodCategory:      { marginBottom: 18 },
+  foodCategoryLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 },
+  foodChips:         { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  foodChip:          { paddingVertical: 7, paddingHorizontal: 12, borderRadius: radius.full, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface },
+  foodChipActive:    { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  foodChipText:      { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
+  foodChipTextActive:{ color: colors.primary, fontWeight: '600' },
 
   // Buttons
   buttons: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  backButton: { flex: 1, paddingVertical: 16, borderRadius: 12, backgroundColor: '#e0e0e0', alignItems: 'center' },
+  backButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.surface, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
   buttonDisabled: { opacity: 0.4 },
-  backButtonText: { fontSize: 16, fontWeight: '600', color: '#666' },
-  nextButton: { flex: 1, paddingVertical: 16, borderRadius: 12, backgroundColor: '#007AFF', alignItems: 'center' },
-  nextButtonText: { fontSize: 16, fontWeight: '600', color: '#fff' },
+  backButtonText: { fontSize: 16, fontWeight: '600', color: colors.textSecondary },
+  nextButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center' },
+  nextButtonText: { fontSize: 16, fontWeight: '600', color: colors.background },
 });

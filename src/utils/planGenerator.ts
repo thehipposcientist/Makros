@@ -7,273 +7,190 @@ import {
   NutritionTargets,
   MealSuggestion,
 } from '../types';
+import { FOOD_MACROS, FoodItem } from '../constants/foods';
+import { GYM_MACHINE_ITEMS, BARBELL_ITEMS, DUMBBELL_ITEMS } from '../constants/equipment';
 
-// Workout generation logic
+// ─── Equipment helpers ────────────────────────────────────────────────────────
+
+function hasGymEquip(equipment: string[]): boolean {
+  return equipment.some(e => GYM_MACHINE_ITEMS.has(e) || BARBELL_ITEMS.has(e))
+    || equipment.includes('gym');
+}
+
+function hasDumbbellEquip(equipment: string[]): boolean {
+  return equipment.some(e => DUMBBELL_ITEMS.has(e))
+    || equipment.includes('dumbbells');
+}
+
+function hasPullUpBar(equipment: string[]): boolean {
+  return equipment.includes('Pull-up bar') || hasGymEquip(equipment);
+}
+
+// ─── Duration → exercise count ────────────────────────────────────────────────
+
+function exerciseCount(durationMinutes: number): number {
+  // ~8 min per exercise (3 sets × ~90s rest + ~3 min work)
+  if (durationMinutes <= 30) return 3;
+  if (durationMinutes <= 45) return 5;
+  if (durationMinutes <= 60) return 6;
+  if (durationMinutes <= 75) return 8;
+  return 10;
+}
+
+function pick<T>(arr: T[], n: number): T[] {
+  return arr.slice(0, Math.min(n, arr.length));
+}
+
+// ─── Exercise pools ───────────────────────────────────────────────────────────
+
+function squatPool(gym: boolean, db: boolean): Exercise[] {
+  return [
+    { name: gym ? 'Barbell Back Squat'   : 'Goblet Squat',         sets: 4, reps: '6-8',   restSeconds: 120, equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Leg Press'            : 'Bulgarian Split Squat', sets: 3, reps: '8-10',  restSeconds: 90,  equipment: gym ? 'Machine' : 'Bodyweight' },
+    { name: gym ? 'Hack Squat'           : 'Reverse Lunge',         sets: 3, reps: '10-12', restSeconds: 60,  equipment: gym ? 'Machine' : 'Bodyweight' },
+    { name: db  ? 'Dumbbell Step-up'     : 'Jump Squat',            sets: 3, reps: '10-12', restSeconds: 60,  equipment: db  ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Leg Extension'        : 'Wall Sit',              sets: 3, reps: '12-15', restSeconds: 60,  equipment: gym ? 'Machine' : 'Bodyweight' },
+  ];
+}
+
+function hingePool(gym: boolean, db: boolean): Exercise[] {
+  return [
+    { name: gym ? 'Barbell Deadlift'        : db ? 'Dumbbell RDL'        : 'Single-leg Deadlift', sets: 4, reps: '5-6',   restSeconds: 120, equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Romanian Deadlift'       : db ? 'Dumbbell Good Morning': 'Glute Bridge',        sets: 3, reps: '8-10',  restSeconds: 90,  equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Leg Curl'               : 'Nordic Curl',              sets: 3, reps: '10-12', restSeconds: 60,  equipment: gym ? 'Machine' : 'Bodyweight' },
+    { name: db  ? 'Kettlebell Swing'        : 'Hip Thrust',               sets: 3, reps: '12-15', restSeconds: 60,  equipment: db  ? 'Dumbbell' : 'Bodyweight' },
+  ];
+}
+
+function pushPool(gym: boolean, db: boolean): Exercise[] {
+  return [
+    { name: gym ? 'Barbell Bench Press'     : db ? 'Dumbbell Bench Press'  : 'Push-up',            sets: 4, reps: '6-8',   restSeconds: 90,  equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Incline Barbell Press'   : db ? 'Incline Dumbbell Press': 'Incline Push-up',     sets: 3, reps: '8-10',  restSeconds: 75,  equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Overhead Press'          : db ? 'Dumbbell Shoulder Press': 'Pike Push-up',       sets: 3, reps: '8-10',  restSeconds: 75,  equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Cable Chest Fly'         : db ? 'Dumbbell Fly'          : 'Diamond Push-up',     sets: 3, reps: '12-15', restSeconds: 60,  equipment: gym ? 'Cable' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Tricep Pushdown'         : db ? 'Dumbbell Skullcrusher' : 'Tricep Dip',         sets: 3, reps: '12-15', restSeconds: 60,  equipment: gym ? 'Cable' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: db  ? 'Lateral Raises'          : 'Wall Push-up',              sets: 3, reps: '15-20', restSeconds: 45,  equipment: db  ? 'Dumbbell' : 'Bodyweight' },
+  ];
+}
+
+function pullPool(gym: boolean, db: boolean, pullUp: boolean): Exercise[] {
+  return [
+    { name: pullUp ? 'Pull-up'              : db ? 'Dumbbell Row'          : 'Inverted Row',        sets: 4, reps: '6-8',   restSeconds: 90,  equipment: pullUp ? 'Pull-up bar' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Barbell Row'             : db ? 'Single-arm DB Row'     : 'Inverted Row',        sets: 3, reps: '8-10',  restSeconds: 75,  equipment: gym ? 'Barbell' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Lat Pulldown'            : pullUp ? 'Chin-up'           : 'Resistance Band Row', sets: 3, reps: '8-10',  restSeconds: 75,  equipment: gym ? 'Machine' : pullUp ? 'Pull-up bar' : 'Band' },
+    { name: gym ? 'Seated Cable Row'        : db ? 'Chest-supported Row'   : 'Superman Hold',       sets: 3, reps: '10-12', restSeconds: 60,  equipment: gym ? 'Cable' : db ? 'Dumbbell' : 'Bodyweight' },
+    { name: gym ? 'Face Pull'              : db ? 'Rear Delt Fly'         : 'Band Pull-apart',      sets: 3, reps: '15-20', restSeconds: 45,  equipment: gym ? 'Cable' : db ? 'Dumbbell' : 'Band' },
+    { name: db  ? 'Dumbbell Bicep Curl'     : 'Resistance Band Curl',      sets: 3, reps: '12-15', restSeconds: 45,  equipment: db  ? 'Dumbbell' : 'Band' },
+  ];
+}
+
+function corePool(gym: boolean, db: boolean): Exercise[] {
+  return [
+    { name: 'Plank',                        sets: 3, reps: '30-60s', restSeconds: 45, equipment: 'Bodyweight' },
+    { name: gym ? 'Hanging Leg Raise'       : 'Lying Leg Raise',           sets: 3, reps: '12-15', restSeconds: 45, equipment: gym ? 'Pull-up bar' : 'Bodyweight' },
+    { name: db  ? 'Weighted Russian Twist'  : 'Russian Twist',             sets: 3, reps: '20',    restSeconds: 45, equipment: db  ? 'Dumbbell' : 'Bodyweight' },
+    { name: 'Dead Bug',                     sets: 3, reps: '10 each side', restSeconds: 45, equipment: 'Bodyweight' },
+    { name: gym ? 'Ab Wheel Rollout'        : 'Mountain Climbers',         sets: 3, reps: '10-12', restSeconds: 45, equipment: gym ? 'Ab wheel' : 'Bodyweight' },
+  ];
+}
+
+function calfPool(gym: boolean, db: boolean): Exercise[] {
+  return [
+    { name: gym ? 'Standing Calf Raise'     : db ? 'Dumbbell Calf Raise'   : 'Calf Raise',          sets: 4, reps: '15-20', restSeconds: 45, equipment: gym ? 'Machine' : db ? 'Dumbbell' : 'Bodyweight' },
+  ];
+}
+
+// ─── Workout generation ───────────────────────────────────────────────────────
+
 export function generateWorkoutPlan(profile: UserProfile): WorkoutPlan {
-  const { daysPerWeek, equipment, goal } = profile;
-  const days = generateWorkoutDays(daysPerWeek, equipment, goal);
-  
-  return {
-    name: `${daysPerWeek}-Day Split`,
-    totalDays: daysPerWeek,
-    days,
+  const { daysPerWeek, equipment, goal, workoutDurationMinutes = 60 } = profile;
+  const gym   = hasGymEquip(equipment);
+  const db    = hasDumbbellEquip(equipment);
+  const pu    = hasPullUpBar(equipment);
+  const count = exerciseCount(workoutDurationMinutes);
+  const days  = buildDays(daysPerWeek, gym, db, pu, count);
+
+  return { name: `${daysPerWeek}-Day Split`, totalDays: daysPerWeek, days };
+}
+
+function buildDays(days: number, gym: boolean, db: boolean, pu: boolean, count: number): WorkoutDay[] {
+  if (days <= 3) return fullBodyDays(gym, db, pu, count);
+  if (days <= 5) return pplDays(gym, db, pu, count);
+  return upperLowerDays(gym, db, pu, count);
+}
+
+function fullBodyDays(gym: boolean, db: boolean, pu: boolean, count: number): WorkoutDay[] {
+  const squat = squatPool(gym, db);
+  const hinge = hingePool(gym, db);
+  const push  = pushPool(gym, db);
+  const pull  = pullPool(gym, db, pu);
+  const core  = corePool(gym, db);
+
+  const makeDay = (label: string, focus: string, pools: Exercise[][]): WorkoutDay => {
+    const combined = pools.flat();
+    return { day: label, focus, exercises: pick(combined, count) };
   };
-}
 
-function generateWorkoutDays(
-  daysPerWeek: number,
-  equipment: Equipment[],
-  goal: string
-): WorkoutDay[] {
-  const hasGym = equipment.includes('gym');
-  const hasDumbbells = equipment.includes('dumbbells');
-  const hasBodyweight = equipment.length === 0 || equipment.includes('home');
-
-  // Simple splits based on days available
-  if (daysPerWeek <= 3) {
-    return generateFullBodySplit(hasGym, hasDumbbells, hasBodyweight);
-  } else if (daysPerWeek <= 5) {
-    return generatePPLSplit(hasGym, hasDumbbells, hasBodyweight);
-  } else {
-    return generateUpperLowerSplit(hasGym, hasDumbbells, hasBodyweight);
-  }
-}
-
-function generateFullBodySplit(
-  hasGym: boolean,
-  hasDumbbells: boolean,
-  hasBodyweight: boolean
-): WorkoutDay[] {
   return [
-    {
-      day: 'Day 1',
-      focus: 'Full Body A',
-      exercises: [
-        {
-          name: hasGym ? 'Barbell Squats' : 'Bodyweight Squats',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 90,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasGym ? 'Barbell Bench Press' : 'Push-ups',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 90,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasDumbbells ? 'Dumbbell Rows' : 'Push-ups',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 60,
-          equipment: hasDumbbells ? 'dumbbells' : 'bodyweight',
-        },
-      ],
-    },
-    {
-      day: 'Day 2',
-      focus: 'Full Body B',
-      exercises: [
-        {
-          name: hasGym ? 'Deadlifts' : 'Single-leg Squats',
-          sets: 3,
-          reps: '5-8',
-          restSeconds: 120,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasDumbbells ? 'Dumbbell Press' : 'Push-ups',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 60,
-          equipment: hasDumbbells ? 'dumbbells' : 'bodyweight',
-        },
-        {
-          name: 'Pull-ups',
-          sets: 3,
-          reps: '5-8',
-          restSeconds: 90,
-          equipment: 'gym',
-        },
-      ],
-    },
-    {
-      day: 'Day 3',
-      focus: 'Full Body C',
-      exercises: [
-        {
-          name: hasGym ? 'Leg Press' : 'Lunges',
-          sets: 3,
-          reps: '10-12',
-          restSeconds: 60,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasGym ? 'Cable Fly' : 'Incline Push-ups',
-          sets: 3,
-          reps: '12-15',
-          restSeconds: 60,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasDumbbells ? 'Dumbbell Curls' : 'Pike Push-ups',
-          sets: 3,
-          reps: '10-12',
-          restSeconds: 60,
-          equipment: hasDumbbells ? 'dumbbells' : 'bodyweight',
-        },
-      ],
-    },
+    makeDay('Day 1', 'Full Body — Strength',   [squat, push, pull, core]),
+    makeDay('Day 2', 'Full Body — Power',       [hinge, push, pull, core]),
+    makeDay('Day 3', 'Full Body — Hypertrophy', [squat, hinge, push, pull, core]),
+  ].slice(0, 3);
+}
+
+function pplDays(gym: boolean, db: boolean, pu: boolean, count: number): WorkoutDay[] {
+  const push  = pushPool(gym, db);
+  const pull  = pullPool(gym, db, pu);
+  const squat = squatPool(gym, db);
+  const hinge = hingePool(gym, db);
+  const core  = corePool(gym, db);
+  const calf  = calfPool(gym, db);
+
+  return [
+    { day: 'Day 1', focus: 'Push — Chest & Shoulders & Triceps', exercises: pick(push, count) },
+    { day: 'Day 2', focus: 'Pull — Back & Biceps',               exercises: pick(pull, count) },
+    { day: 'Day 3', focus: 'Legs — Quads & Hamstrings & Glutes', exercises: pick([...squat, ...hinge, ...calf], count) },
+    { day: 'Day 4', focus: 'Push — Volume',                      exercises: pick(push.slice(1), count) },
+    { day: 'Day 5', focus: 'Pull — Volume & Core',               exercises: pick([...pull.slice(1), ...core], count) },
   ];
 }
 
-function generatePPLSplit(
-  hasGym: boolean,
-  hasDumbbells: boolean,
-  hasBodyweight: boolean
-): WorkoutDay[] {
+function upperLowerDays(gym: boolean, db: boolean, pu: boolean, count: number): WorkoutDay[] {
+  const push  = pushPool(gym, db);
+  const pull  = pullPool(gym, db, pu);
+  const squat = squatPool(gym, db);
+  const hinge = hingePool(gym, db);
+  const core  = corePool(gym, db);
+  const calf  = calfPool(gym, db);
+
   return [
-    {
-      day: 'Day 1',
-      focus: 'Push Day',
-      exercises: [
-        {
-          name: hasGym ? 'Barbell Bench Press' : 'Push-ups',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 90,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasGym ? 'Incline Dumbbell Press' : 'Incline Push-ups',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 60,
-          equipment: hasDumbbells ? 'dumbbells' : 'bodyweight',
-        },
-      ],
-    },
-    {
-      day: 'Day 2',
-      focus: 'Pull Day',
-      exercises: [
-        {
-          name: 'Pull-ups',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 90,
-          equipment: 'gym',
-        },
-        {
-          name: hasGym ? 'Barbell Rows' : 'Inverted Rows',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 60,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-      ],
-    },
-    {
-      day: 'Day 3',
-      focus: 'Leg Day',
-      exercises: [
-        {
-          name: hasGym ? 'Barbell Squats' : 'Bodyweight Squats',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 120,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-        {
-          name: hasGym ? 'Leg Press' : 'Lunges',
-          sets: 3,
-          reps: '8-10',
-          restSeconds: 60,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-      ],
-    },
+    { day: 'Day 1', focus: 'Upper A — Strength',    exercises: pick([...push, ...pull], count) },
+    { day: 'Day 2', focus: 'Lower A — Strength',    exercises: pick([...squat, ...hinge, ...calf], count) },
+    { day: 'Day 3', focus: 'Upper B — Hypertrophy', exercises: pick([...push.slice(1), ...pull.slice(1)], count) },
+    { day: 'Day 4', focus: 'Lower B — Hypertrophy', exercises: pick([...squat.slice(1), ...hinge.slice(1), ...core], count) },
+    { day: 'Day 5', focus: 'Upper C — Volume',      exercises: pick([...push.slice(2), ...pull.slice(2), ...core], count) },
+    { day: 'Day 6', focus: 'Lower C — Volume',      exercises: pick([...squat.slice(2), ...hinge, ...calf, ...core], count) },
   ];
 }
-
-function generateUpperLowerSplit(
-  hasGym: boolean,
-  hasDumbbells: boolean,
-  hasBodyweight: boolean
-): WorkoutDay[] {
-  return [
-    {
-      day: 'Day 1',
-      focus: 'Upper A',
-      exercises: [
-        {
-          name: hasGym ? 'Barbell Bench Press' : 'Push-ups',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 90,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-      ],
-    },
-    {
-      day: 'Day 2',
-      focus: 'Lower A',
-      exercises: [
-        {
-          name: hasGym ? 'Barbell Squats' : 'Bodyweight Squats',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 120,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-      ],
-    },
-    {
-      day: 'Day 3',
-      focus: 'Upper B',
-      exercises: [
-        {
-          name: 'Pull-ups',
-          sets: 4,
-          reps: '6-8',
-          restSeconds: 90,
-          equipment: 'gym',
-        },
-      ],
-    },
-    {
-      day: 'Day 4',
-      focus: 'Lower B',
-      exercises: [
-        {
-          name: hasGym ? 'Deadlifts' : 'Single-leg Squats',
-          sets: 4,
-          reps: '5-8',
-          restSeconds: 120,
-          equipment: hasGym ? 'gym' : 'bodyweight',
-        },
-      ],
-    },
-  ];
-}
-
-type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
 
 // Nutrition generation logic
 export function generateDailyNutrition(profile: UserProfile): DailyNutritionPlan {
   const targets = calculateNutritionTargets(profile);
-  
-  // Divide daily targets into meals
+
+  // Merge standard + custom food macros for lookup
+  const customMacros: Record<string, FoodItem> = {};
+  for (const f of (profile.customFoods ?? [])) {
+    customMacros[f.name] = f;
+  }
+
   const breakfastCalories = targets.calories * 0.25;
   const lunchCalories = targets.calories * 0.35;
   const dinnerCalories = targets.calories * 0.4;
 
   return {
-    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable),
-    lunch: generateMealSuggestion('Lunch', lunchCalories, profile.foodsAvailable),
-    dinner: generateMealSuggestion('Dinner', dinnerCalories, profile.foodsAvailable),
+    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, customMacros),
+    lunch: generateMealSuggestion('Lunch', lunchCalories, profile.foodsAvailable, customMacros),
+    dinner: generateMealSuggestion('Dinner', dinnerCalories, profile.foodsAvailable, customMacros),
     targets,
   };
 }
@@ -326,28 +243,77 @@ function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
   };
 }
 
+// Default foods per meal type when user hasn't selected any
+const DEFAULT_MEAL_FOODS: Record<string, string[]> = {
+  Breakfast: ['Eggs', 'Oats', 'Blueberries', 'Greek yogurt'],
+  Lunch:     ['Chicken breast', 'White rice', 'Broccoli', 'Olive oil'],
+  Dinner:    ['Salmon', 'Sweet potato', 'Spinach', 'Olive oil'],
+};
+
+// Preferred food roles per meal — used to pick a balanced combo
+const MEAL_ROLE_PREFERENCES: Record<string, ('protein' | 'carb' | 'fat' | 'veg')[]> = {
+  Breakfast: ['protein', 'carb', 'veg'],
+  Lunch:     ['protein', 'carb', 'veg', 'fat'],
+  Dinner:    ['protein', 'carb', 'veg', 'fat'],
+};
+
+function classifyFood(item: FoodItem): 'protein' | 'carb' | 'fat' | 'veg' {
+  if (item.protein >= 10) return 'protein';
+  if (item.carbs >= 15)   return 'carb';
+  if (item.fat >= 8)      return 'fat';
+  return 'veg';
+}
+
 function generateMealSuggestion(
   mealType: string,
   calorieTarget: number,
-  foodsAvailable: string[]
+  foodsAvailable: string[],
+  customMacros: Record<string, FoodItem> = {}
 ): MealSuggestion {
-  const defaultFoods: Record<string, string[]> = {
-    Breakfast: ['Eggs', 'Oatmeal', 'Berries', 'Greek Yogurt', 'Toast'],
-    Lunch: ['Chicken', 'Rice', 'Broccoli', 'Sweet Potato'],
-    Dinner: ['Salmon', 'Quinoa', 'Asparagus', 'Olive Oil'],
-  };
+  // Resolve food items — use selected foods if available, otherwise defaults
+  const candidates = foodsAvailable.length > 0 ? foodsAvailable : DEFAULT_MEAL_FOODS[mealType] ?? [];
 
-  const foods = foodsAvailable.length > 0 
-    ? foodsAvailable.slice(0, 3)
-    : defaultFoods[mealType] || ['Protein', 'Carbs', 'Vegetables'];
+  // Separate candidates into macro roles, keeping only known foods
+  const byRole: Record<string, FoodItem[]> = { protein: [], carb: [], fat: [], veg: [] };
+  const unknown: string[] = [];
 
-  // Simple estimation
-  const protein = Math.round(calorieTarget * 0.3 / 4);
+  for (const name of candidates) {
+    const item = FOOD_MACROS[name] ?? customMacros[name];
+    if (item) byRole[classifyFood(item)].push(item);
+    else unknown.push(name);
+  }
+
+  // Pick one food per preferred role for this meal
+  const roles = MEAL_ROLE_PREFERENCES[mealType] ?? ['protein', 'carb', 'veg'];
+  const picked: FoodItem[] = [];
+  for (const role of roles) {
+    const pool = byRole[role];
+    if (pool.length) picked.push(pool[Math.floor(Math.random() * pool.length)]);
+  }
+
+  // If we ended up with no known foods, fall back to defaults
+  if (picked.length === 0) {
+    const fallbackNames = DEFAULT_MEAL_FOODS[mealType] ?? ['Chicken breast', 'White rice', 'Broccoli'];
+    const totalCal = Math.round(calorieTarget);
+    return {
+      meal: mealType,
+      foods: fallbackNames,
+      calories: totalCal,
+      protein: Math.round(totalCal * 0.3 / 4),
+    };
+  }
+
+  // Sum raw macros from one serving of each picked food
+  let rawCal  = picked.reduce((s, f) => s + f.calories, 0);
+  let rawProt = picked.reduce((s, f) => s + f.protein,  0);
+
+  // Scale all items proportionally to hit the calorie target
+  const scale = rawCal > 0 ? calorieTarget / rawCal : 1;
 
   return {
     meal: mealType,
-    foods,
+    foods: picked.map(f => f.name),
     calories: Math.round(calorieTarget),
-    protein,
+    protein: Math.round(rawProt * scale),
   };
 }

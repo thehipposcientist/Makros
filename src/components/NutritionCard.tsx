@@ -1,6 +1,6 @@
-import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { DailyNutritionPlan } from '../types';
+import { colors, radius } from '../constants/theme';
 
 interface NutritionCardProps {
   nutritionPlan: DailyNutritionPlan;
@@ -11,70 +11,52 @@ export default function NutritionCard({ nutritionPlan }: NutritionCardProps) {
 
   return (
     <View style={styles.card}>
-      <View style={styles.header}>
-        <Text style={styles.title}>🍎 Nutrition Targets</Text>
+      <Text style={styles.title}>Nutrition Targets</Text>
+
+      <View style={styles.macrosRow}>
+        <MacroBadge label="Calories" value={String(targets.calories)} unit="" highlight />
+        <MacroBadge label="Protein"  value={String(targets.protein)}  unit="g" />
+        <MacroBadge label="Carbs"    value={String(targets.carbs)}    unit="g" />
+        <MacroBadge label="Fat"      value={String(targets.fat)}      unit="g" />
       </View>
 
-      {/* Daily Targets */}
-      <View style={styles.targetsContainer}>
-        <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>Calories</Text>
-          <Text style={styles.targetValue}>{targets.calories}</Text>
-        </View>
-        <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>Protein</Text>
-          <Text style={styles.targetValue}>{targets.protein}g</Text>
-        </View>
-        <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>Carbs</Text>
-          <Text style={styles.targetValue}>{targets.carbs}g</Text>
-        </View>
-        <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>Fat</Text>
-          <Text style={styles.targetValue}>{targets.fat}g</Text>
-        </View>
-      </View>
-
-      {/* Meals */}
-      <View style={styles.mealsContainer}>
-        <MealItem meal={breakfast} emoji="🌅" />
-        <MealItem meal={lunch} emoji="🥗" />
-        <MealItem meal={dinner} emoji="🍽️" />
+      <View style={styles.meals}>
+        <MealRow emoji="🌅" meal={breakfast} />
+        <MealRow emoji="🥗" meal={lunch} />
+        <MealRow emoji="🍽️" meal={dinner} />
       </View>
 
       <View style={styles.footer}>
-        <Text style={styles.footerText}>
-          💧 Remember to stay hydrated throughout the day!
-        </Text>
+        <Text style={styles.footerText}>Stay hydrated throughout the day</Text>
       </View>
     </View>
   );
 }
 
-interface MealItemProps {
-  meal: {
-    meal: string;
-    foods: string[];
-    calories: number;
-    protein: number;
-  };
-  emoji: string;
+function MacroBadge({ label, value, unit, highlight }: {
+  label: string; value: string; unit: string; highlight?: boolean;
+}) {
+  return (
+    <View style={styles.macroBadge}>
+      <Text style={styles.macroLabel}>{label}</Text>
+      <Text style={[styles.macroValue, highlight && styles.macroValueHighlight]}>
+        {value}{unit}
+      </Text>
+    </View>
+  );
 }
 
-function MealItem({ meal, emoji }: MealItemProps) {
+function MealRow({ emoji, meal }: {
+  emoji: string;
+  meal: { meal: string; foods: string[]; calories: number; protein: number };
+}) {
   return (
     <View style={styles.mealItem}>
-      <Text style={styles.mealName}>{emoji} {meal.meal}</Text>
-      <View style={styles.foodsContainer}>
-        <Text style={styles.foodsText}>{meal.foods.join(', ')}</Text>
-      </View>
-      <View style={styles.mealStats}>
-        <View style={styles.mealStatBadge}>
-          <Text style={styles.mealStatText}>{Math.round(meal.calories)} cal</Text>
-        </View>
-        <View style={styles.mealStatBadge}>
-          <Text style={styles.mealStatText}>{meal.protein}g protein</Text>
-        </View>
+      <Text style={styles.mealName}>{emoji}  {meal.meal}</Text>
+      <Text style={styles.mealFoods}>{meal.foods.join(', ')}</Text>
+      <View style={styles.mealBadges}>
+        <View style={styles.badge}><Text style={styles.badgeText}>{Math.round(meal.calories)} cal</Text></View>
+        <View style={styles.badge}><Text style={styles.badgeText}>{meal.protein}g protein</Text></View>
       </View>
     </View>
   );
@@ -82,92 +64,41 @@ function MealItem({ meal, emoji }: MealItemProps) {
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#fff0f5',
-    borderRadius: 16,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
     padding: 16,
     marginBottom: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#ff6b6b',
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
   },
-  header: {
-    marginBottom: 16,
+  title: { fontSize: 18, fontWeight: '700', color: colors.textPrimary, marginBottom: 14 },
+
+  macrosRow: {
+    flexDirection: 'row', backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md, padding: 12, marginBottom: 14,
+    borderWidth: 1, borderColor: colors.border,
   },
-  title: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#000',
-  },
-  targetsContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
-    gap: 8,
-  },
-  targetItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  targetLabel: {
-    fontSize: 11,
-    color: '#999',
-    marginBottom: 4,
-    fontWeight: '500',
-  },
-  targetValue: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#ff6b6b',
-  },
-  mealsContainer: {
-    gap: 12,
-    marginBottom: 12,
-  },
+  macroBadge:          { flex: 1, alignItems: 'center' },
+  macroLabel:          { fontSize: 11, color: colors.textSecondary, marginBottom: 4, fontWeight: '500' },
+  macroValue:          { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  macroValueHighlight: { color: colors.accent },
+
+  meals:    { gap: 10, marginBottom: 14 },
   mealItem: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md, padding: 12,
+    borderWidth: 1, borderColor: colors.border,
   },
-  mealName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000',
-    marginBottom: 8,
+  mealName:   { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 6 },
+  mealFoods:  { fontSize: 13, color: colors.textSecondary, lineHeight: 18, marginBottom: 8 },
+  mealBadges: { flexDirection: 'row', gap: 8 },
+  badge: {
+    backgroundColor: colors.background,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border,
   },
-  foodsContainer: {
-    marginBottom: 8,
-  },
-  foodsText: {
-    fontSize: 13,
-    color: '#666',
-    lineHeight: 18,
-  },
-  mealStats: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  mealStatBadge: {
-    backgroundColor: '#f0f0f0',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  mealStatText: {
-    fontSize: 12,
-    color: '#666',
-    fontWeight: '500',
-  },
-  footer: {
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#ff6b6b',
-    fontWeight: '500',
-  },
+  badgeText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+
+  footer:     { paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  footerText: { fontSize: 12, color: colors.textSecondary },
 });

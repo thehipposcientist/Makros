@@ -10,7 +10,6 @@
     ],
     "ios": {},
     "scheme": "makros",
-    "newArchEnabled": false,
     "experiments": {
       "typedRoutes": true
     }

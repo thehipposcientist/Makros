@@ -47,13 +47,24 @@ export interface GoalDetails {
   timelineWeeks?: number;   // derived from pace for performance/recomp goals
 }
 
+export interface CustomFoodItem {
+  name: string;
+  unit: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}
+
 export interface UserProfile {
   goal: Goal;
   goalDetails: GoalDetails;
   physicalStats: PhysicalStats;
   daysPerWeek: number;
-  equipment: Equipment[];
+  workoutDurationMinutes: number;
+  equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   foodsAvailable: string[];
+  customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
