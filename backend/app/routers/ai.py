@@ -314,6 +314,37 @@ def recommend_weight(
             max_tokens=100,
         )
         result = json.loads(response.choices[0].message.content)
+
+        # Deterministic post-adjustment so feedback always affects output.
+        last_feedback = None
+        for s in reversed(body.lastSets):
+            if s.feedback:
+                last_feedback = s.feedback.lower()
+                break
+
+        weight = float(result.get("weightLbs", body.lastSets[-1].weightLbs if body.lastSets else 0))
+        reps = int(result.get("reps", max(5, body.lastSets[-1].reps if body.lastSets else 8)))
+        tip = str(result.get("tip", "Keep form tight and adjust based on how the set felt."))
+
+        if last_feedback == "easy":
+            weight = max(0, round(weight + max(2.5, weight * 0.025), 1))
+            reps = min(15, reps + 1)
+            tip = f"Last set looked easy, so we are nudging intensity up. {tip}"
+        elif last_feedback == "grind":
+            weight = max(0, round(weight - max(2.5, weight * 0.02), 1))
+            reps = max(5, reps - 1)
+            tip = f"Last set was a grind, so back off slightly and keep clean reps. {tip}"
+        elif last_feedback == "pain":
+            weight = max(0, round(weight - max(5, weight * 0.1), 1))
+            reps = max(5, reps - 2)
+            tip = "Pain was flagged, so reduce load and prioritize safe technique."
+
+        result = {
+            "weightLbs": weight,
+            "reps": reps,
+            "tip": tip,
+            "feedbackApplied": last_feedback,
+        }
         print(f"[BACKEND] OpenAI response: {result}")
         return result
     except Exception as e:

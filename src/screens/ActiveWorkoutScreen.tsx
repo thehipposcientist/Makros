@@ -4,9 +4,11 @@ import {
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as FileSystem from 'expo-file-system';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import { cancelRestNotifications, scheduleRestNotifications } from '../utils/restNotifications';
 
@@ -23,6 +25,20 @@ const FEEDBACK_OPTIONS: Array<{ value: SetFeedback; label: string }> = [
   { value: 'grind', label: 'Grind' },
   { value: 'pain', label: 'Pain' },
 ];
+
+const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: string) => string }> = [
+  { label: 'Form question', template: (name) => `Form check on ${name}: what 2-3 cues should I focus on next set?` },
+  { label: 'Injury/pain', template: (name) => `I feel pain/discomfort during ${name}. What should I adjust right now?` },
+  { label: 'Not feeling target', template: (name) => `I am not feeling ${name} in the target muscle. How should I fix setup and execution?` },
+  { label: 'Lacking intensity', template: (name) => `This ${name} set feels too easy. Should I adjust reps, tempo, rest, or load?` },
+];
+
+interface ExerciseLibraryItem {
+  id?: number;
+  name: string;
+  equipment?: string;
+  primary_muscle?: string;
+}
 
 interface ActiveWorkoutScreenProps {
   authToken: string;
@@ -80,6 +96,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachPhotoLoading, setCoachPhotoLoading] = useState(false);
   const [coachChat, setCoachChat] = useState<WorkoutCoachMessage[]>([]);
+  const [addExerciseModalVisible, setAddExerciseModalVisible] = useState(false);
+  const [exerciseSearch, setExerciseSearch] = useState('');
+  const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
+  const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
 
   // Timer
   useEffect(() => {
@@ -136,6 +156,39 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     }));
   }, []);
 
+  const openAddExerciseModal = useCallback(async () => {
+    setAddExerciseModalVisible(true);
+    if (exerciseLibrary.length > 0) return;
+    setExerciseLibraryLoading(true);
+    try {
+      const rows = await getExercises();
+      setExerciseLibrary(rows);
+    } catch {
+      setExerciseLibrary([]);
+    } finally {
+      setExerciseLibraryLoading(false);
+    }
+  }, [exerciseLibrary.length]);
+
+  const handleAddExercise = useCallback((item: ExerciseLibraryItem) => {
+    const nextExercise: SessionExercise = {
+      name: item.name,
+      targetSets: 3,
+      targetReps: '10',
+      targetRestSeconds: 60,
+      equipment: item.equipment ? String(item.equipment) : 'bodyweight',
+      sets: [],
+      aiRecommendation: undefined,
+    };
+    setExercises(prev => {
+      const updated = [...prev, nextExercise];
+      setActiveExIdx(updated.length - 1);
+      return updated;
+    });
+    setAddExerciseModalVisible(false);
+    setExerciseSearch('');
+  }, []);
+
   const clearRestState = useCallback(() => {
     setRestRemaining(0);
     setRestForExercise(null);
@@ -156,6 +209,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = await scheduleRestNotifications(params);
   }, []);
+
+  const handleRemoveExercise = useCallback((exIdx: number) => {
+    if (exercises.length <= 1) {
+      Alert.alert('Cannot remove', 'You need at least one exercise in the workout.');
+      return;
+    }
+    const exName = exercises[exIdx]?.name ?? 'this exercise';
+    Alert.alert('Remove exercise', `Remove ${exName} from this workout?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: () => {
+          setExercises(prev => prev.filter((_, idx) => idx !== exIdx));
+          setActiveExIdx(prev => Math.max(0, prev > exIdx ? prev - 1 : Math.min(prev, exercises.length - 2)));
+          if (restForExercise === exName) clearRestState();
+        },
+      },
+    ]);
+  }, [clearRestState, exercises, restForExercise]);
 
   const handleLogSet = async () => {
     console.log('[LOG_SET] handleLogSet called with weight:', logWeight, 'reps:', logReps, 'exercise index:', logExIdx);
@@ -427,6 +500,71 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     }
   }, [activeExIdx, authToken, coachInput, exercises]);
 
+  const handleAnalyzeFormVideo = useCallback(async (source: 'camera' | 'library') => {
+    if (!authToken) {
+      Alert.alert('Sign in required', 'You need to be signed in to analyze form videos.');
+      return;
+    }
+
+    const permission = source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', `Please allow ${source === 'camera' ? 'camera' : 'photo library'} access for video analysis.`);
+      return;
+    }
+
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ quality: 0.7, mediaTypes: ['videos'] as any, videoMaxDuration: 20 })
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, mediaTypes: ['videos'] as any });
+
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+
+    const active = exercises[activeExIdx];
+    const prompt = coachInput.trim();
+    const lead = prompt || `Check my ${active?.name ?? 'current exercise'} form from this video.`;
+    setCoachChat(prev => [...prev, { role: 'user', content: `${lead} [form video]` }]);
+    setCoachInput('');
+    setCoachPhotoLoading(true);
+
+    try {
+      const asset = result.assets[0];
+      const thumbnail = await VideoThumbnails.getThumbnailAsync(asset.uri, { time: 1200 });
+      const imageBase64 = await FileSystem.readAsStringAsync(thumbnail.uri, { encoding: 'base64' as any });
+      const response = await analyzeWorkoutFormPhoto(authToken, {
+        image_base64: imageBase64,
+        mime_type: 'image/jpeg',
+        exercise_name: active?.name,
+        question: prompt ? `Video form check: ${prompt}` : 'Video form check',
+      });
+
+      const cues = (response.quick_cues ?? []).slice(0, 3).map((x: string) => `• ${x}`).join('\n');
+      const redFlags = (response.red_flags ?? []).slice(0, 2).map((x: string) => `• ${x}`).join('\n');
+      const content = [
+        response.answer,
+        response.likely_target ? `\nTarget: ${response.likely_target}` : '',
+        cues ? `\n${cues}` : '',
+        redFlags ? `\nRed flags:\n${redFlags}` : '',
+        response.safety_note ? `\nSafety: ${response.safety_note}` : '',
+        '\nNote: video analysis is currently based on a representative frame from your clip.',
+      ].join('');
+      setCoachChat(prev => [...prev, { role: 'assistant', content }]);
+    } catch (e: any) {
+      setCoachChat(prev => [...prev, { role: 'assistant', content: `Could not analyze the form video right now. ${e?.message ?? ''}` }]);
+    } finally {
+      setCoachPhotoLoading(false);
+    }
+  }, [activeExIdx, authToken, coachInput, exercises]);
+
+  const filteredExerciseLibrary = exerciseLibrary.filter(item => {
+    const q = exerciseSearch.trim().toLowerCase();
+    if (!q) return true;
+    return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
+      .join(' ')
+      .toLowerCase()
+      .includes(q);
+  });
+
   return (
     <View style={styles.container}>
 
@@ -526,6 +664,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
                       </TouchableOpacity>
                     </View>
                   </View>
+
+                    <View style={styles.exerciseActionsRow}>
+                      <TouchableOpacity style={styles.exerciseActionBtn} onPress={openAddExerciseModal}>
+                        <Text style={styles.exerciseActionBtnText}>+ Add Exercise</Text>
+                      </TouchableOpacity>
+                      {exercises.length > 1 ? (
+                        <TouchableOpacity style={[styles.exerciseActionBtn, styles.exerciseActionBtnDanger]} onPress={() => handleRemoveExercise(i)}>
+                          <Text style={[styles.exerciseActionBtnText, styles.exerciseActionBtnDangerText]}>Remove Exercise</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
 
                   {ex.sets.length > 0 && (
                     <View style={styles.setsLog}>
@@ -698,6 +847,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
             </View>
             <Text style={styles.coachHint}>This chat is for form, pain flags, and in-session adjustments.</Text>
 
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.coachPromptRow}>
+              {COACH_PROMPT_OPTIONS.map((option) => (
+                <TouchableOpacity
+                  key={option.label}
+                  style={styles.coachPromptChip}
+                  onPress={() => {
+                    const activeExercise = exercises[activeExIdx]?.name ?? 'this exercise';
+                    setCoachInput(option.template(activeExercise));
+                  }}>
+                  <Text style={styles.coachPromptChipText}>{option.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
             <View style={styles.coachActionRow}>
               <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormPhoto('camera')} disabled={coachPhotoLoading}>
                 <Text style={styles.coachActionText}>{coachPhotoLoading ? 'Analyzing...' : 'Snap Form Photo'}</Text>
@@ -706,7 +869,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
                 <Text style={styles.coachActionText}>Use Existing Photo</Text>
               </TouchableOpacity>
             </View>
-            <Text style={styles.coachSubHint}>Start with a still-image form check. If that works well, we can extend it to short clips next.</Text>
+            <View style={styles.coachActionRow}>
+              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormVideo('camera')} disabled={coachPhotoLoading}>
+                <Text style={styles.coachActionText}>Record Form Video</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormVideo('library')} disabled={coachPhotoLoading}>
+                <Text style={styles.coachActionText}>Analyze Saved Video</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.coachSubHint}>Video checks use a representative frame from your clip for now.</Text>
 
             <ScrollView contentContainerStyle={styles.coachChatList} keyboardShouldPersistTaps="handled">
               {coachChat.length === 0 ? (
@@ -733,6 +904,45 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
                 {coachLoading ? <ActivityIndicator size="small" color={colors.background} /> : <Text style={styles.coachSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={addExerciseModalVisible} transparent animationType="slide" onRequestClose={() => setAddExerciseModalVisible(false)}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.coachSheet}>
+            <View style={styles.coachHeader}>
+              <Text style={styles.coachTitle}>Add Exercise</Text>
+              <TouchableOpacity onPress={() => setAddExerciseModalVisible(false)}>
+                <Text style={styles.coachClose}>Close</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TextInput
+              value={exerciseSearch}
+              onChangeText={setExerciseSearch}
+              placeholder="Search exercise library..."
+              placeholderTextColor={colors.textMuted}
+              style={styles.addExerciseSearch}
+            />
+
+            {exerciseLibraryLoading ? (
+              <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 12 }} />
+            ) : (
+              <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
+                {filteredExerciseLibrary.length === 0 ? (
+                  <Text style={styles.coachEmpty}>No exercises match your search.</Text>
+                ) : filteredExerciseLibrary.map((item) => (
+                  <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.addExerciseName}>{item.name}</Text>
+                      <Text style={styles.addExerciseMeta}>{item.primary_muscle ?? 'general'} · {item.equipment ?? 'bodyweight'}</Text>
+                    </View>
+                    <Text style={styles.addExerciseUse}>Add</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -767,15 +977,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     gap: 10,
+    alignItems: 'stretch',
   },
   restBannerUrgent: { borderColor: colors.warning, backgroundColor: colors.warning + '12' },
-  restBannerMain: { gap: 4 },
+  restBannerMain: { gap: 4, flex: 1, minWidth: 0 },
   restHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   restBannerTitle: { fontSize: 18, color: colors.textPrimary, fontWeight: '800' },
   restExerciseText: { fontSize: 13, color: colors.primary, fontWeight: '700' },
   restTargetText: { fontSize: 13, color: colors.textPrimary, fontWeight: '700' },
   restCueText: { fontSize: 12, color: colors.textSecondary, lineHeight: 18 },
-  restBannerActions: { flexDirection: 'row', gap: 8 },
+  restBannerActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   restBannerBtn: {
     paddingVertical: 8,
     paddingHorizontal: 12,
@@ -830,6 +1041,18 @@ const styles = StyleSheet.create({
   },
   restAdjustBtnText: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
   restAdjustValue: { minWidth: 48, textAlign: 'center', fontSize: 13, fontWeight: '700', color: colors.primary },
+  exerciseActionsRow: { flexDirection: 'row', gap: 8 },
+  exerciseActionBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+  },
+  exerciseActionBtnDanger: { borderColor: colors.error, backgroundColor: colors.error + '12' },
+  exerciseActionBtnText: { fontSize: 12, color: colors.textPrimary, fontWeight: '700' },
+  exerciseActionBtnDangerText: { color: colors.error },
 
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
@@ -918,6 +1141,16 @@ const styles = StyleSheet.create({
   coachTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   coachClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
   coachHint: { fontSize: 12, color: colors.textSecondary, paddingHorizontal: 16, marginBottom: 8 },
+  coachPromptRow: { gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
+  coachPromptChip: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.full,
+    backgroundColor: colors.surfaceRaised,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  coachPromptChipText: { fontSize: 12, color: colors.textPrimary, fontWeight: '600' },
   coachActionRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 8 },
   coachActionBtn: {
     flex: 1,
@@ -958,4 +1191,28 @@ const styles = StyleSheet.create({
   },
   coachSendBtn: { backgroundColor: colors.primary, borderRadius: radius.md, minWidth: 64, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
   coachSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+  addExerciseSearch: {
+    marginHorizontal: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: colors.background,
+    color: colors.textPrimary,
+  },
+  addExerciseList: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 16, gap: 8 },
+  addExerciseItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
+    padding: 12,
+  },
+  addExerciseName: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  addExerciseMeta: { fontSize: 12, color: colors.textSecondary },
+  addExerciseUse: { fontSize: 12, color: colors.primary, fontWeight: '700' },
 });

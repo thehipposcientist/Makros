@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getGoalEstimate } from '../utils/goalEstimate';
 import { getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises, askTrainerQuestion } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -39,6 +38,11 @@ interface MealDay {
 interface TrainerChatMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface AvailabilityItem {
+  label: string;
+  pct: number;
 }
 
 interface ExerciseLibraryItem {
@@ -141,134 +145,87 @@ function buildExerciseGuide(ex: ExerciseLibraryItem) {
   };
 }
 
-// ── Goal progress banner ───────────────────────────────────────────────────────
-
-function GoalProgressBanner({ userProfile, goalLabel, goalConfig }: {
-  userProfile: UserProfile;
-  goalLabel: string;
-  goalConfig: import('../hooks/useMetaData').GoalConfig;
-}) {
-  const estimate = getGoalEstimate(userProfile, goalConfig);
-  if (!estimate) return null;
-
+function compactGoalProgressText(
+  userProfile: UserProfile,
+  goalConfig: import('../hooks/useMetaData').GoalConfig,
+): string | null {
   const { goal, goalDetails, physicalStats } = userProfile;
-  const isWeightGoal   = new Set(goalConfig.weight_goals).has(goal);
-  const isTimelineGoal = new Set(goalConfig.timeline_goals).has(goal);
-
-  let progressPct = 0;
-  let leftLabel = '', rightLabel = '', midLabel = '';
-  let weightSummary: { start: number; current: number; remaining: number } | null = null;
-
+  const isWeightGoal = new Set(goalConfig.weight_goals).has(goal);
   if (isWeightGoal && goalDetails.targetWeightLbs) {
-    const start   = goalDetails.startWeightLbs ?? physicalStats.weightLbs;
+    const start = goalDetails.startWeightLbs ?? physicalStats.weightLbs;
     const current = physicalStats.weightLbs;
-    const target  = goalDetails.targetWeightLbs;
-    const total   = Math.abs(start - target);
-    const done    = Math.abs(start - current);
-    progressPct   = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0;
-    leftLabel     = `${start} lbs`;
-    rightLabel    = `${target} lbs`;
-    midLabel      = `${current} lbs now`;
-    weightSummary = {
-      start,
-      current,
-      remaining: Math.abs(current - target),
-    };
-  } else if (isTimelineGoal && goalDetails.timelineWeeks) {
-    const startDate    = goalDetails.goalStartedAt ? new Date(goalDetails.goalStartedAt) : new Date();
-    const weeksElapsed = Math.max(0, (Date.now() - startDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
-    progressPct = Math.min(1, weeksElapsed / goalDetails.timelineWeeks);
-    leftLabel   = 'Week 0';
-    rightLabel  = `Week ${goalDetails.timelineWeeks}`;
-    midLabel    = `Week ${Math.round(weeksElapsed)}`;
-  } else {
-    leftLabel  = 'Start';
-    rightLabel = estimate.label;
+    const target = goalDetails.targetWeightLbs;
+    const total = Math.abs(start - target);
+    const done = Math.abs(start - current);
+    const pct = total > 0 ? Math.round(Math.min(1, Math.max(0, done / total)) * 100) : 0;
+    return `${pct}% · ${current} / ${target} lbs`;
   }
 
-  const pctDisplay = Math.round(progressPct * 100);
+  if (goalDetails.timelineWeeks) {
+    const startDate = goalDetails.goalStartedAt ? new Date(goalDetails.goalStartedAt) : new Date();
+    const weeksElapsed = Math.max(0, (Date.now() - startDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
+    const pct = Math.round(Math.min(1, weeksElapsed / goalDetails.timelineWeeks) * 100);
+    return `${pct}% · week ${Math.round(weeksElapsed)} / ${goalDetails.timelineWeeks}`;
+  }
 
-  return (
-    <View style={bs.banner}>
-      <View style={bs.topRow}>
-        <Text style={bs.icon}>🎯</Text>
-        <View style={{ flex: 1 }}>
-          <Text style={bs.goalName}>{goalLabel}</Text>
-          <Text style={bs.targetDate}>
-            {estimate.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-            {'  ·  '}{estimate.label}
-          </Text>
-        </View>
-        <View style={bs.pctBadge}>
-          <Text style={bs.pctText}>{pctDisplay}%</Text>
-        </View>
-      </View>
-      <View style={bs.meterWrap}>
-        <View style={bs.meterTrack}>
-          <View style={[bs.meterFill, { width: `${pctDisplay}%` as any }]} />
-          {progressPct > 0 && progressPct < 1 && (
-            <View style={[bs.meterDot, { left: `${pctDisplay}%` as any }]} />
-          )}
-        </View>
-        <View style={bs.meterLabels}>
-          <Text style={bs.meterLabel}>{leftLabel}</Text>
-          {midLabel ? <Text style={bs.meterLabelMid}>{midLabel}</Text> : null}
-          <Text style={bs.meterLabel}>{rightLabel}</Text>
-        </View>
-      </View>
-
-      {weightSummary && (
-        <View style={bs.quickRow}>
-          <View style={bs.quickStat}>
-            <Text style={bs.quickLabel}>Initial</Text>
-            <Text style={bs.quickValue}>{weightSummary.start} lbs</Text>
-          </View>
-          <View style={bs.quickStat}>
-            <Text style={bs.quickLabel}>Current</Text>
-            <Text style={bs.quickValue}>{weightSummary.current} lbs</Text>
-          </View>
-          <View style={bs.quickStat}>
-            <Text style={bs.quickLabel}>Remaining</Text>
-            <Text style={bs.quickValue}>{weightSummary.remaining.toFixed(1)} lbs</Text>
-          </View>
-        </View>
-      )}
-    </View>
-  );
+  return null;
 }
 
-const bs = StyleSheet.create({
-  banner:       { marginHorizontal: 16, marginBottom: 12, backgroundColor: colors.surface, borderRadius: radius.md, padding: 14, borderWidth: 1, borderColor: colors.border, borderLeftWidth: 3, borderLeftColor: colors.accent, gap: 12 },
-  topRow:       { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  icon:         { fontSize: 20 },
-  goalName:     { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 1 },
-  targetDate:   { fontSize: 11, color: colors.textSecondary },
-  pctBadge:     { backgroundColor: colors.accent + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.accent },
-  pctText:      { fontSize: 13, fontWeight: '800', color: colors.accent },
-  meterWrap:    { gap: 6 },
-  meterTrack:   { height: 8, backgroundColor: colors.border, borderRadius: 4, overflow: 'visible' },
-  meterFill:    { height: 8, backgroundColor: colors.accent, borderRadius: 4 },
-  meterDot:     { position: 'absolute', top: -4, width: 16, height: 16, borderRadius: 8, backgroundColor: colors.accent, marginLeft: -8, borderWidth: 2, borderColor: colors.background },
-  meterLabels:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  meterLabel:   { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
-  meterLabelMid:{ fontSize: 10, color: colors.accent, fontWeight: '700' },
-  quickRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 2,
-  },
-  quickStat: {
-    flex: 1,
-    backgroundColor: colors.surfaceRaised,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-  },
-  quickLabel: { fontSize: 10, color: colors.textSecondary, marginBottom: 1 },
-  quickValue: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
-});
+function inferGroup(text: string): string {
+  const blob = text.toLowerCase();
+  if (/(bike|cycle|cycling|spin|run|running|jog|treadmill|cardio|conditioning|hiit)/.test(blob)) return 'Cardio';
+  if (/(bench|chest|press|fly|push[- ]?up)/.test(blob)) return 'Chest';
+  if (/(row|pull|lat|back|deadlift|pull[- ]?up)/.test(blob)) return 'Back';
+  if (/(squat|lunge|leg|quad|hamstring|calf)/.test(blob)) return 'Legs';
+  if (/(shoulder|overhead|lateral raise|rear delt)/.test(blob)) return 'Shoulders';
+  if (/(bicep|tricep|curl|extension)/.test(blob)) return 'Arms';
+  if (/(core|ab|plank|crunch)/.test(blob)) return 'Core';
+  if (/(glute|hip thrust)/.test(blob)) return 'Glutes';
+  return 'Other';
+}
+
+function buildAvailability(
+  workoutPlan: WorkoutPlan,
+  history: Awaited<ReturnType<typeof loadWorkoutHistory>>,
+): { items: AvailabilityItem[]; cardioProfile: string | null } {
+  const counts: Record<string, number> = {
+    Chest: 0,
+    Back: 0,
+    Legs: 0,
+    Shoulders: 0,
+    Arms: 0,
+    Core: 0,
+    Glutes: 0,
+    Cardio: 0,
+  };
+
+  for (const day of workoutPlan.days) {
+    for (const ex of day.exercises) {
+      const group = inferGroup(`${day.focus} ${ex.name}`);
+      if (group in counts) counts[group] += 1;
+    }
+  }
+
+  const maxCount = Math.max(1, ...Object.values(counts));
+  const items = Object.entries(counts)
+    .filter(([, value]) => value > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([label, value]) => ({
+      label,
+      pct: Math.max(10, Math.round((value / maxCount) * 100 / 5) * 5),
+    }));
+
+  const cyclingHits = history.filter((s) => /cycle|cycling|bike|spin/i.test(`${s.focus} ${s.exercises.map(e => e.name).join(' ')}`)).length;
+  const runningHits = history.filter((s) => /run|running|jog|treadmill/i.test(`${s.focus} ${s.exercises.map(e => e.name).join(' ')}`)).length;
+  const cardioProfile = cyclingHits > 0
+    ? `Cyclist profile (${cyclingHits} sessions)`
+    : runningHits > 0
+      ? `Runner profile (${runningHits} sessions)`
+      : null;
+
+  return { items, cardioProfile };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -303,6 +260,8 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
   const [currentDate, setCurrentDate] = useState(todayKey());
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set([todayKey()]));
   const [groceryPreview, setGroceryPreview] = useState<Array<{ food: string; frequency: number }>>([]);
+  const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
+  const [cardioProfile, setCardioProfile] = useState<string | null>(null);
 
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
@@ -324,6 +283,19 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
   }, [userProfile, authToken, meta.allFoods.length]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!workoutPlan) return;
+      const history = await loadWorkoutHistory();
+      const insight = buildAvailability(workoutPlan, history);
+      if (!mounted) return;
+      setAvailabilityItems(insight.items);
+      setCardioProfile(insight.cardioProfile);
+    })();
+    return () => { mounted = false; };
+  }, [todayDone, workoutPlan]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -682,14 +654,14 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
           <View style={styles.goalBadge}>
             <Text style={styles.goalBadgeText}>{goalLabel}</Text>
           </View>
+          {compactGoalProgressText(userProfile, meta.goalConfig) ? (
+            <Text style={styles.goalSubText}>{compactGoalProgressText(userProfile, meta.goalConfig)}</Text>
+          ) : null}
         </View>
         <TouchableOpacity style={styles.menuBtn} onPress={() => setMenuOpen(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <View style={styles.menuBar} /><View style={styles.menuBar} /><View style={styles.menuBar} />
         </TouchableOpacity>
       </View>
-
-      {/* Goal progress banner */}
-      <GoalProgressBanner userProfile={userProfile} goalLabel={goalLabel} goalConfig={meta.goalConfig} />
 
       {/* Tabs */}
       <View style={styles.tabs}>
@@ -719,6 +691,19 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                 </Text>
               </View>
             </View>
+            {(availabilityItems.length > 0 || cardioProfile) && (
+              <View style={styles.insightCard}>
+                <Text style={styles.insightTitle}>Available Muscle/Cardio Focus</Text>
+                {cardioProfile ? <Text style={styles.insightSubtitle}>{cardioProfile}</Text> : null}
+                <View style={styles.insightChips}>
+                  {availabilityItems.map(item => (
+                    <View key={item.label} style={styles.insightChip}>
+                      <Text style={styles.insightChipText}>{item.label} {item.pct}%</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
             <TouchableOpacity style={styles.askTrainerBtn} onPress={() => setShowTrainerModal(true)}>
               <Text style={styles.askTrainerBtnText}>Ask Trainer</Text>
             </TouchableOpacity>
@@ -1150,6 +1135,7 @@ const styles = StyleSheet.create({
   greeting:      { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   goalBadge:     { alignSelf: 'flex-start', backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
   goalBadgeText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  goalSubText:   { fontSize: 11, color: colors.textSecondary, marginTop: 5 },
 
   menuBtn: { padding: 4, gap: 5, alignItems: 'center', justifyContent: 'center' },
   menuBar: { width: 22, height: 2, backgroundColor: colors.textPrimary, borderRadius: 2 },
@@ -1167,6 +1153,28 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   compactNoteText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+
+  insightCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: 12,
+    marginBottom: 12,
+    gap: 8,
+  },
+  insightTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
+  insightSubtitle: { fontSize: 12, color: colors.textSecondary },
+  insightChips: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  insightChip: {
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.full,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  insightChipText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
 
   askTrainerBtn: {
     alignSelf: 'flex-start',
