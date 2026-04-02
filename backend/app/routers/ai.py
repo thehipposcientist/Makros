@@ -45,6 +45,7 @@ class CompletedSetIn(BaseModel):
     setNumber: int
     reps: int
     weightLbs: float
+    feedback: str | None = None
 
 class WeightRecommendRequest(BaseModel):
     exerciseName: str
@@ -68,6 +69,18 @@ class WorkoutCoachQuestionRequest(BaseModel):
     activeExerciseName: str | None = None
     currentSetNumber: int | None = None
     loggedSets: list[dict] | None = None
+
+
+class FoodPhotoRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
+
+
+class FormPhotoRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
+    exercise_name: str | None = None
+    question: str | None = None
 
 
 # ─── Prompt builder ───────────────────────────────────────────────────────────
@@ -274,6 +287,7 @@ def recommend_weight(
 
     sets_str = '; '.join(
         f"Set {s.setNumber}: {s.weightLbs} lbs × {s.reps} reps"
+        + (f" ({s.feedback})" if s.feedback else "")
         for s in body.lastSets
     )
 
@@ -290,7 +304,8 @@ def recommend_weight(
                     f'User goal: {body.goal}\n'
                     f'Sets completed so far: {sets_str}\n'
                     f'This is set number {body.nextSetNumber}.\n\n'
-                    'Based on the sets completed and goal, recommend the weight and reps for the next set. '
+                    'Based on the sets completed, goal, and any set feedback labels like easy, good, grind, or pain, recommend the weight and reps for the next set. '
+                    'If the last set was marked pain, be conservative and prioritize safety. '
                     'Be concise and motivational. Return JSON:\n'
                     '{"weightLbs": number, "reps": number, "tip": "one short sentence"}'
                 )},
@@ -470,3 +485,117 @@ def ask_workout_question(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Workout question failed: {str(e)}")
+
+
+@router.post("/food-photo")
+def analyze_food_photo(
+    body: FoodPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Estimate meal contents and macros from a food photo."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a nutrition coach analyzing meal photos. Estimate likely meal contents and macros. "
+                        "Use practical ranges but return a single best estimate. Return valid JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyze this meal photo. Identify likely foods in plain English, estimate total macros, and provide a short meal name. "
+                                "Return exactly this JSON schema: "
+                                "{\"meal_name\": string, \"items\": [string], \"calories\": number, \"protein\": number, \"carbs\": number, \"fat\": number}"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_data_url},
+                        },
+                    ],
+                },
+            ],
+            temperature=0.2,
+            max_tokens=300,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food photo analysis failed: {str(e)}")
+
+
+@router.post("/form-photo")
+def analyze_form_photo(
+    body: FormPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze a form photo for quick coaching cues."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a workout form coach analyzing a single exercise photo. "
+                        "Provide practical setup/posture cues, likely muscle targeting notes, and obvious red flags. "
+                        "Do not pretend to diagnose injury from one image. Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Exercise: {body.exercise_name or 'unknown'}\n"
+                                f"User concern: {body.question or 'General form check'}\n\n"
+                                "Analyze this form photo. Return exactly this JSON schema: "
+                                "{\"answer\": string, \"quick_cues\": [string], \"likely_target\": string, \"red_flags\": [string], \"safety_note\": string}"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_data_url},
+                        },
+                    ],
+                },
+            ],
+            temperature=0.2,
+            max_tokens=350,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Form photo analysis failed: {str(e)}")

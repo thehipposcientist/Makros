@@ -114,7 +114,7 @@ export default function Index() {
   if (!userProfile) return <OnboardingScreen onComplete={handleProfileComplete} />;
 
   if (isEditing) {
-    return <EditProfileScreen profile={userProfile} onSave={handleSaveProfile} onCancel={() => setIsEditing(false)} />;
+    return <EditProfileScreen authToken={authToken} profile={userProfile} onSave={handleSaveProfile} onCancel={() => setIsEditing(false)} />;
   }
 
   if (activeWorkout) {

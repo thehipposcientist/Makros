@@ -3,7 +3,7 @@ import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
-import { MealSuggestion, DailyNutritionPlan } from '../types';
+import { MealSuggestion, DailyNutritionPlan, SavedMealTemplate } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
 
@@ -14,6 +14,7 @@ interface Props {
   nutritionPlan: DailyNutritionPlan; // full plan so we can show day total
   allFoods: FoodItem[];
   foodCategories: FoodCategoryGroup[];
+  savedMeals?: SavedMealTemplate[];
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
 }
@@ -57,7 +58,7 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   }, zero);
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, onSave, onClose }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], onSave, onClose }: Props) {
   const [foods,  setFoods]  = useState<string[]>(meal.foods);
   const [search, setSearch] = useState('');
 
@@ -183,6 +184,35 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               );
             })}
 
+            {savedMeals.length > 0 && (
+              <>
+                <Text style={[s.sectionLabel, { marginTop: 24 }]}>Saved Meals</Text>
+                {savedMeals.map((template) => (
+                  <TouchableOpacity
+                    key={template.id}
+                    style={s.savedMealRow}
+                    onPress={() => {
+                      onSave({
+                        ...meal,
+                        meal: template.name,
+                        foods: template.items,
+                        calories: template.calories,
+                        protein: template.protein,
+                        carbs: template.carbs,
+                        fat: template.fat,
+                      });
+                      onClose();
+                    }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.savedMealName}>{template.name}</Text>
+                      <Text style={s.savedMealMeta}>{template.items.join(', ')}</Text>
+                    </View>
+                    <Text style={s.savedMealApply}>Use</Text>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
             {/* Food picker */}
             <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
             <TextInput
@@ -271,6 +301,15 @@ const s = StyleSheet.create({
   currentFoodInfo:   { flex: 1 },
   currentFoodName:   { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
   currentFoodMacros: { fontSize: 12, color: colors.textMuted },
+  savedMealRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    padding: 12, marginBottom: 8,
+  },
+  savedMealName: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
+  savedMealMeta: { fontSize: 12, color: colors.textMuted },
+  savedMealApply: { fontSize: 12, color: colors.primary, fontWeight: '700' },
   removeBtn: {
     width: 28, height: 28, borderRadius: 14,
     backgroundColor: colors.error + '22', borderWidth: 1, borderColor: colors.error,

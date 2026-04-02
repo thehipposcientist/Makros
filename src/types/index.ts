@@ -58,6 +58,16 @@ export interface CustomFoodItem {
   fat: number;
 }
 
+export interface SavedMealTemplate {
+  id: string;
+  name: string;
+  items: string[];
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}
+
 export interface UserProfile {
   goal: Goal;
   goalDetails: GoalDetails;
@@ -67,6 +77,7 @@ export interface UserProfile {
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   foodsAvailable: string[];
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
+  savedMeals?: SavedMealTemplate[];
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
@@ -130,6 +141,7 @@ export interface CompletedSet {
   setNumber: number;
   reps: number;
   weightLbs: number;
+  feedback?: 'easy' | 'good' | 'grind' | 'pain';
 }
 
 export interface SessionExercise {

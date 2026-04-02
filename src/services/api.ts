@@ -77,6 +77,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       equipment:              data.preferences.equipment ?? [],
       foodsAvailable:         data.preferences.foods_available ?? [],
       customFoods:            [],
+      savedMeals:             [],
     };
   } catch {
     return null;
@@ -309,6 +310,41 @@ export async function askWorkoutQuestion(
   },
 ): Promise<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }> {
   return request('/ai/workout-question', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function analyzeFoodPhoto(
+  token: string,
+  payload: { image_base64: string; mime_type?: string },
+): Promise<{
+  meal_name: string;
+  items: string[];
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}> {
+  return request('/ai/food-photo', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function analyzeWorkoutFormPhoto(
+  token: string,
+  payload: { image_base64: string; mime_type?: string; exercise_name?: string; question?: string },
+): Promise<{
+  answer: string;
+  quick_cues: string[];
+  likely_target: string;
+  red_flags: string[];
+  safety_note: string;
+}> {
+  return request('/ai/form-photo', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),

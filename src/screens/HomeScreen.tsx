@@ -134,6 +134,10 @@ function buildExerciseGuide(ex: ExerciseLibraryItem) {
     why: ex.is_compound
       ? `It hits ${primary.toLowerCase()} because multiple joints are moving together, which lets ${primary.toLowerCase()} work hard while nearby muscles assist and stabilize.`
       : `It hits ${primary.toLowerCase()} because the movement keeps tension focused there instead of spreading the work across many muscle groups.`,
+    setup: `Set yourself up so your body feels balanced, brace your torso, and position the ${equipment.toLowerCase()} so the movement starts under control.`,
+    movement: `Move through a controlled full range, avoid rushing, and think about driving the weight with ${primary.toLowerCase()} instead of just swinging it.`,
+    feel: `You should mostly feel this in ${primary.toLowerCase()}${secondary.length ? ` with some support from ${joinParts(secondary).toLowerCase()}` : ''}, not in random joints or sharp pain spots.`,
+    mistake: `A common mistake is using too much momentum or shortening the range of motion, which takes work away from ${primary.toLowerCase()}.`,
   };
 }
 
@@ -280,6 +284,9 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [exerciseSearch, setExerciseSearch] = useState('');
+  const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
+  const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [showTrainerModal, setShowTrainerModal] = useState(false);
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
@@ -407,6 +414,28 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
       setExerciseLibraryLoading(false);
     }
   }, [exerciseLibrary.length]);
+
+  const exerciseMuscleOptions = Array.from(
+    new Set(exerciseLibrary.map((item) => item.primary_muscle).filter(Boolean) as string[])
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+
+  const exerciseEquipmentOptions = Array.from(
+    new Set(exerciseLibrary.map((item) => item.equipment).filter(Boolean) as string[])
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+
+  const filteredExerciseLibrary = exerciseLibrary.filter((item) => {
+    const search = exerciseSearch.trim().toLowerCase();
+    const matchesSearch = !search || [
+      item.name,
+      item.description ?? '',
+      humanizeToken(item.primary_muscle),
+      humanizeToken(item.equipment),
+      ...(item.secondary_muscles ?? []).map(humanizeToken),
+    ].some((value) => value.toLowerCase().includes(search));
+    const matchesMuscle = exerciseMuscleFilter === 'all' || item.primary_muscle === exerciseMuscleFilter;
+    const matchesEquipment = exerciseEquipmentFilter === 'all' || item.equipment === exerciseEquipmentFilter;
+    return matchesSearch && matchesMuscle && matchesEquipment;
+  });
 
   const summarizeTrainerUpdate = useCallback((
     prevWorkout: WorkoutPlan,
@@ -780,6 +809,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
           nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
           allFoods={meta.allFoods}
           foodCategories={meta.foodCategories}
+          savedMeals={userProfile.savedMeals ?? []}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
         />
@@ -817,17 +847,117 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
         <View style={styles.libraryBackdrop}>
           <View style={styles.librarySheet}>
             <View style={styles.libraryHeader}>
-              <Text style={styles.libraryTitle}>Exercise Library</Text>
-              <TouchableOpacity onPress={() => setShowExerciseLibrary(false)}>
+              <Text style={styles.libraryTitle}>{selectedExercise ? selectedExercise.name : 'Exercise Library'}</Text>
+              <TouchableOpacity onPress={() => {
+                if (selectedExercise) {
+                  setSelectedExercise(null);
+                  return;
+                }
+                setShowExerciseLibrary(false);
+              }}>
                 <Text style={styles.libraryClose}>Close</Text>
               </TouchableOpacity>
             </View>
 
             {exerciseLibraryLoading ? (
               <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
+            ) : selectedExercise ? (
+              <ScrollView contentContainerStyle={styles.detailContent}>
+                {(() => {
+                  const guide = buildExerciseGuide(selectedExercise);
+                  return (
+                    <>
+                      <View style={styles.detailTopCard}>
+                        <Text style={styles.detailMeta}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
+                        {selectedExercise.secondary_muscles?.length ? (
+                          <Text style={styles.detailMeta}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
+                        ) : null}
+                        {selectedExercise.equipment ? <Text style={styles.detailMeta}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>How To Perform It</Text>
+                        <Text style={styles.detailSectionText}>{guide.howTo}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>Setup</Text>
+                        <Text style={styles.detailSectionText}>{guide.setup}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>Movement Cue</Text>
+                        <Text style={styles.detailSectionText}>{guide.movement}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>What It Hits</Text>
+                        <Text style={styles.detailSectionText}>{guide.hits}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>Why It Hits That</Text>
+                        <Text style={styles.detailSectionText}>{guide.why}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>How It Should Feel</Text>
+                        <Text style={styles.detailSectionText}>{guide.feel}</Text>
+                      </View>
+
+                      <View style={styles.detailSection}>
+                        <Text style={styles.detailSectionTitle}>Common Mistake</Text>
+                        <Text style={styles.detailSectionText}>{guide.mistake}</Text>
+                      </View>
+                    </>
+                  );
+                })()}
+              </ScrollView>
             ) : (
               <ScrollView contentContainerStyle={styles.libraryList}>
-                {exerciseLibrary.map((ex) => (
+                <TextInput
+                  value={exerciseSearch}
+                  onChangeText={setExerciseSearch}
+                  placeholder="Search exercises, muscles, or equipment"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.librarySearchInput}
+                />
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                  <TouchableOpacity
+                    style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
+                    onPress={() => setExerciseMuscleFilter('all')}>
+                    <Text style={[styles.libraryFilterText, exerciseMuscleFilter === 'all' && styles.libraryFilterTextActive]}>All Muscles</Text>
+                  </TouchableOpacity>
+                  {exerciseMuscleOptions.map((muscle) => (
+                    <TouchableOpacity
+                      key={muscle}
+                      style={[styles.libraryFilterChip, exerciseMuscleFilter === muscle && styles.libraryFilterChipActive]}
+                      onPress={() => setExerciseMuscleFilter(muscle)}>
+                      <Text style={[styles.libraryFilterText, exerciseMuscleFilter === muscle && styles.libraryFilterTextActive]}>{humanizeToken(muscle)}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                  <TouchableOpacity
+                    style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
+                    onPress={() => setExerciseEquipmentFilter('all')}>
+                    <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === 'all' && styles.libraryFilterTextActive]}>All Equipment</Text>
+                  </TouchableOpacity>
+                  {exerciseEquipmentOptions.map((equipment) => (
+                    <TouchableOpacity
+                      key={equipment}
+                      style={[styles.libraryFilterChip, exerciseEquipmentFilter === equipment && styles.libraryFilterChipActive]}
+                      onPress={() => setExerciseEquipmentFilter(equipment)}>
+                      <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === equipment && styles.libraryFilterTextActive]}>{humanizeToken(equipment)}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                {filteredExerciseLibrary.length === 0 ? (
+                  <Text style={styles.libraryEmptyText}>No exercises match the current search and filters.</Text>
+                ) : filteredExerciseLibrary.map((ex) => (
                   <TouchableOpacity key={String(ex.id ?? ex.name)} style={styles.libraryItem} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
                     <Text style={styles.libraryItemName}>{ex.name}</Text>
                     <Text style={styles.libraryItemMeta}>
@@ -840,49 +970,6 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                 ))}
               </ScrollView>
             )}
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={!!selectedExercise} transparent animationType="slide" onRequestClose={() => setSelectedExercise(null)}>
-        <View style={styles.libraryBackdrop}>
-          <View style={styles.detailSheet}>
-            <View style={styles.libraryHeader}>
-              <Text style={styles.libraryTitle}>{selectedExercise?.name ?? 'Exercise'}</Text>
-              <TouchableOpacity onPress={() => setSelectedExercise(null)}>
-                <Text style={styles.libraryClose}>Close</Text>
-              </TouchableOpacity>
-            </View>
-
-            {selectedExercise && (() => {
-              const guide = buildExerciseGuide(selectedExercise);
-              return (
-                <ScrollView contentContainerStyle={styles.detailContent}>
-                  <View style={styles.detailTopCard}>
-                    <Text style={styles.detailMeta}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
-                    {selectedExercise.secondary_muscles?.length ? (
-                      <Text style={styles.detailMeta}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
-                    ) : null}
-                    {selectedExercise.equipment ? <Text style={styles.detailMeta}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
-                  </View>
-
-                  <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>How To Perform It</Text>
-                    <Text style={styles.detailSectionText}>{guide.howTo}</Text>
-                  </View>
-
-                  <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>What It Hits</Text>
-                    <Text style={styles.detailSectionText}>{guide.hits}</Text>
-                  </View>
-
-                  <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>Why It Hits That</Text>
-                    <Text style={styles.detailSectionText}>{guide.why}</Text>
-                  </View>
-                </ScrollView>
-              );
-            })()}
           </View>
         </View>
       </Modal>
@@ -1204,6 +1291,38 @@ const styles = StyleSheet.create({
   libraryTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   libraryClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
   libraryList: { paddingHorizontal: 16, paddingBottom: 28 },
+  librarySearchInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: colors.background,
+    color: colors.textPrimary,
+    marginBottom: 10,
+  },
+  libraryFilterRow: { gap: 8, paddingBottom: 10 },
+  libraryFilterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+  },
+  libraryFilterChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
+  libraryFilterText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  libraryFilterTextActive: { color: colors.primary },
+  libraryEmptyText: {
+    fontSize: 13,
+    color: colors.textMuted,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: 12,
+    marginTop: 4,
+  },
   libraryItem: {
     backgroundColor: colors.surfaceRaised,
     borderWidth: 1,
