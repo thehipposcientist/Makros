@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking } from 'react-native';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises, askTrainerQuestion } from '../services/api';
+import * as ImagePicker from 'expo-image-picker';
+import { getWorkoutStatus, getDayState, upsertDayState, getGroceryList, getExercises, askTrainerQuestion, analyzeFoodPhoto } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory,
@@ -12,13 +13,16 @@ import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
-import { colors, radius } from '../constants/theme';
+import { colors, getTheme, radius } from '../constants/theme';
 
 interface HomeScreenProps {
   authToken: string;
   userProfile: UserProfile | null;
   onSignOut: () => void;
   onEditProfile: () => void;
+  onEditEquipment: () => void;
+  onEditFoods: () => void;
+  onEditThemes: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
@@ -145,6 +149,34 @@ function buildExerciseGuide(ex: ExerciseLibraryItem) {
   };
 }
 
+function getExerciseVideoUrl(exerciseName: string): string {
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${exerciseName} proper form`)}`;
+}
+
+function buildWarmupPlan(workout: WorkoutDay): string[] {
+  const focus = workout.focus.toLowerCase();
+  const primer = /leg|lower/.test(focus)
+    ? '3-5 minutes easy bike or treadmill, then ankle, hip, and squat mobility.'
+    : /pull|back/.test(focus)
+      ? '3-5 minutes light cardio, then band pull-aparts, scap retractions, and shoulder prep.'
+      : /push|chest|shoulder|upper/.test(focus)
+        ? '3-5 minutes light cardio, then shoulder circles, band external rotations, and light pressing prep.'
+        : '3-5 minutes of light cardio followed by dynamic mobility for the joints you will use most.';
+
+  const firstExercise = workout.exercises[0]?.name;
+  const secondExercise = workout.exercises[1]?.name;
+  const ramp = firstExercise
+    ? `Do 2-3 lighter ramp-up sets for ${firstExercise}${secondExercise ? `, then one feeler set for ${secondExercise}` : ''}.`
+    : 'Do 2-3 lighter ramp-up sets before your first working set.';
+
+  return [
+    primer,
+    'Keep warm-up reps smooth and stop well before fatigue.',
+    ramp,
+    'If a joint feels off, slow down and add one more lighter set before starting work sets.',
+  ];
+}
+
 function compactGoalProgressText(
   userProfile: UserProfile,
   goalConfig: import('../hooks/useMetaData').GoalConfig,
@@ -229,8 +261,13 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, onSignOut, onEditProfile, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
   const meta = useMetaData();
+  const theme = getTheme(userProfile?.themePreference);
+  const themeColors = theme.colors;
+  const workoutPalette = theme.sections.workout;
+  const mealPalette = theme.sections.meals;
+  const plannerPalette = theme.sections.planner;
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
@@ -245,6 +282,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
   const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [showTrainerModal, setShowTrainerModal] = useState(false);
+  const [coachMode, setCoachMode] = useState<'trainer' | 'nutritionist'>('trainer');
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
   const [trainerChat, setTrainerChat] = useState<TrainerChatMessage[]>([]);
@@ -611,6 +649,94 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
   }, [persistDayState]);
 
+  const handlePhotoMeal = useCallback(async (date: string, mealType: string) => {
+    if (!authToken) {
+      Alert.alert('Sign in required', 'You need to be signed in to use food photo tracking.');
+      return;
+    }
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) {
+      // Fallback to library if camera denied
+      const libPerm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!libPerm.granted) {
+        Alert.alert('Permission needed', 'Please allow camera or photo library access to track meals by photo.');
+        return;
+      }
+    }
+
+    Alert.alert('Track Meal by Photo', 'Take a new photo or pick one from your library?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Camera',
+        onPress: async () => {
+          const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+          if (result.canceled || !result.assets?.[0]?.base64) return;
+          try {
+            const analysis = await analyzeFoodPhoto(authToken, {
+              image_base64: result.assets[0].base64!,
+              mime_type: result.assets[0].mimeType ?? 'image/jpeg',
+            });
+            setNutritionPlansByDate(prev => {
+              const plan = prev[date];
+              if (!plan) return prev;
+              const updated = {
+                ...plan,
+                [mealType]: {
+                  ...plan[mealType as keyof typeof plan],
+                  meal: analysis.meal_name,
+                  foods: analysis.items,
+                  calories: analysis.calories,
+                  protein: analysis.protein,
+                  carbs: analysis.carbs,
+                  fat: analysis.fat,
+                },
+              };
+              saveNutritionPlan(date, updated as DailyNutritionPlan);
+              return { ...prev, [date]: updated as DailyNutritionPlan };
+            });
+            Alert.alert('Meal logged!', `Detected: ${analysis.meal_name}\n${analysis.calories} cal · ${analysis.protein}g protein`);
+          } catch (e: any) {
+            Alert.alert('Analysis failed', e?.message ?? 'Could not analyze photo. Check your OpenAI API key.');
+          }
+        },
+      },
+      {
+        text: 'Photo Library',
+        onPress: async () => {
+          const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+          if (result.canceled || !result.assets?.[0]?.base64) return;
+          try {
+            const analysis = await analyzeFoodPhoto(authToken, {
+              image_base64: result.assets[0].base64!,
+              mime_type: result.assets[0].mimeType ?? 'image/jpeg',
+            });
+            setNutritionPlansByDate(prev => {
+              const plan = prev[date];
+              if (!plan) return prev;
+              const updated = {
+                ...plan,
+                [mealType]: {
+                  ...plan[mealType as keyof typeof plan],
+                  meal: analysis.meal_name,
+                  foods: analysis.items,
+                  calories: analysis.calories,
+                  protein: analysis.protein,
+                  carbs: analysis.carbs,
+                  fat: analysis.fat,
+                },
+              };
+              saveNutritionPlan(date, updated as DailyNutritionPlan);
+              return { ...prev, [date]: updated as DailyNutritionPlan };
+            });
+            Alert.alert('Meal logged!', `Detected: ${analysis.meal_name}\n${analysis.calories} cal · ${analysis.protein}g protein`);
+          } catch (e: any) {
+            Alert.alert('Analysis failed', e?.message ?? 'Could not analyze photo. Check your OpenAI API key.');
+          }
+        },
+      },
+    ]);
+  }, [authToken, persistDayState]);
+
   const handleSkipToday = useCallback(async (focus: string) => {
     Alert.alert(
       'Skip Today?',
@@ -639,20 +765,32 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
     await persistDayState(date, { skipped_focus: null });
   }, [persistDayState]);
 
+  const openExerciseVideo = useCallback(async (exerciseName: string) => {
+    try {
+      await Linking.openURL(getExerciseVideoUrl(exerciseName));
+    } catch {
+      Alert.alert('Could not open video', 'There was a problem opening the exercise video link.');
+    }
+  }, []);
+
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label ?? userProfile.goal;
   const schedule  = get7DaySchedule(workoutPlan, userProfile.daysPerWeek);
   const mealDays = getNextMealDays(3);
+  const todayScheduleItem = schedule[0] ?? null;
+  const showWarmupCard = !!todayScheduleItem?.workout && !todayScheduleItem.isRest && !todayDone && !skippedDates.has(todayKey());
+  const warmupSteps = showWarmupCard ? buildWarmupPlan(todayScheduleItem!.workout!) : [];
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: themeColors.background }] }>
 
       {/* Header */}
       <View style={styles.header}>
         <View>
           <Text style={styles.greeting}>Today's Plan</Text>
-          <View style={styles.goalBadge}>
-            <Text style={styles.goalBadgeText}>{goalLabel}</Text>
+          <View style={[styles.goalBadge, { borderColor: plannerPalette.strong, backgroundColor: plannerPalette.soft }] }>
+            <Text style={[styles.goalBadgeText, { color: plannerPalette.text }]}>{goalLabel}</Text>
           </View>
           {compactGoalProgressText(userProfile, meta.goalConfig) ? (
             <Text style={styles.goalSubText}>{compactGoalProgressText(userProfile, meta.goalConfig)}</Text>
@@ -665,10 +803,10 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
 
       {/* Tabs */}
       <View style={styles.tabs}>
-        <TouchableOpacity style={[styles.tab, activeTab === 'workout' && styles.tabActive]} onPress={() => setActiveTab('workout')}>
+        <TouchableOpacity style={[styles.tab, activeTab === 'workout' && { backgroundColor: workoutPalette.strong }]} onPress={() => setActiveTab('workout')}>
           <Text style={[styles.tabText, activeTab === 'workout' && styles.tabTextActive]}>Workout</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.tab, activeTab === 'meals' && styles.tabActive]} onPress={() => setActiveTab('meals')}>
+        <TouchableOpacity style={[styles.tab, activeTab === 'meals' && { backgroundColor: mealPalette.strong }]} onPress={() => setActiveTab('meals')}>
           <Text style={[styles.tabText, activeTab === 'meals' && styles.tabTextActive]}>Meals</Text>
         </TouchableOpacity>
       </View>
@@ -677,36 +815,30 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'workout' ? (
           <>
-            <View style={styles.compactNotesRow}>
-              <View style={styles.compactNoteChip}>
-                <Text style={styles.compactNoteText}>{userProfile.daysPerWeek} days a week</Text>
+            <TouchableOpacity style={[styles.askTrainerBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => { setCoachMode('trainer'); setShowTrainerModal(true); }}>
+              <Text style={styles.askTrainerBtnText}>AI Trainer</Text>
+            </TouchableOpacity>
+            {showWarmupCard && (
+              <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }] }>
+                <Text style={[styles.warmupTitle, { color: workoutPalette.text }]}>Warm-Up For Today</Text>
+                {warmupSteps.map((step, index) => (
+                  <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+                ))}
               </View>
-              <View style={styles.compactNoteChip}>
-                <Text style={styles.compactNoteText}>{userProfile.workoutDurationMinutes} min sessions</Text>
-              </View>
-              <View style={styles.compactNoteChip}>
-                <Text style={styles.compactNoteText}>
-                  Rest {Math.round((schedule[0]?.workout?.exercises?.reduce((sum, ex) => sum + (ex.restSeconds || 0), 0) || 60) /
-                    Math.max(1, schedule[0]?.workout?.exercises?.length || 1))}s avg
-                </Text>
-              </View>
-            </View>
+            )}
             {(availabilityItems.length > 0 || cardioProfile) && (
-              <View style={styles.insightCard}>
+              <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
                 <Text style={styles.insightTitle}>Available Muscle/Cardio Focus</Text>
                 {cardioProfile ? <Text style={styles.insightSubtitle}>{cardioProfile}</Text> : null}
                 <View style={styles.insightChips}>
                   {availabilityItems.map(item => (
-                    <View key={item.label} style={styles.insightChip}>
-                      <Text style={styles.insightChipText}>{item.label} {item.pct}%</Text>
+                    <View key={item.label} style={[styles.insightChip, { borderColor: plannerPalette.strong + '55' }]}>
+                      <Text style={[styles.insightChipText, { color: plannerPalette.text }]}>{item.label} {item.pct}%</Text>
                     </View>
                   ))}
                 </View>
               </View>
             )}
-            <TouchableOpacity style={styles.askTrainerBtn} onPress={() => setShowTrainerModal(true)}>
-              <Text style={styles.askTrainerBtnText}>Ask Trainer</Text>
-            </TouchableOpacity>
             {schedule.map((item, i) => {
               const key = dateKey(item.date);
               const isToday     = i === 0;
@@ -716,12 +848,14 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                 <DayCard
                   key={i}
                   item={item}
+                  themeName={userProfile.themePreference}
                   isToday={isToday}
                   isCompleted={isCompleted}
                   isSkipped={isSkipped}
                   expanded={expandedDay === i}
                   onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
                   onStartWorkout={onStartWorkout}
+                  onOpenExerciseVideo={openExerciseVideo}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                 />
@@ -730,6 +864,9 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
           </>
         ) : (
           <>
+            <TouchableOpacity style={[styles.askTrainerBtn, { backgroundColor: mealPalette.strong }]} onPress={() => { setCoachMode('nutritionist'); setShowTrainerModal(true); }}>
+              <Text style={styles.askTrainerBtnText}>AI Nutritionist</Text>
+            </TouchableOpacity>
             {groceryPreview.length > 0 && (
               <View style={styles.groceryCard}>
                 <Text style={styles.groceryTitle}>3-Day Grocery Preview</Text>
@@ -752,7 +889,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
               return (
                 <View key={d.key} style={styles.mealAccordionCard}>
                   <TouchableOpacity
-                    style={styles.mealAccordionHeader}
+                    style={[styles.mealAccordionHeader, { backgroundColor: mealPalette.soft }]}
                     onPress={() => setExpandedMealDays(prev => {
                       const next = new Set(prev);
                       if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
@@ -769,6 +906,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
 
                   {isExpanded && (
                     <NutritionCard
+                      themeName={userProfile.themePreference}
                       nutritionPlan={plan}
                       checkedMeals={checkedMealsByDate[d.key] ?? {}}
                       onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
@@ -776,6 +914,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                       onAddSnack={() => handleAddSnack(d.key)}
                       onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
                       onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
+                      onPhotoMeal={(mealType) => handlePhotoMeal(d.key, mealType)}
                     />
                   )}
                 </View>
@@ -821,6 +960,18 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
               <Text style={styles.menuItemText}>Edit Plan</Text>
             </TouchableOpacity>
             <View style={styles.menuDivider} />
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onEditEquipment(); }}>
+              <Text style={styles.menuItemText}>Edit Equipment</Text>
+            </TouchableOpacity>
+            <View style={styles.menuDivider} />
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onEditFoods(); }}>
+              <Text style={styles.menuItemText}>Edit Food Options</Text>
+            </TouchableOpacity>
+            <View style={styles.menuDivider} />
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onEditThemes(); }}>
+              <Text style={styles.menuItemText}>Themes</Text>
+            </TouchableOpacity>
+            <View style={styles.menuDivider} />
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onSignOut(); }}>
               <Text style={[styles.menuItemText, { color: colors.error }]}>Sign Out</Text>
             </TouchableOpacity>
@@ -858,6 +1009,9 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
                           <Text style={styles.detailMeta}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
                         {selectedExercise.equipment ? <Text style={styles.detailMeta}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
+                        <TouchableOpacity style={styles.detailVideoBtn} onPress={() => openExerciseVideo(selectedExercise.name)}>
+                          <Text style={styles.detailVideoBtnText}>Watch Form Video</Text>
+                        </TouchableOpacity>
                       </View>
 
                       <View style={styles.detailSection}>
@@ -967,13 +1121,17 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
         >
           <View style={styles.trainerSheet}>
             <View style={styles.libraryHeader}>
-              <Text style={styles.libraryTitle}>Ask Trainer</Text>
+              <Text style={styles.libraryTitle}>{coachMode === 'nutritionist' ? 'AI Nutritionist' : 'AI Trainer'}</Text>
               <TouchableOpacity onPress={() => setShowTrainerModal(false)}>
                 <Text style={styles.libraryClose}>Close</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.trainerHint}>Ask about progress stalls, pain, substitutions, or plan changes.</Text>
+            <Text style={styles.trainerHint}>
+              {coachMode === 'nutritionist'
+                ? 'Ask about calories, meals, food swaps, grocery choices, or how to adjust your nutrition plan.'
+                : 'Ask about progress stalls, pain, substitutions, or training plan changes.'}
+            </Text>
 
             {trainerUpdateSummary && (
               <View style={styles.trainerSummaryCard}>
@@ -998,7 +1156,7 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
               <TextInput
                 value={trainerInput}
                 onChangeText={setTrainerInput}
-                placeholder="Ask trainer..."
+                placeholder={coachMode === 'nutritionist' ? 'Ask nutritionist...' : 'Ask trainer...'}
                 placeholderTextColor={colors.textMuted}
                 style={styles.trainerInput}
                 multiline
@@ -1014,14 +1172,16 @@ export default function HomeScreen({ authToken, userProfile, onSignOut, onEditPr
   );
 }
 
-function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, onPress, onStartWorkout, onOpenExerciseVideo, onSkip, onUnskip }: {
   item: ScheduleItem;
+  themeName?: import('../types').AppThemeName;
   isToday: boolean;
   isCompleted: boolean;
   isSkipped: boolean;
   expanded: boolean;
   onPress: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
+  onOpenExerciseVideo: (exerciseName: string) => void;
   onSkip: (focus: string) => void;
   onUnskip: () => void;
 }) {
@@ -1103,7 +1263,7 @@ function DayCard({ item, isToday, isCompleted, isSkipped, expanded, onPress, onS
             </View>
           ) : (
             <>
-              <WorkoutCard workout={item.workout!} />
+              <WorkoutCard workout={item.workout!} themeName={themeName} onOpenExerciseVideo={onOpenExerciseVideo} />
               <View style={styles.actionRow}>
                 {isToday && (
                   <TouchableOpacity
@@ -1185,6 +1345,16 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   askTrainerBtnText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+
+  warmupCard: {
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 14,
+    marginBottom: 12,
+    gap: 8,
+  },
+  warmupTitle: { fontSize: 14, fontWeight: '800' },
+  warmupStep: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
 
   tabs:          { flexDirection: 'row', marginHorizontal: 16, marginBottom: 12, backgroundColor: colors.surface, borderRadius: radius.md, padding: 4, borderWidth: 1, borderColor: colors.border },
   tab:           { flex: 1, paddingVertical: 10, borderRadius: radius.sm, alignItems: 'center' },
@@ -1363,6 +1533,17 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   detailMeta: { fontSize: 12, color: colors.textSecondary },
+  detailVideoBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+    backgroundColor: colors.primary + '18',
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: radius.full,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  detailVideoBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
   detailSection: {
     backgroundColor: colors.surfaceRaised,
     borderRadius: radius.md,

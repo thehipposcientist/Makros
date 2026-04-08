@@ -15,6 +15,7 @@ export type Goal =
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
+export type AppThemeName = 'midnight' | 'ember' | 'ocean' | 'forest' | 'sunrise' | 'graphite';
 
 export interface GoalOption {
   value: Goal;
@@ -71,6 +72,7 @@ export interface SavedMealTemplate {
 export interface UserProfile {
   goal: Goal;
   goalDetails: GoalDetails;
+  themePreference?: AppThemeName;
   physicalStats: PhysicalStats;
   daysPerWeek: number;
   workoutDurationMinutes: number;
@@ -118,6 +120,14 @@ export interface MealSuggestion {
   protein: number;
   carbs?: number;
   fat?: number;
+  instructions?: string; // brief recipe/cooking notes
+}
+
+export interface WorkoutSummary {
+  caloriesBurned: number;
+  motivationMessage: string;
+  achievements: string[];
+  recommendations: string[];
 }
 
 export interface DailyNutritionPlan {
@@ -141,7 +151,8 @@ export interface CompletedSet {
   setNumber: number;
   reps: number;
   weightLbs: number;
-  feedback?: 'easy' | 'good' | 'grind' | 'pain';
+  rir?: number;
+  feedback?: 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
 }
 
 export interface SessionExercise {

@@ -1,9 +1,11 @@
+import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { DailyNutritionPlan, MealSuggestion } from '../types';
-import { colors, radius } from '../constants/theme';
+import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
+import { getTheme, radius } from '../constants/theme';
 
 interface NutritionCardProps {
   title?: string;
+  themeName?: AppThemeName;
   nutritionPlan: DailyNutritionPlan;
   checkedMeals?: Record<string, boolean>;
   onToggleMeal?: (mealType: string) => void;
@@ -11,10 +13,12 @@ interface NutritionCardProps {
   onAddSnack?: () => void;
   onRemoveMeal?: (mealType: string) => void;
   onRestoreMeal?: (mealType: string) => void;
+  onPhotoMeal?: (mealType: string) => void;
 }
 
 export default function NutritionCard({
   title,
+  themeName,
   nutritionPlan,
   checkedMeals = {},
   onToggleMeal,
@@ -22,7 +26,12 @@ export default function NutritionCard({
   onAddSnack,
   onRemoveMeal,
   onRestoreMeal,
+  onPhotoMeal,
 }: NutritionCardProps) {
+  const theme = getTheme(themeName);
+  const colors = theme.colors;
+  const section = theme.sections.meals;
+  const styles = createStyles(colors, section);
   const { breakfast, lunch, dinner, snack, targets } = nutritionPlan;
   const removed = new Set(nutritionPlan.removedMeals ?? []);
 
@@ -61,7 +70,9 @@ export default function NutritionCard({
           actual={actual.calories}
           target={targets.calories}
           unit=""
-          color={colors.accent}
+          color={section.strong}
+          colors={colors}
+          styles={styles}
         />
         <MacroTracker
           label="Protein"
@@ -69,6 +80,8 @@ export default function NutritionCard({
           target={targets.protein}
           unit="g"
           color={colors.primary}
+          colors={colors}
+          styles={styles}
         />
         <MacroTracker
           label="Carbs"
@@ -76,6 +89,8 @@ export default function NutritionCard({
           target={targets.carbs}
           unit="g"
           color="#F59E0B"
+          colors={colors}
+          styles={styles}
         />
         <MacroTracker
           label="Fat"
@@ -83,6 +98,8 @@ export default function NutritionCard({
           target={targets.fat}
           unit="g"
           color="#A78BFA"
+          colors={colors}
+          styles={styles}
         />
       </View>
 
@@ -98,6 +115,10 @@ export default function NutritionCard({
             onToggle={onToggleMeal}
             onEdit={onEditMeal}
             onRemove={onRemoveMeal}
+            onPhoto={onPhotoMeal}
+            colors={colors}
+            styles={styles}
+            mealAccent={section}
           />
         ))}
         {hiddenMeals.length > 0 && (
@@ -125,7 +146,9 @@ export default function NutritionCard({
 
 function MacroTracker({
   label, actual, target, unit, color,
-}: { label: string; actual: number; target: number; unit: string; color: string }) {
+  colors,
+  styles,
+}: { label: string; actual: number; target: number; unit: string; color: string; colors: ReturnType<typeof getTheme>['colors']; styles: ReturnType<typeof createStyles> }) {
   const pct     = target > 0 ? Math.min(actual / target, 1) : 0;
   const over    = actual > target;
   const barColor = over ? colors.error : color;
@@ -163,7 +186,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove }: {
+function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, onPhoto, colors, styles, mealAccent }: {
   emoji: string;
   mealType: string;
   meal: MealSuggestion;
@@ -171,7 +194,13 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove }:
   onToggle?: (mealType: string) => void;
   onEdit?:   (mealType: string, meal: MealSuggestion) => void;
   onRemove?: (mealType: string) => void;
+  onPhoto?: (mealType: string) => void;
+  colors: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+  mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
+  const [showRecipe, setShowRecipe] = useState(false);
+
   return (
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
       <View style={styles.mealHeader}>
@@ -184,6 +213,14 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove }:
         <Text style={[styles.mealName, checked && styles.mealNameDone]}>
           {emoji}  {meal.meal}
         </Text>
+        {onPhoto && (
+          <TouchableOpacity
+            onPress={() => onPhoto(mealType)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.photoBtn}>
+            <Text style={styles.photoBtnText}>📷</Text>
+          </TouchableOpacity>
+        )}
         {onEdit && (
           <TouchableOpacity
             onPress={() => onEdit(mealType, meal)}
@@ -202,21 +239,35 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove }:
         )}
       </View>
 
+      {/* Ingredients list */}
       <Text style={[styles.mealFoods, checked && styles.mealFoodsDone]}>
-        {meal.foods.join(', ')}
+        {meal.foods.join(' · ')}
       </Text>
 
+      {/* Recipe instructions toggle */}
+      {meal.instructions && (
+        <TouchableOpacity onPress={() => setShowRecipe(v => !v)} style={styles.recipeToggle}>
+          <Text style={styles.recipeToggleText}>{showRecipe ? 'Hide recipe ▲' : 'View recipe ▼'}</Text>
+        </TouchableOpacity>
+      )}
+      {showRecipe && meal.instructions && (
+        <View style={styles.recipeBox}>
+          <Text style={styles.recipeLabel}>How to make it</Text>
+          <Text style={styles.recipeText}>{meal.instructions}</Text>
+        </View>
+      )}
+
       <View style={styles.mealBadges}>
-        <MacroPill label="cal"     value={Math.round(meal.calories)}   color={colors.accent} />
-        <MacroPill label="protein" value={Math.round(meal.protein)}    color={colors.primary} />
-        <MacroPill label="carbs"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B" />
-        <MacroPill label="fat"     value={Math.round(meal.fat   ?? 0)} color="#A78BFA" />
+        <MacroPill label="cal"     value={Math.round(meal.calories)}   color={colors.accent} styles={styles} />
+        <MacroPill label="protein" value={Math.round(meal.protein)}    color={colors.primary} styles={styles} />
+        <MacroPill label="carbs"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B" styles={styles} />
+        <MacroPill label="fat"     value={Math.round(meal.fat   ?? 0)} color="#A78BFA" styles={styles} />
       </View>
     </View>
   );
 }
 
-function MacroPill({ label, value, color }: { label: string; value: number; color: string }) {
+function MacroPill({ label, value, color, styles }: { label: string; value: number; color: string; styles: ReturnType<typeof createStyles> }) {
   return (
     <View style={[styles.pill, { borderColor: color + '55' }]}>
       <Text style={[styles.pillValue, { color }]}>{value}</Text>
@@ -227,33 +278,33 @@ function MacroPill({ label, value, color }: { label: string; value: number; colo
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: ReturnType<typeof getTheme>['sections']['meals']) => StyleSheet.create({
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     padding: 16,
     marginBottom: 16,
     borderLeftWidth: 3,
-    borderLeftColor: colors.accent,
+    borderLeftColor: section.strong,
   },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   title: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
   addSnackBtn: {
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: section.soft,
     borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: section.strong + '55',
     paddingHorizontal: 10,
     paddingVertical: 5,
   },
-  addSnackBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  addSnackBtnText: { fontSize: 12, color: section.text, fontWeight: '700' },
 
   // Macro grid
   macrosGrid: {
     flexDirection: 'row',
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: section.soft,
     borderRadius: radius.md,
-    borderWidth: 1, borderColor: colors.border,
+    borderWidth: 1, borderColor: section.strong + '44',
     padding: 12, marginBottom: 14,
     gap: 2,
   },
@@ -282,10 +333,10 @@ const styles = StyleSheet.create({
   mealItem: {
     backgroundColor: colors.surfaceRaised,
     borderRadius: radius.md, padding: 12,
-    borderWidth: 1, borderColor: colors.border,
+    borderWidth: 1, borderColor: section.strong + '33',
     gap: 6,
   },
-  mealItemDone: { opacity: 0.55, borderColor: colors.success },
+  mealItemDone: { opacity: 0.62, borderColor: colors.success },
 
   mealHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   checkbox: {
@@ -299,20 +350,33 @@ const styles = StyleSheet.create({
   mealName:     { flex: 1, fontSize: 14, fontWeight: '600', color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
 
+  photoBtn: { paddingHorizontal: 4 },
+  photoBtnText: { fontSize: 15 },
   editBtn:     { paddingHorizontal: 6 },
-  editBtnText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  editBtnText: { fontSize: 12, color: section.strong, fontWeight: '700' },
   removeMealBtn: { paddingHorizontal: 6 },
   removeMealBtnText: { fontSize: 12, color: colors.error, fontWeight: '600' },
+  recipeToggle: { paddingVertical: 2 },
+  recipeToggleText: { fontSize: 11, color: section.text, fontWeight: '700' },
+  recipeBox: {
+    backgroundColor: colors.background,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+  },
+  recipeLabel: { fontSize: 10, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
+  recipeText:  { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
 
   mealFoods:     { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
   mealFoodsDone: { color: colors.textMuted },
 
   mealBadges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   hiddenMealRow: {
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: section.soft,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: section.strong + '44',
     padding: 10,
     gap: 8,
   },
@@ -322,11 +386,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: colors.primary,
+    borderColor: section.strong,
     paddingHorizontal: 10,
     paddingVertical: 5,
   },
-  restoreBtnText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  restoreBtnText: { fontSize: 12, color: section.text, fontWeight: '700' },
   pill: {
     backgroundColor: colors.background, borderRadius: radius.sm,
     borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4,

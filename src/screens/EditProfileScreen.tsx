@@ -4,9 +4,9 @@ import {
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate } from '../types';
+import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { colors, radius } from '../constants/theme';
+import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto } from '../services/api';
 
 interface EditProfileScreenProps {
@@ -14,6 +14,7 @@ interface EditProfileScreenProps {
   profile: UserProfile;
   onSave: (updated: UserProfile) => void;
   onCancel: () => void;
+  mode?: 'plan' | 'equipment' | 'foods' | 'theme';
 }
 
 interface PhotoMealDraft {
@@ -186,7 +187,7 @@ const afm = StyleSheet.create({
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditProfileScreen({ authToken, profile, onSave, onCancel }: EditProfileScreenProps) {
+export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'plan' }: EditProfileScreenProps) {
   const meta = useMetaData();
 
   const weightGoals   = new Set(meta.goalConfig.weight_goals);
@@ -198,6 +199,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
   );
+  const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'midnight');
 
   // Physical stats
   const [currentWeight, setCurrentWeight] = useState<string>(
@@ -308,6 +310,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     onSave({
       ...profile,
       goal,
+      themePreference,
       // Preserve goal start metadata so editing current weight does not reset "initial" weight.
       goalDetails: {
         ...profile.goalDetails,
@@ -356,13 +359,29 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     return `${food.name} ${food.unit ?? ''}`.toLowerCase().includes(foodSearchLower);
   });
 
+  const screenTitle = mode === 'equipment'
+    ? 'Edit Equipment'
+    : mode === 'foods'
+      ? 'Edit Food Options'
+      : mode === 'theme'
+        ? 'Themes'
+        : 'Edit Plan';
+  const saveLabel = mode === 'equipment'
+    ? 'Save Equipment'
+    : mode === 'foods'
+      ? 'Save Foods'
+      : mode === 'theme'
+        ? 'Save Theme'
+        : 'Save & Update Plan';
+  const previewTheme = getTheme(themePreference);
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={onCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Text style={styles.cancelText}>Cancel</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>Edit Plan</Text>
+        <Text style={styles.title}>{screenTitle}</Text>
         <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Text style={styles.saveText}>Save</Text>
         </TouchableOpacity>
@@ -370,6 +389,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
 
+        {(mode === 'plan' || mode === 'theme') && (
+        <>
+        {mode === 'plan' && (
+        <>
         {/* ── Goal ── */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Goal</Text>
@@ -483,8 +506,62 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             ))}
           </View>
         </View>
+        </>
+        )}
 
-        {/* ── Equipment ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Theme</Text>
+          <View style={styles.themeList}>
+            {(Object.values(APP_THEMES) as Array<(typeof APP_THEMES)[keyof typeof APP_THEMES]>).map((theme) => {
+              const selected = themePreference === theme.name;
+              return (
+                <TouchableOpacity
+                  key={theme.name}
+                  style={[
+                    styles.themeCard,
+                    {
+                      backgroundColor: theme.colors.surface,
+                      borderColor: selected ? theme.colors.primary : theme.colors.border,
+                    },
+                  ]}
+                  onPress={() => setThemePreference(theme.name)}>
+                  <View style={styles.themeCardTop}>
+                    <View>
+                      <Text style={[styles.themeName, { color: theme.colors.textPrimary }]}>{theme.label}</Text>
+                      <Text style={[styles.themeDesc, { color: theme.colors.textSecondary }]}>{theme.description}</Text>
+                    </View>
+                    {selected ? <Text style={[styles.themeSelected, { color: theme.colors.primary }]}>Selected</Text> : null}
+                  </View>
+                  <View style={styles.themeSwatches}>
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.workout.strong }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.meals.strong }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.planner.strong }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.surfaceRaised }]} />
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <View style={[styles.themePreview, { backgroundColor: previewTheme.colors.surface, borderColor: previewTheme.colors.border }]}> 
+            <Text style={[styles.themePreviewTitle, { color: previewTheme.colors.textPrimary }]}>Preview</Text>
+            <View style={styles.themePreviewRow}>
+              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.workout.soft, borderColor: previewTheme.sections.workout.strong }]}>
+                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.workout.text }]}>Workout</Text>
+              </View>
+              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.meals.soft, borderColor: previewTheme.sections.meals.strong }]}>
+                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.meals.text }]}>Meals</Text>
+              </View>
+              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.planner.soft, borderColor: previewTheme.sections.planner.strong }]}>
+                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.planner.text }]}>Planning</Text>
+              </View>
+            </View>
+          </View>
+        </View>
+        </>
+        )}
+
+        {mode === 'equipment' && (
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>
             Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
@@ -532,8 +609,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Text style={styles.addTriggerText}>+ Add equipment</Text>
           </TouchableOpacity>
         </View>
+        )}
 
-        {/* ── Foods ── */}
+        {mode === 'foods' && (
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>
             Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
@@ -645,9 +723,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </TouchableOpacity>
           </View>
         </View>
+        )}
 
         <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-          <Text style={styles.saveBtnText}>Save & Update Plan</Text>
+          <Text style={styles.saveBtnText}>{saveLabel}</Text>
         </TouchableOpacity>
       </ScrollView>
 
@@ -679,16 +758,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       />
       <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} />
 
-      <Modal visible={!!photoMealDraft} transparent animationType="slide" onRequestClose={() => setPhotoMealDraft(null)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-          <TouchableOpacity style={im.backdrop} activeOpacity={1} onPress={() => setPhotoMealDraft(null)}>
-            <View style={im.sheet}>
-              <View style={im.handle} />
-              <Text style={im.title}>Confirm Photo Meal</Text>
-              <Text style={im.subtitle}>Review the detected foods and save this as a reusable meal entry.</Text>
+      <Modal visible={!!photoMealDraft} transparent animationType="fade" onRequestClose={() => setPhotoMealDraft(null)}>
+        <KeyboardAvoidingView style={styles.centeredBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <TouchableOpacity style={styles.centeredBackdrop} activeOpacity={1} onPress={() => setPhotoMealDraft(null)}>
+            <TouchableOpacity activeOpacity={1} style={styles.photoAssessmentModal} onPress={() => undefined}>
+              <View style={styles.photoAssessmentHeader}>
+                <Text style={styles.photoAssessmentEyebrow}>Photo Assessment</Text>
+                <Text style={styles.photoAssessmentTitle}>Review detected meal</Text>
+                <Text style={styles.photoAssessmentSubtitle}>Clean this up if needed, then save it as a reusable meal.</Text>
+              </View>
 
               <TextInput
-                style={im.input}
+                style={styles.photoAssessmentInput}
                 value={photoMealDraft?.meal_name ?? ''}
                 onChangeText={(value) => setPhotoMealDraft(prev => prev ? { ...prev, meal_name: value } : prev)}
                 placeholder="Meal name"
@@ -696,17 +777,38 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               />
 
               <View style={styles.photoMealCard}>
-                <Text style={styles.photoMealCardTitle}>Detected Contents</Text>
-                <Text style={styles.photoMealItems}>{photoMealDraft?.items.join(', ')}</Text>
-                <Text style={styles.photoMealMacros}>
-                  {Math.round(photoMealDraft?.calories ?? 0)} cal · {Math.round(photoMealDraft?.protein ?? 0)}g protein · {Math.round(photoMealDraft?.carbs ?? 0)}g carbs · {Math.round(photoMealDraft?.fat ?? 0)}g fat
-                </Text>
+                <Text style={styles.photoMealCardTitle}>Detected foods</Text>
+                <Text style={styles.photoMealItems}>{photoMealDraft?.items.join(' · ')}</Text>
               </View>
 
-              <TouchableOpacity style={im.confirmBtn} onPress={confirmPhotoMeal}>
-                <Text style={im.confirmText}>Save as Reusable Meal</Text>
-              </TouchableOpacity>
-            </View>
+              <View style={styles.photoMacroGrid}>
+                <View style={styles.photoMacroTile}>
+                  <Text style={styles.photoMacroValue}>{Math.round(photoMealDraft?.calories ?? 0)}</Text>
+                  <Text style={styles.photoMacroLabel}>Calories</Text>
+                </View>
+                <View style={styles.photoMacroTile}>
+                  <Text style={styles.photoMacroValue}>{Math.round(photoMealDraft?.protein ?? 0)}g</Text>
+                  <Text style={styles.photoMacroLabel}>Protein</Text>
+                </View>
+                <View style={styles.photoMacroTile}>
+                  <Text style={styles.photoMacroValue}>{Math.round(photoMealDraft?.carbs ?? 0)}g</Text>
+                  <Text style={styles.photoMacroLabel}>Carbs</Text>
+                </View>
+                <View style={styles.photoMacroTile}>
+                  <Text style={styles.photoMacroValue}>{Math.round(photoMealDraft?.fat ?? 0)}g</Text>
+                  <Text style={styles.photoMacroLabel}>Fat</Text>
+                </View>
+              </View>
+
+              <View style={styles.photoAssessmentActions}>
+                <TouchableOpacity style={styles.photoAssessmentSecondaryBtn} onPress={() => setPhotoMealDraft(null)}>
+                  <Text style={styles.photoAssessmentSecondaryText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.photoAssessmentPrimaryBtn} onPress={confirmPhotoMeal}>
+                  <Text style={styles.photoAssessmentPrimaryText}>Save Meal</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
           </TouchableOpacity>
         </KeyboardAvoidingView>
       </Modal>
@@ -765,6 +867,36 @@ const styles = StyleSheet.create({
   durationDesc:       { fontSize: 10, color: colors.textMuted, marginTop: 2 },
   durationDescActive: { color: colors.primaryLight },
 
+  themeList: { gap: 10 },
+  themeCard: {
+    borderWidth: 1.5,
+    borderRadius: radius.md,
+    padding: 14,
+    gap: 10,
+  },
+  themeCardTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  themeName: { fontSize: 15, fontWeight: '700' },
+  themeDesc: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  themeSelected: { fontSize: 12, fontWeight: '700' },
+  themeSwatches: { flexDirection: 'row', gap: 8 },
+  themeSwatch: { width: 28, height: 28, borderRadius: radius.full },
+  themePreview: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 12,
+    gap: 10,
+  },
+  themePreviewTitle: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7 },
+  themePreviewRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  themePreviewPill: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  themePreviewPillText: { fontSize: 12, fontWeight: '700' },
+
   chipGroup:      { marginBottom: 16 },
   chipGroupLabel: { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8 },
   searchInput: {
@@ -819,6 +951,60 @@ const styles = StyleSheet.create({
   photoMealCardTitle: { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6 },
   photoMealItems: { fontSize: 13, color: colors.textPrimary },
   photoMealMacros: { fontSize: 12, color: colors.textSecondary },
+  centeredBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.72)', justifyContent: 'center', padding: 20 },
+  photoAssessmentModal: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 20,
+    gap: 14,
+  },
+  photoAssessmentHeader: { gap: 4 },
+  photoAssessmentEyebrow: { fontSize: 11, fontWeight: '700', color: colors.primary, textTransform: 'uppercase', letterSpacing: 1 },
+  photoAssessmentTitle: { fontSize: 20, fontWeight: '700', color: colors.textPrimary },
+  photoAssessmentSubtitle: { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
+  photoAssessmentInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    backgroundColor: colors.background,
+    color: colors.textPrimary,
+  },
+  photoMacroGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  photoMacroTile: {
+    width: '47%',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+  },
+  photoMacroValue: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
+  photoMacroLabel: { fontSize: 11, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 4 },
+  photoAssessmentActions: { flexDirection: 'row', gap: 10, marginTop: 4 },
+  photoAssessmentSecondaryBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+    backgroundColor: colors.surfaceRaised,
+  },
+  photoAssessmentSecondaryText: { fontSize: 14, fontWeight: '700', color: colors.textSecondary },
+  photoAssessmentPrimaryBtn: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  photoAssessmentPrimaryText: { fontSize: 14, fontWeight: '700', color: colors.background },
   savedMealsList: { gap: 8, marginTop: 6 },
   savedMealCard: {
     flexDirection: 'row',

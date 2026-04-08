@@ -106,11 +106,22 @@ export async function getWeightRecommendation(
   goal: string,
   lastSets: import('../types').CompletedSet[],
   nextSetNumber: number,
+  options?: {
+    targetSets?: number;
+    targetReps?: string;
+    progressionPace?: 'conservative' | 'moderate' | 'aggressive';
+    experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
+    recoveryLevel?: 'low' | 'normal' | 'high';
+    phase?: 'accumulation' | 'intensification' | 'deload';
+    workoutFocus?: string;
+    weekNumber?: number;
+    incrementLbs?: number;
+  },
 ): Promise<{ weightLbs: number; reps: number; tip: string }> {
   return request('/ai/recommend-weight', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber }),
+    body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber, ...options }),
   });
 }
 
@@ -328,6 +339,23 @@ export async function analyzeFoodPhoto(
   fat: number;
 }> {
   return request('/ai/food-photo', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getWorkoutSummary(
+  token: string,
+  payload: {
+    exercises: import('../types').SessionExercise[];
+    durationSeconds: number;
+    focus: string;
+    goal: string;
+    weightLbs?: number;
+  },
+): Promise<import('../types').WorkoutSummary> {
+  return request('/ai/workout-summary', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),

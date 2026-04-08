@@ -1,12 +1,20 @@
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { WorkoutDay } from '../types';
-import { colors, radius } from '../constants/theme';
+import { AppThemeName } from '../types';
+import { getTheme, radius } from '../constants/theme';
 
 interface WorkoutCardProps {
   workout: WorkoutDay;
+  themeName?: AppThemeName;
+  onOpenExerciseVideo?: (exerciseName: string) => void;
 }
 
-export default function WorkoutCard({ workout }: WorkoutCardProps) {
+export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }: WorkoutCardProps) {
+  const theme = getTheme(themeName);
+  const colors = theme.colors;
+  const section = theme.sections.workout;
+  const styles = createStyles(colors, section);
+
   return (
     <View style={styles.card}>
       <View style={styles.header}>
@@ -28,6 +36,11 @@ export default function WorkoutCard({ workout }: WorkoutCardProps) {
               <View style={styles.badge}>
                 <Text style={styles.badgeText}>Rest {exercise.restSeconds}s</Text>
               </View>
+              {onOpenExerciseVideo ? (
+                <TouchableOpacity style={styles.videoBadge} onPress={() => onOpenExerciseVideo(exercise.name)}>
+                  <Text style={styles.videoBadgeText}>Form Video</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           </View>
         ))}
@@ -40,14 +53,14 @@ export default function WorkoutCard({ workout }: WorkoutCardProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: ReturnType<typeof getTheme>['sections']['workout']) => StyleSheet.create({
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     padding: 16,
     marginBottom: 16,
     borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
+    borderLeftColor: section.strong,
   },
   header:    { marginBottom: 16 },
   title:     { fontSize: 18, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
@@ -67,12 +80,21 @@ const styles = StyleSheet.create({
 
   badges:    { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   badge: {
-    backgroundColor: colors.background,
+    backgroundColor: section.soft,
     paddingHorizontal: 10, paddingVertical: 4,
     borderRadius: radius.sm,
-    borderWidth: 1, borderColor: colors.border,
+    borderWidth: 1, borderColor: section.strong + '66',
   },
-  badgeText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  badgeText: { fontSize: 12, color: section.text, fontWeight: '600' },
+  videoBadge: {
+    backgroundColor: colors.surface,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: section.strong,
+  },
+  videoBadgeText: { fontSize: 12, color: section.strong, fontWeight: '700' },
 
   footer:     { paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
   footerText: { fontSize: 12, color: colors.textSecondary },

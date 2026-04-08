@@ -32,6 +32,7 @@ export default function Index() {
   const [authToken, setAuthToken]         = useState<string | null>(null);
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
+  const [editMode, setEditMode]           = useState<'plan' | 'equipment' | 'foods' | 'theme'>('plan');
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [activeWorkout, setActiveWorkout] = useState<WorkoutDay | null>(null);
@@ -92,6 +93,7 @@ export default function Index() {
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
+    setEditMode('plan');
     setShowProgress(false);
     setShowAccount(false);
     setActiveWorkout(null);
@@ -102,6 +104,7 @@ export default function Index() {
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
     setIsEditing(false);
+    setEditMode('plan');
     if (authToken) syncOnboarding(authToken, stamped).catch(() => null);
   };
 
@@ -114,7 +117,7 @@ export default function Index() {
   if (!userProfile) return <OnboardingScreen onComplete={handleProfileComplete} />;
 
   if (isEditing) {
-    return <EditProfileScreen authToken={authToken} profile={userProfile} onSave={handleSaveProfile} onCancel={() => setIsEditing(false)} />;
+    return <EditProfileScreen authToken={authToken} profile={userProfile} mode={editMode} onSave={handleSaveProfile} onCancel={() => { setIsEditing(false); setEditMode('plan'); }} />;
   }
 
   if (activeWorkout) {
@@ -123,6 +126,8 @@ export default function Index() {
         authToken={authToken}
         workout={activeWorkout}
         goal={userProfile.goal}
+        themeName={userProfile.themePreference}
+        weightLbs={userProfile.physicalStats.weightLbs}
         onFinish={handleWorkoutFinish}
         onCancel={() => setActiveWorkout(null)}
       />
@@ -139,7 +144,10 @@ export default function Index() {
         authToken={authToken}
         userProfile={userProfile}
         onSignOut={handleSignOut}
-        onEditProfile={() => setIsEditing(true)}
+        onEditProfile={() => { setEditMode('plan'); setIsEditing(true); }}
+        onEditEquipment={() => { setEditMode('equipment'); setIsEditing(true); }}
+        onEditFoods={() => { setEditMode('foods'); setIsEditing(true); }}
+        onEditThemes={() => { setEditMode('theme'); setIsEditing(true); }}
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}

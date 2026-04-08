@@ -8,6 +8,25 @@ from openai import OpenAI
 
 from app.auth import get_current_user
 from app.models import User
+from app.workout_progression import (
+    EffortFeedback,
+    ExerciseCategory,
+    ExercisePrescription,
+    ExperienceLevel,
+    GoalType,
+    PhaseType,
+    PlannedSet,
+    ProgressionPace,
+    ProgressionPriority,
+    ReadinessInput,
+    RecoveryLevel,
+    SetResult,
+    SetType,
+    UserTrainingProfile,
+    WorkoutContext,
+    WorkoutFocus,
+    WorkoutProgressionEngine,
+)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -48,12 +67,27 @@ class CompletedSetIn(BaseModel):
     reps: int
     weightLbs: float
     feedback: str | None = None
+    rir: float | None = None
 
 class WeightRecommendRequest(BaseModel):
     exerciseName: str
     goal: str
     lastSets: list[CompletedSetIn]
     nextSetNumber: int
+    targetSets: int | None = None
+    targetReps: str | None = None
+    progressionPace: str | None = None
+    experienceLevel: str | None = None
+    recoveryLevel: str | None = None
+    phase: str | None = None
+    workoutFocus: str | None = None
+    weekNumber: int | None = None
+    incrementLbs: float | None = None
+    sleepHours: float | None = None
+    energy1to5: int | None = None
+    soreness1to5: int | None = None
+    stress1to5: int | None = None
+    caloriesOnTargetRecently: bool | None = None
 
 
 class TrainerQuestionRequest(BaseModel):
@@ -83,6 +117,120 @@ class FormPhotoRequest(BaseModel):
     mime_type: str = "image/jpeg"
     exercise_name: str | None = None
     question: str | None = None
+
+
+progression_engine = WorkoutProgressionEngine()
+
+
+def map_goal_type(goal: str) -> GoalType:
+    g = (goal or "").lower().strip()
+    if g in {"strength"}:
+        return GoalType.STRENGTH
+    if g in {"fat_loss", "toning"}:
+        return GoalType.FAT_LOSS
+    if g in {"maintain", "flexibility", "stress_relief"}:
+        return GoalType.MAINTAIN
+    if g in {"endurance"}:
+        return GoalType.ENDURANCE
+    return GoalType.HYPERTROPHY
+
+
+def map_feedback(feedback: str | None) -> EffortFeedback | None:
+    if not feedback:
+        return None
+    value = feedback.lower().strip()
+    mapping = {
+        "easy": EffortFeedback.EASY,
+        "good": EffortFeedback.GOOD,
+        "grind": EffortFeedback.HARD,
+        "hard": EffortFeedback.HARD,
+        "failure": EffortFeedback.FAILURE,
+        "pain": EffortFeedback.PAIN,
+        "form_breakdown": EffortFeedback.FORM_BREAKDOWN,
+        "form breakdown": EffortFeedback.FORM_BREAKDOWN,
+    }
+    return mapping.get(value)
+
+
+def infer_exercise_category(exercise_name: str) -> ExerciseCategory:
+    name = (exercise_name or "").lower()
+    if any(x in name for x in ["machine", "cable", "leg press", "pulldown", "row machine"]):
+        return ExerciseCategory.MACHINE
+    if any(x in name for x in ["push up", "pull up", "plank", "dip", "bodyweight"]):
+        return ExerciseCategory.BODYWEIGHT
+    if any(x in name for x in ["curl", "extension", "raise", "fly", "kickback", "lateral"]):
+        return ExerciseCategory.ISOLATION
+    return ExerciseCategory.COMPOUND
+
+
+def parse_target_reps(target_reps: str | None) -> tuple[int, int] | None:
+    if not target_reps:
+        return None
+    cleaned = target_reps.strip()
+    if "-" in cleaned:
+        left, right = cleaned.split("-", 1)
+        if left.strip().isdigit() and right.strip().isdigit():
+            rep_min = int(left.strip())
+            rep_max = int(right.strip())
+            if rep_min > 0 and rep_max >= rep_min:
+                return rep_min, rep_max
+    if cleaned.isdigit():
+        reps = int(cleaned)
+        if reps > 0:
+            return reps, reps
+    return None
+
+
+def map_progression_priority(goal_type: GoalType) -> ProgressionPriority:
+    if goal_type == GoalType.STRENGTH:
+        return ProgressionPriority.LOAD_FIRST
+    if goal_type == GoalType.HYPERTROPHY:
+        return ProgressionPriority.HYBRID
+    return ProgressionPriority.REPS_FIRST
+
+
+def map_workout_focus(value: str | None) -> WorkoutFocus:
+    raw = (value or "").lower().strip().replace(" ", "_")
+    for focus in WorkoutFocus:
+        if raw == focus.value:
+            return focus
+    return WorkoutFocus.FULL_BODY
+
+
+def map_phase(value: str | None) -> PhaseType:
+    raw = (value or "").lower().strip()
+    if raw == PhaseType.INTENSIFICATION.value:
+        return PhaseType.INTENSIFICATION
+    if raw == PhaseType.DELOAD.value:
+        return PhaseType.DELOAD
+    return PhaseType.ACCUMULATION
+
+
+def map_progression_pace(value: str | None) -> ProgressionPace:
+    raw = (value or "").lower().strip()
+    if raw == ProgressionPace.CONSERVATIVE.value:
+        return ProgressionPace.CONSERVATIVE
+    if raw == ProgressionPace.AGGRESSIVE.value:
+        return ProgressionPace.AGGRESSIVE
+    return ProgressionPace.MODERATE
+
+
+def map_experience_level(value: str | None) -> ExperienceLevel:
+    raw = (value or "").lower().strip()
+    if raw == ExperienceLevel.BEGINNER.value:
+        return ExperienceLevel.BEGINNER
+    if raw == ExperienceLevel.ADVANCED.value:
+        return ExperienceLevel.ADVANCED
+    return ExperienceLevel.INTERMEDIATE
+
+
+def map_recovery_level(value: str | None) -> RecoveryLevel:
+    raw = (value or "").lower().strip()
+    if raw == RecoveryLevel.LOW.value:
+        return RecoveryLevel.LOW
+    if raw == RecoveryLevel.HIGH.value:
+        return RecoveryLevel.HIGH
+    return RecoveryLevel.NORMAL
 
 
 # ─── Prompt builder ───────────────────────────────────────────────────────────
@@ -246,24 +394,27 @@ Return ONLY valid JSON matching this exact schema, no extra text:
       "fat": {t['fat']}
     }},
     "breakfast": {{
-      "meal": "Breakfast",
-      "foods": ["string"],
+      "meal": "Recipe name (e.g. Oat & Egg White Bowl)",
+      "foods": ["100g oats", "3 egg whites", "1 tbsp honey"],
+      "instructions": "Cook oats 3 min. Whisk egg whites, scramble 2 min. Drizzle honey.",
       "calories": {t['breakfast_cal']},
       "protein": {t['breakfast_prot']},
       "carbs": {t['breakfast_carbs']},
       "fat": {t['breakfast_fat']}
     }},
     "lunch": {{
-      "meal": "Lunch",
-      "foods": ["string"],
+      "meal": "Recipe name",
+      "foods": ["ingredient with amount", "ingredient with amount"],
+      "instructions": "Brief 1-3 sentence cooking method.",
       "calories": {t['lunch_cal']},
       "protein": {t['lunch_prot']},
       "carbs": {t['lunch_carbs']},
       "fat": {t['lunch_fat']}
     }},
     "dinner": {{
-      "meal": "Dinner",
-      "foods": ["string"],
+      "meal": "Recipe name",
+      "foods": ["ingredient with amount", "ingredient with amount"],
+      "instructions": "Brief 1-3 sentence cooking method.",
       "calories": {t['dinner_cal']},
       "protein": {t['dinner_prot']},
       "carbs": {t['dinner_carbs']},
@@ -280,77 +431,87 @@ def recommend_weight(
     body: WeightRecommendRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Given recent sets for an exercise, return the next weight/rep recommendation."""
-    print(f"[BACKEND] Received weight recommendation request for {body.exerciseName}, set {body.nextSetNumber}")
-    api_key = get_openai_api_key()
-    if not api_key:
-        print("[BACKEND] ERROR: OpenAI API key not configured")
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-
-    sets_str = '; '.join(
-        f"Set {s.setNumber}: {s.weightLbs} lbs × {s.reps} reps"
-        + (f" ({s.feedback})" if s.feedback else "")
-        for s in body.lastSets
-    )
-
-    client = OpenAI(api_key=api_key)
+    """Deterministic next-set recommendation based on recent performance and feedback."""
     try:
-        print(f"[BACKEND] Calling OpenAI for {body.exerciseName} recommendation...")
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are an expert strength coach. Respond with valid JSON only."},
-                {"role": "user", "content": (
-                    f'Exercise: {body.exerciseName}\n'
-                    f'User goal: {body.goal}\n'
-                    f'Sets completed so far: {sets_str}\n'
-                    f'This is set number {body.nextSetNumber}.\n\n'
-                    'Based on the sets completed, goal, and any set feedback labels like easy, good, grind, or pain, recommend the weight and reps for the next set. '
-                    'If the last set was marked pain, be conservative and prioritize safety. '
-                    'Be concise and motivational. Return JSON:\n'
-                    '{"weightLbs": number, "reps": number, "tip": "one short sentence"}'
-                )},
-            ],
-            temperature=0.4,
-            max_tokens=100,
+        planned_set_count = body.targetSets if body.targetSets and body.targetSets > 0 else max(1, body.nextSetNumber)
+        planned_sets = [
+            PlannedSet(set_number=idx + 1, set_type=SetType.STRAIGHT)
+            for idx in range(planned_set_count)
+        ]
+
+        sets_completed = [
+            SetResult(
+                set_number=set_data.setNumber,
+                weight_lbs=set_data.weightLbs,
+                reps=set_data.reps,
+                rir=set_data.rir,
+                feedback=map_feedback(set_data.feedback),
+            )
+            for set_data in body.lastSets
+        ]
+        last_weight = sets_completed[-1].weight_lbs if sets_completed else None
+
+        goal_type = map_goal_type(body.goal)
+        profile = UserTrainingProfile(
+            primary_goal=goal_type,
+            experience_level=map_experience_level(body.experienceLevel),
+            recovery_level=map_recovery_level(body.recoveryLevel),
+            progression_pace=map_progression_pace(body.progressionPace),
         )
-        result = json.loads(response.choices[0].message.content)
+        workout = WorkoutContext(
+            workout_name="Current Workout",
+            focus=map_workout_focus(body.workoutFocus),
+            phase=map_phase(body.phase),
+            week_number=max(1, body.weekNumber or 1),
+        )
+        prescription = ExercisePrescription(
+            exercise_name=body.exerciseName,
+            category=infer_exercise_category(body.exerciseName),
+            planned_sets=planned_sets,
+            increment_lbs=max(1.0, body.incrementLbs or 5.0),
+            progression_priority=map_progression_priority(goal_type),
+            default_start_weight_lbs=last_weight,
+        )
+        readiness = ReadinessInput(
+            sleep_hours=body.sleepHours,
+            energy_1_to_5=body.energy1to5,
+            soreness_1_to_5=body.soreness1to5,
+            stress_1_to_5=body.stress1to5,
+            calories_on_target_recently=body.caloriesOnTargetRecently,
+        )
+        rec = progression_engine.recommend_next_set(
+            profile=profile,
+            workout=workout,
+            prescription=prescription,
+            sets_completed_this_workout=sets_completed,
+            readiness=readiness,
+            target_rep_override=parse_target_reps(body.targetReps),
+        )
 
-        # Deterministic post-adjustment so feedback always affects output.
-        last_feedback = None
-        for s in reversed(body.lastSets):
-            if s.feedback:
-                last_feedback = s.feedback.lower()
-                break
+        if rec.action.value == "end_exercise":
+            return {
+                "weightLbs": float(last_weight or 0),
+                "reps": 0,
+                "tip": f"{body.exerciseName} complete for today.",
+                "action": rec.action.value,
+                "debug": rec.debug,
+            }
 
-        weight = float(result.get("weightLbs", body.lastSets[-1].weightLbs if body.lastSets else 0))
-        reps = int(result.get("reps", max(5, body.lastSets[-1].reps if body.lastSets else 8)))
-        tip = str(result.get("tip", "Keep form tight and adjust based on how the set felt."))
+        rec_weight = float(rec.recommended_weight_lbs or last_weight or 0)
+        rep_min = int(rec.target_rep_min or 8)
+        rep_max = int(rec.target_rep_max or rep_min)
+        rec_reps = max(1, round((rep_min + rep_max) / 2))
 
-        if last_feedback == "easy":
-            weight = max(0, round(weight + max(2.5, weight * 0.025), 1))
-            reps = min(15, reps + 1)
-            tip = f"Last set looked easy, so we are nudging intensity up. {tip}"
-        elif last_feedback == "grind":
-            weight = max(0, round(weight - max(2.5, weight * 0.02), 1))
-            reps = max(5, reps - 1)
-            tip = f"Last set was a grind, so back off slightly and keep clean reps. {tip}"
-        elif last_feedback == "pain":
-            weight = max(0, round(weight - max(5, weight * 0.1), 1))
-            reps = max(5, reps - 2)
-            tip = "Pain was flagged, so reduce load and prioritize safe technique."
-
-        result = {
-            "weightLbs": weight,
-            "reps": reps,
-            "tip": tip,
-            "feedbackApplied": last_feedback,
+        return {
+            "weightLbs": rec_weight,
+            "reps": rec_reps,
+            "tip": rec.coach_message,
+            "action": rec.action.value,
+            "repRange": f"{rep_min}-{rep_max}",
+            "debug": rec.debug,
         }
-        print(f"[BACKEND] OpenAI response: {result}")
-        return result
     except Exception as e:
-        print(f"[BACKEND] ERROR: OpenAI call failed: {str(e)}")
+        print(f"[BACKEND] ERROR: deterministic recommendation failed: {str(e)}")
         raise HTTPException(status_code=502, detail=f"Recommendation failed: {str(e)}")
 
 
@@ -574,6 +735,102 @@ def analyze_food_photo(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food photo analysis failed: {str(e)}")
+
+
+class WorkoutSummaryRequest(BaseModel):
+    exercises: list[dict]
+    durationSeconds: int
+    focus: str
+    goal: str
+    weightLbs: float = 150.0
+
+
+@router.post("/workout-summary")
+def generate_workout_summary(
+    body: WorkoutSummaryRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """AI post-workout summary: calories burned, achievements, and personalized recommendations."""
+    weight_kg = body.weightLbs / 2.205
+    duration_hours = body.durationSeconds / 3600
+
+    focus_lower = body.focus.lower()
+    if any(kw in focus_lower for kw in ["cardio", "run", "cycle", "hiit", "conditioning"]):
+        met = 8.0
+    elif any(kw in focus_lower for kw in ["strength", "power", "heavy"]):
+        met = 6.5
+    else:
+        met = 5.5  # hypertrophy / general resistance training
+
+    calories_burned = max(1, round(met * weight_kg * duration_hours))
+
+    total_sets = sum(len(ex.get("sets", [])) for ex in body.exercises)
+    exercises_done = sum(1 for ex in body.exercises if len(ex.get("sets", [])) > 0)
+    achievements: list[str] = []
+    for ex in body.exercises:
+        sets = ex.get("sets", [])
+        if sets:
+            best = max(sets, key=lambda s: s.get("weightLbs", 0) * s.get("reps", 0))
+            weight = best.get("weightLbs", 0)
+            reps = best.get("reps", 0)
+            if weight > 0:
+                achievements.append(f"{ex['name']}: {weight} lbs × {reps} reps")
+
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {
+            "caloriesBurned": calories_burned,
+            "motivationMessage": "Solid effort — every set counts toward your goal. Keep showing up!",
+            "achievements": achievements[:4],
+            "recommendations": [
+                "Consume 20–40 g protein within 2 hours for optimal recovery.",
+                "Hydrate well — aim for at least 16 oz of water post-workout.",
+                "Sleep 7–9 hours tonight to lock in the gains from this session.",
+            ],
+        }
+
+    client = OpenAI(api_key=api_key)
+    try:
+        prompt = (
+            f"Post-workout summary request:\n"
+            f"- Focus: {body.focus}\n"
+            f"- Goal: {body.goal}\n"
+            f"- Duration: {body.durationSeconds // 60} min\n"
+            f"- Exercises completed: {exercises_done}\n"
+            f"- Total sets logged: {total_sets}\n"
+            f"- Estimated calories burned: {calories_burned}\n"
+            f"- Best sets: {'; '.join(achievements[:4]) or 'none logged'}\n\n"
+            "Write a short, energetic post-workout message and 3 concrete recovery/nutrition tips.\n"
+            'Return JSON: {"motivationMessage": string, "recommendations": [string, string, string]}'
+        )
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are an upbeat fitness coach. Give brief, practical post-workout feedback. Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=250,
+        )
+        ai = json.loads(response.choices[0].message.content)
+        return {
+            "caloriesBurned": calories_burned,
+            "motivationMessage": ai.get("motivationMessage", "Great work today!"),
+            "achievements": achievements[:4],
+            "recommendations": ai.get("recommendations", []),
+        }
+    except Exception:
+        return {
+            "caloriesBurned": calories_burned,
+            "motivationMessage": "Strong session — consistency is the key to progress!",
+            "achievements": achievements[:4],
+            "recommendations": [
+                "Consume 20–40 g protein within 2 hours.",
+                "Hydrate well post-workout.",
+                "Aim for 7–9 hours of sleep tonight.",
+            ],
+        }
 
 
 @router.post("/form-photo")

@@ -60,9 +60,26 @@ function buildStrengthTrend(history: WorkoutSession[]): StrengthPoint[] {
   });
 }
 
+/** Returns all data points for a specific exercise across history: {date, bestWeightLbs, totalVolume} */
+function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
+  const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
+  return sorted
+    .filter(s => s.exercises.some(e => e.name.toLowerCase() === exerciseName.toLowerCase()))
+    .slice(-10)
+    .map(s => {
+      const ex = s.exercises.find(e => e.name.toLowerCase() === exerciseName.toLowerCase())!;
+      const bestWeight = ex.sets.length ? Math.max(...ex.sets.map(set => set.weightLbs)) : 0;
+      const volume = ex.sets.reduce((sum, set) => sum + set.weightLbs * set.reps, 0);
+      const d = new Date(s.date);
+      return { label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume };
+    });
+}
+
 export default function ProgressScreen({ onBack, authToken, userProfile }: ProgressScreenProps) {
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history'>('prs');
+  const [tab, setTab] = useState<'prs' | 'history' | 'charts'>('prs');
+  const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
+  const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
   const [prs, setPrs] = useState<PR[]>([]);
   const [history, setHistory] = useState<WorkoutSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,7 +133,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile }: Progr
         <TouchableOpacity
           style={[styles.tab, tab === 'prs' && styles.tabActive]}
           onPress={() => setTab('prs')}>
-          <Text style={[styles.tabText, tab === 'prs' && styles.tabTextActive]}>Personal Records</Text>
+          <Text style={[styles.tabText, tab === 'prs' && styles.tabTextActive]}>Records</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, tab === 'charts' && styles.tabActive]}
+          onPress={() => setTab('charts')}>
+          <Text style={[styles.tabText, tab === 'charts' && styles.tabTextActive]}>Charts</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tab, tab === 'history' && styles.tabActive]}
@@ -129,6 +151,103 @@ export default function ProgressScreen({ onBack, authToken, userProfile }: Progr
         <View style={styles.center}>
           <ActivityIndicator color={colors.primary} />
         </View>
+      ) : tab === 'charts' ? (
+        <ScrollView contentContainerStyle={styles.content}>
+          {prs.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>📊</Text>
+              <Text style={styles.emptyTitle}>No data yet</Text>
+              <Text style={styles.emptyBody}>Complete workouts and log sets to see your progress charts.</Text>
+            </View>
+          ) : (
+            <>
+              {/* Exercise selector */}
+              <Text style={styles.sectionLabel}>Select exercise</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                {prs.map((pr, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
+                    onPress={() => setSelectedExercise(pr.exerciseName)}>
+                    <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
+                      {pr.exerciseName}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              {selectedExercise ? (() => {
+                const trend = buildExerciseTrend(history, selectedExercise);
+                if (trend.length < 2) {
+                  return (
+                    <View style={styles.emptyBox}>
+                      <Text style={styles.emptyTitle}>Not enough data</Text>
+                      <Text style={styles.emptyBody}>Complete at least 2 sessions with {selectedExercise} to see a trend.</Text>
+                    </View>
+                  );
+                }
+                const values = trend.map(p => chartMode === 'weight' ? p.bestWeight : Math.round(p.volume));
+                const maxVal = Math.max(...values, 1);
+                return (
+                  <View style={styles.graphCard}>
+                    <View style={styles.graphHeader}>
+                      <Text style={styles.graphTitle}>{selectedExercise}</Text>
+                      <View style={{ flexDirection: 'row', gap: 6 }}>
+                        <TouchableOpacity
+                          style={[styles.chartModeBtn, chartMode === 'weight' && styles.chartModeBtnActive]}
+                          onPress={() => setChartMode('weight')}>
+                          <Text style={[styles.chartModeBtnText, chartMode === 'weight' && styles.chartModeBtnTextActive]}>Weight</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.chartModeBtn, chartMode === 'volume' && styles.chartModeBtnActive]}
+                          onPress={() => setChartMode('volume')}>
+                          <Text style={[styles.chartModeBtnText, chartMode === 'volume' && styles.chartModeBtnTextActive]}>Volume</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                    <Text style={styles.graphSubtitle}>
+                      {chartMode === 'weight' ? 'Best set weight (lbs) per session' : 'Total volume (lbs × reps) per session'}
+                    </Text>
+                    <View style={styles.graphBars}>
+                      {trend.map((point, i) => {
+                        const val = chartMode === 'weight' ? point.bestWeight : Math.round(point.volume);
+                        const h = Math.max(8, Math.round((val / maxVal) * 100));
+                        const isLast = i === trend.length - 1;
+                        return (
+                          <View key={i} style={styles.graphBarCol}>
+                            <Text style={[styles.graphBarValue, isLast && { color: colors.primary }]}>{val}</Text>
+                            <View style={[styles.graphBar, { height: h }, isLast && { backgroundColor: colors.accent }]} />
+                            <Text style={styles.graphBarLabel}>{point.label}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                    <View style={styles.chartSummaryRow}>
+                      <View style={styles.chartStat}>
+                        <Text style={styles.chartStatValue}>{values[values.length - 1]}{chartMode === 'weight' ? ' lbs' : ''}</Text>
+                        <Text style={styles.chartStatLabel}>Latest</Text>
+                      </View>
+                      <View style={styles.chartStat}>
+                        <Text style={styles.chartStatValue}>{Math.max(...values)}{chartMode === 'weight' ? ' lbs' : ''}</Text>
+                        <Text style={styles.chartStatLabel}>All-time best</Text>
+                      </View>
+                      <View style={styles.chartStat}>
+                        <Text style={[styles.chartStatValue, { color: values[values.length - 1] >= values[0] ? colors.primary : colors.error }]}>
+                          {values[values.length - 1] >= values[0] ? '+' : ''}{values[values.length - 1] - values[0]}{chartMode === 'weight' ? ' lbs' : ''}
+                        </Text>
+                        <Text style={styles.chartStatLabel}>vs first session</Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              })() : (
+                <View style={styles.emptyBox}>
+                  <Text style={styles.emptyBody}>Tap an exercise above to see its progress chart.</Text>
+                </View>
+              )}
+            </>
+          )}
+        </ScrollView>
       ) : tab === 'prs' ? (
         <ScrollView contentContainerStyle={styles.content}>
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
@@ -389,4 +508,28 @@ const styles = StyleSheet.create({
   exRow:    { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   exName:   { fontSize: 13, color: colors.textPrimary },
   exBest:   { fontSize: 13, color: colors.primary, fontWeight: '600' },
+
+  exerciseChip: {
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: radius.full,
+    borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+  },
+  exerciseChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '20' },
+  exerciseChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  exerciseChipTextActive: { color: colors.primary },
+
+  chartModeBtn: {
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: radius.full,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  chartModeBtnActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  chartModeBtnText: { fontSize: 11, color: colors.textSecondary, fontWeight: '700' },
+  chartModeBtnTextActive: { color: colors.background },
+
+  chartSummaryRow: { flexDirection: 'row', justifyContent: 'space-around', marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },
+  chartStat: { alignItems: 'center', gap: 2 },
+  chartStatValue: { fontSize: 15, fontWeight: '800', color: colors.textPrimary },
+  chartStatLabel: { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
 });

@@ -6,24 +6,25 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
-import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet } from '../types';
+import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises } from '../services/api';
-import { colors, radius } from '../constants/theme';
-import { cancelRestNotifications, scheduleRestNotifications } from '../utils/restNotifications';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary } from '../services/api';
+import { colors, getTheme, radius } from '../constants/theme';
+import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 
 interface WorkoutCoachMessage {
   role: 'user' | 'assistant';
   content: string;
 }
 
-type SetFeedback = 'easy' | 'good' | 'grind' | 'pain';
+type SetFeedback = 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
 
 const FEEDBACK_OPTIONS: Array<{ value: SetFeedback; label: string }> = [
-  { value: 'easy', label: 'Easy' },
-  { value: 'good', label: 'Good' },
-  { value: 'grind', label: 'Grind' },
-  { value: 'pain', label: 'Pain' },
+  { value: 'easy',    label: 'Easy' },
+  { value: 'good',    label: 'Good' },
+  { value: 'hard',    label: 'Hard' },
+  { value: 'failure', label: 'Failure' },
+  { value: 'pain',    label: 'Pain' },
 ];
 
 const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: string) => string }> = [
@@ -44,6 +45,8 @@ interface ActiveWorkoutScreenProps {
   authToken: string;
   workout: WorkoutDay;
   goal: string;
+  themeName?: AppThemeName;
+  weightLbs?: number;
   onFinish: (session: WorkoutSession) => void;
   onCancel: () => void;
 }
@@ -54,10 +57,53 @@ function formatTime(seconds: number): string {
   return `${m}:${s}`;
 }
 
-export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish, onCancel }: ActiveWorkoutScreenProps) {
+function getTargetSetCount(targetSets: unknown): number {
+  const parsed = Number(targetSets);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.floor(parsed);
+  }
+  return 3;
+}
+
+function buildWarmupPlan(workout: WorkoutDay): string[] {
+  const focus = (workout.focus || '').toLowerCase();
+  const primer = /leg|lower/.test(focus)
+    ? '3-5 minutes easy bike or treadmill, then ankle, hip, and squat mobility.'
+    : /pull|back/.test(focus)
+      ? '3-5 minutes light cardio, then band pull-aparts, scap retractions, and shoulder prep.'
+      : /push|chest|shoulder|upper/.test(focus)
+        ? '3-5 minutes light cardio, then shoulder circles, band external rotations, and light pressing prep.'
+        : '3-5 minutes of light cardio followed by dynamic mobility for the joints you will use most.';
+
+  const firstExercise = workout.exercises[0]?.name;
+  const secondExercise = workout.exercises[1]?.name;
+  const ramp = firstExercise
+    ? `Do 2-3 lighter ramp-up sets for ${firstExercise}${secondExercise ? `, then one feeler set for ${secondExercise}` : ''}.`
+    : 'Do 2-3 lighter ramp-up sets before your first working set.';
+
+  return [
+    primer,
+    'Keep warm-up reps smooth and stop well before fatigue.',
+    ramp,
+    'If a joint feels off, slow down and add one more lighter set before starting work sets.',
+  ];
+}
+
+export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
+    // Warm-up state
+    const [warmupDone, setWarmupDone] = useState(false);
+    const warmupSteps = buildWarmupPlan(workout);
+  const theme = getTheme(themeName);
+  const themeColors = theme.colors;
+  const workoutPalette = theme.sections.workout;
   const startTime = useRef(Date.now());
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
+  // Ref-based rest timer — avoids interval churn from re-running useEffect every second
+  const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const restStartAtRef = useRef<number>(0);
+  const restTotalSecondsRef = useRef<number>(0);
+  const restExerciseNameRef = useRef<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
   const [exercises, setExercises] = useState<SessionExercise[]>(() =>
@@ -90,6 +136,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
   const [aiLoadingIdx, setAiLoadingIdx] = useState<number | null>(null);
   const [aiErrorIdx, setAiErrorIdx]     = useState<number | null>(null);
 
+  // Last-session data for comparison display
+  const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
+
+  // Workout summary after finish
+  const [summaryVisible, setSummaryVisible] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
+  const [finishedSession, setFinishedSession] = useState<WorkoutSession | null>(null);
+
   const [finishModalVisible, setFinishModalVisible] = useState(false);
   const [coachModalVisible, setCoachModalVisible] = useState(false);
   const [coachInput, setCoachInput] = useState('');
@@ -101,7 +156,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
 
-  // Timer
+  // Elapsed workout timer
   useEffect(() => {
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
@@ -109,28 +164,32 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     return () => clearInterval(interval);
   }, []);
 
+  // Set up notifications immediately so lock screen alerts work from the first rest
   useEffect(() => {
-    if (restRemaining <= 0) return;
-    const interval = setInterval(() => {
-      setRestRemaining(prev => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          Vibration.vibrate([0, 250, 120, 250]);
-          cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
-          restNotificationIds.current = null;
-          Alert.alert('Rest Complete', `${restForExercise ?? 'Current exercise'} — ready for the next set.`);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [restRemaining, restForExercise]);
+    configureWorkoutNotifications().catch(() => undefined);
+    ensureWorkoutNotificationPermission().catch(() => undefined);
+  }, []);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (restTimerRef.current) clearInterval(restTimerRef.current);
       cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     };
+  }, []);
+
+  // Preload last-session data for all exercises so "Last time" panel shows immediately
+  useEffect(() => {
+    Promise.all(
+      workout.exercises.map(async ex => {
+        const sets = await getLastSetsForExercise(ex.name);
+        return { name: ex.name, sets: sets ?? [] };
+      })
+    ).then(results => {
+      const map: Record<string, CompletedSet[]> = {};
+      results.forEach(r => { if (r.sets.length > 0) map[r.name] = r.sets; });
+      setLastExerciseSets(map);
+    });
   }, []);
 
   // Pre-fill from history when modal opens
@@ -147,14 +206,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
       setLogReps(String(last.reps));
     }
   }, [exercises]);
-
-  const adjustRestSeconds = useCallback((exIdx: number, delta: number) => {
-    setExercises(prev => prev.map((ex, i) => {
-      if (i !== exIdx) return ex;
-      const next = Math.max(15, Math.min(300, (ex.targetRestSeconds || 60) + delta));
-      return { ...ex, targetRestSeconds: next };
-    }));
-  }, []);
 
   const openAddExerciseModal = useCallback(async () => {
     setAddExerciseModalVisible(true);
@@ -189,7 +240,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     setExerciseSearch('');
   }, []);
 
+  // Timestamp-based rest timer — avoids drift from re-running setInterval every second
+  const startRestTimer = useCallback((seconds: number, exerciseName: string) => {
+    if (restTimerRef.current) clearInterval(restTimerRef.current);
+    restStartAtRef.current = Date.now();
+    restTotalSecondsRef.current = seconds;
+    restExerciseNameRef.current = exerciseName;
+
+    restTimerRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
+      const remaining = Math.max(0, restTotalSecondsRef.current - elapsed);
+      setRestRemaining(remaining);
+
+      if (remaining === 0) {
+        if (restTimerRef.current) clearInterval(restTimerRef.current);
+        restTimerRef.current = null;
+        Vibration.vibrate([0, 250, 120, 250]);
+        cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
+        restNotificationIds.current = null;
+        Alert.alert('Rest Complete', `${restExerciseNameRef.current ?? 'Current exercise'} — ready for the next set.`);
+      }
+    }, 500); // 500ms tick for smooth countdown without drift
+  }, []);
+
   const clearRestState = useCallback(() => {
+    if (restTimerRef.current) {
+      clearInterval(restTimerRef.current);
+      restTimerRef.current = null;
+    }
     setRestRemaining(0);
     setRestForExercise(null);
     setRestCue(null);
@@ -243,7 +321,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     // Capture synchronously before any state updates
     const exIdx = logExIdx;
     const ex    = exercises[exIdx];
-    console.log('[LOG_SET] Processing set for exercise:', ex.name, 'current sets:', ex.sets.length, 'target sets:', ex.targetSets);
+    const targetSetCount = getTargetSetCount(ex.targetSets);
+    console.log('[LOG_SET] Processing set for exercise:', ex.name, 'current sets:', ex.sets.length, 'target sets:', targetSetCount);
 
     const newSet: CompletedSet = { setNumber: ex.sets.length + 1, reps: repsNum, weightLbs: weightNum };
     const updatedSets = [...ex.sets, newSet];
@@ -259,7 +338,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     console.log('[LOG_SET] Cleared AI error index');
 
     // Start rest timer automatically if more sets remain for this exercise.
-    if (updatedSets.length < ex.targetSets) {
+    if (updatedSets.length < targetSetCount) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
       const nextSetLabel = `Set ${updatedSets.length + 1}: ${weightNum} lbs x ${ex.targetReps}`;
       restDurationSeconds.current = restSeconds;
@@ -267,6 +346,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
       setRestRemaining(restSeconds);
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
+      startRestTimer(restSeconds, ex.name);
       await rescheduleRestNotifications({
         seconds: restSeconds,
         exerciseName: ex.name,
@@ -280,7 +360,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
 
     // Fetch AI tip for the next set
     const setsLogged = updatedSets.length;
-    if (setsLogged < ex.targetSets) {
+    if (setsLogged < targetSetCount) {
       console.log('[AI] Starting AI recommendation fetch for exercise:', ex.name, 'set:', setsLogged + 1);
       setAiLoadingIdx(exIdx);
       try {
@@ -290,7 +370,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
           throw new Error('Not authenticated');
         }
         console.log('[AI] Calling getWeightRecommendation API...');
-        const rec = await getWeightRecommendation(authToken, ex.name, goal, updatedSets, setsLogged + 1);
+        const rec = await getWeightRecommendation(authToken, ex.name, goal, updatedSets, setsLogged + 1, {
+          targetSets: ex.targetSets,
+          targetReps: ex.targetReps,
+          progressionPace: 'moderate',
+          experienceLevel: 'intermediate',
+          recoveryLevel: 'normal',
+          phase: 'accumulation',
+          workoutFocus: workout.focus,
+          weekNumber: 1,
+          incrementLbs: 5,
+        });
         console.log('[AI] API call successful, received recommendation:', rec);
         const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
         console.log('[AI] Formatted tip text:', tip);
@@ -301,7 +391,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
           console.log('[AI] Updated exercises state, recommendation set for exercise index:', exIdx);
           return newExercises;
         });
-        if (updatedSets.length < ex.targetSets) {
+        if (updatedSets.length < targetSetCount) {
           await rescheduleRestNotifications({
             seconds: restRemaining > 0 ? restRemaining : restDurationSeconds.current,
             exerciseName: ex.name,
@@ -331,7 +421,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
       clearRestState();
       return;
     }
+    // Restart the timestamp-based timer with the adjusted duration
+    startRestTimer(nextRemaining, restForExercise);
     setRestRemaining(nextRemaining);
+    // Also persist the new rest duration on the exercise so the next set uses it
+    setExercises(prev => prev.map(ex =>
+      ex.name === restForExercise ? { ...ex, targetRestSeconds: nextRemaining } : ex
+    ));
     await rescheduleRestNotifications({
       seconds: nextRemaining,
       exerciseName: restForExercise,
@@ -339,15 +435,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
       aiCue: restCue,
       includeStartAlert: false,
     });
-  }, [clearRestState, rescheduleRestNotifications, restCue, restForExercise, restNextTarget, restRemaining]);
+  }, [clearRestState, rescheduleRestNotifications, restCue, restForExercise, restNextTarget, restRemaining, startRestTimer]);
 
   const refreshRecommendationForExercise = useCallback(async (exIdx: number, setsForExercise: CompletedSet[]) => {
     const ex = exercises[exIdx];
-    if (!ex || setsForExercise.length >= ex.targetSets || !authToken) return;
+    const targetSetCount = ex ? getTargetSetCount(ex.targetSets) : 3;
+    if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
 
     setAiLoadingIdx(exIdx);
     try {
-      const rec = await getWeightRecommendation(authToken, ex.name, goal, setsForExercise, setsForExercise.length + 1);
+      const rec = await getWeightRecommendation(authToken, ex.name, goal, setsForExercise, setsForExercise.length + 1, {
+        targetSets: ex.targetSets,
+        targetReps: ex.targetReps,
+        progressionPace: 'moderate',
+        experienceLevel: 'intermediate',
+        recoveryLevel: 'normal',
+        phase: 'accumulation',
+        workoutFocus: workout.focus,
+        weekNumber: 1,
+        incrementLbs: 5,
+      });
       const tip = `Set ${setsForExercise.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
       setRestNextTarget(`Set ${setsForExercise.length + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
       setRestCue(rec.tip);
@@ -402,16 +509,39 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
     };
     await saveWorkoutSession(session);
     clearRestState();
+    setFinishedSession(session);
+    setFinishModalVisible(false);
+
     // Also persist completion to backend DB so it survives cache clears
     try {
       if (authToken) {
         await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed);
       }
     } catch {}
-    onFinish(session);
+
+    // Show summary modal and fetch AI content
+    setSummaryVisible(true);
+    setSummaryLoading(true);
+    setSummaryData(null);
+    try {
+      if (authToken) {
+        const s = await getWorkoutSummary(authToken, {
+          exercises: session.exercises,
+          durationSeconds: session.durationSeconds,
+          focus: session.focus,
+          goal,
+          weightLbs,
+        });
+        setSummaryData(s);
+      }
+    } catch {
+      /* show basic summary without AI */
+    } finally {
+      setSummaryLoading(false);
+    }
   };
 
-  const completedCount = exercises.filter(e => e.sets.length >= e.targetSets).length;
+  const completedCount = exercises.filter(e => e.sets.length >= getTargetSetCount(e.targetSets)).length;
 
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
@@ -566,7 +696,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
   });
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: themeColors.background }] }>
 
       {/* Header */}
       <View style={styles.header}>
@@ -589,31 +719,51 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
         </TouchableOpacity>
       </View>
 
+      {/* Warm-up card (must complete before exercises) */}
+      {!warmupDone && (
+        <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }] }>
+          <Text style={[styles.warmupTitle, { color: workoutPalette.text }]}>Warm-Up For Today</Text>
+          {warmupSteps.map((step, index) => (
+            <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+          ))}
+          <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => setWarmupDone(true)}>
+            <Text style={styles.warmupDoneBtnText}>Mark Warm-Up Finished</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Progress bar */}
-      <View style={styles.progressBarTrack}>
+      <View style={[styles.progressBarTrack, { backgroundColor: themeColors.border }] }>
         <View style={[styles.progressBarFill, {
+          backgroundColor: workoutPalette.strong,
           width: `${exercises.length ? (completedCount / exercises.length) * 100 : 0}%` as any,
         }]} />
       </View>
 
       {restRemaining > 0 && (
-        <View style={[styles.restBanner, restRemaining <= 10 && styles.restBannerUrgent]}>
-          <View style={styles.restBannerMain}>
-            <View style={styles.restHeaderRow}>
-              <Text style={styles.restBannerTitle}>Rest {formatTime(restRemaining)}</Text>
-              <Text style={styles.restExerciseText}>{restForExercise ? `• ${restForExercise}` : ''}</Text>
-            </View>
-            {restNextTarget ? <Text style={styles.restTargetText}>{restNextTarget}</Text> : null}
-            {restCue ? <Text style={styles.restCueText}>{restCue}</Text> : null}
+        <View style={[styles.restBanner, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }, restRemaining <= 10 && styles.restBannerUrgent]}>
+          {/* Left: big countdown */}
+          <View style={styles.restBannerLeft}>
+            <Text style={[styles.restBannerLabel, { color: workoutPalette.text }]}>REST</Text>
+            <Text style={[styles.restBannerTime, { color: workoutPalette.text }, restRemaining <= 10 && styles.restBannerTimeUrgent]}>
+              {formatTime(restRemaining)}
+            </Text>
           </View>
+          {/* Center: next set info + cue */}
+          <View style={styles.restBannerCenter}>
+            {restForExercise ? <Text style={styles.restExerciseText} numberOfLines={1}>{restForExercise}</Text> : null}
+            {restNextTarget ? <Text style={styles.restTargetText} numberOfLines={1}>{restNextTarget}</Text> : null}
+            {restCue ? <Text style={styles.restCueText} numberOfLines={2}>{restCue}</Text> : null}
+          </View>
+          {/* Right: adjust + skip */}
           <View style={styles.restBannerActions}>
             <TouchableOpacity style={styles.restBannerBtn} onPress={() => adjustActiveRestRemaining(15)}>
               <Text style={styles.restBannerBtnText}>+15s</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.restBannerBtn} onPress={() => adjustActiveRestRemaining(-15)}>
-              <Text style={styles.restBannerBtnText}>-15s</Text>
+              <Text style={styles.restBannerBtnText}>−15s</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.restBannerBtn, styles.restBannerBtnPrimary]} onPress={clearRestState}>
+            <TouchableOpacity style={[styles.restBannerBtn, styles.restBannerBtnPrimary, { backgroundColor: workoutPalette.strong }]} onPress={clearRestState}>
               <Text style={styles.restBannerBtnPrimaryText}>Skip</Text>
             </TouchableOpacity>
           </View>
@@ -622,84 +772,114 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
 
       {/* Exercise list */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
-        {exercises.map((ex, i) => {
-          const isDone      = ex.sets.length >= ex.targetSets;
-          const isActive    = activeExIdx === i;
-          const isAiLoading = aiLoadingIdx === i;
-          const isAiError   = aiErrorIdx === i;
+        {!warmupDone && (
+          <View style={{ alignItems: 'center', marginTop: 32 }}>
+            <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 16 }}>Finish warm-up to start exercises</Text>
+          </View>
+        )}
+        {warmupDone && exercises.map((ex, i) => {
+          const targetSetCount  = getTargetSetCount(ex.targetSets);
+          const isDone          = ex.sets.length >= targetSetCount;
+          const isActive        = activeExIdx === i;
+          const isAiLoading     = aiLoadingIdx === i;
+          const isAiError       = aiErrorIdx === i;
+          const hasLastTime     = !!(lastExerciseSets[ex.name]?.length);
+          const bestLastSet     = hasLastTime
+            ? lastExerciseSets[ex.name].reduce<CompletedSet | null>((best, current) => {
+                if (!best) return current;
+                const bestScore = best.weightLbs * best.reps;
+                const currentScore = current.weightLbs * current.reps;
+                return currentScore > bestScore ? current : best;
+              }, null)
+            : null;
+          const restLabel       = `${Math.max(15, ex.targetRestSeconds || 60)}s rest`;
 
           return (
-            <TouchableOpacity
-              key={i}
-              style={[styles.exerciseCard, isDone && styles.exerciseCardDone, isActive && styles.exerciseCardActive]}
-              onPress={() => setActiveExIdx(isActive ? -1 : i)}
-              activeOpacity={0.8}>
+            <View key={i} style={[styles.exerciseCard, isDone && styles.exerciseCardDone, isActive && styles.exerciseCardActive]}>
 
-              <View style={styles.exerciseHeader}>
+              {/* ── Header row: tap to expand/collapse ── */}
+              <TouchableOpacity
+                style={styles.exerciseHeader}
+                onPress={() => setActiveExIdx(isActive ? -1 : i)}
+                activeOpacity={0.7}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
-                  <Text style={styles.exerciseMeta}>{ex.targetSets} sets x {ex.targetReps} reps</Text>
+                  <Text style={styles.exerciseMeta}>{targetSetCount} × {ex.targetReps}  ·  {restLabel}</Text>
                 </View>
                 <View style={[styles.setsBadge, isDone && styles.setsBadgeDone]}>
                   <Text style={[styles.setsBadgeText, isDone && styles.setsBadgeTextDone]}>
-                    {ex.sets.length > ex.targetSets
-                      ? `${ex.targetSets}+${ex.sets.length - ex.targetSets}`
-                      : `${ex.sets.length}/${ex.targetSets}`}
+                    {ex.sets.length > targetSetCount
+                      ? `${targetSetCount}+${ex.sets.length - targetSetCount}`
+                      : `${ex.sets.length}/${targetSetCount}`}
                   </Text>
                 </View>
-              </View>
+                {/* Small red remove button — only when more than one exercise */}
+                {exercises.length > 1 && (
+                  <TouchableOpacity
+                    style={styles.removeBtn}
+                    onPress={() => handleRemoveExercise(i)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={styles.removeBtnText}>−</Text>
+                  </TouchableOpacity>
+                )}
+              </TouchableOpacity>
 
               {isActive && (
                 <View style={styles.exerciseDetail}>
 
-                  <View style={styles.restAdjustRow}>
-                    <Text style={styles.restAdjustLabel}>Rest target</Text>
-                    <View style={styles.restAdjustControls}>
-                      <TouchableOpacity style={styles.restAdjustBtn} onPress={() => adjustRestSeconds(i, -15)}>
-                        <Text style={styles.restAdjustBtnText}>-15s</Text>
-                      </TouchableOpacity>
-                      <Text style={styles.restAdjustValue}>{Math.max(15, ex.targetRestSeconds || 60)}s</Text>
-                      <TouchableOpacity style={styles.restAdjustBtn} onPress={() => adjustRestSeconds(i, 15)}>
-                        <Text style={styles.restAdjustBtnText}>+15s</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-
-                    <View style={styles.exerciseActionsRow}>
-                      <TouchableOpacity style={styles.exerciseActionBtn} onPress={openAddExerciseModal}>
-                        <Text style={styles.exerciseActionBtnText}>+ Add Exercise</Text>
-                      </TouchableOpacity>
-                      {exercises.length > 1 ? (
-                        <TouchableOpacity style={[styles.exerciseActionBtn, styles.exerciseActionBtnDanger]} onPress={() => handleRemoveExercise(i)}>
-                          <Text style={[styles.exerciseActionBtnText, styles.exerciseActionBtnDangerText]}>Remove Exercise</Text>
-                        </TouchableOpacity>
-                      ) : null}
-                    </View>
-
-                  {ex.sets.length > 0 && (
-                    <View style={styles.setsLog}>
-                      {ex.sets.map((set, si) => (
-                        <View key={si} style={styles.setRow}>
-                          <Text style={styles.setNum}>Set {set.setNumber}</Text>
-                          <Text style={styles.setData}>{set.weightLbs} lbs x {set.reps} reps</Text>
-                          <Text style={styles.setCheck}>{set.feedback ? set.feedback : 'done'}</Text>
+                  {/* ── Last results ── */}
+                  {hasLastTime && (
+                    <View style={styles.lastTimeCard}>
+                      <View style={styles.lastTimeHeader}>
+                        <Text style={styles.lastTimeTitle}>Last Results</Text>
+                        {bestLastSet ? <Text style={styles.lastTimeBest}>Best {bestLastSet.weightLbs} x {bestLastSet.reps}</Text> : null}
+                      </View>
+                      {lastExerciseSets[ex.name].map((s, si) => (
+                        <View key={si} style={styles.lastTimeRow}>
+                          <Text style={styles.lastTimeSetNum}>Set {s.setNumber}</Text>
+                          <Text style={styles.lastTimeData}>{s.weightLbs} lbs × {s.reps} reps</Text>
+                          {s.feedback ? <Text style={styles.lastTimeFeedback}>{s.feedback}</Text> : null}
                         </View>
                       ))}
                     </View>
                   )}
 
-                  {ex.sets.length > 0 && ex.sets.length < ex.targetSets && (
+                  {/* ── Sets logged ── */}
+                  {ex.sets.length > 0 && (
+                    <View style={styles.setsLog}>
+                      {ex.sets.map((set, si) => (
+                        <View key={si} style={styles.setRow}>
+                          <Text style={styles.setNum}>Set {set.setNumber}</Text>
+                          <Text style={styles.setData}>{set.weightLbs} lbs × {set.reps} reps</Text>
+                          {set.feedback ? <Text style={styles.setCheck}>{set.feedback}</Text> : null}
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* ── How did that feel? (only after a set, before last set) ── */}
+                  {ex.sets.length > 0 && ex.sets.length < targetSetCount && (
                     <View style={styles.feedbackCard}>
-                      <Text style={styles.feedbackTitle}>How did that last set feel?</Text>
+                      <Text style={styles.feedbackTitle}>Last set felt?</Text>
                       <View style={styles.feedbackRow}>
                         {FEEDBACK_OPTIONS.map((option) => {
                           const active = ex.sets[ex.sets.length - 1]?.feedback === option.value;
+                          const isPain = option.value === 'pain';
                           return (
                             <TouchableOpacity
                               key={option.value}
-                              style={[styles.feedbackChip, active && styles.feedbackChipActive]}
+                              style={[
+                                styles.feedbackChip,
+                                active && styles.feedbackChipActive,
+                                isPain && styles.feedbackChipPain,
+                                active && isPain && styles.feedbackChipPainActive,
+                              ]}
                               onPress={() => handleSetFeedback(i, option.value)}>
-                              <Text style={[styles.feedbackChipText, active && styles.feedbackChipTextActive]}>{option.label}</Text>
+                              <Text style={[
+                                styles.feedbackChipText,
+                                active && styles.feedbackChipTextActive,
+                                isPain && styles.feedbackChipTextPain,
+                              ]}>{option.label}</Text>
                             </TouchableOpacity>
                           );
                         })}
@@ -707,15 +887,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
                     </View>
                   )}
 
-                  {/* AI tip: loading state shown inside the card */}
+                  {/* ── AI tip ── */}
                   {isAiLoading && (
                     <View style={styles.aiBubble}>
                       <ActivityIndicator size="small" color={colors.accent} />
-                      <Text style={styles.aiLoadingText}>  Getting AI tip for next set...</Text>
+                      <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
                     </View>
                   )}
-
-                  {/* AI tip: success */}
                   {!isAiLoading && ex.aiRecommendation && (
                     <View style={styles.aiBubble}>
                       <View style={{ flex: 1 }}>
@@ -724,47 +902,51 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
                       </View>
                     </View>
                   )}
-
-                  {/* AI tip: error — visible instead of silent */}
                   {!isAiLoading && isAiError && !ex.aiRecommendation && (
                     <View style={[styles.aiBubble, styles.aiBubbleError]}>
-                      <Text style={styles.aiErrorText}>
-                        AI tip unavailable — check your OpenAI API key in backend/.env
-                      </Text>
+                      <Text style={styles.aiErrorText}>AI tip unavailable — check backend/.env for OpenAI key</Text>
                     </View>
                   )}
 
+                  {/* ── Log set / Done ── */}
                   {!isDone && (
                     <TouchableOpacity style={styles.logSetBtn} onPress={() => openLogModal(i)}>
                       <Text style={styles.logSetBtnText}>+ Log Set {ex.sets.length + 1}</Text>
                     </TouchableOpacity>
                   )}
-
                   {isDone && (
                     <View style={styles.doneRow}>
                       <Text style={styles.doneText}>All sets complete!</Text>
                       <TouchableOpacity style={styles.addSetBtn} onPress={() => openLogModal(i)}>
-                        <Text style={styles.addSetBtnText}>+ Add Set</Text>
+                        <Text style={styles.addSetBtnText}>+ Extra Set</Text>
                       </TouchableOpacity>
                     </View>
                   )}
                 </View>
               )}
-            </TouchableOpacity>
+            </View>
           );
         })}
 
-        <TouchableOpacity
-          style={[styles.finishBtn, completedCount === 0 && styles.finishBtnDisabled]}
-          onPress={() => {
-            if (completedCount === 0) {
-              Alert.alert('No sets logged', 'Log at least one set before finishing.');
-              return;
-            }
-            setFinishModalVisible(true);
-          }}>
-          <Text style={styles.finishBtnText}>Finish Workout</Text>
-        </TouchableOpacity>
+        {/* Add Exercise — outside/below exercise cards */}
+        {warmupDone && (
+          <>
+            <TouchableOpacity style={styles.addExerciseBtn} onPress={openAddExerciseModal}>
+              <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.finishBtn, completedCount === 0 && styles.finishBtnDisabled]}
+              onPress={() => {
+                if (completedCount === 0) {
+                  Alert.alert('No sets logged', 'Log at least one set before finishing.');
+                  return;
+                }
+                setFinishModalVisible(true);
+              }}>
+              <Text style={styles.finishBtnText}>Finish Workout</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </ScrollView>
 
       {/* Log Set Modal — keyboard-aware */}
@@ -814,11 +996,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Finish Modal */}
+      {/* Confirm Finish Modal */}
       <Modal visible={finishModalVisible} transparent animationType="fade" onRequestClose={() => setFinishModalVisible(false)}>
         <View style={styles.finishBackdrop}>
           <View style={styles.finishModal}>
-            <Text style={styles.finishModalTitle}>Great Work!</Text>
+            <Text style={styles.finishModalTitle}>Finish Workout?</Text>
             <Text style={styles.finishModalBody}>
               {formatTime(elapsed)}  |  {completedCount}/{exercises.length} exercises done
             </Text>
@@ -829,6 +1011,70 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
               <Text style={styles.finishCancelText}>Keep Going</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* Post-Workout Summary Modal */}
+      <Modal visible={summaryVisible} transparent animationType="fade" onRequestClose={() => { setSummaryVisible(false); if (finishedSession) onFinish(finishedSession); }}>
+        <View style={styles.finishBackdrop}>
+          <ScrollView contentContainerStyle={styles.summaryScroll}>
+            <View style={styles.summaryModal}>
+              <Text style={styles.summaryTitle}>Workout Complete!</Text>
+              <Text style={styles.summarySubtitle}>{workout.focus}  ·  {formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
+
+              {summaryLoading ? (
+                <View style={styles.summaryLoadingRow}>
+                  <ActivityIndicator color={colors.primary} />
+                  <Text style={styles.summaryLoadingText}>Generating summary...</Text>
+                </View>
+              ) : (
+                <>
+                  {summaryData && (
+                    <View style={styles.summaryCaloriesRow}>
+                      <Text style={styles.summaryCaloriesValue}>~{summaryData.caloriesBurned}</Text>
+                      <Text style={styles.summaryCaloriesLabel}>calories burned</Text>
+                    </View>
+                  )}
+
+                  {summaryData?.motivationMessage ? (
+                    <View style={styles.summaryMotivation}>
+                      <Text style={styles.summaryMotivationText}>{summaryData.motivationMessage}</Text>
+                    </View>
+                  ) : null}
+
+                  {(summaryData?.achievements?.length ?? 0) > 0 && (
+                    <View style={styles.summarySection}>
+                      <Text style={styles.summarySectionTitle}>Today's Best Sets</Text>
+                      {summaryData!.achievements.map((a, i) => (
+                        <Text key={i} style={styles.summaryItem}>{a}</Text>
+                      ))}
+                    </View>
+                  )}
+
+                  {(summaryData?.recommendations?.length ?? 0) > 0 && (
+                    <View style={styles.summarySection}>
+                      <Text style={styles.summarySectionTitle}>Recovery Tips</Text>
+                      {summaryData!.recommendations.map((r, i) => (
+                        <Text key={i} style={styles.summaryItem}>• {r}</Text>
+                      ))}
+                    </View>
+                  )}
+
+                  {!summaryData && (
+                    <Text style={styles.summaryMotivationText}>
+                      {completedCount}/{exercises.length} exercises  ·  {finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0} sets logged
+                    </Text>
+                  )}
+                </>
+              )}
+
+              <TouchableOpacity
+                style={styles.finishConfirmBtn}
+                onPress={() => { setSummaryVisible(false); if (finishedSession) onFinish(finishedSession); }}>
+                <Text style={styles.finishConfirmText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
         </View>
       </Modal>
 
@@ -951,6 +1197,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, onFinish
 }
 
 const styles = StyleSheet.create({
+  warmupCard: {
+    borderWidth: 1.5,
+    borderRadius: radius.lg,
+    padding: 18,
+    margin: 18,
+    marginBottom: 0,
+    gap: 10,
+    alignItems: 'flex-start',
+  },
+  warmupTitle: { fontSize: 16, fontWeight: '800', marginBottom: 2 },
+  warmupStep: { fontSize: 13, color: colors.textPrimary, lineHeight: 20 },
+  warmupDoneBtn: {
+    marginTop: 12,
+    alignSelf: 'stretch',
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  warmupDoneBtnText: { color: colors.background, fontWeight: '700', fontSize: 15 },
   container: { flex: 1, backgroundColor: colors.background },
 
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12, gap: 12 },
@@ -970,34 +1235,38 @@ const styles = StyleSheet.create({
   restBanner: {
     marginHorizontal: 16,
     marginBottom: 12,
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
+    backgroundColor: colors.primary + '18',
+    borderRadius: radius.lg,
+    borderWidth: 2,
     borderColor: colors.primary,
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 10,
-    alignItems: 'stretch',
   },
-  restBannerUrgent: { borderColor: colors.warning, backgroundColor: colors.warning + '12' },
-  restBannerMain: { gap: 4, flex: 1, minWidth: 0 },
-  restHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  restBannerTitle: { fontSize: 18, color: colors.textPrimary, fontWeight: '800' },
-  restExerciseText: { fontSize: 13, color: colors.primary, fontWeight: '700' },
+  restBannerUrgent: { borderColor: colors.warning, backgroundColor: colors.warning + '18' },
+  restBannerLeft: { alignItems: 'center', minWidth: 64 },
+  restBannerLabel: { fontSize: 9, fontWeight: '800', color: colors.primary, textTransform: 'uppercase', letterSpacing: 1 },
+  restBannerTime: { fontSize: 32, fontWeight: '900', color: colors.primary, lineHeight: 36 },
+  restBannerTimeUrgent: { color: colors.warning },
+  restBannerCenter: { flex: 1, gap: 2, minWidth: 0 },
+  restExerciseText: { fontSize: 11, color: colors.primary, fontWeight: '700' },
   restTargetText: { fontSize: 13, color: colors.textPrimary, fontWeight: '700' },
-  restCueText: { fontSize: 12, color: colors.textSecondary, lineHeight: 18 },
-  restBannerActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  restCueText: { fontSize: 11, color: colors.textSecondary, lineHeight: 16 },
+  restBannerActions: { flexDirection: 'column', gap: 5, alignItems: 'stretch' },
   restBannerBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
   },
-  restBannerBtnText: { fontSize: 12, color: colors.textPrimary, fontWeight: '700' },
+  restBannerBtnText: { fontSize: 11, color: colors.textPrimary, fontWeight: '700' },
   restBannerBtnPrimary: { borderColor: colors.primary, backgroundColor: colors.primary },
-  restBannerBtnPrimaryText: { fontSize: 12, color: colors.background, fontWeight: '700' },
+  restBannerBtnPrimaryText: { fontSize: 11, color: colors.background, fontWeight: '700' },
 
   scroll:        { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
@@ -1006,7 +1275,7 @@ const styles = StyleSheet.create({
   exerciseCardDone:   { borderColor: colors.primary, opacity: 0.85 },
   exerciseCardActive: { borderColor: colors.primary },
 
-  exerciseHeader:   { flexDirection: 'row', alignItems: 'center' },
+  exerciseHeader:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
   exerciseName:     { fontSize: 15, fontWeight: '600', color: colors.textPrimary, marginBottom: 2 },
   exerciseNameDone: { color: colors.textSecondary, textDecorationLine: 'line-through' },
   exerciseMeta:     { fontSize: 12, color: colors.textMuted },
@@ -1016,43 +1285,31 @@ const styles = StyleSheet.create({
   setsBadgeText:    { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
   setsBadgeTextDone:{ color: colors.background },
 
-  exerciseDetail: { marginTop: 14, gap: 10 },
-
-  restAdjustRow: {
-    flexDirection: 'row',
+  // Small red remove button in the header
+  removeBtn: {
+    width: 26, height: 26,
+    borderRadius: 13,
+    backgroundColor: colors.error + '18',
+    borderWidth: 1,
+    borderColor: colors.error,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    justifyContent: 'center',
   },
-  restAdjustLabel: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
-  restAdjustControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  restAdjustBtn: {
-    backgroundColor: colors.surface,
+  removeBtnText: { fontSize: 18, color: colors.error, fontWeight: '800', lineHeight: 22 },
+
+  exerciseDetail: { marginTop: 12, gap: 10 },
+
+  // Add Exercise button — below all cards
+  addExerciseBtn: {
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.md,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  restAdjustBtnText: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
-  restAdjustValue: { minWidth: 48, textAlign: 'center', fontSize: 13, fontWeight: '700', color: colors.primary },
-  exerciseActionsRow: { flexDirection: 'row', gap: 8 },
-  exerciseActionBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 10,
     backgroundColor: colors.surfaceRaised,
   },
-  exerciseActionBtnDanger: { borderColor: colors.error, backgroundColor: colors.error + '12' },
-  exerciseActionBtnText: { fontSize: 12, color: colors.textPrimary, fontWeight: '700' },
-  exerciseActionBtnDangerText: { color: colors.error },
+  addExerciseBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
 
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
@@ -1060,26 +1317,26 @@ const styles = StyleSheet.create({
   setData: { flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary },
   setCheck:{ fontSize: 12, color: colors.primary, fontWeight: '700' },
   feedbackCard: {
-    backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    padding: 10,
-    gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
-  feedbackTitle: { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
-  feedbackRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  feedbackTitle: { fontSize: 11, fontWeight: '600', color: colors.textMuted, marginRight: 2 },
+  feedbackRow: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   feedbackChip: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  feedbackChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
-  feedbackChipText: { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
+  feedbackChipActive:     { borderColor: colors.primary, backgroundColor: colors.primary + '20' },
+  feedbackChipPain:       { borderColor: colors.error + '80' },
+  feedbackChipPainActive: { borderColor: colors.error, backgroundColor: colors.error + '20' },
+  feedbackChipText:       { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
   feedbackChipTextActive: { color: colors.primary },
+  feedbackChipTextPain:   { color: colors.error },
 
   aiBubble:      { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceRaised, borderRadius: radius.md, padding: 12, borderLeftWidth: 3, borderLeftColor: colors.accent },
   aiBubbleError: { borderLeftColor: colors.error },
@@ -1119,6 +1376,22 @@ const styles = StyleSheet.create({
   logConfirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center' },
   logConfirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
 
+  lastTimeCard: {
+    backgroundColor: colors.accent + '16',
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: colors.accent + '88',
+    padding: 10,
+    gap: 6,
+  },
+  lastTimeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  lastTimeTitle: { fontSize: 12, fontWeight: '800', color: colors.accent, textTransform: 'uppercase', letterSpacing: 0.7 },
+  lastTimeBest: { fontSize: 11, color: colors.textPrimary, fontWeight: '700' },
+  lastTimeRow:      { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
+  lastTimeSetNum:   { fontSize: 11, color: colors.textMuted, width: 36 },
+  lastTimeData:     { flex: 1, fontSize: 12, color: colors.textPrimary, fontWeight: '700' },
+  lastTimeFeedback: { fontSize: 11, color: colors.accent, fontWeight: '700' },
+
   finishBackdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   finishModal:       { backgroundColor: colors.surface, borderRadius: radius.xl, padding: 28, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: colors.border, width: '85%' },
   finishModalTitle:  { fontSize: 26, fontWeight: '800', color: colors.textPrimary },
@@ -1126,6 +1399,31 @@ const styles = StyleSheet.create({
   finishConfirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', width: '100%', marginTop: 8 },
   finishConfirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
   finishCancelText:  { fontSize: 14, color: colors.textMuted, marginTop: 4 },
+
+  summaryScroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 24 },
+  summaryModal: {
+    backgroundColor: colors.surface, borderRadius: radius.xl,
+    padding: 24, gap: 14, borderWidth: 1, borderColor: colors.border,
+    width: '90%',
+  },
+  summaryTitle:    { fontSize: 26, fontWeight: '800', color: colors.textPrimary, textAlign: 'center' },
+  summarySubtitle: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', marginTop: -8 },
+  summaryLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center', paddingVertical: 12 },
+  summaryLoadingText: { fontSize: 13, color: colors.textSecondary },
+  summaryCaloriesRow: { alignItems: 'center', paddingVertical: 8, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.border },
+  summaryCaloriesValue: { fontSize: 40, fontWeight: '800', color: colors.primary },
+  summaryCaloriesLabel: { fontSize: 12, color: colors.textSecondary, marginTop: -4 },
+  summaryMotivation: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    padding: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  summaryMotivationText: { fontSize: 14, color: colors.textPrimary, lineHeight: 20, textAlign: 'center' },
+  summarySection: { gap: 6 },
+  summarySectionTitle: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6 },
+  summaryItem: { fontSize: 13, color: colors.textPrimary, lineHeight: 18 },
 
   coachSheet: {
     maxHeight: '82%',
