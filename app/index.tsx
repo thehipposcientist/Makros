@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutDay, WorkoutSession } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -33,6 +33,8 @@ export default function Index() {
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'plan' | 'equipment' | 'foods' | 'theme'>('plan');
+  const [planRefreshKey, setPlanRefreshKey] = useState(0);
+  const [isPlanUpdating, setIsPlanUpdating] = useState(false);
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [activeWorkout, setActiveWorkout] = useState<WorkoutDay | null>(null);
@@ -89,7 +91,7 @@ export default function Index() {
   };
 
   const handleSignOut = async () => {
-    await AsyncStorage.multiRemove(['authToken', 'userProfile']);
+    await AsyncStorage.multiRemove(['authToken', 'userProfile', 'aiWorkoutPlan', 'aiNutritionPlan', 'metaData_v1']);
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
@@ -105,14 +107,37 @@ export default function Index() {
     setUserProfile(stamped);
     setIsEditing(false);
     setEditMode('plan');
-    if (authToken) syncOnboarding(authToken, stamped).catch(() => null);
+    if (authToken) {
+      syncOnboarding(authToken, stamped).catch(() => null);
+      // Regenerate plans via AI in the background when plan settings change
+      if (editMode === 'plan') {
+        setIsPlanUpdating(true);
+        getAIPlans(authToken, stamped)
+          .then(async (aiPlans) => {
+            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+            await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan));
+            setPlanRefreshKey(k => k + 1);
+          })
+          .catch(() => null)
+          .finally(() => setIsPlanUpdating(false));
+      }
+    }
   };
 
   const handleWorkoutFinish = (_session: WorkoutSession) => {
     setActiveWorkout(null);
   };
 
-  if (isLoading) return <View style={{ flex: 1, backgroundColor: '#0D0D0D' }} />;
+  if (isLoading) return (
+    <View style={{ flex: 1, backgroundColor: '#0D0F14', alignItems: 'center', justifyContent: 'center' }}>
+      <Image
+        source={require('../assets/images/Apple dumbbell logo with _MAKROS_ text.png')}
+        style={{ width: 260, height: 104 }}
+        resizeMode="contain"
+      />
+      <ActivityIndicator color="#15C7B8" style={{ marginTop: 32 }} />
+    </View>
+  );
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (!userProfile) return <OnboardingScreen onComplete={handleProfileComplete} />;
 
@@ -143,6 +168,8 @@ export default function Index() {
       <HomeScreen
         authToken={authToken}
         userProfile={userProfile}
+        planRefreshKey={planRefreshKey}
+        isPlanUpdating={isPlanUpdating}
         onSignOut={handleSignOut}
         onEditProfile={() => { setEditMode('plan'); setIsEditing(true); }}
         onEditEquipment={() => { setEditMode('equipment'); setIsEditing(true); }}

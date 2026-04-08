@@ -42,20 +42,34 @@ function addMacros(a: Macros, b: Macros): Macros {
 // Returns macros for all meals EXCEPT the one being edited
 function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros {
   const zero: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const meals = [
+  const fixed: Array<{ type: string; meal: MealSuggestion | undefined }> = [
     { type: 'breakfast', meal: plan.breakfast },
     { type: 'lunch',     meal: plan.lunch },
     { type: 'dinner',    meal: plan.dinner },
+    { type: 'snack',     meal: plan.snack },
   ];
-  return meals.reduce((acc, { type, meal }) => {
-    if (type === editingType) return acc;
-    return addMacros(acc, {
-      calories: Math.round(meal.calories),
-      protein:  Math.round(meal.protein),
-      carbs:    Math.round(meal.carbs ?? 0),
-      fat:      Math.round(meal.fat   ?? 0),
-    });
-  }, zero);
+  let total = fixed
+    .filter(({ type, meal }) => !!meal && type !== editingType)
+    .reduce((acc, { meal }) => addMacros(acc, {
+      calories: Math.round(meal!.calories),
+      protein:  Math.round(meal!.protein),
+      carbs:    Math.round(meal!.carbs ?? 0),
+      fat:      Math.round(meal!.fat   ?? 0),
+    }), zero);
+
+  (plan.extraMeals ?? []).forEach((meal, idx) => {
+    // For 'new_extra', count all existing extra meals. For 'extra_N', skip that index.
+    if (`extra_${idx}` !== editingType) {
+      total = addMacros(total, {
+        calories: Math.round(meal.calories),
+        protein:  Math.round(meal.protein),
+        carbs:    Math.round(meal.carbs ?? 0),
+        fat:      Math.round(meal.fat   ?? 0),
+      });
+    }
+  });
+
+  return total;
 }
 
 export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], onSave, onClose }: Props) {
@@ -97,7 +111,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     onClose();
   };
 
-  const titleMap: Record<string, string> = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner' };
+  const titleMap: Record<string, string> = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snack', new_extra: 'Extra Meal' };
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -108,7 +122,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={s.title}>{titleMap[mealType] ?? mealType}</Text>
+          <Text style={s.title}>{titleMap[mealType] ?? (mealType.startsWith('extra_') ? 'Extra Meal' : mealType)}</Text>
           <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.saveText}>Save</Text>
           </TouchableOpacity>

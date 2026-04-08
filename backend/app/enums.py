@@ -39,6 +39,7 @@ class EquipmentType(str, Enum):
     DUMBBELLS  = "dumbbells"
     BODYWEIGHT = "bodyweight"
     HOME       = "home"
+    CARDIO     = "cardio"
     OTHER      = "other"
 
 

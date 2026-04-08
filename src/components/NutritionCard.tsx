@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
@@ -32,7 +31,7 @@ export default function NutritionCard({
   const colors = theme.colors;
   const section = theme.sections.meals;
   const styles = createStyles(colors, section);
-  const { breakfast, lunch, dinner, snack, targets } = nutritionPlan;
+  const { breakfast, lunch, dinner, snack, extraMeals: extraMealsList, targets } = nutritionPlan;
   const removed = new Set(nutritionPlan.removedMeals ?? []);
 
   const allMeals: Array<{ key: string; emoji: string; meal: MealSuggestion | undefined }> = [
@@ -43,22 +42,25 @@ export default function NutritionCard({
   ];
   const visibleMeals = allMeals.filter(m => m.meal && !removed.has(m.key)) as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
   const hiddenMeals = allMeals.filter(m => m.meal && removed.has(m.key)) as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
+  const extraMealItems = (extraMealsList ?? []).map((meal, idx) => ({ key: `extra_${idx}`, emoji: '🍴', meal }));
 
   // Sum actual macros across all meals
+  const allVisible = [...visibleMeals, ...extraMealItems];
   const actual = {
-    calories: Math.round(visibleMeals.reduce((sum, m) => sum + m.meal.calories, 0)),
-    protein:  Math.round(visibleMeals.reduce((sum, m) => sum + m.meal.protein, 0)),
-    carbs:    Math.round(visibleMeals.reduce((sum, m) => sum + (m.meal.carbs ?? 0), 0)),
-    fat:      Math.round(visibleMeals.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
+    calories: Math.round(allVisible.reduce((sum, m) => sum + m.meal.calories, 0)),
+    protein:  Math.round(allVisible.reduce((sum, m) => sum + m.meal.protein, 0)),
+    carbs:    Math.round(allVisible.reduce((sum, m) => sum + (m.meal.carbs ?? 0), 0)),
+    fat:      Math.round(allVisible.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
   };
 
   return (
     <View style={styles.card}>
+      <View style={styles.cardAccent} />
       <View style={styles.titleRow}>
         <Text style={styles.title}>{title ? `${title} Nutrition` : 'Daily Nutrition'}</Text>
-        {!snack && onAddSnack && (
+        {onAddSnack && (
           <TouchableOpacity style={styles.addSnackBtn} onPress={onAddSnack}>
-            <Text style={styles.addSnackBtnText}>+ Snack</Text>
+            <Text style={styles.addSnackBtnText}>+ Add Meal</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -106,6 +108,22 @@ export default function NutritionCard({
       {/* Meals */}
       <View style={styles.meals}>
         {visibleMeals.map(({ key, emoji, meal }) => (
+          <MealRow
+            key={key}
+            emoji={emoji}
+            mealType={key}
+            meal={meal}
+            checked={!!checkedMeals[key]}
+            onToggle={onToggleMeal}
+            onEdit={onEditMeal}
+            onRemove={onRemoveMeal}
+            onPhoto={onPhotoMeal}
+            colors={colors}
+            styles={styles}
+            mealAccent={section}
+          />
+        ))}
+        {extraMealItems.map(({ key, emoji, meal }) => (
           <MealRow
             key={key}
             emoji={emoji}
@@ -199,8 +217,6 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
-  const [showRecipe, setShowRecipe] = useState(false);
-
   return (
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
       <View style={styles.mealHeader}>
@@ -239,23 +255,30 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
         )}
       </View>
 
-      {/* Ingredients list */}
-      <Text style={[styles.mealFoods, checked && styles.mealFoodsDone]}>
-        {meal.foods.join(' · ')}
-      </Text>
-
-      {/* Recipe instructions toggle */}
-      {meal.instructions && (
-        <TouchableOpacity onPress={() => setShowRecipe(v => !v)} style={styles.recipeToggle}>
-          <Text style={styles.recipeToggleText}>{showRecipe ? 'Hide recipe ▲' : 'View recipe ▼'}</Text>
-        </TouchableOpacity>
-      )}
-      {showRecipe && meal.instructions && (
-        <View style={styles.recipeBox}>
-          <Text style={styles.recipeLabel}>How to make it</Text>
-          <Text style={styles.recipeText}>{meal.instructions}</Text>
-        </View>
-      )}
+      {/* Foods always visible with amounts */}
+      <View style={styles.mealFoodsDetail}>
+        {meal.foods.map((food, i) => {
+          const amount = meal.amounts?.[i];
+          return (
+            <View key={i} style={styles.mealFoodRow}>
+              {amount && (
+                <Text style={[styles.mealFoodAmount, { color: mealAccent.strong }]}>
+                  {amount}
+                </Text>
+              )}
+              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, !amount && { marginLeft: 0 }]}>
+                {food}
+              </Text>
+            </View>
+          );
+        })}
+        {meal.instructions && (
+          <View style={styles.recipeBox}>
+            <Text style={styles.recipeLabel}>How to make it</Text>
+            <Text style={styles.recipeText}>{meal.instructions}</Text>
+          </View>
+        )}
+      </View>
 
       <View style={styles.mealBadges}>
         <MacroPill label="cal"     value={Math.round(meal.calories)}   color={colors.accent} styles={styles} />
@@ -283,9 +306,17 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: Re
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     padding: 16,
+    paddingLeft: 19,
     marginBottom: 16,
-    borderLeftWidth: 3,
-    borderLeftColor: section.strong,
+    overflow: 'hidden',
+  },
+  cardAccent: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
+    backgroundColor: section.strong,
   },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   title: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
@@ -368,8 +399,11 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: Re
   recipeLabel: { fontSize: 10, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
   recipeText:  { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
 
-  mealFoods:     { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
-  mealFoodsDone: { color: colors.textMuted },
+  mealFoodsDone:   { color: colors.textMuted },
+  mealFoodsDetail: { gap: 6, marginTop: 6 },
+  mealFoodRow:     { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mealFoodAmount:  { fontSize: 12, fontWeight: '800', color: section.strong, minWidth: 56 },
+  mealFoodName:    { flex: 1, fontSize: 13, color: colors.textSecondary },
 
   mealBadges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   hiddenMealRow: {

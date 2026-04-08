@@ -7,7 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
-import { analyzeFoodPhoto } from '../services/api';
+import { analyzeFoodPhoto, scanFoodsPhoto } from '../services/api';
 
 interface EditProfileScreenProps {
   authToken: string;
@@ -24,6 +24,16 @@ interface PhotoMealDraft {
   protein: number;
   carbs: number;
   fat: number;
+}
+
+interface ScannedFoodItem {
+  name: string;
+  serving: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  selected: boolean;
 }
 
 const DURATION_OPTIONS = [
@@ -199,6 +209,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
   );
+  const [targetEvent, setTargetEvent] = useState<string>(
+    profile.goalDetails.targetEvent ?? ''
+  );
   const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'midnight');
 
   // Physical stats
@@ -215,6 +228,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [foods, setFoods]             = useState<string[]>(profile.foodsAvailable);
   const [customFoods, setCustomFoods] = useState<CustomFoodItem[]>(profile.customFoods ?? []);
   const [savedMeals, setSavedMeals]   = useState<SavedMealTemplate[]>(profile.savedMeals ?? []);
+  const [mealRoutine, setMealRoutine] = useState(profile.mealRoutine ?? '');
   const [foodSearch, setFoodSearch]   = useState('');
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>('all');
 
@@ -222,6 +236,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [addFoodVisible,    setAddFoodVisible]    = useState(false);
   const [photoMealLoading,  setPhotoMealLoading]  = useState(false);
   const [photoMealDraft,    setPhotoMealDraft]    = useState<PhotoMealDraft | null>(null);
+  const [scanFoodsLoading,  setScanFoodsLoading]  = useState(false);
+  const [scannedFoods,      setScannedFoods]      = useState<ScannedFoodItem[] | null>(null);
   const [equipModalVisible, setEquipModalVisible] = useState(false);
   const [newEquipName,      setNewEquipName]      = useState('');
   const [equipError,        setEquipError]        = useState('');
@@ -284,6 +300,61 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
+  const handleScanFoods = async (source: 'camera' | 'library') => {
+    if (!authToken) {
+      Alert.alert('Sign in required', 'You need to be signed in to scan foods.');
+      return;
+    }
+    const permission = source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', `Please allow ${source === 'camera' ? 'camera' : 'photo library'} access.`);
+      return;
+    }
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any })
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+
+    setScanFoodsLoading(true);
+    try {
+      const asset = result.assets[0];
+      const imageBase64 = asset.base64;
+      if (!imageBase64) return;
+      const response = await scanFoodsPhoto(authToken, {
+        image_base64: imageBase64,
+        mime_type: asset.mimeType ?? 'image/jpeg',
+      });
+      setScannedFoods((response.foods ?? []).map(f => ({ ...f, selected: true })));
+    } catch (e: any) {
+      Alert.alert('Scan failed', e?.message ?? 'Could not identify foods from this photo.');
+    } finally {
+      setScanFoodsLoading(false);
+    }
+  };
+
+  const confirmScannedFoods = () => {
+    if (!scannedFoods) return;
+    const selected = scannedFoods.filter(f => f.selected);
+    selected.forEach(f => {
+      const item: CustomFoodItem = {
+        name: f.name,
+        unit: f.serving,
+        calories: Math.round(f.calories),
+        protein: Math.round(f.protein),
+        carbs: Math.round(f.carbs),
+        fat: Math.round(f.fat),
+      };
+      handleAddCustomFood(item);
+    });
+    setScannedFoods(null);
+    if (selected.length > 0) {
+      Alert.alert('Added', `${selected.length} food${selected.length > 1 ? 's' : ''} added to your list.`);
+    }
+  };
+
   const confirmPhotoMeal = () => {
     if (!photoMealDraft) return;
     setSavedMeals(prev => [
@@ -306,6 +377,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     const isTimelineGoal = timelineGoals.has(goal);
     const timelineWeeks  = isTimelineGoal ? (meta.goalConfig.timeline_weeks[goal]?.[pace] ?? undefined) : undefined;
     const targetWeightLbs = isWeightGoal && targetWeight ? parseFloat(targetWeight) : undefined;
+    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
+    const targetEventVal = eventGoals.has(goal) && targetEvent.trim() ? targetEvent.trim() : undefined;
 
     onSave({
       ...profile,
@@ -316,6 +389,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         ...profile.goalDetails,
         pace,
         targetWeightLbs,
+        targetEvent: targetEventVal,
         timelineWeeks,
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
@@ -324,6 +398,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       foodsAvailable: foods,
       customFoods,
       savedMeals,
+      mealRoutine: mealRoutine.trim() || undefined,
       physicalStats: {
         ...profile.physicalStats,
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
@@ -389,8 +464,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
 
-        {(mode === 'plan' || mode === 'theme') && (
-        <>
         {mode === 'plan' && (
         <>
         {/* ── Goal ── */}
@@ -471,6 +544,34 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
         )}
 
+        {/* ── Target event (strength / endurance / athletic goals) ── */}
+        {(() => {
+          const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
+          if (!eventGoals.has(goal)) return null;
+          const label =
+            goal === 'strength'             ? 'Strength Target (optional)' :
+            goal === 'endurance'            ? 'Endurance Target (optional)' :
+                                              'Performance Target (optional)';
+          const placeholder =
+            goal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
+            goal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
+                                              'e.g. sub-40s 100m, dunk a basketball';
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>{label}</Text>
+              <TextInput
+                style={styles.textField}
+                value={targetEvent}
+                onChangeText={setTargetEvent}
+                placeholder={placeholder}
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="none"
+                returnKeyType="done"
+              />
+            </View>
+          );
+        })()}
+
         {/* ── Training days ── */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Training Days / Week</Text>
@@ -506,9 +607,27 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             ))}
           </View>
         </View>
+
+        {/* ── Meal Routine ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>My Meal Routine</Text>
+          <Text style={styles.sectionHint}>
+            Describe any fixed eating habits. Your AI nutritionist will build around these.
+          </Text>
+          <TextInput
+            style={[styles.mealRoutineInput]}
+            value={mealRoutine}
+            onChangeText={setMealRoutine}
+            placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays.'}
+            placeholderTextColor={colors.textMuted}
+            multiline
+            numberOfLines={4}
+          />
+        </View>
         </>
         )}
 
+        {mode === 'theme' && (
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Theme</Text>
           <View style={styles.themeList}>
@@ -543,7 +662,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             })}
           </View>
 
-          <View style={[styles.themePreview, { backgroundColor: previewTheme.colors.surface, borderColor: previewTheme.colors.border }]}> 
+          <View style={[styles.themePreview, { backgroundColor: previewTheme.colors.surface, borderColor: previewTheme.colors.border }]}>
             <Text style={[styles.themePreviewTitle, { color: previewTheme.colors.textPrimary }]}>Preview</Text>
             <View style={styles.themePreviewRow}>
               <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.workout.soft, borderColor: previewTheme.sections.workout.strong }]}>
@@ -558,14 +677,20 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
         </View>
-        </>
         )}
 
         {mode === 'equipment' && (
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>
-            Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
-          </Text>
+          <View style={styles.sectionTopRow}>
+            <Text style={styles.sectionLabel}>
+              Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
+            </Text>
+            <TouchableOpacity
+              style={styles.sectionAddBtn}
+              onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
+              <Text style={styles.sectionAddBtnText}>+ Add</Text>
+            </TouchableOpacity>
+          </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
               {meta.equipmentCategories.map(category => (
@@ -613,9 +738,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'foods' && (
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>
-            Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
-          </Text>
+          <View style={styles.sectionTopRow}>
+            <Text style={styles.sectionLabel}>
+              Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
+            </Text>
+            <TouchableOpacity style={styles.sectionAddBtn} onPress={() => setAddFoodVisible(true)}>
+              <Text style={styles.sectionAddBtnText}>+ Add food</Text>
+            </TouchableOpacity>
+          </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
               <TextInput
@@ -715,11 +845,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Text style={styles.addTriggerText}>+ Add food</Text>
           </TouchableOpacity>
           <View style={styles.photoActionsRow}>
-            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleAnalyzeFoodPhoto('camera')} disabled={photoMealLoading}>
-              <Text style={styles.addTriggerText}>{photoMealLoading ? 'Analyzing...' : '+ Scan food photo'}</Text>
+            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleScanFoods('camera')} disabled={scanFoodsLoading}>
+              <Text style={styles.addTriggerText}>{scanFoodsLoading ? 'Scanning...' : '📷 Scan foods (camera)'}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleAnalyzeFoodPhoto('library')} disabled={photoMealLoading}>
-              <Text style={styles.addTriggerText}>+ Choose photo</Text>
+            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleScanFoods('library')} disabled={scanFoodsLoading}>
+              <Text style={styles.addTriggerText}>🖼 Scan foods (library)</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.addTriggerBtn, { opacity: 0.7 }]} onPress={() => handleAnalyzeFoodPhoto('camera')} disabled={photoMealLoading}>
+              <Text style={styles.addTriggerText}>{photoMealLoading ? 'Analyzing...' : '+ Scan meal photo'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -757,6 +890,49 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         confirmLabel="Add" error={equipError}
       />
       <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} />
+
+      {/* ── Scanned Foods Modal ── */}
+      <Modal visible={!!scannedFoods} transparent animationType="slide" onRequestClose={() => setScannedFoods(null)}>
+        <View style={styles.centeredBackdrop}>
+          <View style={[styles.photoAssessmentModal, { maxHeight: '80%' }]}>
+            <View style={styles.photoAssessmentHeader}>
+              <Text style={styles.photoAssessmentEyebrow}>AI Food Scan</Text>
+              <Text style={styles.photoAssessmentTitle}>Select foods to add</Text>
+              <Text style={styles.photoAssessmentSubtitle}>Tap to toggle. Selected foods are added to your list with their macros.</Text>
+            </View>
+            <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ gap: 8 }}>
+              {(scannedFoods ?? []).map((item, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.scannedFoodRow, item.selected && styles.scannedFoodRowSelected]}
+                  onPress={() => setScannedFoods(prev => prev?.map((f, i) => i === idx ? { ...f, selected: !f.selected } : f) ?? null)}
+                  activeOpacity={0.7}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.scannedFoodName}>{item.name}</Text>
+                    <Text style={styles.scannedFoodServing}>{item.serving}</Text>
+                    <Text style={styles.scannedFoodMacros}>
+                      {item.calories} cal · {item.protein}g P · {item.carbs}g C · {item.fat}g F
+                    </Text>
+                  </View>
+                  <Text style={[styles.scannedFoodCheck, item.selected && styles.scannedFoodCheckSelected]}>
+                    {item.selected ? '✓' : '○'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <View style={styles.photoAssessmentActions}>
+              <TouchableOpacity style={styles.photoAssessmentSecondaryBtn} onPress={() => setScannedFoods(null)}>
+                <Text style={styles.photoAssessmentSecondaryText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.photoAssessmentPrimaryBtn} onPress={confirmScannedFoods}>
+                <Text style={styles.photoAssessmentPrimaryText}>
+                  Add {(scannedFoods ?? []).filter(f => f.selected).length} Food{(scannedFoods ?? []).filter(f => f.selected).length !== 1 ? 's' : ''}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={!!photoMealDraft} transparent animationType="fade" onRequestClose={() => setPhotoMealDraft(null)}>
         <KeyboardAvoidingView style={styles.centeredBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -828,8 +1004,23 @@ const styles = StyleSheet.create({
   saveText:   { fontSize: 15, fontWeight: '700', color: colors.primary },
 
   content:      { padding: 16, paddingBottom: 48 },
-  section:      { marginBottom: 28 },
-  sectionLabel: { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 12 },
+  section:         { marginBottom: 28 },
+  sectionTopRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  sectionLabel:    { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.8 },
+  sectionAddBtn:   { backgroundColor: colors.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 },
+  sectionAddBtnText: { fontSize: 12, fontWeight: '700', color: colors.background },
+  sectionHint:     { fontSize: 12, color: colors.textMuted, marginBottom: 10 },
+  mealRoutineInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: 12,
+    fontSize: 14,
+    backgroundColor: colors.background,
+    color: colors.textPrimary,
+    minHeight: 100,
+    textAlignVertical: 'top',
+  },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   goalCard: { width: '31%', backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, paddingVertical: 12, paddingHorizontal: 8, alignItems: 'center', gap: 6 },
@@ -852,6 +1043,10 @@ const styles = StyleSheet.create({
   weightValue:       { fontSize: 16, fontWeight: '600', color: colors.textPrimary },
   weightPlaceholder: { fontSize: 15, color: colors.textMuted },
   editHint:          { fontSize: 13, color: colors.primary, fontWeight: '600' },
+  textField: {
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    padding: 14, fontSize: 15, backgroundColor: colors.surface, color: colors.textPrimary,
+  },
 
   daysRow:         { flexDirection: 'row', alignItems: 'center', gap: 20 },
   daysBtn:         { width: 44, height: 44, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
@@ -1019,6 +1214,26 @@ const styles = StyleSheet.create({
   savedMealName: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 3 },
   savedMealMeta: { fontSize: 12, color: colors.textSecondary },
   savedMealDelete: { fontSize: 12, color: colors.error, fontWeight: '700' },
+
+  scannedFoodRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    gap: 10,
+  },
+  scannedFoodRowSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '12',
+  },
+  scannedFoodName: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  scannedFoodServing: { fontSize: 12, color: colors.textSecondary, marginBottom: 2 },
+  scannedFoodMacros: { fontSize: 12, color: colors.textMuted },
+  scannedFoodCheck: { fontSize: 20, color: colors.textMuted, width: 24, textAlign: 'center' },
+  scannedFoodCheckSelected: { color: colors.primary },
 
   saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
   saveBtnText: { fontSize: 16, fontWeight: '700', color: colors.background },

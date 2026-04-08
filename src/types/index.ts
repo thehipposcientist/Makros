@@ -15,7 +15,7 @@ export type Goal =
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
-export type AppThemeName = 'midnight' | 'ember' | 'ocean' | 'forest' | 'sunrise' | 'graphite';
+export type AppThemeName = 'midnight' | 'cocoa' | 'neon' | 'forest' | 'slate' | 'sunrise' | 'arctic' | 'rose';
 
 export interface GoalOption {
   value: Goal;
@@ -45,6 +45,7 @@ export interface PhysicalStats {
 export interface GoalDetails {
   pace: GoalPace;
   targetWeightLbs?: number;  // for fat_loss, toning, muscle_gain
+  targetEvent?: string;      // for strength, endurance, athletic_performance (e.g. "315lb deadlift", "half marathon")
   timelineWeeks?: number;    // derived from pace for performance/recomp goals
   startWeightLbs?: number;   // weight at goal start — used for progress meter
   goalStartedAt?: string;    // ISO date when goal was set — used for timeline meter
@@ -80,6 +81,7 @@ export interface UserProfile {
   foodsAvailable: string[];
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
   savedMeals?: SavedMealTemplate[];
+  mealRoutine?: string;          // user's fixed meal habits e.g. "I have a protein shake every morning"
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
@@ -116,6 +118,7 @@ export interface NutritionTargets {
 export interface MealSuggestion {
   meal: string;
   foods: string[];
+  amounts?: string[];   // portion per food item, parallel to foods[] e.g. ["6 oz", "1 cup", "2 cups"]
   calories: number;
   protein: number;
   carbs?: number;
@@ -135,6 +138,7 @@ export interface DailyNutritionPlan {
   lunch: MealSuggestion;
   dinner: MealSuggestion;
   snack?: MealSuggestion;
+  extraMeals?: MealSuggestion[];
   removedMeals?: string[];
   targets: NutritionTargets;
 }
@@ -151,6 +155,7 @@ export interface CompletedSet {
   setNumber: number;
   reps: number;
   weightLbs: number;
+  durationSeconds?: number; // for timed exercises (cardio, jump rope, etc.)
   rir?: number;
   feedback?: 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
 }

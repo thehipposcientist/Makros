@@ -17,6 +17,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
 
   return (
     <View style={styles.card}>
+      <View style={styles.cardAccent} />
       <View style={styles.header}>
         <Text style={styles.title}>{workout.focus}</Text>
         <Text style={styles.subtitle}>{workout.day}</Text>
@@ -58,9 +59,17 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: Re
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     padding: 16,
+    paddingLeft: 19,
     marginBottom: 16,
-    borderLeftWidth: 3,
-    borderLeftColor: section.strong,
+    overflow: 'hidden',
+  },
+  cardAccent: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
+    backgroundColor: section.strong,
   },
   header:    { marginBottom: 16 },
   title:     { fontSize: 18, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },

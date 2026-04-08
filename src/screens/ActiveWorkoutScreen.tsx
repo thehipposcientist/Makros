@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration,
+  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
@@ -65,6 +65,24 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
+const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio/i;
+
+function isTimedExercise(name: string): boolean {
+  return TIMED_EXERCISE_RE.test(name);
+}
+
+function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string | null {
+  const name = exerciseName.toLowerCase();
+  const isCompound = /squat|deadlift|bench press|overhead press|ohp|barbell press|pull.up|row|lunge|hip thrust|clean|snatch/.test(name);
+  if (!isCompound && !isFirst) return null;
+  if (/squat/.test(name)) return 'Warm-up: 2–3 ramp-up sets — e.g. bar × 10, 50% × 8, 70% × 5 before working weight';
+  if (/deadlift/.test(name)) return 'Warm-up: 2–3 light singles — e.g. 40% × 5, 60% × 3, 80% × 1 before working sets';
+  if (/bench/.test(name)) return 'Warm-up: 2–3 ramp-up sets — e.g. bar × 15, 50% × 8, 70% × 5 before working weight';
+  if (/overhead press|ohp/.test(name)) return 'Warm-up: 2 ramp-up sets — e.g. bar × 10, 60% × 6 before working weight';
+  if (isFirst) return 'Warm-up: 1–2 lighter sets recommended before starting working weight';
+  return null;
+}
+
 function buildWarmupPlan(workout: WorkoutDay): string[] {
   const focus = (workout.focus || '').toLowerCase();
   const primer = /leg|lower/.test(focus)
@@ -120,7 +138,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
 
-  // Log-set modal
+  // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
+  const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
+
+  // Extra set rows added by user beyond target set count
+  const [extraSetCounts, setExtraSetCounts] = useState<Record<number, number>>({});
+
+  // Log-set modal (kept for extra sets beyond targetSets)
   const [logModalVisible, setLogModalVisible] = useState(false);
   const [logExIdx, setLogExIdx] = useState<number>(0);
   const [logWeight, setLogWeight] = useState('');
@@ -178,7 +202,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     };
   }, []);
 
-  // Preload last-session data for all exercises so "Last time" panel shows immediately
+  // Preload last-session data and pre-populate inline set inputs from history
   useEffect(() => {
     Promise.all(
       workout.exercises.map(async ex => {
@@ -189,6 +213,23 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const map: Record<string, CompletedSet[]> = {};
       results.forEach(r => { if (r.sets.length > 0) map[r.name] = r.sets; });
       setLastExerciseSets(map);
+
+      // Pre-populate inputs from last session for each exercise slot
+      const inputs: Record<string, { weight: string; reps: string; duration: string }> = {};
+      workout.exercises.forEach((ex, exIdx) => {
+        const lastSets = map[ex.name] ?? [];
+        for (let slot = 0; slot < ex.sets; slot++) {
+          const last = lastSets[slot] ?? lastSets[lastSets.length - 1];
+          if (last) {
+            if (isTimedExercise(ex.name) && last.durationSeconds != null) {
+              inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: (last.durationSeconds / 60).toFixed(1) };
+            } else {
+              inputs[`${exIdx}-${slot}`] = { weight: String(last.weightLbs), reps: String(last.reps), duration: '' };
+            }
+          }
+        }
+      });
+      setSetInputs(inputs);
     });
   }, []);
 
@@ -206,6 +247,116 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setLogReps(String(last.reps));
     }
   }, [exercises]);
+
+  // Log a specific set slot inline (no modal)
+  const handleLogSetInline = useCallback(async (exIdx: number, setSlot: number, silent = false) => {
+    const key = `${exIdx}-${setSlot}`;
+    const input = setInputs[key];
+    const ex = exercises[exIdx];
+    const timed = isTimedExercise(ex?.name ?? '');
+
+    let newSet: CompletedSet;
+
+    if (timed) {
+      const durText = input?.duration?.trim() ?? '';
+      if (!durText) {
+        if (!silent) Alert.alert('Enter duration', 'Fill in the duration before logging this set.');
+        return;
+      }
+      // Parse duration: accept "mm:ss" or plain seconds
+      let durationSeconds: number;
+      if (durText.includes(':')) {
+        const [mm, ss] = durText.split(':').map(Number);
+        durationSeconds = (mm || 0) * 60 + (ss || 0);
+      } else {
+        durationSeconds = Math.round(parseFloat(durText) * 60); // assume minutes if plain number
+      }
+      if (durationSeconds <= 0) {
+        if (!silent) Alert.alert('Enter duration', 'Enter a valid duration.');
+        return;
+      }
+      newSet = { setNumber: setSlot + 1, reps: 0, weightLbs: 0, durationSeconds };
+    } else {
+      const weightNum = parseFloat(input?.weight ?? '');
+      const repsNum   = parseInt(input?.reps ?? '', 10);
+      if (!input?.weight || !input?.reps || isNaN(weightNum) || isNaN(repsNum) || repsNum <= 0) {
+        if (!silent) Alert.alert('Enter values', 'Fill in weight and reps before logging this set.');
+        return;
+      }
+      newSet = { setNumber: setSlot + 1, reps: repsNum, weightLbs: weightNum };
+    }
+
+    const targetSetCount = getTargetSetCount(ex.targetSets);
+
+    // Insert or replace at the correct slot position
+    const updatedSets = [...ex.sets];
+    updatedSets[setSlot] = newSet;
+    // Remove any trailing undefined slots
+    const cleanSets = updatedSets.filter(Boolean);
+
+    const updatedExercises = exercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
+    setExercises(updatedExercises);
+    setAiErrorIdx(null);
+
+    // Auto-advance to next incomplete exercise when all target sets are done
+    if (cleanSets.length >= targetSetCount) {
+      const nextIdx = updatedExercises.findIndex((e, i) => i > exIdx && e.sets.length < getTargetSetCount(e.targetSets));
+      setActiveExIdx(nextIdx >= 0 ? nextIdx : -1);
+    } else {
+      setActiveExIdx(exIdx);
+    }
+
+    // Start rest timer automatically if more sets remain
+    if (cleanSets.length < targetSetCount) {
+      const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
+      const nextSetLabel = timed
+        ? `Set ${cleanSets.length + 1}: ${ex.targetReps}`
+        : `Set ${cleanSets.length + 1}: ${newSet.weightLbs} lbs x ${ex.targetReps}`;
+      restDurationSeconds.current = restSeconds;
+      setRestForExercise(ex.name);
+      setRestRemaining(restSeconds);
+      setRestNextTarget(nextSetLabel);
+      setRestCue(null);
+      startRestTimer(restSeconds, ex.name);
+      await rescheduleRestNotifications({
+        seconds: restSeconds,
+        exerciseName: ex.name,
+        nextSetLabel,
+        aiCue: null,
+        includeStartAlert: true,
+      });
+    } else {
+      clearRestState();
+    }
+
+    // AI tip for next set (skip for timed/cardio exercises)
+    const setsLogged = cleanSets.length;
+    if (!timed && setsLogged < targetSetCount) {
+      setAiLoadingIdx(exIdx);
+      try {
+        if (!authToken) throw new Error('Not authenticated');
+        const rec = await getWeightRecommendation(authToken, ex.name, goal, cleanSets, setsLogged + 1, {
+          targetSets: ex.targetSets,
+          targetReps: ex.targetReps,
+          progressionPace: 'moderate',
+          experienceLevel: 'intermediate',
+          recoveryLevel: 'normal',
+          phase: 'accumulation',
+          workoutFocus: workout.focus,
+          weekNumber: 1,
+          incrementLbs: 5,
+        });
+        const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
+        setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
+        setRestCue(rec.tip);
+        setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e));
+      } catch {
+        setAiErrorIdx(exIdx);
+      } finally {
+        setAiLoadingIdx(null);
+      }
+    }
+  }, [setInputs, exercises, authToken, goal, workout.focus, startRestTimer, rescheduleRestNotifications, clearRestState]);
 
   const openAddExerciseModal = useCallback(async () => {
     setAddExerciseModalVisible(true);
@@ -441,6 +592,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const ex = exercises[exIdx];
     const targetSetCount = ex ? getTargetSetCount(ex.targetSets) : 3;
     if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
+    if (isTimedExercise(ex.name)) return; // No AI weight tip for cardio/timed exercises
 
     setAiLoadingIdx(exIdx);
     try {
@@ -721,24 +873,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
       {/* Warm-up card (must complete before exercises) */}
       {!warmupDone && (
-        <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }] }>
+        <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}>
           <Text style={[styles.warmupTitle, { color: workoutPalette.text }]}>Warm-Up For Today</Text>
           {warmupSteps.map((step, index) => (
             <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
           ))}
-          <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => setWarmupDone(true)}>
-            <Text style={styles.warmupDoneBtnText}>Mark Warm-Up Finished</Text>
-          </TouchableOpacity>
+          <View style={styles.warmupActions}>
+            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => setWarmupDone(true)}>
+              <Text style={styles.warmupDoneBtnText}>Start Workout</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.warmupCoachBtn, { borderColor: workoutPalette.strong }]} onPress={() => { setCoachInput('Can you modify my warm-up based on today\'s workout focus?'); setCoachModalVisible(true); }}>
+              <Text style={[styles.warmupCoachBtnText, { color: workoutPalette.text }]}>Ask Coach</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
-      {/* Progress bar */}
-      <View style={[styles.progressBarTrack, { backgroundColor: themeColors.border }] }>
-        <View style={[styles.progressBarFill, {
-          backgroundColor: workoutPalette.strong,
-          width: `${exercises.length ? (completedCount / exercises.length) * 100 : 0}%` as any,
-        }]} />
-      </View>
+      {/* Progress bar — only shown once workout starts */}
+      {warmupDone && (
+        <View style={[styles.progressBarTrack, { backgroundColor: themeColors.border }]}>
+          <View style={[styles.progressBarFill, {
+            backgroundColor: workoutPalette.strong,
+            width: `${exercises.length ? (completedCount / exercises.length) * 100 : 0}%` as any,
+          }]} />
+        </View>
+      )}
 
       {restRemaining > 0 && (
         <View style={[styles.restBanner, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }, restRemaining <= 10 && styles.restBannerUrgent]}>
@@ -772,14 +931,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
       {/* Exercise list */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
-        {!warmupDone && (
-          <View style={{ alignItems: 'center', marginTop: 32 }}>
-            <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 16 }}>Finish warm-up to start exercises</Text>
-          </View>
-        )}
         {warmupDone && exercises.map((ex, i) => {
           const targetSetCount  = getTargetSetCount(ex.targetSets);
-          const isDone          = ex.sets.length >= targetSetCount;
+          const totalSetCount   = targetSetCount + (extraSetCounts[i] ?? 0);
+          const isDone          = ex.sets.length >= totalSetCount;
           const isActive        = activeExIdx === i;
           const isAiLoading     = aiLoadingIdx === i;
           const isAiError       = aiErrorIdx === i;
@@ -808,9 +963,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 </View>
                 <View style={[styles.setsBadge, isDone && styles.setsBadgeDone]}>
                   <Text style={[styles.setsBadgeText, isDone && styles.setsBadgeTextDone]}>
-                    {ex.sets.length > targetSetCount
-                      ? `${targetSetCount}+${ex.sets.length - targetSetCount}`
-                      : `${ex.sets.length}/${targetSetCount}`}
+                    {`${ex.sets.length}/${totalSetCount}`}
                   </Text>
                 </View>
                 {/* Small red remove button — only when more than one exercise */}
@@ -827,37 +980,159 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {isActive && (
                 <View style={styles.exerciseDetail}>
 
-                  {/* ── Last results ── */}
-                  {hasLastTime && (
-                    <View style={styles.lastTimeCard}>
-                      <View style={styles.lastTimeHeader}>
-                        <Text style={styles.lastTimeTitle}>Last Results</Text>
-                        {bestLastSet ? <Text style={styles.lastTimeBest}>Best {bestLastSet.weightLbs} x {bestLastSet.reps}</Text> : null}
+                  {/* ── Exercise-specific warm-up note ── */}
+                  {(() => {
+                    const note = getExerciseWarmupNote(ex.name, i === 0);
+                    return note ? (
+                      <View style={styles.warmupNoteCard}>
+                        <Text style={styles.warmupNoteText}>💡 {note}</Text>
                       </View>
-                      {lastExerciseSets[ex.name].map((s, si) => (
-                        <View key={si} style={styles.lastTimeRow}>
-                          <Text style={styles.lastTimeSetNum}>Set {s.setNumber}</Text>
-                          <Text style={styles.lastTimeData}>{s.weightLbs} lbs × {s.reps} reps</Text>
-                          {s.feedback ? <Text style={styles.lastTimeFeedback}>{s.feedback}</Text> : null}
-                        </View>
-                      ))}
+                    ) : null;
+                  })()}
+
+                  {/* ── Form video link ── */}
+                  <TouchableOpacity
+                    style={styles.formVideoLink}
+                    onPress={() => Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${ex.name} proper form`)}`)}
+                    activeOpacity={0.7}>
+                    <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
+                  </TouchableOpacity>
+
+                  {/* ── AI tip — shown prominently above set rows ── */}
+                  {isAiLoading && (
+                    <View style={styles.aiBubble}>
+                      <ActivityIndicator size="small" color={colors.accent} />
+                      <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
+                    </View>
+                  )}
+                  {!isAiLoading && ex.aiRecommendation && (
+                    <View style={styles.aiBubble}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.aiLabel}>AI TIP</Text>
+                        <Text style={styles.aiText}>{ex.aiRecommendation}</Text>
+                      </View>
                     </View>
                   )}
 
-                  {/* ── Sets logged ── */}
-                  {ex.sets.length > 0 && (
-                    <View style={styles.setsLog}>
-                      {ex.sets.map((set, si) => (
-                        <View key={si} style={styles.setRow}>
-                          <Text style={styles.setNum}>Set {set.setNumber}</Text>
-                          <Text style={styles.setData}>{set.weightLbs} lbs × {set.reps} reps</Text>
-                          {set.feedback ? <Text style={styles.setCheck}>{set.feedback}</Text> : null}
+                  {/* ── Inline set rows ── */}
+                  {(() => {
+                    const timed = isTimedExercise(ex.name);
+                    return (
+                      <>
+                        <View style={styles.inlineSetsHeader}>
+                          <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
+                          {timed ? (
+                            <Text style={[styles.inlineSetsLabel, { flex: 2 }]}>Duration (min)</Text>
+                          ) : (
+                            <>
+                              <Text style={styles.inlineSetsLabel}>Weight</Text>
+                              <Text style={styles.inlineSetsLabel}>Reps</Text>
+                            </>
+                          )}
+                          <Text style={styles.inlineSetsLabel}>Last time</Text>
+                          <View style={{ width: 40 }} />
                         </View>
-                      ))}
-                    </View>
-                  )}
 
-                  {/* ── How did that feel? (only after a set, before last set) ── */}
+                        {Array.from({ length: targetSetCount + (extraSetCounts[i] ?? 0) }, (_, slot) => {
+                          const logged = ex.sets[slot];
+                          const inputKey = `${i}-${slot}`;
+                          const input = setInputs[inputKey] ?? { weight: '', reps: '', duration: '' };
+                          const lastSet = lastExerciseSets[ex.name]?.[slot] ?? lastExerciseSets[ex.name]?.[lastExerciseSets[ex.name]?.length - 1];
+                          const isLogged = !!logged;
+
+                          const lastTimeLabel = lastSet
+                            ? (lastSet.durationSeconds != null
+                                ? `${(lastSet.durationSeconds / 60).toFixed(1)}min`
+                                : `${lastSet.weightLbs}×${lastSet.reps}`)
+                            : '—';
+
+                          if (timed) {
+                            const loggedLabel = logged?.durationSeconds != null
+                              ? `${(logged.durationSeconds / 60).toFixed(1)}`
+                              : '';
+                            return (
+                              <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
+                                <Text style={styles.inlineSetNum}>{slot + 1}</Text>
+                                <TextInput
+                                  style={[styles.inlineInput, { flex: 2 }, isLogged && styles.inlineInputDone]}
+                                  value={isLogged ? loggedLabel : input.duration}
+                                  onChangeText={v => {
+                                    if (!isLogged) {
+                                      setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
+                                    }
+                                  }}
+                                  onEndEditing={() => {
+                                    if (!isLogged) handleLogSetInline(i, slot, true);
+                                  }}
+                                  keyboardType="decimal-pad"
+                                  placeholder="e.g. 5 or 0:30"
+                                  placeholderTextColor={colors.textMuted}
+                                  editable={!isLogged}
+                                  selectTextOnFocus
+                                  returnKeyType="done"
+                                />
+                                <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
+                                <TouchableOpacity
+                                  style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
+                                  onPress={() => { if (!isLogged) handleLogSetInline(i, slot, false); }}
+                                  disabled={isLogged}>
+                                  <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: colors.textMuted }]}>
+                                    {isLogged ? '✓' : '○'}
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          }
+
+                          return (
+                            <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
+                              <Text style={styles.inlineSetNum}>{slot + 1}</Text>
+                              <TextInput
+                                style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
+                                value={isLogged ? String(logged.weightLbs) : input.weight}
+                                onChangeText={v => {
+                                  if (!isLogged) {
+                                    setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, weight: v } }));
+                                  }
+                                }}
+                                onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
+                                keyboardType="decimal-pad"
+                                placeholder="lbs"
+                                placeholderTextColor={colors.textMuted}
+                                editable={!isLogged}
+                                selectTextOnFocus
+                                returnKeyType="next"
+                              />
+                              <TextInput
+                                style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
+                                value={isLogged ? String(logged.reps) : input.reps}
+                                onChangeText={v => {
+                                  if (!isLogged) {
+                                    setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, reps: v } }));
+                                  }
+                                }}
+                                onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
+                                keyboardType="number-pad"
+                                placeholder="reps"
+                                placeholderTextColor={colors.textMuted}
+                                editable={!isLogged}
+                                selectTextOnFocus
+                                returnKeyType="done"
+                              />
+                              <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
+                              <View style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}>
+                                <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: colors.textMuted }]}>
+                                  {isLogged ? '✓' : '○'}
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+                      </>
+                    );
+                  })()}
+
+                  {/* ── Feedback for last logged set ── */}
                   {ex.sets.length > 0 && ex.sets.length < targetSetCount && (
                     <View style={styles.feedbackCard}>
                       <Text style={styles.feedbackTitle}>Last set felt?</Text>
@@ -887,41 +1162,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                   )}
 
-                  {/* ── AI tip ── */}
-                  {isAiLoading && (
-                    <View style={styles.aiBubble}>
-                      <ActivityIndicator size="small" color={colors.accent} />
-                      <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
-                    </View>
-                  )}
-                  {!isAiLoading && ex.aiRecommendation && (
-                    <View style={styles.aiBubble}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.aiLabel}>AI TIP</Text>
-                        <Text style={styles.aiText}>{ex.aiRecommendation}</Text>
-                      </View>
-                    </View>
-                  )}
-                  {!isAiLoading && isAiError && !ex.aiRecommendation && (
-                    <View style={[styles.aiBubble, styles.aiBubbleError]}>
-                      <Text style={styles.aiErrorText}>AI tip unavailable — check backend/.env for OpenAI key</Text>
-                    </View>
-                  )}
-
-                  {/* ── Log set / Done ── */}
-                  {!isDone && (
-                    <TouchableOpacity style={styles.logSetBtn} onPress={() => openLogModal(i)}>
-                      <Text style={styles.logSetBtnText}>+ Log Set {ex.sets.length + 1}</Text>
+                  {/* ── Add set / done row ── */}
+                  <View style={styles.doneRow}>
+                    {isDone && <Text style={styles.doneText}>All sets complete!</Text>}
+                    <TouchableOpacity style={styles.addSetBtn} onPress={() => setExtraSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }))}>
+                      <Text style={styles.addSetBtnText}>+ Add Set</Text>
                     </TouchableOpacity>
-                  )}
-                  {isDone && (
-                    <View style={styles.doneRow}>
-                      <Text style={styles.doneText}>All sets complete!</Text>
-                      <TouchableOpacity style={styles.addSetBtn} onPress={() => openLogModal(i)}>
-                        <Text style={styles.addSetBtnText}>+ Extra Set</Text>
-                      </TouchableOpacity>
-                    </View>
-                  )}
+                  </View>
                 </View>
               )}
             </View>
@@ -1208,14 +1455,15 @@ const styles = StyleSheet.create({
   },
   warmupTitle: { fontSize: 16, fontWeight: '800', marginBottom: 2 },
   warmupStep: { fontSize: 13, color: colors.textPrimary, lineHeight: 20 },
+  warmupActions: { flexDirection: 'row', gap: 10, marginTop: 12, alignSelf: 'stretch' },
   warmupDoneBtn: {
-    marginTop: 12,
-    alignSelf: 'stretch',
     borderRadius: radius.md,
     paddingVertical: 14,
     alignItems: 'center',
   },
   warmupDoneBtnText: { color: colors.background, fontWeight: '700', fontSize: 15 },
+  warmupCoachBtn: { borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 16, paddingVertical: 14, alignItems: 'center', justifyContent: 'center' },
+  warmupCoachBtnText: { fontSize: 13, fontWeight: '700' },
   container: { flex: 1, backgroundColor: colors.background },
 
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12, gap: 12 },
@@ -1310,6 +1558,56 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceRaised,
   },
   addExerciseBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
+
+  // Warm-up note within exercise card
+  warmupNoteCard: {
+    backgroundColor: colors.warning + '18',
+    borderRadius: radius.md,
+    padding: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.warning,
+  },
+  warmupNoteText: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
+
+  // Form video link within exercise card
+  formVideoLink: {
+    alignSelf: 'flex-start',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '14',
+  },
+  formVideoLinkText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+
+  // Inline set logging
+  inlineSetsHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: colors.border },
+  inlineSetsLabel: { flex: 1, fontSize: 10, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
+  inlineSetRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border + '66',
+  },
+  inlineSetRowDone: { opacity: 0.75 },
+  inlineSetNum: { width: 20, fontSize: 13, fontWeight: '700', color: colors.textSecondary, textAlign: 'center' },
+  inlineInput: {
+    flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm,
+    paddingVertical: 8, paddingHorizontal: 6, fontSize: 16, fontWeight: '700',
+    color: colors.textPrimary, backgroundColor: colors.surfaceRaised, textAlign: 'center',
+  },
+  inlineInputDone: { borderColor: colors.primary + '60', backgroundColor: colors.primary + '14', color: colors.primary },
+  inlineLastResult: { flex: 1, fontSize: 11, color: colors.textMuted, textAlign: 'center' },
+  inlineLogBtn: {
+    width: 40, paddingVertical: 8, borderRadius: radius.sm,
+    backgroundColor: colors.primary, alignItems: 'center',
+  },
+  inlineLogBtnText: { fontSize: 12, fontWeight: '700', color: colors.background },
+  inlineLoggedBadgePending: { backgroundColor: 'transparent' },
+  inlineLoggedBadge: {
+    width: 40, paddingVertical: 8, borderRadius: radius.sm,
+    backgroundColor: colors.primary + '20', alignItems: 'center',
+  },
+  inlineLoggedBadgeText: { fontSize: 14, color: colors.primary, fontWeight: '800' },
 
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },

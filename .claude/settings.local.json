@@ -24,7 +24,10 @@
       "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")",
       "Bash(python -c \"from app.main import app; print\\(''OK''\\)\")",
       "Bash(python -c \"from app.routers.workouts import router; print\\(''workouts OK''\\)\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(sort -k6,7)",
+      "Bash(venv/Scripts/python.exe -c ':*)",
+      "Bash(netstat -ano)"
     ]
   }
 }

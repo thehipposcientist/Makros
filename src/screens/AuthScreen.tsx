@@ -1,13 +1,14 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image,
+  Platform, Image, Dimensions,
 } from 'react-native';
 import { login, register } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
-const logo = require('../../assets/images/logo.png');
+const { width: SCREEN_W } = Dimensions.get('window');
+const logo = require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png');
 
 interface AuthScreenProps {
   onAuthenticated: (token: string, isNewUser: boolean) => void;
@@ -18,12 +19,24 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const usernameRef        = useRef<TextInput>(null);
+  const passwordRef        = useRef<TextInput>(null);
+  const confirmPasswordRef = useRef<TextInput>(null);
+  const scrollRef          = useRef<ScrollView>(null);
 
   const switchMode = (next: 'login' | 'signup') => {
     setMode(next);
     setError('');
+    setPassword('');
+    setConfirmPassword('');
+    setShowPassword(false);
+    setShowConfirmPassword(false);
   };
 
   const handleSubmit = async () => {
@@ -32,16 +45,24 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       setError('Email and password are required');
       return;
     }
-    if (mode === 'signup' && !username.trim()) {
-      setError('Username is required');
-      return;
+    if (mode === 'signup') {
+      if (!username.trim()) {
+        setError('Username is required');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Passwords do not match');
+        return;
+      }
+      if (password.length < 6) {
+        setError('Password must be at least 6 characters');
+        return;
+      }
     }
     setLoading(true);
     try {
       const isNewUser = mode === 'signup';
-      if (isNewUser) {
-        await register(email.trim(), username.trim(), password);
-      }
+      if (isNewUser) await register(email.trim(), username.trim(), password);
       const { access_token } = await login(email.trim(), password);
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
@@ -52,57 +73,126 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   };
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: colors.background }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <ScrollView style={styles.container} contentContainerStyle={styles.content}
+    <KeyboardAvoidingView
+      style={styles.root}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}>
+      <ScrollView
+        ref={scrollRef}
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag">
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}>
 
+        {/* Logo */}
         <View style={styles.logoContainer}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.tagline}>Track smarter. Eat better. Move more.</Text>
+          <Text style={styles.tagline}>AI-powered fitness, built around you.</Text>
+          <View style={styles.featureRow}>
+            {(['Smart workout plans', 'Nutrition tracking', 'Real-time AI coaching'] as const).map(f => (
+              <View key={f} style={styles.featureChip}>
+                <Text style={styles.featureChipText}>{f}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
-        <View style={styles.toggle}>
-          <TouchableOpacity
-            style={[styles.toggleButton, mode === 'login' && styles.toggleActive]}
-            onPress={() => switchMode('login')}>
-            <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>
-              Log In
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.toggleButton, mode === 'signup' && styles.toggleActive]}
-            onPress={() => switchMode('signup')}>
-            <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>
-              Sign Up
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <View style={styles.divider} />
 
-        <View style={styles.form}>
+        {/* Auth form */}
+        <View style={styles.formCard}>
+          {/* Login / Sign Up toggle */}
+          <View style={styles.toggle}>
+            <TouchableOpacity
+              style={[styles.toggleButton, mode === 'login' && styles.toggleActive]}
+              onPress={() => switchMode('login')}>
+              <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Log In</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toggleButton, mode === 'signup' && styles.toggleActive]}
+              onPress={() => switchMode('signup')}>
+              <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Sign Up</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Email */}
           <TextInput
-            style={styles.input} placeholder="Email" placeholderTextColor={colors.textMuted}
-            value={email} onChangeText={setEmail}
-            keyboardType="email-address" autoCapitalize="none" autoCorrect={false}
+            style={styles.input}
+            placeholder="Email"
+            placeholderTextColor={colors.textMuted}
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="next"
+            onSubmitEditing={() => mode === 'signup' ? usernameRef.current?.focus() : passwordRef.current?.focus()}
+            blurOnSubmit={false}
           />
+
+          {/* Username (signup only) */}
           {mode === 'signup' && (
             <TextInput
-              style={styles.input} placeholder="Username" placeholderTextColor={colors.textMuted}
-              value={username} onChangeText={setUsername}
-              autoCapitalize="none" autoCorrect={false}
+              ref={usernameRef}
+              style={styles.input}
+              placeholder="Username"
+              placeholderTextColor={colors.textMuted}
+              value={username}
+              onChangeText={setUsername}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="next"
+              onSubmitEditing={() => passwordRef.current?.focus()}
+              blurOnSubmit={false}
             />
           )}
-          <TextInput
-            style={styles.input} placeholder="Password" placeholderTextColor={colors.textMuted}
-            value={password} onChangeText={setPassword} secureTextEntry
-          />
+
+          {/* Password */}
+          <View style={styles.passwordRow}>
+            <TextInput
+              ref={passwordRef}
+              style={[styles.input, styles.passwordInput]}
+              placeholder="Password"
+              placeholderTextColor={colors.textMuted}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
+              returnKeyType={mode === 'signup' ? 'next' : 'go'}
+              onSubmitEditing={() => mode === 'signup' ? confirmPasswordRef.current?.focus() : handleSubmit()}
+              blurOnSubmit={false}
+            />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
+              <Text style={styles.eyeText}>{showPassword ? 'Hide' : 'Show'}</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Confirm password (signup only) */}
+          {mode === 'signup' && (
+            <View style={styles.passwordRow}>
+              <TextInput
+                ref={confirmPasswordRef}
+                style={[styles.input, styles.passwordInput]}
+                placeholder="Confirm password"
+                placeholderTextColor={colors.textMuted}
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry={!showConfirmPassword}
+                returnKeyType="go"
+                onSubmitEditing={handleSubmit}
+              />
+              <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowConfirmPassword(v => !v)}>
+                <Text style={styles.eyeText}>{showConfirmPassword ? 'Hide' : 'Show'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
           <TouchableOpacity
             style={[styles.submitButton, loading && styles.submitButtonDisabled]}
-            onPress={handleSubmit} disabled={loading}>
+            onPress={handleSubmit}
+            disabled={loading}>
             {loading
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
@@ -111,39 +201,65 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             }
           </TouchableOpacity>
         </View>
+
+        <View style={{ height: 40 }} />
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:  { flex: 1, backgroundColor: colors.background },
-  content:    { flexGrow: 1, justifyContent: 'center', padding: 28, paddingBottom: 60 },
+  root:   { flex: 1, backgroundColor: colors.background },
+  scroll: { flex: 1 },
+  content: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 60, paddingBottom: 24 },
 
-  logoContainer: { alignItems: 'center', marginBottom: 48 },
-  logo:          { width: 500, height: 200 },
-  tagline:       { fontSize: 14, color: colors.textSecondary, marginTop: 12, textAlign: 'center' },
+  logoContainer: { alignItems: 'center', marginBottom: 24 },
+  logo:          { width: SCREEN_W * 0.88, height: SCREEN_W * 0.88 * 0.44 },
+  tagline:       { fontSize: 15, color: colors.textSecondary, marginTop: 14, textAlign: 'center', fontWeight: '500', letterSpacing: 0.2 },
+  featureRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14, justifyContent: 'center' },
+  featureChip:   { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.border },
+  featureChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+
+  divider: { height: 1, backgroundColor: colors.border, marginBottom: 24 },
+
+  formCard: { gap: 12 },
 
   toggle: {
-    flexDirection: 'row', backgroundColor: colors.surface,
-    borderRadius: radius.md, padding: 4, marginBottom: 28,
-    borderWidth: 1, borderColor: colors.border,
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.full,
+    padding: 3,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  toggleButton:     { flex: 1, paddingVertical: 12, borderRadius: radius.sm, alignItems: 'center' },
-  toggleActive:     { backgroundColor: colors.primary },
-  toggleText:       { fontSize: 15, fontWeight: '500', color: colors.textSecondary },
-  toggleTextActive: { color: colors.background, fontWeight: '700' },
+  toggleButton:     { flex: 1, paddingVertical: 12, borderRadius: radius.full, alignItems: 'center' },
+  toggleActive:     { backgroundColor: colors.primary, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
+  toggleText:       { fontSize: 15, fontWeight: '600', color: colors.textMuted },
+  toggleTextActive: { color: '#FFFFFF', fontWeight: '700' },
 
-  form:  { gap: 14 },
   input: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
     padding: 16, fontSize: 16, backgroundColor: colors.surface, color: colors.textPrimary,
   },
-  error:        { fontSize: 14, color: colors.error, textAlign: 'center' },
+
+  passwordRow: { flexDirection: 'row', alignItems: 'center' },
+  passwordInput: { flex: 1, borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRightWidth: 0 },
+  eyeBtn: {
+    borderWidth: 1, borderColor: colors.border, borderLeftWidth: 0,
+    borderTopRightRadius: radius.md, borderBottomRightRadius: radius.md,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 14, justifyContent: 'center', alignSelf: 'stretch',
+  },
+  eyeText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+
+  error: { fontSize: 14, color: colors.error, textAlign: 'center' },
+
   submitButton: {
     backgroundColor: colors.primary, borderRadius: radius.md,
-    paddingVertical: 16, alignItems: 'center', marginTop: 4,
+    paddingVertical: 17, alignItems: 'center', marginTop: 4,
+    shadowColor: colors.primary, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6, elevation: 4,
   },
   submitButtonDisabled: { opacity: 0.6 },
-  submitText:   { color: colors.background, fontSize: 16, fontWeight: '700' },
+  submitText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700', letterSpacing: 0.3 },
 });

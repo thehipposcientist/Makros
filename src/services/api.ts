@@ -9,15 +9,22 @@ function getBaseUrl(): string {
   return 'https://your-production-api.com';
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       ...options,
+      signal: controller.signal,
       headers: { 'Content-Type': 'application/json', ...options.headers },
     });
+    clearTimeout(timer);
     const data = await res.json();
     if (!res.ok) {
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        throw new Error(`The AI server is temporarily unavailable (${res.status}). Please try again in a moment.`);
+      }
       const detail = Array.isArray(data.detail)
         ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
         : (data.detail ?? 'Request failed');
@@ -25,6 +32,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     return data as T;
   } catch (e: any) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') {
+      throw new Error('Request timed out — the AI is taking too long. Please try a shorter question.');
+    }
     if (e.message === 'Network request failed') {
       throw new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
     }
@@ -289,9 +300,15 @@ export async function askTrainerQuestion(
   token: string,
   payload: {
     question: string;
+    mode: 'trainer' | 'nutritionist';
     profile: any;
     workoutPlan?: any;
     nutritionPlan?: any;
+    currentPlanContext?: {
+      workoutDays: Array<{ focus: string; exercises: Array<{ name: string; sets: number; reps: string }> }>;
+      todayMeals: Array<{ type: string; meal: string; foods: string[]; calories: number; protein: number }>;
+      mealRoutine?: string;
+    };
     progress?: any;
     conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
   },
@@ -307,7 +324,7 @@ export async function askTrainerQuestion(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
 }
 
 export async function askWorkoutQuestion(
@@ -339,6 +356,26 @@ export async function analyzeFoodPhoto(
   fat: number;
 }> {
   return request('/ai/food-photo', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function scanFoodsPhoto(
+  token: string,
+  payload: { image_base64: string; mime_type?: string },
+): Promise<{
+  foods: Array<{
+    name: string;
+    serving: string;
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+  }>;
+}> {
+  return request('/ai/scan-foods', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),

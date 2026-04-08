@@ -18,17 +18,17 @@ import {
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 
-const logo = require('../../assets/images/logo.png');
+const logo = require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png');
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods';
+type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'mealRoutine';
 
 function getSteps(goal: Goal, lifestyleGoals: Set<string>): StepKey[] {
   if (lifestyleGoals.has(goal)) {
-    return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
+    return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'mealRoutine'];
   }
-  return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
+  return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'mealRoutine'];
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   // Step 2 — Goal details
   const [pace, setPace] = useState<GoalPace>('moderate');
   const [targetWeight, setTargetWeight] = useState('');
+  const [targetEvent, setTargetEvent] = useState('');
 
   // Step 3 — Physical stats
   const [weightLbs, setWeightLbs] = useState('');
@@ -70,6 +71,9 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
 
   // Step 6 — Foods
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
+
+  // Step 7 — Meal routine
+  const [mealRoutine, setMealRoutine] = useState('');
 
   const steps = getSteps(goal, lifestyleGoals);
   const totalSteps = steps.length;
@@ -131,9 +135,11 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   };
 
   const handleComplete = () => {
+    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
     const goalDetails: GoalDetails = {
       pace,
       targetWeightLbs: weightGoals.has(goal) && targetWeight ? parseFloat(targetWeight) : undefined,
+      targetEvent:     eventGoals.has(goal) && targetEvent.trim() ? targetEvent.trim() : undefined,
       timelineWeeks:   timelineGoals.has(goal)
         ? (meta.goalConfig.timeline_weeks[goal]?.[pace] ?? undefined)
         : undefined,
@@ -156,6 +162,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       equipment:              selectedEquipment,
       foodsAvailable,
       customFoods: [],
+      mealRoutine: mealRoutine.trim() || undefined,
     });
   };
 
@@ -192,7 +199,15 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const renderGoalDetailsStep = () => {
     const paceOpts = pacesForGoal(goal, meta.paces);
     const showTargetWeight = weightGoals.has(goal);
+    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
+    const showTargetEvent = eventGoals.has(goal);
     const goalLabel = meta.goals.find(g => g.value === goal)?.label ?? '';
+
+    const eventPlaceholder =
+      goal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
+      goal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
+      goal === 'athletic_performance' ? 'e.g. sub-40s 100m, dunk a basketball' :
+      'Describe your target';
 
     return (
       <View style={styles.stepContainer}>
@@ -217,6 +232,23 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
               />
               <Text style={styles.unit}>lbs</Text>
             </View>
+          </View>
+        )}
+
+        {showTargetEvent && (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>
+              Target goal <Text style={styles.optional}>(optional)</Text>
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder={eventPlaceholder}
+              placeholderTextColor={colors.textMuted}
+              value={targetEvent}
+              onChangeText={setTargetEvent}
+              autoCapitalize="none"
+              returnKeyType="done"
+            />
           </View>
         )}
 
@@ -453,6 +485,28 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
     </View>
   );
 
+  const renderMealRoutineStep = () => (
+    <View style={styles.stepContainer}>
+      <Text style={styles.stepTitle}>Your Meal Routine</Text>
+      <Text style={styles.stepDescription}>
+        Do you already follow a regular meal routine? Describe it so your AI nutritionist can plan around it.
+      </Text>
+      <TextInput
+        style={[styles.input, { height: 120, textAlignVertical: 'top', paddingTop: 12 }]}
+        placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays. I do the same dinner routine each night.'}
+        placeholderTextColor={colors.textMuted}
+        value={mealRoutine}
+        onChangeText={setMealRoutine}
+        multiline
+        numberOfLines={5}
+      />
+      <Text style={styles.hint}>
+        You can also update this anytime by chatting with your AI Nutritionist in the app.
+      </Text>
+      <Text style={styles.hint}>Leave blank if you have no fixed routine — the AI will plan everything for you.</Text>
+    </View>
+  );
+
   const renderStep = () => {
     switch (currentStepKey) {
       case 'goal':          return renderGoalStep();
@@ -461,6 +515,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       case 'trainingDays':  return renderTrainingDaysStep();
       case 'equipment':     return renderEquipmentStep();
       case 'foods':         return renderFoodsStep();
+      case 'mealRoutine':   return renderMealRoutineStep();
     }
   };
 

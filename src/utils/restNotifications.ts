@@ -65,14 +65,18 @@ export async function scheduleRestNotifications(params: {
   const granted = await ensureWorkoutNotificationPermission();
   if (!granted) return {};
 
-  const aiLine = params.aiCue ? ` Cue: ${params.aiCue}` : '';
+  const aiLine = params.aiCue ? `\n${params.aiCue}` : '';
+  const endTime = new Date(Date.now() + params.seconds * 1000);
+  const endClock = endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
   let startId: string | undefined;
   if (params.includeStartAlert !== false) {
     startId = await Notifications.scheduleNotificationAsync({
       content: {
-        title: 'Rest timer started',
-        body: `${params.seconds}s for ${params.exerciseName}. ${params.nextSetLabel}.${aiLine}`,
+        title: `Rest — ${params.seconds}s  ·  ends ${endClock}`,
+        body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
         sound: 'default',
+        ...(Platform.OS === 'android' ? { sticky: false, ongoing: false } : {}),
       },
       trigger: null,
     });
@@ -82,8 +86,8 @@ export async function scheduleRestNotifications(params: {
   if (params.seconds > 10) {
     warningId = await Notifications.scheduleNotificationAsync({
       content: {
-        title: '10 seconds left',
-        body: `${params.exerciseName} is almost up. ${params.nextSetLabel}.`,
+        title: '10 seconds left — get ready',
+        body: `${params.exerciseName}\n${params.nextSetLabel}`,
         sound: 'default',
       },
       trigger: {
@@ -95,8 +99,8 @@ export async function scheduleRestNotifications(params: {
 
   const completeId = await Notifications.scheduleNotificationAsync({
     content: {
-      title: 'Next set ready',
-      body: `${params.exerciseName}. ${params.nextSetLabel}.${aiLine}`,
+      title: 'Go! Next set ready',
+      body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
       sound: 'default',
     },
     trigger: {
