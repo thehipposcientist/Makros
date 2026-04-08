@@ -2,8 +2,9 @@ import { useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions,
+  Platform, Image, Dimensions, Alert,
 } from 'react-native';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { login, register } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
@@ -11,7 +12,7 @@ const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png');
 
 interface AuthScreenProps {
-  onAuthenticated: (token: string, isNewUser: boolean) => void;
+  onAuthenticated: (token: string, isNewUser: boolean, offerBiometric?: boolean) => void;
 }
 
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
@@ -64,7 +65,31 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       const isNewUser = mode === 'signup';
       if (isNewUser) await register(email.trim(), username.trim(), password);
       const { access_token } = await login(email.trim(), password);
-      onAuthenticated(access_token, isNewUser);
+
+      // Offer Face ID / biometric login after successful credential login
+      let offerBiometric = false;
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled  = await LocalAuthentication.isEnrolledAsync();
+        const types       = await LocalAuthentication.supportedAuthenticationTypesAsync();
+        const hasFaceId   = types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION);
+        if (hasHardware && isEnrolled) {
+          offerBiometric = await new Promise<boolean>(resolve => {
+            Alert.alert(
+              hasFaceId ? 'Enable Face ID' : 'Enable Biometric Login',
+              `Use ${hasFaceId ? 'Face ID' : 'fingerprint'} to log in next time without entering your password?`,
+              [
+                { text: 'Not Now', style: 'cancel', onPress: () => resolve(false) },
+                { text: 'Enable',                   onPress: () => resolve(true)  },
+              ],
+            );
+          });
+        }
+      } catch {
+        // Biometric check failed silently — proceed without it
+      }
+
+      onAuthenticated(access_token, isNewUser, offerBiometric);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
     } finally {

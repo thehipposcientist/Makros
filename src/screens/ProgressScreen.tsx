@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
+  TextInput, Alert,
 } from 'react-native';
 import { WorkoutSession, UserProfile } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR } from '../utils/workoutHistory';
@@ -13,6 +14,7 @@ interface ProgressScreenProps {
   onBack: () => void;
   authToken: string;
   userProfile: UserProfile;
+  onUpdateWeight?: (weightLbs: number) => void;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -75,7 +77,7 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
     });
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight }: ProgressScreenProps) {
   const meta = useMetaData();
   const [tab, setTab] = useState<'prs' | 'history' | 'charts'>('prs');
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
@@ -87,6 +89,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile }: Progr
   const [guardrails, setGuardrails] = useState<string[]>([]);
   const [coachMemory, setCoachMemory] = useState<any[]>([]);
   const [progressionHint, setProgressionHint] = useState<string>('');
+  const [editingWeight, setEditingWeight] = useState(false);
+  const [weightInput, setWeightInput] = useState('');
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory()]).then(([p, h]) => {
@@ -270,22 +274,65 @@ export default function ProgressScreen({ onBack, authToken, userProfile }: Progr
           )}
 
           <View style={styles.weightCard}>
-            <Text style={styles.weightTitle}>Weight Progress</Text>
-            <View style={styles.weightRow}>
-              <View style={styles.weightMetric}>
-                <Text style={styles.weightMetricLabel}>Initial</Text>
-                <Text style={styles.weightMetricValue}>{startWeight} lbs</Text>
-              </View>
-              <View style={styles.weightMetric}>
-                <Text style={styles.weightMetricLabel}>Current</Text>
-                <Text style={styles.weightMetricValue}>{currentWeight} lbs</Text>
-              </View>
-              <View style={styles.weightMetric}>
-                <Text style={styles.weightMetricLabel}>Change</Text>
-                <Text style={styles.weightMetricValue}>{lostOrGained.toFixed(1)} lbs {direction}</Text>
-              </View>
+            <View style={styles.weightCardHeader}>
+              <Text style={styles.weightTitle}>Weight Progress</Text>
+              {onUpdateWeight && !editingWeight && (
+                <TouchableOpacity
+                  onPress={() => { setWeightInput(String(currentWeight)); setEditingWeight(true); }}
+                  style={styles.updateWeightBtn}>
+                  <Text style={styles.updateWeightBtnText}>Update</Text>
+                </TouchableOpacity>
+              )}
             </View>
-            {targetWeight != null && (
+
+            {editingWeight ? (
+              <View style={styles.weightInputRow}>
+                <TextInput
+                  style={styles.weightInput}
+                  value={weightInput}
+                  onChangeText={setWeightInput}
+                  keyboardType="decimal-pad"
+                  placeholder="Enter weight (lbs)"
+                  placeholderTextColor={colors.textMuted}
+                  autoFocus
+                />
+                <TouchableOpacity
+                  style={styles.weightConfirmBtn}
+                  onPress={() => {
+                    const val = parseFloat(weightInput);
+                    if (isNaN(val) || val < 50 || val > 700) {
+                      Alert.alert('Invalid weight', 'Please enter a weight between 50 and 700 lbs.');
+                      return;
+                    }
+                    onUpdateWeight!(val);
+                    setEditingWeight(false);
+                  }}>
+                  <Text style={styles.weightConfirmText}>Save</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.weightCancelBtn}
+                  onPress={() => setEditingWeight(false)}>
+                  <Text style={styles.weightCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.weightRow}>
+                <View style={styles.weightMetric}>
+                  <Text style={styles.weightMetricLabel}>Initial</Text>
+                  <Text style={styles.weightMetricValue}>{startWeight} lbs</Text>
+                </View>
+                <View style={styles.weightMetric}>
+                  <Text style={styles.weightMetricLabel}>Current</Text>
+                  <Text style={styles.weightMetricValue}>{currentWeight} lbs</Text>
+                </View>
+                <View style={styles.weightMetric}>
+                  <Text style={styles.weightMetricLabel}>Change</Text>
+                  <Text style={styles.weightMetricValue}>{lostOrGained.toFixed(1)} lbs {direction}</Text>
+                </View>
+              </View>
+            )}
+
+            {targetWeight != null && !editingWeight && (
               <Text style={styles.weightEta}>
                 Target: {targetWeight} lbs
                 {remainingLbs != null ? `  ·  ${remainingLbs.toFixed(1)} lbs remaining` : ''}
@@ -459,7 +506,22 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 12,
   },
-  weightTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginBottom: 10 },
+  weightCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  weightTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  updateWeightBtn: {
+    borderWidth: 1, borderColor: colors.primary,
+    borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 5,
+  },
+  updateWeightBtnText: { fontSize: 12, fontWeight: '700', color: colors.primary },
+  weightInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  weightInput: {
+    flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    padding: 10, fontSize: 15, color: colors.textPrimary, backgroundColor: colors.surfaceRaised,
+  },
+  weightConfirmBtn: { backgroundColor: colors.primary, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10 },
+  weightConfirmText: { fontSize: 13, fontWeight: '700', color: '#fff' },
+  weightCancelBtn: { paddingHorizontal: 8, paddingVertical: 10 },
+  weightCancelText: { fontSize: 13, color: colors.textSecondary },
   weightRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   weightMetric: {
     flex: 1,

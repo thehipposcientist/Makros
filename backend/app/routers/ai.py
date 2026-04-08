@@ -121,6 +121,8 @@ class TrainerQuestionRequest(BaseModel):
     nutritionPlan: dict | None = None
     progress: dict | None = None
     conversation: list[dict] | None = None
+    image_base64: str | None = None
+    mime_type: str = "image/jpeg"
 
 
 class WorkoutCoachQuestionRequest(BaseModel):
@@ -472,6 +474,10 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
             f'    "{name}": {{\n'
             f'      "meal": "Short descriptive recipe name",\n'
             f'      "foods": ["ingredient with amount", "..."],\n'
+            f'      "calories": {cal},\n'
+            f'      "protein": {prot},\n'
+            f'      "carbs": {carb},\n'
+            f'      "fat": {fat_g},\n'
             f'      "instructions": "1-3 sentence method.",\n'
             f'      "estimated_alignment": "e.g. high protein, moderate carb"\n'
             f'    }}'
@@ -928,40 +934,61 @@ def ask_trainer_question(
     }
     trimmed_convo = (body.conversation or [])[-12:]
 
+    user_text = (
+        "Recent conversation (most recent last):\n"
+        f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
+        "User question:\n"
+        f"{q}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+        "Return this JSON schema exactly:\n"
+        '{"answer": string, "action_items": [string], '
+        '"needs_plan_update": boolean, "safety_note": string, '
+        '"updated_workout_plan": object|null, "updated_nutrition_plan": object|null}'
+    )
+
+    # Build user message — use vision format if image is attached
+    if body.image_base64:
+        user_message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_text},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{body.mime_type};base64,{body.image_base64}",
+                        "detail": "low",
+                    },
+                },
+            ],
+        }
+    else:
+        user_message = {"role": "user", "content": user_text}
+
     client = OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
-            model=get_openai_model(),
+            model="gpt-4o",  # vision requires gpt-4o
             response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are an expert strength coach and injury-aware trainer. "
-                        "Use provided profile/plan/progress context to give practical, safe advice. "
+                        "Always check the profile's 'injuries' field first — if injuries are present, "
+                        "remove or substitute any exercises that stress those areas before answering. "
+                        "Use the provided workout plan, nutrition plan, and progress context to give practical advice. "
+                        "If the user shares a photo of their meal, analyze the foods visible and factor that into your advice. "
                         "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
-                        "When the user asks for plan changes, include concrete updated plan objects. "
+                        "When the user asks for plan changes or you need to accommodate injuries, "
+                        "set needs_plan_update=true and include a fully updated plan object. "
                         "Return JSON only."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": (
-                        "Recent conversation (most recent last):\n"
-                        f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
-                        "User question:\n"
-                        f"{q}\n\n"
-                        "Context JSON:\n"
-                        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
-                        "Return this JSON schema exactly:\n"
-                        '{"answer": string, "action_items": [string], '
-                        '"needs_plan_update": boolean, "safety_note": string, '
-                        '"updated_workout_plan": object|null, "updated_nutrition_plan": object|null}'
-                    ),
-                },
+                user_message,
             ],
             temperature=0.4,
-            max_tokens=500,
+            max_tokens=2000,
         )
         return json.loads(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1135,6 +1162,76 @@ def scan_foods_photo(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
+
+
+@router.post("/scan-equipment")
+def scan_equipment_photo(
+    body: FoodPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify gym equipment visible in a photo and return names matching the app's equipment library."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    known_equipment = [
+        "Pull-up bar", "Resistance bands", "Yoga mat", "Jump rope", "Foam roller",
+        "Ab wheel", "Dip bars", "Suspension trainer",
+        "Dumbbells", "Barbell", "Kettlebell", "EZ curl bar", "Weight plates",
+        "Trap bar", "Medicine ball",
+        "Flat bench", "Adjustable bench", "Incline bench",
+        "Squat rack", "Power rack", "Landmine attachment",
+        "Cable machine", "Leg press", "Lat pulldown", "Chest press machine",
+        "Seated row machine", "Leg extension", "Leg curl machine",
+        "Shoulder press machine", "Hip abduction machine", "Hip adduction machine",
+        "Smith machine", "Hack squat machine", "Assisted pull-up machine",
+        "Treadmill", "Stationary bike", "Elliptical", "Rowing machine",
+        "Stair climber", "Assault bike", "Swimming pool", "Battle ropes",
+        "Plyo box", "Sled",
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a fitness equipment expert. Identify gym equipment visible in the image. "
+                        "Only return equipment names that exactly match items in the provided list. "
+                        "Return valid JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Identify all gym equipment visible in this image. "
+                                f"Only include items whose names exactly match something in this list: {known_equipment}. "
+                                "Return exactly this JSON — no extra text: "
+                                '{"equipment": [<array of matching equipment name strings>]}'
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                },
+            ],
+            temperature=0.1,
+            max_tokens=400,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Equipment scan failed: {str(e)}")
 
 
 class WorkoutSummaryRequest(BaseModel):

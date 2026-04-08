@@ -9,7 +9,8 @@
       "**/*"
     ],
     "plugins": [
-      "expo-notifications"
+      "expo-notifications",
+      "expo-secure-store"
     ],
     "ios": {},
     "scheme": "makros",

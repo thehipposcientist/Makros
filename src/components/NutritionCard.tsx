@@ -12,7 +12,6 @@ interface NutritionCardProps {
   onAddSnack?: () => void;
   onRemoveMeal?: (mealType: string) => void;
   onRestoreMeal?: (mealType: string) => void;
-  onPhotoMeal?: (mealType: string) => void;
 }
 
 export default function NutritionCard({
@@ -25,7 +24,6 @@ export default function NutritionCard({
   onAddSnack,
   onRemoveMeal,
   onRestoreMeal,
-  onPhotoMeal,
 }: NutritionCardProps) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -117,7 +115,6 @@ export default function NutritionCard({
             onToggle={onToggleMeal}
             onEdit={onEditMeal}
             onRemove={onRemoveMeal}
-            onPhoto={onPhotoMeal}
             colors={colors}
             styles={styles}
             mealAccent={section}
@@ -133,7 +130,6 @@ export default function NutritionCard({
             onToggle={onToggleMeal}
             onEdit={onEditMeal}
             onRemove={onRemoveMeal}
-            onPhoto={onPhotoMeal}
             colors={colors}
             styles={styles}
             mealAccent={section}
@@ -204,7 +200,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, onPhoto, colors, styles, mealAccent }: {
+function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, colors, styles, mealAccent }: {
   emoji: string;
   mealType: string;
   meal: MealSuggestion;
@@ -212,7 +208,6 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
   onToggle?: (mealType: string) => void;
   onEdit?:   (mealType: string, meal: MealSuggestion) => void;
   onRemove?: (mealType: string) => void;
-  onPhoto?: (mealType: string) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
@@ -229,14 +224,6 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
         <Text style={[styles.mealName, checked && styles.mealNameDone]}>
           {emoji}  {meal.meal}
         </Text>
-        {onPhoto && (
-          <TouchableOpacity
-            onPress={() => onPhoto(mealType)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={styles.photoBtn}>
-            <Text style={styles.photoBtnText}>📷</Text>
-          </TouchableOpacity>
-        )}
         {onEdit && (
           <TouchableOpacity
             onPress={() => onEdit(mealType, meal)}
@@ -255,23 +242,15 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
         )}
       </View>
 
-      {/* Foods always visible with amounts */}
+      {/* Foods always visible */}
       <View style={styles.mealFoodsDetail}>
-        {meal.foods.map((food, i) => {
-          const amount = meal.amounts?.[i];
-          return (
-            <View key={i} style={styles.mealFoodRow}>
-              {amount && (
-                <Text style={[styles.mealFoodAmount, { color: mealAccent.strong }]}>
-                  {amount}
-                </Text>
-              )}
-              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, !amount && { marginLeft: 0 }]}>
-                {food}
-              </Text>
-            </View>
-          );
-        })}
+        {meal.foods.map((food, i) => (
+          <View key={i} style={styles.mealFoodRow}>
+            <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { marginLeft: 0 }]}>
+              {food}
+            </Text>
+          </View>
+        ))}
         {meal.instructions && (
           <View style={styles.recipeBox}>
             <Text style={styles.recipeLabel}>How to make it</Text>
@@ -381,8 +360,6 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors'], section: Re
   mealName:     { flex: 1, fontSize: 14, fontWeight: '600', color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
 
-  photoBtn: { paddingHorizontal: 4 },
-  photoBtnText: { fontSize: 15 },
   editBtn:     { paddingHorizontal: 6 },
   editBtnText: { fontSize: 12, color: section.strong, fontWeight: '700' },
   removeMealBtn: { paddingHorizontal: 6 },

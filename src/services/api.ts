@@ -311,6 +311,8 @@ export async function askTrainerQuestion(
     };
     progress?: any;
     conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    image_base64?: string;
+    mime_type?: string;
   },
 ): Promise<{
   answer: string;
@@ -376,6 +378,17 @@ export async function scanFoodsPhoto(
   }>;
 }> {
   return request('/ai/scan-foods', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function scanEquipmentPhoto(
+  token: string,
+  payload: { image_base64: string; mime_type?: string },
+): Promise<{ equipment: string[] }> {
+  return request('/ai/scan-equipment', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),

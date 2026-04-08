@@ -81,7 +81,10 @@ export interface UserProfile {
   foodsAvailable: string[];
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
   savedMeals?: SavedMealTemplate[];
-  mealRoutine?: string;          // user's fixed meal habits e.g. "I have a protein shake every morning"
+  mealRoutine?: string;          // user's fixed meal habits
+  injuries?: string;             // injuries or physical limitations
+  experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
+  lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────

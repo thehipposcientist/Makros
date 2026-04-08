@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
-  StyleSheet, TextInput, KeyboardAvoidingView, Platform,
+  StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { MealSuggestion, DailyNutritionPlan, SavedMealTemplate } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
+import { scanFoodsPhoto } from '../services/api';
 
 interface Props {
   visible: boolean;
@@ -15,6 +17,7 @@ interface Props {
   allFoods: FoodItem[];
   foodCategories: FoodCategoryGroup[];
   savedMeals?: SavedMealTemplate[];
+  authToken?: string;
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
 }
@@ -72,9 +75,10 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   return total;
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], onSave, onClose }: Props) {
-  const [foods,  setFoods]  = useState<string[]>(meal.foods);
-  const [search, setSearch] = useState('');
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose }: Props) {
+  const [foods,       setFoods]       = useState<string[]>(meal.foods);
+  const [search,      setSearch]      = useState('');
+  const [scanLoading, setScanLoading] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -82,6 +86,34 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setSearch('');
     }
   }, [visible, meal]);
+
+  const pickAndScan = async (source: 'camera' | 'library') => {
+    if (!authToken) return;
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images' })
+      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: 'images' });
+    if (result.canceled || !result.assets[0]?.base64) return;
+    const asset = result.assets[0];
+    setScanLoading(true);
+    try {
+      const res = await scanFoodsPhoto(authToken, {
+        image_base64: asset.base64!,
+        mime_type: asset.mimeType ?? 'image/jpeg',
+      });
+      const names = res.foods.map(f => f.name);
+      if (names.length === 0) {
+        Alert.alert('No foods found', 'Could not identify any foods in that photo.');
+        return;
+      }
+      const newFoods = names.filter(n => !foods.includes(n));
+      setFoods(prev => [...prev, ...newFoods]);
+      if (newFoods.length === 0) Alert.alert('Already added', 'All identified foods are already in this meal.');
+    } catch (e: any) {
+      Alert.alert('Scan failed', e.message ?? 'Could not scan the photo.');
+    } finally {
+      setScanLoading(false);
+    }
+  };
 
   const mealMacros  = calcMacros(foods, allFoods);
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
@@ -229,6 +261,26 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
             {/* Food picker */}
             <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
+
+            {authToken && (
+              <View style={s.scanRow}>
+                <TouchableOpacity
+                  style={[s.scanBtn, scanLoading && { opacity: 0.5 }]}
+                  onPress={() => pickAndScan('camera')}
+                  disabled={scanLoading}>
+                  {scanLoading
+                    ? <ActivityIndicator size="small" color={colors.primary} />
+                    : <Text style={s.scanBtnText}>Take Photo</Text>}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.scanBtn, scanLoading && { opacity: 0.5 }]}
+                  onPress={() => pickAndScan('library')}
+                  disabled={scanLoading}>
+                  <Text style={s.scanBtnText}>Choose Photo</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             <TextInput
               style={s.searchInput}
               value={search}
@@ -330,6 +382,16 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', marginLeft: 10,
   },
   removeText: { fontSize: 18, color: colors.error, fontWeight: '700', lineHeight: 22 },
+
+  scanRow: {
+    flexDirection: 'row', gap: 10, marginBottom: 12,
+  },
+  scanBtn: {
+    flex: 1, borderWidth: 1, borderColor: colors.primary,
+    borderRadius: radius.md, paddingVertical: 10, alignItems: 'center',
+    backgroundColor: colors.primary + '18',
+  },
+  scanBtnText: { fontSize: 13, fontWeight: '600', color: colors.primary },
 
   searchInput: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,

@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as LocalAuthentication from 'expo-local-authentication';
+import * as SecureStore from 'expo-secure-store';
 import { UserProfile, WorkoutDay, WorkoutSession } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, upsertDayState } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -54,8 +56,32 @@ export default function Index() {
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }
 
-    // Keep auth session in memory only so a full app close requires login again.
-    await AsyncStorage.removeItem('authToken');
+    // Biometric auto-login: SecureStore is the single source of truth.
+    // If a token is stored there, the user opted in — prompt Face ID.
+    try {
+      const savedToken = await SecureStore.getItemAsync('authToken');
+      if (savedToken) {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled  = await LocalAuthentication.isEnrolledAsync();
+        if (hasHardware && isEnrolled) {
+          const result = await LocalAuthentication.authenticateAsync({
+            promptMessage: 'Log in to Makros',
+            cancelLabel: 'Use Password Instead',
+            disableDeviceFallback: true,
+          });
+          if (result.success) {
+            setAuthToken(savedToken);
+            await loadProfile(savedToken);
+            setIsLoading(false);
+            return;
+          }
+          // Face ID cancelled or failed — fall through to login screen
+        }
+      }
+    } catch {
+      // SecureStore or biometric unavailable — fall through to manual login
+    }
+
     setIsLoading(false);
   };
 
@@ -72,14 +98,23 @@ export default function Index() {
     }
   };
 
-  const handleAuthenticated = async (token: string, isNewUser: boolean) => {
+  const handleAuthenticated = async (token: string, isNewUser: boolean, offerBiometric?: boolean) => {
     setAuthToken(token);
     if (isNewUser) {
-      // Clear any stale profile so onboarding always runs for new accounts
       await AsyncStorage.removeItem('userProfile');
       setUserProfile(null);
     } else {
       await loadProfile(token);
+    }
+
+    if (offerBiometric) {
+      // Store token in hardware-backed SecureStore — this IS the biometric-enabled flag.
+      // Presence of the token in SecureStore = biometric login is active.
+      try {
+        await SecureStore.setItemAsync('authToken', token);
+      } catch {
+        // SecureStore unavailable on this device — silently skip
+      }
     }
   };
 
@@ -92,6 +127,7 @@ export default function Index() {
 
   const handleSignOut = async () => {
     await AsyncStorage.multiRemove(['authToken', 'userProfile', 'aiWorkoutPlan', 'aiNutritionPlan', 'metaData_v1']);
+    try { await SecureStore.deleteItemAsync('authToken'); } catch {};
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
@@ -109,13 +145,30 @@ export default function Index() {
     setEditMode('plan');
     if (authToken) {
       syncOnboarding(authToken, stamped).catch(() => null);
-      // Regenerate plans via AI in the background when plan settings change
-      if (editMode === 'plan') {
+
+      const shouldRegen = editMode === 'plan' || editMode === 'foods' || editMode === 'equipment';
+      if (shouldRegen) {
+        if (editMode !== 'equipment') await AsyncStorage.removeItem('mealEdits');
         setIsPlanUpdating(true);
         getAIPlans(authToken, stamped)
           .then(async (aiPlans) => {
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-            await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan));
+            const updateWorkout  = editMode === 'plan' || editMode === 'equipment';
+            const updateNutrition = editMode === 'plan' || editMode === 'foods';
+
+            if (updateWorkout) {
+              await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+            }
+            if (updateNutrition) {
+              await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan));
+              const today = new Date();
+              const token = authToken;
+              for (let i = 0; i < 3; i++) {
+                const d = new Date(today);
+                d.setDate(today.getDate() + i);
+                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                upsertDayState(token, key, { nutrition_plan: aiPlans.nutrition_plan }).catch(() => null);
+              }
+            }
             setPlanRefreshKey(k => k + 1);
           })
           .catch(() => null)
@@ -126,6 +179,17 @@ export default function Index() {
 
   const handleWorkoutFinish = (_session: WorkoutSession) => {
     setActiveWorkout(null);
+  };
+
+  const handleUpdateWeight = async (weightLbs: number) => {
+    if (!userProfile) return;
+    const updated: UserProfile = {
+      ...userProfile,
+      physicalStats: { ...userProfile.physicalStats, weightLbs },
+    };
+    await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
+    setUserProfile(updated);
+    if (authToken) syncOnboarding(authToken, updated).catch(() => null);
   };
 
   if (isLoading) return (
@@ -139,7 +203,7 @@ export default function Index() {
     </View>
   );
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  if (!userProfile) return <OnboardingScreen onComplete={handleProfileComplete} />;
+  if (!userProfile) return <OnboardingScreen authToken={authToken ?? ''} onComplete={handleProfileComplete} />;
 
   if (isEditing) {
     return <EditProfileScreen authToken={authToken} profile={userProfile} mode={editMode} onSave={handleSaveProfile} onCancel={() => { setIsEditing(false); setEditMode('plan'); }} />;
@@ -160,7 +224,7 @@ export default function Index() {
   }
 
   if (showProgress) {
-    return <ProgressScreen authToken={authToken} userProfile={userProfile} onBack={() => setShowProgress(false)} />;
+    return <ProgressScreen authToken={authToken} userProfile={userProfile} onBack={() => setShowProgress(false)} onUpdateWeight={handleUpdateWeight} />;
   }
 
   return (

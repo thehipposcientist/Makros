@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import * as ImagePicker from 'expo-image-picker';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, analyzeFoodPhoto } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory,
@@ -19,6 +19,7 @@ import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
 import { colors, getTheme, radius } from '../constants/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface HomeScreenProps {
   authToken: string;
@@ -80,6 +81,7 @@ const TRAINING_DAY_SETS: Record<number, number[]> = {
 };
 
 function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number): ScheduleItem[] {
+  if (!workoutPlan?.days?.length) return [];
   const trainingSet = new Set(TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]);
   const today = new Date();
   const todayDow = today.getDay();
@@ -215,8 +217,8 @@ function buildAvailability(
     Cardio: 0,
   };
 
-  for (const day of workoutPlan.days) {
-    for (const ex of day.exercises) {
+  for (const day of (workoutPlan.days ?? [])) {
+    for (const ex of (day.exercises ?? [])) {
       const group = inferGroup(`${day.focus} ${ex.name}`);
       if (group in counts) counts[group] += 1;
     }
@@ -232,8 +234,8 @@ function buildAvailability(
       pct: Math.max(10, Math.round((value / maxCount) * 100 / 5) * 5),
     }));
 
-  const cyclingHits = history.filter((s) => /cycle|cycling|bike|spin/i.test(`${s.focus} ${s.exercises.map(e => e.name).join(' ')}`)).length;
-  const runningHits = history.filter((s) => /run|running|jog|treadmill/i.test(`${s.focus} ${s.exercises.map(e => e.name).join(' ')}`)).length;
+  const cyclingHits = history.filter((s) => /cycle|cycling|bike|spin/i.test(`${s.focus} ${(s.exercises ?? []).map(e => e.name).join(' ')}`)).length;
+  const runningHits = history.filter((s) => /run|running|jog|treadmill/i.test(`${s.focus} ${(s.exercises ?? []).map(e => e.name).join(' ')}`)).length;
   const cardioProfile = cyclingHits > 0
     ? `Cyclist profile (${cyclingHits} sessions)`
     : runningHits > 0
@@ -246,6 +248,7 @@ function buildAvailability(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isPlanUpdating = false, onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+  const insets = useSafeAreaInsets();
   const meta = useMetaData();
   const theme = getTheme(userProfile?.themePreference);
   const themeColors = theme.colors;
@@ -269,6 +272,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [coachMode, setCoachMode] = useState<'trainer' | 'nutritionist'>('trainer');
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
+  const [attachedImage, setAttachedImage] = useState<{ base64: string; uri: string } | null>(null);
   const [workoutChat, setWorkoutChat] = useState<TrainerChatMessage[]>([]);
   const [nutritionChat, setNutritionChat] = useState<TrainerChatMessage[]>([]);
   const [workoutUpdateSummary, setWorkoutUpdateSummary] = useState<string | null>(null);
@@ -334,7 +338,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const loadDayStatus = async () => {
     const today = todayKey();
-    const mealDays = getNextMealDays(3);
+    const mealDays = getNextMealDays(7);
     const checkMap: Record<string, MealChecks> = {};
     const skipped = new Set<string>();
 
@@ -372,19 +376,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
     const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
     setWorkoutPlan(baseWorkout);
-    const mealDays = getNextMealDays(3);
+
+    // AI nutrition plan is used as the base template (overrides local generation)
+    const aiNutritionRaw = await AsyncStorage.getItem('aiNutritionPlan');
+    const aiNutritionTemplate: DailyNutritionPlan | null = aiNutritionRaw ? JSON.parse(aiNutritionRaw) : null;
+
+    const mealDays = getNextMealDays(7);
+
+    /** Returns true only if meals carry real per-meal calorie data. */
+    const hasMealMacros = (plan: DailyNutritionPlan | null | undefined): boolean => {
+      if (!plan) return false;
+      const meals = [plan.breakfast, plan.lunch, plan.dinner].filter(Boolean);
+      return meals.length > 0 && meals.every(m => (m?.calories ?? 0) > 0);
+    };
+
     const localEntries = await Promise.all(
       mealDays.map(async d => {
+        // 1. Try backend day-state — only trust it if macros are present
         if (authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
-          if (remote?.nutrition_plan) return [d.key, remote.nutrition_plan as DailyNutritionPlan] as const;
+          if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan)) {
+            return [d.key, remote.nutrition_plan as DailyNutritionPlan] as const;
+          }
         }
+        // 2. Try locally saved plan (user's day-specific edits) — only if macros valid
         const saved = await getSavedNutritionPlan(d.key);
-        return [d.key, saved ?? generateDailyNutritionForDate(profile, meta.allFoods, d.key)] as const;
+        if (saved && hasMealMacros(saved)) return [d.key, saved] as const;
+
+        // 3. Use AI-generated template (has macros after backend fix)
+        if (aiNutritionTemplate && hasMealMacros(aiNutritionTemplate)) {
+          return [d.key, aiNutritionTemplate] as const;
+        }
+
+        // 4. Local generator — always has macros
+        return [d.key, generateDailyNutritionForDate(profile, meta.allFoods, d.key)] as const;
       })
     );
     setNutritionPlansByDate(Object.fromEntries(localEntries));
-
   };
 
   const openExerciseLibrary = useCallback(async () => {
@@ -432,12 +460,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const notes: string[] = [];
 
     if (nextWorkout) {
-      const prevDays = prevWorkout.days.length;
-      const nextDays = nextWorkout.days.length;
+      const prevDays = prevWorkout?.days?.length ?? 0;
+      const nextDays = nextWorkout?.days?.length ?? 0;
       if (prevDays !== nextDays) notes.push(`Workout days: ${prevDays} → ${nextDays}`);
 
-      const prevExercises = prevWorkout.days.reduce((sum, d) => sum + d.exercises.length, 0);
-      const nextExercises = nextWorkout.days.reduce((sum, d) => sum + d.exercises.length, 0);
+      const prevExercises = (prevWorkout?.days ?? []).reduce((sum, d) => sum + (d.exercises?.length ?? 0), 0);
+      const nextExercises = (nextWorkout?.days ?? []).reduce((sum, d) => sum + (d.exercises?.length ?? 0), 0);
       if (prevExercises !== nextExercises) notes.push(`Weekly exercises: ${prevExercises} → ${nextExercises}`);
     }
 
@@ -467,10 +495,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const setActiveChat = isTrainer ? setWorkoutChat : setNutritionChat;
     const setUpdateSummary = isTrainer ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
 
-    const userMsg: TrainerChatMessage = { role: 'user', content: q };
+    const userMsg: TrainerChatMessage = { role: 'user', content: q + (attachedImage ? ' [photo attached]' : '') };
     const nextChat = [...activeChat, userMsg];
     setActiveChat(nextChat);
     setTrainerInput('');
+    const imageToSend = attachedImage;
+    setAttachedImage(null);
     setTrainerLoading(true);
 
     try {
@@ -481,13 +511,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         focus: s.focus,
         durationSeconds: s.durationSeconds,
         completed: s.completed,
-        exercises: s.exercises.map((ex) => ({
+        exercises: (s.exercises ?? []).map((ex) => ({
           name: ex.name,
           targetSets: ex.targetSets,
           targetReps: ex.targetReps,
           targetRestSeconds: ex.targetRestSeconds,
-          setsLogged: ex.sets.length,
-          bestSet: ex.sets.reduce<{ weightLbs: number; reps: number } | null>((best, set) => {
+          setsLogged: ex.sets?.length ?? 0,
+          bestSet: (ex.sets ?? []).reduce<{ weightLbs: number; reps: number } | null>((best, set) => {
             if (!best) return { weightLbs: set.weightLbs, reps: set.reps };
             const bestScore = best.weightLbs * best.reps;
             const currentScore = set.weightLbs * set.reps;
@@ -502,7 +532,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }).length;
 
       const totalSetsLogged = workoutHistory.reduce(
-        (sum, s) => sum + s.exercises.reduce((setSum, ex) => setSum + ex.sets.length, 0),
+        (sum, s) => sum + (s.exercises ?? []).reduce((setSum, ex) => setSum + (ex.sets?.length ?? 0), 0),
         0
       );
 
@@ -535,7 +565,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         mealRoutine: userProfile.mealRoutine,
       };
 
-      // Send only what the AI needs — keep payload small to avoid 502 timeouts
       const slimProfile = {
         goal: userProfile.goal,
         goalDetails: userProfile.goalDetails,
@@ -544,20 +573,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         workoutDurationMinutes: userProfile.workoutDurationMinutes,
         equipment: userProfile.equipment,
         mealRoutine: userProfile.mealRoutine,
+        injuries: userProfile.injuries,
+        experienceLevel: userProfile.experienceLevel,
       };
 
       const resp = await askTrainerQuestion(authToken, {
         question: q,
         mode: coachMode,
         profile: slimProfile,
-        currentPlanContext,  // has workout days + today's meals — no need to send full plans
+        workoutPlan: currentPlanContext,  // backend field name
+        nutritionPlan: todayPlan ?? undefined,
         progress: {
           goal: progress.goal,
           todayDone: progress.todayDone,
           sessionsLast30d: progress.sessionsLast30d,
           totalSessions: progress.totalSessions,
         },
-        conversation: nextChat.slice(-6),  // last 6 messages only
+        conversation: nextChat.slice(-8),
+        image_base64: imageToSend?.base64 ?? undefined,
+        mime_type: 'image/jpeg',
       });
 
       const actionLines = (resp.action_items ?? []).slice(0, 4).map((x: string) => `• ${x}`).join('\n');
@@ -592,7 +626,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setTrainerLoading(false);
     }
-  }, [trainerInput, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, persistDayState]);
+  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, persistDayState]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     const current = checkedMealsByDate[date] ?? {};
@@ -661,93 +695,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
   }, [persistDayState]);
 
-  const handlePhotoMeal = useCallback(async (date: string, mealType: string) => {
-    if (!authToken) {
-      Alert.alert('Sign in required', 'You need to be signed in to use food photo tracking.');
-      return;
-    }
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      // Fallback to library if camera denied
-      const libPerm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!libPerm.granted) {
-        Alert.alert('Permission needed', 'Please allow camera or photo library access to track meals by photo.');
-        return;
-      }
-    }
-
-    Alert.alert('Track Meal by Photo', 'Take a new photo or pick one from your library?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Camera',
-        onPress: async () => {
-          const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
-          if (result.canceled || !result.assets?.[0]?.base64) return;
-          try {
-            const analysis = await analyzeFoodPhoto(authToken, {
-              image_base64: result.assets[0].base64!,
-              mime_type: result.assets[0].mimeType ?? 'image/jpeg',
-            });
-            setNutritionPlansByDate(prev => {
-              const plan = prev[date];
-              if (!plan) return prev;
-              const updated = {
-                ...plan,
-                [mealType]: {
-                  ...plan[mealType as keyof typeof plan],
-                  meal: analysis.meal_name,
-                  foods: analysis.items,
-                  calories: analysis.calories,
-                  protein: analysis.protein,
-                  carbs: analysis.carbs,
-                  fat: analysis.fat,
-                },
-              };
-              saveNutritionPlan(date, updated as DailyNutritionPlan);
-              return { ...prev, [date]: updated as DailyNutritionPlan };
-            });
-            Alert.alert('Meal logged!', `Detected: ${analysis.meal_name}\n${analysis.calories} cal · ${analysis.protein}g protein`);
-          } catch (e: any) {
-            Alert.alert('Analysis failed', e?.message ?? 'Could not analyze photo. Check your OpenAI API key.');
-          }
-        },
-      },
-      {
-        text: 'Photo Library',
-        onPress: async () => {
-          const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
-          if (result.canceled || !result.assets?.[0]?.base64) return;
-          try {
-            const analysis = await analyzeFoodPhoto(authToken, {
-              image_base64: result.assets[0].base64!,
-              mime_type: result.assets[0].mimeType ?? 'image/jpeg',
-            });
-            setNutritionPlansByDate(prev => {
-              const plan = prev[date];
-              if (!plan) return prev;
-              const updated = {
-                ...plan,
-                [mealType]: {
-                  ...plan[mealType as keyof typeof plan],
-                  meal: analysis.meal_name,
-                  foods: analysis.items,
-                  calories: analysis.calories,
-                  protein: analysis.protein,
-                  carbs: analysis.carbs,
-                  fat: analysis.fat,
-                },
-              };
-              saveNutritionPlan(date, updated as DailyNutritionPlan);
-              return { ...prev, [date]: updated as DailyNutritionPlan };
-            });
-            Alert.alert('Meal logged!', `Detected: ${analysis.meal_name}\n${analysis.calories} cal · ${analysis.protein}g protein`);
-          } catch (e: any) {
-            Alert.alert('Analysis failed', e?.message ?? 'Could not analyze photo. Check your OpenAI API key.');
-          }
-        },
-      },
-    ]);
-  }, [authToken, persistDayState]);
 
   const handleSkipToday = useCallback(async (focus: string) => {
     Alert.alert(
@@ -788,8 +735,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label ?? userProfile.goal;
-  const schedule  = get7DaySchedule(workoutPlan, userProfile.daysPerWeek);
-  const mealDays = getNextMealDays(3);
+  const schedule  = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek) : [];
+  const mealDays = getNextMealDays(7);
 
   const isLightTheme = ['sunrise', 'arctic', 'rose'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
@@ -804,17 +751,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       <StatusBar style={statusBarStyle} />
 
       {/* Header */}
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Image
-            source={require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png')}
-            style={styles.headerLogo}
-            resizeMode="contain"
-          />
-          {compactGoalProgressText(userProfile, meta.goalConfig) ? (
-            <Text style={[styles.goalSubText, { color: themeColors.textSecondary }]}>{compactGoalProgressText(userProfile, meta.goalConfig)}</Text>
-          ) : null}
-        </View>
+      <View style={[styles.header, { paddingTop: insets.top + 6, backgroundColor: themeColors.surfaceRaised, borderBottomColor: themeColors.border }]}>
+        <Image
+          source={require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png')}
+          style={styles.headerLogo}
+          resizeMode="contain"
+        />
+        <View style={{ flex: 1 }} />
         <TouchableOpacity style={styles.menuBtn} onPress={() => setMenuOpen(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
           <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
@@ -822,22 +765,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </TouchableOpacity>
       </View>
 
-      {/* AI plan updating banner */}
-      {isPlanUpdating && (
-        <View style={[styles.planUpdatingBanner, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-          <ActivityIndicator size="small" color={themeColors.primary} />
-          <Text style={[styles.planUpdatingText, { color: themeColors.textSecondary }]}>AI is rebuilding your plan…</Text>
+      {/* AI plan updating — full overlay, hides stale plans */}
+      {isPlanUpdating ? (
+        <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
+          <ActivityIndicator size="large" color={themeColors.primary} />
+          <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
+          <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
+            AI is generating a personalized workout and meal plan based on your settings…
+          </Text>
         </View>
-      )}
+      ) : null}
 
       {/* Tab toggle — pill style */}
-      <View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+      {!isPlanUpdating && <View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'workout' && [styles.tabActive, { backgroundColor: workoutPalette.strong }]]}
           onPress={() => setActiveTab('workout')}
           activeOpacity={0.8}>
           <Text style={[styles.tabText, { color: activeTab === 'workout' ? '#FFFFFF' : themeColors.textMuted }]}>
-            Workout
+            Workout{workoutUpdateSummary ? '  •' : ''}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -845,14 +791,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           onPress={() => setActiveTab('meals')}
           activeOpacity={0.8}>
           <Text style={[styles.tabText, { color: activeTab === 'meals' ? '#FFFFFF' : themeColors.textMuted }]}>
-            Meals
+            Meals{nutritionUpdateSummary ? '  •' : ''}
           </Text>
         </TouchableOpacity>
-      </View>
-
+      </View>}
 
       {/* Tab content */}
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+      {!isPlanUpdating && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'workout' ? (
           <>
             {(availabilityItems.length > 0 || cardioProfile) && (
@@ -926,7 +871,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onAddSnack={() => handleAddSnack(d.key)}
                       onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
                       onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
-                      onPhotoMeal={(mealType) => handlePhotoMeal(d.key, mealType)}
                     />
                   )}
                 </View>
@@ -934,7 +878,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             })}
           </>
         )}
-      </ScrollView>
+      </ScrollView>}
 
       {/* Meal edit modal */}
       {editingMeal && nutritionPlansByDate[editingMeal.dateKey] && (
@@ -946,6 +890,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           allFoods={meta.allFoods}
           foodCategories={meta.foodCategories}
           savedMeals={userProfile.savedMeals ?? []}
+          authToken={authToken}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
         />
@@ -1118,13 +1063,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       </Modal>
 
-      <Modal visible={showTrainerModal} transparent animationType="slide" onRequestClose={() => setShowTrainerModal(false)}>
+      <Modal visible={showTrainerModal} animationType="slide" transparent onRequestClose={() => setShowTrainerModal(false)}>
         <KeyboardAvoidingView
-          style={styles.libraryBackdrop}
+          style={styles.trainerFullScreen}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 24 : 0}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
         >
           <View style={styles.trainerSheet}>
+            <View style={styles.sheetHandle} />
             <View style={styles.libraryHeader}>
               <Text style={styles.libraryTitle}>AI Coach</Text>
               <TouchableOpacity onPress={() => setShowTrainerModal(false)}>
@@ -1165,7 +1111,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            <ScrollView contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled">
               {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
                 <Text style={styles.trainerEmpty}>
                   {coachMode === 'nutritionist'
@@ -1179,9 +1125,53 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                 ))
               )}
+              {trainerLoading && (
+                <View style={[styles.trainerBubble, styles.trainerBubbleAssistant]}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={[styles.trainerBubbleText, { color: colors.textMuted, marginTop: 4, fontSize: 12 }]}>Thinking…</Text>
+                </View>
+              )}
             </ScrollView>
 
+            {attachedImage && (
+              <View style={styles.attachPreviewRow}>
+                <Image source={{ uri: attachedImage.uri }} style={styles.attachPreview} />
+                <TouchableOpacity onPress={() => setAttachedImage(null)} style={styles.attachRemoveBtn}>
+                  <Text style={styles.attachRemoveText}>✕</Text>
+                </TouchableOpacity>
+                <Text style={styles.attachLabel}>Photo attached</Text>
+              </View>
+            )}
             <View style={styles.trainerInputRow}>
+              <TouchableOpacity
+                style={styles.trainerAttachBtn}
+                onPress={async () => {
+                  Alert.alert('Attach Photo', 'Add a photo to your message', [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Camera', onPress: async () => {
+                        const perm = await ImagePicker.requestCameraPermissionsAsync();
+                        if (!perm.granted) return;
+                        const res = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any });
+                        if (!res.canceled && res.assets?.[0]?.base64) {
+                          setAttachedImage({ base64: res.assets[0].base64!, uri: res.assets[0].uri });
+                        }
+                      },
+                    },
+                    {
+                      text: 'Photo Library', onPress: async () => {
+                        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                        if (!perm.granted) return;
+                        const res = await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any });
+                        if (!res.canceled && res.assets?.[0]?.base64) {
+                          setAttachedImage({ base64: res.assets[0].base64!, uri: res.assets[0].uri });
+                        }
+                      },
+                    },
+                  ]);
+                }}>
+                <Text style={styles.trainerAttachIcon}>📷</Text>
+              </TouchableOpacity>
               <TextInput
                 value={trainerInput}
                 onChangeText={setTrainerInput}
@@ -1199,11 +1189,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       </Modal>
 
       {/* Floating AI chat button */}
+
       <TouchableOpacity
         style={[styles.fab, { backgroundColor: themeColors.primary }]}
         onPress={() => setShowTrainerModal(true)}
         activeOpacity={0.85}>
-        <Text style={styles.fabIcon}>AI</Text>
+        <Image
+          source={require('../../assets/images/Brain and speech bubble icon white.png')}
+          style={styles.fabIcon}
+          resizeMode="contain"
+        />
       </TouchableOpacity>
     </LinearGradient>
   );
@@ -1344,15 +1339,18 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, o
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
-  header: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12 },
-  headerLogo:          { width: SCREEN_W * 0.62, height: SCREEN_W * 0.62 * 0.44, marginBottom: 2 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8, borderBottomWidth: 1 },
+  headerLogo: { width: 130, height: 130 * 0.44 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
   goalBadgeText:   { fontSize: 12, color: colors.primary, fontWeight: '600' },
   goalSubText:     { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
-  planUpdatingBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginBottom: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.md, borderWidth: 1 },
-  planUpdatingText:   { fontSize: 13, fontWeight: '500' },
+  planLoadingOverlay: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 40,
+  },
+  planLoadingTitle:    { fontSize: 20, fontWeight: '700', textAlign: 'center' },
+  planLoadingSubtitle: { fontSize: 14, textAlign: 'center', lineHeight: 22, opacity: 0.7 },
 
   fab: {
     position: 'absolute',
@@ -1369,7 +1367,7 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 8,
   },
-  fabIcon: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.5 },
+  fabIcon: { width: 38, height: 38 },
 
   coachModePicker: {
     flexDirection: 'row',
@@ -1646,16 +1644,18 @@ const styles = StyleSheet.create({
   detailSectionTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   detailSectionText: { fontSize: 13, lineHeight: 20, color: colors.textSecondary },
 
+  trainerFullScreen: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
   trainerSheet: {
-    maxHeight: '86%',
+    height: '85%',
     backgroundColor: colors.surface,
     borderTopLeftRadius: radius.xl,
     borderTopRightRadius: radius.xl,
     borderTopWidth: 1,
     borderTopColor: colors.border,
-    paddingTop: 14,
+    paddingTop: 16,
     paddingBottom: 12,
   },
+  sheetHandle: { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: 12 },
   trainerHint: {
     fontSize: 12,
     color: colors.textSecondary,
@@ -1705,6 +1705,13 @@ const styles = StyleSheet.create({
     maxWidth: '95%',
   },
   trainerBubbleText: { fontSize: 13, color: colors.textPrimary },
+  attachPreviewRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
+  attachPreview: { width: 48, height: 48, borderRadius: 8, backgroundColor: colors.border },
+  attachRemoveBtn: { padding: 4 },
+  attachRemoveText: { fontSize: 13, color: colors.textMuted, fontWeight: '700' },
+  attachLabel: { fontSize: 12, color: colors.textSecondary, fontStyle: 'italic' },
+  trainerAttachBtn: { paddingHorizontal: 6, paddingBottom: 10, justifyContent: 'flex-end' },
+  trainerAttachIcon: { fontSize: 20 },
   trainerInputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',

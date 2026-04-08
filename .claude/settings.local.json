@@ -27,7 +27,12 @@
       "Bash(python:*)",
       "Bash(sort -k6,7)",
       "Bash(venv/Scripts/python.exe -c ':*)",
-      "Bash(netstat -ano)"
+      "Bash(netstat -ano)",
+      "Read(//mnt/**)",
+      "Read(//e//**)",
+      "Bash(cmd.exe /c \"dir E:\\\\WorkoutPal\\\\backend\")",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)"
     ]
   }
 }
