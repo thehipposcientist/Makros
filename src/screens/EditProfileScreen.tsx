@@ -58,12 +58,14 @@ interface InputModalProps {
   confirmLabel?: string;
   error?: string;
   keyboardType?: 'default' | 'decimal-pad' | 'number-pad';
+  themeColors: ReturnType<typeof getTheme>['colors'];
 }
 
 function InputModal({
   visible, title, subtitle, placeholder, value, onChange, onConfirm, onClose,
-  confirmLabel = 'Confirm', error, keyboardType = 'default',
+  confirmLabel = 'Confirm', error, keyboardType = 'default', themeColors: c,
 }: InputModalProps) {
+  const im = createImStyles(c);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -77,7 +79,7 @@ function InputModal({
               value={value}
               onChangeText={onChange}
               placeholder={placeholder}
-              placeholderTextColor={colors.textMuted}
+              placeholderTextColor={c.textMuted}
               keyboardType={keyboardType}
               autoFocus
               returnKeyType="done"
@@ -94,17 +96,17 @@ function InputModal({
   );
 }
 
-const im = StyleSheet.create({
+function createImStyles(c: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   backdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet:       { backgroundColor: colors.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, padding: 24, paddingBottom: 40, gap: 14, borderTopWidth: 1, borderTopColor: colors.border },
-  handle:      { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: 4 },
-  title:       { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
-  subtitle:    { fontSize: 13, color: colors.textSecondary, marginTop: -6 },
-  input:       { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 14, fontSize: 16, backgroundColor: colors.background, color: colors.textPrimary },
-  error:       { fontSize: 13, color: colors.error },
-  confirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center' },
-  confirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
-});
+  sheet:       { backgroundColor: c.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, padding: 24, paddingBottom: 40, gap: 14, borderTopWidth: 1, borderTopColor: c.border },
+  handle:      { width: 36, height: 4, backgroundColor: c.border, borderRadius: 2, alignSelf: 'center', marginBottom: 4 },
+  title:       { fontSize: 18, fontWeight: '700', color: c.textPrimary },
+  subtitle:    { fontSize: 13, color: c.textSecondary, marginTop: -6 },
+  input:       { borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: 14, fontSize: 16, backgroundColor: c.background, color: c.textPrimary },
+  error:       { fontSize: 13, color: c.error },
+  confirmBtn:  { backgroundColor: c.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center' },
+  confirmText: { color: c.background, fontSize: 16, fontWeight: '700' },
+}); }
 
 // ── Add Food modal (manual macro entry) ───────────────────────────────────────
 
@@ -112,9 +114,12 @@ interface AddFoodModalProps {
   visible: boolean;
   onAdd: (item: CustomFoodItem) => void;
   onClose: () => void;
+  themeColors: ReturnType<typeof getTheme>['colors'];
 }
 
-function AddFoodModal({ visible, onAdd, onClose }: AddFoodModalProps) {
+function AddFoodModal({ visible, onAdd, onClose, themeColors: c }: AddFoodModalProps) {
+  const im = createImStyles(c);
+  const afm = createAfmStyles(c);
   const [name,     setName]     = useState('');
   const [unit,     setUnit]     = useState('');
   const [calories, setCalories] = useState('');
@@ -152,28 +157,28 @@ function AddFoodModal({ visible, onAdd, onClose }: AddFoodModalProps) {
             <Text style={im.subtitle}>Enter the food name and its macros per serving</Text>
 
             <TextInput style={im.input} value={name} onChangeText={v => { setName(v); setError(''); }}
-              placeholder="Food name (e.g. Greek yogurt)" placeholderTextColor={colors.textMuted} autoFocus returnKeyType="next" />
+              placeholder="Food name (e.g. Greek yogurt)" placeholderTextColor={c.textMuted} autoFocus returnKeyType="next" />
             <TextInput style={im.input} value={unit} onChangeText={setUnit}
-              placeholder="Serving size (e.g. 170g, 1 cup) — optional" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+              placeholder="Serving size (e.g. 170g, 1 cup) — optional" placeholderTextColor={c.textMuted} returnKeyType="next" />
 
             <View style={afm.macroRow}>
               <View style={afm.macroField}>
                 <Text style={afm.macroLabel}>Calories</Text>
-                <TextInput style={afm.macroInput} value={calories} onChangeText={setCalories} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <TextInput style={afm.macroInput} value={calories} onChangeText={setCalories} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={c.textMuted} returnKeyType="next" />
               </View>
               <View style={afm.macroField}>
                 <Text style={afm.macroLabel}>Protein (g)</Text>
-                <TextInput style={afm.macroInput} value={protein} onChangeText={setProtein} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <TextInput style={afm.macroInput} value={protein} onChangeText={setProtein} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={c.textMuted} returnKeyType="next" />
               </View>
             </View>
             <View style={afm.macroRow}>
               <View style={afm.macroField}>
                 <Text style={afm.macroLabel}>Carbs (g)</Text>
-                <TextInput style={afm.macroInput} value={carbs} onChangeText={setCarbs} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <TextInput style={afm.macroInput} value={carbs} onChangeText={setCarbs} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={c.textMuted} returnKeyType="next" />
               </View>
               <View style={afm.macroField}>
                 <Text style={afm.macroLabel}>Fat (g)</Text>
-                <TextInput style={afm.macroInput} value={fat} onChangeText={setFat} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.textMuted} returnKeyType="done" onSubmitEditing={handleAdd} />
+                <TextInput style={afm.macroInput} value={fat} onChangeText={setFat} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={c.textMuted} returnKeyType="done" onSubmitEditing={handleAdd} />
               </View>
             </View>
 
@@ -188,16 +193,18 @@ function AddFoodModal({ visible, onAdd, onClose }: AddFoodModalProps) {
   );
 }
 
-const afm = StyleSheet.create({
+function createAfmStyles(c: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   macroRow:   { flexDirection: 'row', gap: 10 },
   macroField: { flex: 1, gap: 6 },
-  macroLabel: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
-  macroInput: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, fontSize: 16, fontWeight: '600', color: colors.textPrimary, backgroundColor: colors.background, textAlign: 'center' },
-});
+  macroLabel: { fontSize: 12, fontWeight: '600', color: c.textSecondary },
+  macroInput: { borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: 12, fontSize: 16, fontWeight: '600', color: c.textPrimary, backgroundColor: c.background, textAlign: 'center' },
+}); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'plan' }: EditProfileScreenProps) {
+  const tc = getTheme(profile.themePreference).colors;
+  const styles = createStyles(tc);
   const meta = useMetaData();
 
   const weightGoals   = new Set(meta.goalConfig.weight_goals);
@@ -448,7 +455,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       : mode === 'theme'
         ? 'Save Theme'
         : 'Save & Update Plan';
-  const previewTheme = getTheme(themePreference);
 
   return (
     <View style={styles.container}>
@@ -564,7 +570,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 value={targetEvent}
                 onChangeText={setTargetEvent}
                 placeholder={placeholder}
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={tc.textMuted}
                 autoCapitalize="none"
                 returnKeyType="done"
               />
@@ -619,7 +625,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             value={mealRoutine}
             onChangeText={setMealRoutine}
             placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays.'}
-            placeholderTextColor={colors.textMuted}
+            placeholderTextColor={tc.textMuted}
             multiline
             numberOfLines={4}
           />
@@ -629,7 +635,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'theme' && (
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Theme</Text>
           <View style={styles.themeList}>
             {(Object.values(APP_THEMES) as Array<(typeof APP_THEMES)[keyof typeof APP_THEMES]>).map((theme) => {
               const selected = themePreference === theme.name;
@@ -645,11 +650,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   ]}
                   onPress={() => setThemePreference(theme.name)}>
                   <View style={styles.themeCardTop}>
-                    <View>
+                    <View style={{ flex: 1 }}>
                       <Text style={[styles.themeName, { color: theme.colors.textPrimary }]}>{theme.label}</Text>
                       <Text style={[styles.themeDesc, { color: theme.colors.textSecondary }]}>{theme.description}</Text>
                     </View>
-                    {selected ? <Text style={[styles.themeSelected, { color: theme.colors.primary }]}>Selected</Text> : null}
+                    {selected && (
+                      <View style={[styles.themeSelectedBadge, { backgroundColor: theme.colors.primary + '22', borderColor: theme.colors.primary }]}>
+                        <Text style={[styles.themeSelectedText, { color: theme.colors.primary }]}>✓ Active</Text>
+                      </View>
+                    )}
                   </View>
                   <View style={styles.themeSwatches}>
                     <View style={[styles.themeSwatch, { backgroundColor: theme.sections.workout.strong }]} />
@@ -662,20 +671,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             })}
           </View>
 
-          <View style={[styles.themePreview, { backgroundColor: previewTheme.colors.surface, borderColor: previewTheme.colors.border }]}>
-            <Text style={[styles.themePreviewTitle, { color: previewTheme.colors.textPrimary }]}>Preview</Text>
-            <View style={styles.themePreviewRow}>
-              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.workout.soft, borderColor: previewTheme.sections.workout.strong }]}>
-                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.workout.text }]}>Workout</Text>
-              </View>
-              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.meals.soft, borderColor: previewTheme.sections.meals.strong }]}>
-                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.meals.text }]}>Meals</Text>
-              </View>
-              <View style={[styles.themePreviewPill, { backgroundColor: previewTheme.sections.planner.soft, borderColor: previewTheme.sections.planner.strong }]}>
-                <Text style={[styles.themePreviewPillText, { color: previewTheme.sections.planner.text }]}>Planning</Text>
-              </View>
-            </View>
-          </View>
         </View>
         )}
 
@@ -753,7 +748,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 value={foodSearch}
                 onChangeText={setFoodSearch}
                 placeholder="Search foods or serving types"
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={tc.textMuted}
               />
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
                 <TouchableOpacity
@@ -870,7 +865,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         placeholder="e.g. 185" value={currentWeightInput} onChange={setCurrentWeightInput}
         onConfirm={() => { setCurrentWeight(currentWeightInput); setCurrentWeightModalVisible(false); }}
         onClose={() => setCurrentWeightModalVisible(false)}
-        confirmLabel="Update" keyboardType="decimal-pad"
+        confirmLabel="Update" keyboardType="decimal-pad" themeColors={tc}
       />
       <InputModal
         visible={weightModalVisible}
@@ -878,7 +873,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         placeholder="e.g. 175" value={weightInput} onChange={setWeightInput}
         onConfirm={() => { setTargetWeight(weightInput); setWeightModalVisible(false); }}
         onClose={() => setWeightModalVisible(false)}
-        confirmLabel="Set" keyboardType="decimal-pad"
+        confirmLabel="Set" keyboardType="decimal-pad" themeColors={tc}
       />
       <InputModal
         visible={equipModalVisible}
@@ -887,9 +882,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         value={newEquipName} onChange={v => { setNewEquipName(v); setEquipError(''); }}
         onConfirm={handleAddEquipment}
         onClose={() => setEquipModalVisible(false)}
-        confirmLabel="Add" error={equipError}
+        confirmLabel="Add" error={equipError} themeColors={tc}
       />
-      <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} />
+      <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} themeColors={tc} />
 
       {/* ── Scanned Foods Modal ── */}
       <Modal visible={!!scannedFoods} transparent animationType="slide" onRequestClose={() => setScannedFoods(null)}>
@@ -949,7 +944,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 value={photoMealDraft?.meal_name ?? ''}
                 onChangeText={(value) => setPhotoMealDraft(prev => prev ? { ...prev, meal_name: value } : prev)}
                 placeholder="Meal name"
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={tc.textMuted}
               />
 
               <View style={styles.photoMealCard}>
@@ -992,7 +987,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -1069,10 +1064,11 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 10,
   },
-  themeCardTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  themeCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   themeName: { fontSize: 15, fontWeight: '700' },
   themeDesc: { fontSize: 12, lineHeight: 17, marginTop: 2 },
-  themeSelected: { fontSize: 12, fontWeight: '700' },
+  themeSelectedBadge: { borderWidth: 1, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'center' },
+  themeSelectedText: { fontSize: 11, fontWeight: '700' },
   themeSwatches: { flexDirection: 'row', gap: 8 },
   themeSwatch: { width: 28, height: 28, borderRadius: radius.full },
   themePreview: {
@@ -1237,4 +1233,4 @@ const styles = StyleSheet.create({
 
   saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
   saveBtnText: { fontSize: 16, fontWeight: '700', color: colors.background },
-});
+}); }

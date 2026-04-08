@@ -931,9 +931,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       <Modal visible={showExerciseLibrary} transparent animationType="slide" onRequestClose={() => setShowExerciseLibrary(false)}>
         <View style={styles.libraryBackdrop}>
-          <View style={styles.librarySheet}>
+          <View style={[styles.librarySheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
             <View style={styles.libraryHeader}>
-              <Text style={styles.libraryTitle}>{selectedExercise ? selectedExercise.name : 'Exercise Library'}</Text>
+              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>{selectedExercise ? selectedExercise.name : 'Exercise Library'}</Text>
               <TouchableOpacity onPress={() => {
                 if (selectedExercise) {
                   setSelectedExercise(null);
@@ -941,7 +941,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 }
                 setShowExerciseLibrary(false);
               }}>
-                <Text style={styles.libraryClose}>Close</Text>
+                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>Close</Text>
               </TouchableOpacity>
             </View>
 
@@ -1008,8 +1008,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   value={exerciseSearch}
                   onChangeText={setExerciseSearch}
                   placeholder="Search exercises, muscles, or equipment"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles.librarySearchInput}
+                  placeholderTextColor={themeColors.textMuted}
+                  style={[styles.librarySearchInput, { backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
                 />
 
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
@@ -1045,16 +1045,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </ScrollView>
 
                 {filteredExerciseLibrary.length === 0 ? (
-                  <Text style={styles.libraryEmptyText}>No exercises match the current search and filters.</Text>
+                  <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
                 ) : filteredExerciseLibrary.map((ex) => (
-                  <TouchableOpacity key={String(ex.id ?? ex.name)} style={styles.libraryItem} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
-                    <Text style={styles.libraryItemName}>{ex.name}</Text>
-                    <Text style={styles.libraryItemMeta}>
+                  <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
+                    <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
+                    <Text style={[styles.libraryItemMeta, { color: themeColors.primary }]}>
                       {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
                       {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
                     </Text>
-                    {ex.description ? <Text style={styles.libraryItemDesc}>{ex.description}</Text> : null}
-                    <Text style={styles.libraryItemLink}>Tap for form guide</Text>
+                    {ex.description ? <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.description}</Text> : null}
+                    <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap for form guide</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
@@ -1069,12 +1069,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
         >
-          <View style={styles.trainerSheet}>
-            <View style={styles.sheetHandle} />
+          <View style={[styles.trainerSheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
             <View style={styles.libraryHeader}>
-              <Text style={styles.libraryTitle}>AI Coach</Text>
+              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>AI Coach</Text>
               <TouchableOpacity onPress={() => setShowTrainerModal(false)}>
-                <Text style={styles.libraryClose}>Close</Text>
+                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>Close</Text>
               </TouchableOpacity>
             </View>
 
@@ -1098,37 +1098,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.trainerHint}>
+            <Text style={[styles.trainerHint, { color: themeColors.textSecondary }]}>
               {coachMode === 'nutritionist'
                 ? 'Your full meal plan is loaded. Say things like "swap my lunch for something lighter" or "I had a shake this morning — update breakfast." Changes apply immediately.'
                 : 'Your full workout plan is loaded. Say things like "remove squats, my knee hurts" or "add more back work." Changes apply immediately.'}
             </Text>
 
             {(coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary) && (
-              <View style={styles.trainerSummaryCard}>
-                <Text style={styles.trainerSummaryTitle}>{coachMode === 'nutritionist' ? 'Meal Plan Updated' : 'Workout Plan Updated'}</Text>
-                <Text style={styles.trainerSummaryText}>{coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary}</Text>
+              <View style={[styles.trainerSummaryCard, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                <Text style={[styles.trainerSummaryTitle, { color: themeColors.primary }]}>{coachMode === 'nutritionist' ? 'Meal Plan Updated' : 'Workout Plan Updated'}</Text>
+                <Text style={[styles.trainerSummaryText, { color: themeColors.textSecondary }]}>{coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary}</Text>
               </View>
             )}
 
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled">
               {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
-                <Text style={styles.trainerEmpty}>
+                <Text style={[styles.trainerEmpty, { color: themeColors.textMuted }]}>
                   {coachMode === 'nutritionist'
                     ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
                     : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
                 </Text>
               ) : (
                 (coachMode === 'trainer' ? workoutChat : nutritionChat).map((m, idx) => (
-                  <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? styles.trainerBubbleUser : styles.trainerBubbleAssistant]}>
-                    <Text style={styles.trainerBubbleText}>{m.content}</Text>
+                  <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
+                    <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
                   </View>
                 ))
               )}
               {trainerLoading && (
-                <View style={[styles.trainerBubble, styles.trainerBubbleAssistant]}>
-                  <ActivityIndicator size="small" color={colors.primary} />
-                  <Text style={[styles.trainerBubbleText, { color: colors.textMuted, marginTop: 4, fontSize: 12 }]}>Thinking…</Text>
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%' }]}>
+                  <ActivityIndicator size="small" color={themeColors.primary} />
+                  <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted, marginTop: 4, fontSize: 12 }]}>Thinking…</Text>
                 </View>
               )}
             </ScrollView>
@@ -1176,12 +1176,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 value={trainerInput}
                 onChangeText={setTrainerInput}
                 placeholder={coachMode === 'nutritionist' ? 'Ask nutritionist...' : 'Ask trainer...'}
-                placeholderTextColor={colors.textMuted}
-                style={styles.trainerInput}
+                placeholderTextColor={themeColors.textMuted}
+                style={[styles.trainerInput, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
                 multiline
               />
-              <TouchableOpacity style={styles.trainerSendBtn} onPress={handleAskTrainer} disabled={trainerLoading}>
-                {trainerLoading ? <ActivityIndicator size="small" color={colors.background} /> : <Text style={styles.trainerSendText}>Send</Text>}
+              <TouchableOpacity style={[styles.trainerSendBtn, { backgroundColor: themeColors.primary }]} onPress={handleAskTrainer} disabled={trainerLoading}>
+                {trainerLoading ? <ActivityIndicator size="small" color={themeColors.background} /> : <Text style={styles.trainerSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -1340,7 +1340,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8, borderBottomWidth: 1 },
-  headerLogo: { width: 130, height: 130 * 0.44 },
+  headerLogo: { width: 200, height: 200 * 0.44 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
@@ -1445,7 +1445,7 @@ const styles = StyleSheet.create({
   warmupTitle: { fontSize: 14, fontWeight: '800' },
   warmupStep: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
 
-  tabs:      { flexDirection: 'row', marginHorizontal: 16, marginBottom: 14, borderRadius: radius.full, padding: 3, borderWidth: 1, borderColor: colors.border },
+  tabs:      { flexDirection: 'row', marginHorizontal: 16, marginTop: 14, marginBottom: 14, borderRadius: radius.full, padding: 3, borderWidth: 1, borderColor: colors.border },
   tab:       { flex: 1, paddingVertical: 11, borderRadius: radius.full, alignItems: 'center', justifyContent: 'center' },
   tabActive: { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },

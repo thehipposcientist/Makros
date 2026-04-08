@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as LocalAuthentication from 'expo-local-authentication';
-import * as SecureStore from 'expo-secure-store';
 import { UserProfile, WorkoutDay, WorkoutSession } from '../src/types';
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, upsertDayState } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
@@ -11,7 +9,7 @@ import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
 import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
-import { colors, radius } from '../src/constants/theme';
+import { colors, getTheme, radius } from '../src/constants/theme';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -56,32 +54,6 @@ export default function Index() {
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }
 
-    // Biometric auto-login: SecureStore is the single source of truth.
-    // If a token is stored there, the user opted in — prompt Face ID.
-    try {
-      const savedToken = await SecureStore.getItemAsync('authToken');
-      if (savedToken) {
-        const hasHardware = await LocalAuthentication.hasHardwareAsync();
-        const isEnrolled  = await LocalAuthentication.isEnrolledAsync();
-        if (hasHardware && isEnrolled) {
-          const result = await LocalAuthentication.authenticateAsync({
-            promptMessage: 'Log in to Makros',
-            cancelLabel: 'Use Password Instead',
-            disableDeviceFallback: true,
-          });
-          if (result.success) {
-            setAuthToken(savedToken);
-            await loadProfile(savedToken);
-            setIsLoading(false);
-            return;
-          }
-          // Face ID cancelled or failed — fall through to login screen
-        }
-      }
-    } catch {
-      // SecureStore or biometric unavailable — fall through to manual login
-    }
-
     setIsLoading(false);
   };
 
@@ -98,23 +70,13 @@ export default function Index() {
     }
   };
 
-  const handleAuthenticated = async (token: string, isNewUser: boolean, offerBiometric?: boolean) => {
+  const handleAuthenticated = async (token: string, isNewUser: boolean) => {
     setAuthToken(token);
     if (isNewUser) {
       await AsyncStorage.removeItem('userProfile');
       setUserProfile(null);
     } else {
       await loadProfile(token);
-    }
-
-    if (offerBiometric) {
-      // Store token in hardware-backed SecureStore — this IS the biometric-enabled flag.
-      // Presence of the token in SecureStore = biometric login is active.
-      try {
-        await SecureStore.setItemAsync('authToken', token);
-      } catch {
-        // SecureStore unavailable on this device — silently skip
-      }
     }
   };
 
@@ -127,7 +89,6 @@ export default function Index() {
 
   const handleSignOut = async () => {
     await AsyncStorage.multiRemove(['authToken', 'userProfile', 'aiWorkoutPlan', 'aiNutritionPlan', 'metaData_v1']);
-    try { await SecureStore.deleteItemAsync('authToken'); } catch {};
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
@@ -224,7 +185,7 @@ export default function Index() {
   }
 
   if (showProgress) {
-    return <ProgressScreen authToken={authToken} userProfile={userProfile} onBack={() => setShowProgress(false)} onUpdateWeight={handleUpdateWeight} />;
+    return <ProgressScreen authToken={authToken} userProfile={userProfile} themeName={userProfile.themePreference} onBack={() => setShowProgress(false)} onUpdateWeight={handleUpdateWeight} />;
   }
 
   return (
@@ -265,6 +226,8 @@ function AccountInfoModal({
   onClose: () => void;
   onSignOut: () => void;
 }) {
+  const tc = getTheme(profile.themePreference).colors;
+  const am = createAmStyles(tc);
   const [accountData, setAccountData] = useState<{ email: string; username: string } | null>(null);
   const [loading, setLoading]         = useState(true);
 
@@ -290,7 +253,7 @@ function AccountInfoModal({
           <Text style={am.title}>Account</Text>
 
           {loading ? (
-            <ActivityIndicator color={colors.primary} style={{ marginVertical: 24 }} />
+            <ActivityIndicator color={tc.primary} style={{ marginVertical: 24 }} />
           ) : (
             <View style={am.infoSection}>
               {accountData ? (
@@ -322,39 +285,39 @@ function AccountInfoModal({
   );
 }
 
-const am = StyleSheet.create({
+function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: {
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
     padding: 24, paddingBottom: 48,
-    borderTopWidth: 1, borderTopColor: colors.border,
+    borderTopWidth: 1, borderTopColor: c.border,
     gap: 16,
   },
-  handle:  { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center' },
-  title:   { fontSize: 20, fontWeight: '700', color: colors.textPrimary },
+  handle:  { width: 36, height: 4, backgroundColor: c.border, borderRadius: 2, alignSelf: 'center' },
+  title:   { fontSize: 20, fontWeight: '700', color: c.textPrimary },
 
   infoSection: {
-    backgroundColor: colors.surfaceRaised, borderRadius: radius.md,
-    borderWidth: 1, borderColor: colors.border, overflow: 'hidden',
+    backgroundColor: c.surfaceRaised, borderRadius: radius.md,
+    borderWidth: 1, borderColor: c.border, overflow: 'hidden',
   },
   row: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 16, paddingVertical: 13,
-    borderBottomWidth: 1, borderBottomColor: colors.border,
+    borderBottomWidth: 1, borderBottomColor: c.border,
   },
-  rowLabel: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
-  rowValue: { fontSize: 14, color: colors.textPrimary,   fontWeight: '600', textTransform: 'capitalize' },
+  rowLabel: { fontSize: 14, color: c.textSecondary, fontWeight: '500' },
+  rowValue: { fontSize: 14, color: c.textPrimary,   fontWeight: '600', textTransform: 'capitalize' },
 
-  errorText: { fontSize: 13, color: colors.error, padding: 16 },
+  errorText: { fontSize: 13, color: c.error, padding: 16 },
 
   signOutBtn: {
-    backgroundColor: colors.error + '22', borderRadius: radius.md,
+    backgroundColor: c.error + '22', borderRadius: radius.md,
     paddingVertical: 14, alignItems: 'center',
-    borderWidth: 1, borderColor: colors.error,
+    borderWidth: 1, borderColor: c.error,
   },
-  signOutText: { fontSize: 15, fontWeight: '700', color: colors.error },
+  signOutText: { fontSize: 15, fontWeight: '700', color: c.error },
 
   closeBtn: { alignItems: 'center', paddingVertical: 8 },
-  closeText: { fontSize: 15, color: colors.textSecondary },
-});
+  closeText: { fontSize: 15, color: c.textSecondary },
+}); }

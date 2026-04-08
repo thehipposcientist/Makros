@@ -15,7 +15,7 @@ export type Goal =
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
-export type AppThemeName = 'midnight' | 'cocoa' | 'neon' | 'forest' | 'slate' | 'sunrise' | 'arctic' | 'rose';
+export type AppThemeName = 'midnight' | 'cocoa' | 'neon' | 'forest' | 'slate' | 'sunrise' | 'arctic' | 'rose' | 'wine' | 'ocean' | 'ember' | 'amethyst' | 'copper';
 
 export interface GoalOption {
   value: Goal;

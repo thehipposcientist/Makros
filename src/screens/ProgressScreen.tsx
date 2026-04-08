@@ -8,13 +8,15 @@ import { loadWorkoutHistory, getPersonalRecords, PR } from '../utils/workoutHist
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights } from '../services/api';
-import { colors, radius } from '../constants/theme';
+import { colors, getTheme, radius } from '../constants/theme';
+import { AppThemeName } from '../types';
 
 interface ProgressScreenProps {
   onBack: () => void;
   authToken: string;
   userProfile: UserProfile;
   onUpdateWeight?: (weightLbs: number) => void;
+  themeName?: AppThemeName;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -77,7 +79,9 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
     });
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName }: ProgressScreenProps) {
+  const tc = getTheme(themeName).colors;
+  const styles = createStyles(tc);
   const meta = useMetaData();
   const [tab, setTab] = useState<'prs' | 'history' | 'charts'>('prs');
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
@@ -436,7 +440,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -594,4 +598,4 @@ const styles = StyleSheet.create({
   chartStat: { alignItems: 'center', gap: 2 },
   chartStatValue: { fontSize: 15, fontWeight: '800', color: colors.textPrimary },
   chartStatLabel: { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
-});
+}); }
