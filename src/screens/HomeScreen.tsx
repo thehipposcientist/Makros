@@ -5,12 +5,12 @@ import * as ImagePicker from 'expo-image-picker';
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, SupplementItem } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory,
+  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveSkipToHistory,
 } from '../utils/workoutHistory';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -20,16 +20,22 @@ import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
 import { colors, getTheme, radius } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 
 interface HomeScreenProps {
   authToken: string;
   userProfile: UserProfile | null;
   planRefreshKey?: number;
   isPlanUpdating?: boolean;
+  trainerNote?: string | null;
+  nutritionistNote?: string | null;
+  supplementStack?: SupplementItem[];
   onSignOut: () => void;
   onEditProfile: () => void;
   onEditEquipment: () => void;
   onEditFoods: () => void;
+  onEditSupplements: () => void;
+  onAddSupplement: (name: string) => void;
   onEditThemes: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
@@ -69,6 +75,347 @@ interface ExerciseLibraryItem {
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ── Supplement Library Data ───────────────────────────────────────────────────
+interface SupplementEntry {
+  name: string;
+  category: string;
+  icon: string;
+  tagline: string;
+  whatItDoes: string;
+  evidence: 'strong' | 'moderate' | 'limited';
+  dose: string;
+  timing: string;
+  goodFor: string[];
+  cautions: string;
+}
+
+const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
+  {
+    name: 'Creatine Monohydrate',
+    category: 'Performance',
+    icon: '⚡',
+    tagline: 'The most studied strength and muscle supplement',
+    whatItDoes: 'Replenishes ATP (cellular energy) faster during high-intensity efforts, letting you squeeze out extra reps before fatigue. Over time it drives more muscle growth by enabling greater training volume. Safe and effective for virtually everyone.',
+    evidence: 'strong',
+    dose: '3–5g daily',
+    timing: 'Any time — consistency matters more than timing',
+    goodFor: ['Strength', 'Muscle gain', 'Athletic performance'],
+    cautions: 'Drink plenty of water. May cause mild water retention in the first week.',
+  },
+  {
+    name: 'Whey Protein',
+    category: 'Protein',
+    icon: '🥛',
+    tagline: 'Fast-digesting complete protein for muscle repair',
+    whatItDoes: 'Delivers all essential amino acids rapidly after a workout to kick-start muscle protein synthesis. Ideal when you struggle to hit protein targets through whole foods. Casein is the slow-digesting sister — great before bed.',
+    evidence: 'strong',
+    dose: '25–40g per serving',
+    timing: 'Post-workout or between meals',
+    goodFor: ['Muscle gain', 'Fat loss', 'Recovery'],
+    cautions: 'May cause bloating in lactose-sensitive individuals — try whey isolate or plant protein instead.',
+  },
+  {
+    name: 'Casein Protein',
+    category: 'Protein',
+    icon: '🌙',
+    tagline: 'Slow-release protein that feeds muscles overnight',
+    whatItDoes: 'Forms a gel in the stomach and digests slowly over 5–7 hours, providing a sustained stream of amino acids. Best used before sleep to prevent muscle breakdown during the overnight fast.',
+    evidence: 'strong',
+    dose: '25–40g',
+    timing: '30 min before bed',
+    goodFor: ['Muscle gain', 'Recovery'],
+    cautions: 'Contains dairy — not suitable for those with milk allergies.',
+  },
+  {
+    name: 'Plant Protein',
+    category: 'Protein',
+    icon: '🌱',
+    tagline: 'Complete protein for plant-based athletes',
+    whatItDoes: 'Blends of pea, rice, hemp, or soy protein that together deliver a full essential amino acid profile. Studies show muscle-building effects comparable to whey when protein intake is equated.',
+    evidence: 'moderate',
+    dose: '25–35g per serving',
+    timing: 'Post-workout or between meals',
+    goodFor: ['Muscle gain', 'Fat loss', 'Plant-based diets'],
+    cautions: 'May contain heavy metals if quality is poor — choose third-party tested brands.',
+  },
+  {
+    name: 'BCAA',
+    category: 'Recovery',
+    icon: '💊',
+    tagline: 'Branched-chain amino acids for intra-workout fuel',
+    whatItDoes: 'Leucine, isoleucine, and valine — the trio that directly trigger muscle protein synthesis. Most useful when training fasted or when total protein intake is low. Largely redundant if you already hit daily protein targets.',
+    evidence: 'moderate',
+    dose: '5–10g',
+    timing: 'During or around workouts',
+    goodFor: ['Muscle gain', 'Endurance', 'Fasted training'],
+    cautions: 'Low value if you are already eating enough protein (1.6g+ per kg body weight).',
+  },
+  {
+    name: 'EAA',
+    category: 'Recovery',
+    icon: '🔗',
+    tagline: 'All 9 essential amino acids for superior muscle signalling',
+    whatItDoes: 'Contains all essential amino acids (not just the 3 BCAAs), providing a more complete stimulus for muscle protein synthesis. Better than BCAAs alone for fasted training or low protein days.',
+    evidence: 'moderate',
+    dose: '10–15g',
+    timing: 'Intra-workout or post-workout',
+    goodFor: ['Muscle gain', 'Recovery', 'Endurance'],
+    cautions: 'Can be expensive relative to just eating more protein-rich food.',
+  },
+  {
+    name: 'Beta-Alanine',
+    category: 'Performance',
+    icon: '🔥',
+    tagline: 'Delays muscle burn during high-rep or cardio efforts',
+    whatItDoes: 'Boosts muscle carnosine levels, which buffer the acid that builds up during intense exercise. This delays the "burn" feeling and lets you push harder in the 1–4 minute effort zone — sprints, high-rep sets, circuits.',
+    evidence: 'strong',
+    dose: '3.2–6.4g daily',
+    timing: 'Pre-workout or split through the day',
+    goodFor: ['Endurance', 'Athletic performance', 'Fat loss'],
+    cautions: 'Causes harmless tingling (paresthesia) — split doses reduce this effect.',
+  },
+  {
+    name: 'L-Citrulline',
+    category: 'Performance',
+    icon: '🩸',
+    tagline: 'Boosts nitric oxide for better pumps and endurance',
+    whatItDoes: 'Converted in the kidneys to arginine, raising nitric oxide levels and widening blood vessels. This improves blood flow to working muscles, reduces fatigue, and enhances the "pump" feeling during training.',
+    evidence: 'moderate',
+    dose: '6–8g (as citrulline) or 8–12g (as citrulline malate)',
+    timing: '30–60 min pre-workout',
+    goodFor: ['Strength', 'Endurance', 'Athletic performance'],
+    cautions: 'Generally very safe. May cause mild GI discomfort at high doses.',
+  },
+  {
+    name: 'Caffeine',
+    category: 'Performance',
+    icon: '☕',
+    tagline: 'Proven ergogenic that boosts strength, power, and focus',
+    whatItDoes: 'Blocks adenosine receptors to reduce perceived effort and fatigue, while increasing dopamine and adrenaline. One of the most consistent performance enhancers in sports science. Works for strength, endurance, and cognitive tasks.',
+    evidence: 'strong',
+    dose: '3–6mg per kg body weight',
+    timing: '30–60 min pre-workout',
+    goodFor: ['Strength', 'Endurance', 'Fat loss', 'Athletic performance'],
+    cautions: 'Can disrupt sleep if taken within 6 hours of bed. Tolerance builds quickly — cycling off helps.',
+  },
+  {
+    name: 'Pre-Workout',
+    category: 'Performance',
+    icon: '💥',
+    tagline: 'Stacked formula for energy, focus, and performance',
+    whatItDoes: 'Typically contains caffeine, beta-alanine, citrulline, and various focus ingredients. Convenient but redundant if you already take the individual components. Quality and dosing vary hugely between brands.',
+    evidence: 'moderate',
+    dose: '1 serving (follow label)',
+    timing: '20–30 min pre-workout',
+    goodFor: ['Strength', 'Endurance', 'Athletic performance'],
+    cautions: 'Check for proprietary blends that hide underdosed ingredients. Avoid high-stim versions if sensitive to caffeine.',
+  },
+  {
+    name: 'L-Glutamine',
+    category: 'Recovery',
+    icon: '🛡️',
+    tagline: 'Supports gut health and immune function under heavy training',
+    whatItDoes: 'Glutamine is the most abundant amino acid in muscle tissue and a primary fuel for gut cells. Heavy training depletes levels. Supplementing can reduce soreness and support immune function during high training loads.',
+    evidence: 'limited',
+    dose: '5–10g',
+    timing: 'Post-workout or before bed',
+    goodFor: ['Recovery', 'Endurance'],
+    cautions: 'Limited direct muscle-building evidence if protein intake is adequate.',
+  },
+  {
+    name: 'Vitamin D',
+    category: 'Health',
+    icon: '☀️',
+    tagline: 'Critical for muscle function, immunity, and hormones',
+    whatItDoes: 'Acts more like a hormone than a vitamin — involved in over 1,000 body processes including testosterone production, muscle strength, immune defence, and mood regulation. Deficiency is extremely common and directly impairs performance.',
+    evidence: 'strong',
+    dose: '1,000–4,000 IU daily (or per blood test)',
+    timing: 'With a meal containing fat',
+    goodFor: ['Strength', 'Endurance', 'General health'],
+    cautions: 'Get blood levels tested first — dosing depends on your baseline. D3 is more effective than D2.',
+  },
+  {
+    name: 'Omega-3 / Fish Oil',
+    category: 'Health',
+    icon: '🐟',
+    tagline: 'Anti-inflammatory support for joints and heart health',
+    whatItDoes: 'EPA and DHA reduce systemic inflammation, support joint lubrication, and may moderately enhance muscle protein synthesis. Important for long-term health and recovery, especially for athletes training at high volumes.',
+    evidence: 'strong',
+    dose: '2–4g EPA+DHA combined daily',
+    timing: 'With meals to reduce fishy burps',
+    goodFor: ['Recovery', 'General health', 'Endurance'],
+    cautions: 'High doses can thin blood — consult a doctor if on blood thinners.',
+  },
+  {
+    name: 'Magnesium Glycinate',
+    category: 'Sleep & Stress',
+    icon: '🧘',
+    tagline: 'Relaxation mineral for sleep quality and muscle function',
+    whatItDoes: 'Magnesium is involved in 300+ enzyme reactions including muscle relaxation, sleep onset, and stress regulation. Glycinate is the most bioavailable and gentle form. Deficiency is common and worsens sleep, cramps, and recovery.',
+    evidence: 'moderate',
+    dose: '200–400mg elemental magnesium',
+    timing: '30–60 min before bed',
+    goodFor: ['Recovery', 'General health', 'Sleep'],
+    cautions: 'Oxide form (cheapest) is poorly absorbed — always choose glycinate or malate.',
+  },
+  {
+    name: 'Zinc',
+    category: 'Health',
+    icon: '🔬',
+    tagline: 'Essential for testosterone production and immune defence',
+    whatItDoes: 'Zinc is critical for testosterone synthesis, immune function, and wound healing. Athletes lose significant zinc through sweat. Even mild deficiency reduces testosterone and impairs recovery.',
+    evidence: 'moderate',
+    dose: '15–30mg',
+    timing: 'With food (reduces nausea)',
+    goodFor: ['Strength', 'Muscle gain', 'General health'],
+    cautions: 'High long-term doses (>40mg) can deplete copper — cycle or pair with a trace mineral supplement.',
+  },
+  {
+    name: 'Ashwagandha',
+    category: 'Sleep & Stress',
+    icon: '🌿',
+    tagline: 'Adaptogen that lowers cortisol and supports recovery',
+    whatItDoes: 'An adaptogenic herb that reduces cortisol (the stress hormone), which when chronically elevated suppresses testosterone and slows recovery. Studies show meaningful improvements in strength, VO2 max, and sleep quality.',
+    evidence: 'moderate',
+    dose: '300–600mg (KSM-66 or Sensoril extract)',
+    timing: 'Daily — morning or evening',
+    goodFor: ['Strength', 'Recovery', 'Endurance'],
+    cautions: 'May interact with thyroid medications. Avoid during pregnancy.',
+  },
+  {
+    name: 'Melatonin',
+    category: 'Sleep & Stress',
+    icon: '😴',
+    tagline: 'Regulates the sleep-wake cycle for faster sleep onset',
+    whatItDoes: 'A hormone naturally produced at night that signals the body to sleep. Supplementing with small doses helps shift the circadian rhythm — ideal for jet lag, shift workers, or those training late at night.',
+    evidence: 'strong',
+    dose: '0.5–3mg (lower is often more effective)',
+    timing: '30–60 min before target sleep time',
+    goodFor: ['Recovery', 'General health'],
+    cautions: 'Avoid high doses (10mg+) — they are not more effective and may cause next-day grogginess.',
+  },
+  {
+    name: 'L-Theanine',
+    category: 'Sleep & Stress',
+    icon: '🍵',
+    tagline: 'Promotes calm focus without drowsiness',
+    whatItDoes: 'An amino acid found in green tea that increases alpha brain waves, producing relaxed alertness. Paired with caffeine it smooths out jitteriness and extends the focus window without adding stimulation.',
+    evidence: 'moderate',
+    dose: '100–200mg',
+    timing: 'With caffeine (1:2 ratio caffeine:theanine) or before bed',
+    goodFor: ['Athletic performance', 'General health'],
+    cautions: 'Very well tolerated. May enhance sedative effects of sleep medications.',
+  },
+  {
+    name: 'L-Carnitine',
+    category: 'Weight Management',
+    icon: '🔥',
+    tagline: 'Shuttles fat into cells to be burned for energy',
+    whatItDoes: 'Transports long-chain fatty acids into mitochondria where they are oxidised for fuel. Evidence for fat loss is modest but consistent in individuals who are deficient (vegans, elderly). Also supports exercise recovery and cognition.',
+    evidence: 'moderate',
+    dose: '1–3g',
+    timing: 'With a carb-containing meal for best absorption',
+    goodFor: ['Fat loss', 'Endurance', 'General health'],
+    cautions: 'Not a magic fat burner — works best alongside a caloric deficit and regular training.',
+  },
+  {
+    name: 'Collagen Peptides',
+    category: 'Protein',
+    icon: '🦴',
+    tagline: 'Supports joints, tendons, and connective tissue repair',
+    whatItDoes: 'Provides glycine, proline, and hydroxyproline — amino acids that rebuild cartilage and tendon collagen. When taken with vitamin C around training, studies show improvements in joint pain and connective tissue thickness.',
+    evidence: 'moderate',
+    dose: '10–20g',
+    timing: '30–60 min before training (with vitamin C)',
+    goodFor: ['Recovery', 'General health', 'Endurance'],
+    cautions: 'Not a replacement for complete protein — lacks tryptophan and is low in leucine.',
+  },
+  {
+    name: 'ZMA',
+    category: 'Sleep & Stress',
+    icon: '💤',
+    tagline: 'Zinc + magnesium + B6 stack for sleep and recovery',
+    whatItDoes: 'Combines zinc, magnesium aspartate, and vitamin B6 to support hormone production, sleep quality, and muscle recovery. Popular with athletes training at high volumes who sweat heavily and may deplete these minerals.',
+    evidence: 'limited',
+    dose: '1 serving (follow label)',
+    timing: '30–60 min before bed on an empty stomach',
+    goodFor: ['Strength', 'Recovery', 'Sleep'],
+    cautions: 'Evidence for benefit is stronger in people who are actually deficient in zinc or magnesium.',
+  },
+  {
+    name: 'Electrolytes',
+    category: 'Recovery',
+    icon: '💧',
+    tagline: 'Sodium, potassium, and magnesium for hydration and cramps',
+    whatItDoes: 'Sweat contains significant sodium, potassium, and magnesium. Replacing them prevents dehydration-related performance drops, muscle cramps, and cognitive fog — especially during long or hot training sessions.',
+    evidence: 'strong',
+    dose: 'Varies by product and sweat rate',
+    timing: 'During and after exercise; also useful fasting or on low-carb diets',
+    goodFor: ['Endurance', 'Athletic performance', 'General health'],
+    cautions: 'High-sodium varieties may not be suitable if you have hypertension.',
+  },
+  {
+    name: 'Multivitamin',
+    category: 'Health',
+    icon: '🧴',
+    tagline: 'Nutritional insurance for gaps in your diet',
+    whatItDoes: 'Covers common micronutrient gaps, especially important for athletes with high metabolic demands or those eating in a caloric deficit. Not a substitute for a balanced diet, but provides a meaningful safety net.',
+    evidence: 'moderate',
+    dose: '1 serving daily (follow label)',
+    timing: 'With food',
+    goodFor: ['General health', 'Fat loss', 'Endurance'],
+    cautions: 'Avoid mega-dose formulas — fat-soluble vitamins (A, D, E, K) accumulate and can reach toxic levels.',
+  },
+  {
+    name: 'Tart Cherry Extract',
+    category: 'Recovery',
+    icon: '🍒',
+    tagline: 'Natural anti-inflammatory for post-workout soreness',
+    whatItDoes: 'Rich in anthocyanins that reduce inflammation and oxidative stress. Studies in strength and endurance athletes show meaningfully less muscle soreness and faster force recovery when taken around training.',
+    evidence: 'moderate',
+    dose: '480mg extract or 30ml concentrate twice daily',
+    timing: 'Morning and night around intense training days',
+    goodFor: ['Recovery', 'Endurance', 'Strength'],
+    cautions: 'Juice form is high in sugar — extract capsules are preferable when cutting.',
+  },
+  {
+    name: 'Green Tea Extract',
+    category: 'Weight Management',
+    icon: '🍵',
+    tagline: 'Modest metabolism boost and antioxidant support',
+    whatItDoes: 'EGCG (the active catechin) mildly inhibits an enzyme that breaks down norepinephrine, gently elevating fat oxidation. Best evidence is for modest calorie burn (50–100 kcal/day) and strong antioxidant protection.',
+    evidence: 'moderate',
+    dose: '400–600mg EGCG',
+    timing: 'With meals to reduce stomach upset',
+    goodFor: ['Fat loss', 'General health'],
+    cautions: 'High doses on an empty stomach can cause nausea and liver stress. Stick to recommended amounts.',
+  },
+];
+
+// ── Logo assets ───────────────────────────────────────────────────────────────
+const LOGO_DARK   = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
+const LOGO_LIGHT_HEADER = require('../../assets/images/main_logo_header-removebg-preview.png');
+
+function bgIsDark(hex: string): boolean {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return true;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) < 0.5;
+}
+
+const SKIP_REASONS = [
+  { emoji: '😴', label: 'Too tired' },
+  { emoji: '🤕', label: 'Injury / Pain' },
+  { emoji: '🤒', label: 'Feeling sick' },
+  { emoji: '⏰', label: 'No time today' },
+  { emoji: '✈️', label: 'Travelling' },
+  { emoji: '🧘', label: 'Need more rest' },
+  { emoji: '💼', label: 'Work conflict' },
+  { emoji: '🌤️', label: 'Did something else' },
+];
 
 const TRAINING_DAY_SETS: Record<number, number[]> = {
   1: [1],
@@ -137,24 +484,211 @@ function joinParts(parts: string[]): string {
   return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
 }
 
+type MovementPattern =
+  | 'curl' | 'extension_elbow' | 'press_horizontal' | 'press_vertical'
+  | 'fly' | 'row' | 'pulldown' | 'raise' | 'squat' | 'hinge'
+  | 'lunge' | 'hip_thrust' | 'calf_raise' | 'plank' | 'crunch' | 'generic';
+
+function detectMovementPattern(name: string, primary: string): MovementPattern {
+  const n = name.toLowerCase();
+  const p = (primary ?? '').toLowerCase();
+  if (/(curl|bicep curl|hammer curl|preacher)/.test(n)) return 'curl';
+  if (/(tricep|skull crusher|pushdown|kickback|overhead extension)/.test(n) && /(extend|press)/.test(n)) return 'extension_elbow';
+  if (/pushdown|tricep extension|skull crusher|kickback/.test(n)) return 'extension_elbow';
+  if (/(bench press|chest press|push.?up|dip|pec dec)/.test(n) && !/(overhead|shoulder)/.test(n)) return 'press_horizontal';
+  if (/(fly|pec|cable cross)/.test(n)) return 'fly';
+  if (/(overhead press|shoulder press|military|arnold|lateral raise|front raise|upright row)/.test(n)) {
+    if (/raise/.test(n)) return 'raise';
+    return 'press_vertical';
+  }
+  if (/(lateral raise|front raise|rear delt|face pull)/.test(n)) return 'raise';
+  if (/(row|pull.?up|chin.?up|lat pull)/.test(n)) {
+    if (/pulldown|lat pull/.test(n)) return 'pulldown';
+    return 'row';
+  }
+  if (/(squat|goblet|hack squat|leg press)/.test(n)) return 'squat';
+  if (/(deadlift|rdl|romanian|good morning|hip hinge)/.test(n)) return 'hinge';
+  if (/lunge/.test(n)) return 'lunge';
+  if (/(hip thrust|glute bridge)/.test(n)) return 'hip_thrust';
+  if (/(calf raise|standing calf|seated calf)/.test(n)) return 'calf_raise';
+  if (/(plank|hollow|l.sit)/.test(n)) return 'plank';
+  if (/(crunch|sit.?up|ab|cable crunch)/.test(n)) return 'crunch';
+  return 'generic';
+}
+
 function buildExerciseGuide(ex: ExerciseLibraryItem) {
   const primary = humanizeToken(ex.primary_muscle) || 'the target muscle';
   const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
-  const equipment = humanizeToken(ex.equipment) || 'the available equipment';
+  const equipment = humanizeToken(ex.equipment) || 'the equipment';
   const supportText = secondary.length ? ` with help from ${joinParts(secondary)}` : '';
+  const pattern = detectMovementPattern(ex.name, ex.primary_muscle ?? '');
+  const p = primary.toLowerCase();
+  const sec = secondary.map(s => s.toLowerCase());
+
+  // Pattern-specific phase descriptions
+  const phaseDescriptions: Record<MovementPattern, { concentric: string; eccentric: string; why: string; setup: string; movement: string; feel: string; mistake: string }> = {
+    curl: {
+      concentric: `As you curl the weight up, the ${p} contracts and shortens — pulling your forearm toward your upper arm. Peak contraction happens at the top: squeeze hard and hold for a beat to maximize tension.`,
+      eccentric: `Lowering is where real growth happens. Control the descent over 2–3 seconds as the ${p} lengthens under load. Rushing the lowering phase throws away half the stimulus.`,
+      why: `The elbow flexion arc puts the ${p} under tension through its full range. With a supinated (underhand) grip, the forearm rotation adds a secondary function the ${p} is designed for, making curls uniquely effective.`,
+      setup: `Stand tall, pin your elbows to your sides. Grab the ${equipment.toLowerCase()} with a shoulder-width underhand grip. Brace your core so only your forearms move.`,
+      movement: `Initiate from the ${p} — not from your wrists or shoulders. The upper arm stays fixed. Drive the weight up, squeeze at the top, then lower with control.`,
+      feel: `You should feel a deep burn in the front of your upper arm. If your shoulder or forearm is dominating, you're probably swinging or using too much weight.`,
+      mistake: `Swinging the torso to heave the weight up. This shifts load to your lower back and delts. Keep your upper arms pinned — only your forearms move.`,
+    },
+    extension_elbow: {
+      concentric: `As you straighten your arm (or push the weight away), the ${p} fires and shortens, driving your elbow toward full extension. The lockout at the end is pure tricep output.`,
+      eccentric: `As you bend the elbow (lowering toward your skull on a skull crusher, or descending in a dip), the ${p} lengthens under load. Overhead variations create the biggest eccentric stretch because the long head spans both joints.`,
+      why: `All pushing and straightening movements require elbow extension — the ${p}'s primary job. The ${p} makes up roughly two-thirds of your upper arm, so developing it adds more arm size than bicep work alone.`,
+      setup: `Position yourself so the ${p} starts in a stretched position. For overhead work, keep elbows pointing forward and close together.`,
+      movement: `Drive from elbow extension — push the weight away by straightening your arm. Think "push my elbow straight" rather than "move the weight." Lock out fully at the top.`,
+      feel: `You should feel the back of your upper arm working — the horseshoe shape should harden and contract. Avoid letting elbows flare wide, which shifts load to the chest.`,
+      mistake: `Letting elbows flare out or cut the range short. Flaring shifts work to shoulders/chest. Partial reps skip the deepest stretch where the long head grows most.`,
+    },
+    press_horizontal: {
+      concentric: `As you press the weight away from your chest, the ${p} shortens and contracts — driving the arms from a bent, lowered position to full extension. The ${p} works hardest in the mid-range to lockout.`,
+      eccentric: `Lowering the bar (or dumbbells) to your chest stretches the ${p} under load. This bottom-range stretch is a key growth stimulus — don't bounce the bar off your chest; control the descent.`,
+      why: `The horizontal pushing motion is perfectly aligned with the ${p}'s fiber direction — from the sternum and clavicle outward. Both shoulder flexion and horizontal adduction (bringing arms together) happen simultaneously, which is exactly what the ${p} does.`,
+      setup: `Lie flat (or at the target angle), retract and depress your shoulder blades into the bench, plant your feet. Grip the ${equipment.toLowerCase()} at roughly 1.5× shoulder width.`,
+      movement: `Lower with control to your chest or chin level, then press explosively. Think "push the bar away from you" or "push yourself away from the bar." Keep wrists stacked over elbows.`,
+      feel: `You should feel a stretch across your chest at the bottom and a squeeze when your arms come together at the top. If your shoulder is the limiting factor, check grip width and elbow angle.`,
+      mistake: `Flaring elbows to 90° (too wide) puts massive stress on the shoulder joint and reduces ${p} involvement. Aim for elbows ~45–75° from your torso.`,
+    },
+    fly: {
+      concentric: `As your arms come together in front of you, the ${p} performs horizontal adduction — bringing the upper arms toward the midline of the body. The muscle fibers slide closer together.`,
+      eccentric: `Opening your arms wide stretches the ${p} fibers across a longer range than any pressing movement. This deep stretch under load is the fly's biggest advantage for hypertrophy.`,
+      why: `The ${p}'s primary action is horizontal adduction (bringing arms together). Flies isolate this motion without triceps helping to lock out, which keeps tension on the ${p} through the full arc.`,
+      setup: `Set up with a slight bend in the elbows (maintain this angle throughout — it reduces elbow stress). Use a light enough weight that you can fully control the arc.`,
+      movement: `Think "hugging a barrel" — arc the arms in a wide circle rather than bending them. Lead with your elbows on the way down, and squeeze the ${p} at the peak.`,
+      feel: `A deep stretch across your chest at the bottom. If you feel it in your biceps or shoulder instead, reduce the weight and focus on form.`,
+      mistake: `Turning a fly into a press by bending the elbows more as the weight gets heavy. The moment you do that you've lost the isolation — go lighter.`,
+    },
+    row: {
+      concentric: `Pulling the weight toward your torso involves the ${p} retracting the scapula and extending the shoulder. The ${p} shortens as your elbow drives back past your torso.`,
+      eccentric: `Letting the weight back out with control stretches the ${p} fibers and allows the scapula to protract. This controlled lowering builds thickness in the back.`,
+      why: `Rows align the pulling motion with the ${p}'s fiber direction — running diagonally across the back from the lumbar/pelvis up to the upper arm. The more horizontal the pull, the more the ${p} works.`,
+      setup: `Hinge at the hips with a neutral spine (not rounded). Keep the ${equipment.toLowerCase()} below your shoulders at the start. Engage your lats before pulling.`,
+      movement: `Drive your elbows back (not up). Think "elbow to pocket" for lower-back engagement or "elbow to ear" for upper-back. Squeeze the muscle at the top of the pull.`,
+      feel: `A tight squeeze between your shoulder blades at the peak and a stretch across your back at full arm extension. If you feel it mainly in your biceps, you're pulling with your arms too much.`,
+      mistake: `Rounding the lower back and using momentum to heave the weight. A rounded spine under load is a spinal injury risk. Brace the core and move only your arms and shoulders.`,
+    },
+    pulldown: {
+      concentric: `As you pull the bar (or cable) down toward your collarbone, the ${p} adducts and extends the shoulder — pulling your upper arms down and back. The lats and ${p} shorten together.`,
+      eccentric: `Allowing the bar to rise back to full arm extension stretches the entire back musculature under tension. Control this phase and feel the full stretch in your sides.`,
+      why: `The pulldown angle closely mimics the ${p}'s line of pull — the fibers run from the outer edges of the back to the upper arm and are maximally loaded when the arms are overhead or angled away from the torso.`,
+      setup: `Sit with thighs under the pads, lean back very slightly (~10–15°). Grab the bar just wider than shoulder-width with an overhand grip.`,
+      movement: `Initiate by depressing your shoulders (push them down, away from your ears) before bending your elbows. Think "elbows to your back pockets."`,
+      feel: `You should feel the sides of your back engaging — the "wings" under your armpits. If you feel it mainly in your biceps or forearms, try a false grip or focus on leading with your elbows.`,
+      mistake: `Pulling with your arms instead of your back. If your biceps fatigue first, you're arm-pulling. Initiate with shoulder depression and think of your hands as hooks.`,
+    },
+    press_vertical: {
+      concentric: `Pressing overhead contracts the ${p} as you drive your arms upward and outward, extending the shoulder joint. The deltoids are the prime mover through the full arc.`,
+      eccentric: `Lowering the weight back to shoulder height stretches the deltoids and engages the rotator cuff as stabilizers. Control the descent.`,
+      why: `Vertical pressing loads the deltoid in its primary function — shoulder abduction and flexion. The overhead position removes chest involvement and forces the delts to handle the full load.`,
+      setup: `Stand tall or sit upright with core braced. Hold the ${equipment.toLowerCase()} at shoulder height with elbows at ~90°. Keep your lower back from arching.`,
+      movement: `Press straight up (or slightly forward for natural shoulder mechanics). At the top, shrug slightly to elevate the scapula — this full overhead position is important for shoulder health.`,
+      feel: `The outer and front of your shoulders should burn. If your traps dominate, you're shrugging too early. If lower back aches, reduce weight or improve core bracing.`,
+      mistake: `Letting the lower back hyperextend to compensate for poor shoulder mobility. Brace the core and keep the ribcage down throughout the press.`,
+    },
+    raise: {
+      concentric: `Raising the weight — whether to the side (lateral), front, or rear — abducts or flexes the shoulder, contracting the target portion of the deltoid.`,
+      eccentric: `Slowly lowering back down under control keeps the deltoid under tension through the full range. This controlled eccentric is key for shoulder cap development.`,
+      why: `Raises isolate specific heads of the deltoid by changing the plane of movement. Lateral raises hit the medial (middle) head; front raises target the anterior head; rear raises target the posterior head.`,
+      setup: `Use a lighter weight than you think. The deltoid is a relatively small muscle and raises are pure isolation — going heavy causes the traps and momentum to take over.`,
+      movement: `Lead with the elbow, not the hand. Keep a slight bend in the arm. Raise to parallel (not above shoulder height for lateral raises) in a smooth arc.`,
+      feel: `A burning sensation at the top and outer part of your shoulder. If your traps are cramping, you're shrugging. If your bicep works more than your delt, you're using too much elbow bend.`,
+      mistake: `Shrugging the traps to assist the raise. This shifts work away from the target delt head. Think "keep shoulders away from ears" throughout the movement.`,
+    },
+    squat: {
+      concentric: `Driving up from the bottom of the squat, the ${p} extend the knee and hip simultaneously, generating force against the floor. The quads are maximally active through knee extension.`,
+      eccentric: `Descending into the squat puts the ${p} and glutes under the highest load — the muscles lengthen under bodyweight and external load. A slow, controlled descent builds strength at the bottom.`,
+      why: `The squat's knee flexion and hip flexion angles load the ${p} exactly at the range they're designed to work — the knee extensors are under maximum stretch at the bottom position.`,
+      setup: `Feet shoulder-width or slightly wider, toes turned out 15–30°. Bar across the traps or front deltoids (depending on variation). Brace the core before descending.`,
+      movement: `Send hips back and down, not just down. Keep your chest up and knees tracking over your toes. Drive through your full foot — heels and toes — on the way up.`,
+      feel: `A deep burn in the front of the thighs (quads) and the glutes at the bottom. If your lower back is the main fatigue point, your hips may be rising too fast on the way up.`,
+      mistake: `Knees caving inward (valgus collapse) on the way up. Push your knees out to match your toe angle throughout the entire movement.`,
+    },
+    hinge: {
+      concentric: `Driving the hips forward to extend them, the ${p} (hamstrings and glutes) contract and shorten, pulling the torso back to upright. The spine maintains its neutral position throughout.`,
+      eccentric: `Hinging the hips back stretches the ${p} and hamstrings under load. This is the most important phase for posterior chain development — control it and feel the hamstrings pull.`,
+      why: `Hip hinges load the ${p} and hamstrings in hip extension — their primary function. The forward lean places the spine under a lever load, making the posterior chain work against significant resistance.`,
+      setup: `Stand with feet hip-width. With a barbell, grip just outside your legs. Keep the bar close to your body (it should drag up your shins for conventional deadlifts). Brace hard before lifting.`,
+      movement: `"Push the floor away" on the concentric rather than "pull the weight up." Maintain a neutral spine — don't round your lower back. Drive hips through at the top.`,
+      feel: `You should feel a deep stretch in the back of your thighs on the way down, and glute contraction at lockout. Rounding lower back means your erectors are compensating — reduce weight.`,
+      mistake: `Rounding the lumbar spine. This shifts load from the ${p} and glutes to the spinal erectors in a compromised position — a frequent injury mechanism. Brace the core and maintain a neutral spine.`,
+    },
+    lunge: {
+      concentric: `Pushing through the front heel to stand back up extends the hip and knee, contracting the ${p} and glutes together. The split position forces unilateral (single-leg) loading.`,
+      eccentric: `Stepping forward and lowering the back knee toward the ground stretches the ${p} and hip flexors under the body's full load. This controlled descent builds single-leg strength.`,
+      why: `Lunges expose and correct bilateral asymmetry — they train each leg independently, so a stronger side cannot compensate for a weaker one. They also train balance and hip stability alongside the ${p}.`,
+      setup: `Step far enough forward that your front shin stays roughly vertical at the bottom. Keep your torso upright and core braced.`,
+      movement: `Lower the back knee toward the floor with control. Drive through the front heel to return — don't push off your back foot or you'll shorten the range.`,
+      feel: `A deep stretch in the back hip (hip flexor) and a squeeze in the front quad and glute. If your front knee falls inward, focus on pressing it out over the second toe.`,
+      mistake: `Step too short, causing the front knee to shoot far past the toes. A small step also reduces hip and glute involvement and puts excess force on the knee.`,
+    },
+    hip_thrust: {
+      concentric: `Driving the hips upward from the bench creates maximal hip extension, squeezing the ${p} at the very top. The thrust pattern loads the glutes at a long muscle length through a full range.`,
+      eccentric: `Lowering the hips back toward the floor stretches the ${p} fibers under load. Full range hip thrusts (going all the way down) produce more hypertrophy than partial reps.`,
+      why: `Hip thrusts are uniquely effective for the ${p} because the resistance is highest at full hip extension (the top), where the ${p} are fully contracted — unlike squats where load drops off at lockout.`,
+      setup: `Upper back against a bench, bar over the hips with a pad. Feet planted flat, about hip-width, feet far enough forward that shins are vertical at the top.`,
+      movement: `Drive hips straight up, not forward. Squeeze the ${p} hard at the top and hold for a beat. Keep your chin tucked — don't hyperextend the neck.`,
+      feel: `An intense contraction in the ${p} at the top. If your lower back is working harder than your glutes, tuck your pelvis slightly at the top.`,
+      mistake: `Hyperextending the lower back at the top. This is actually lumbar extension, not hip extension — you've gone past the glute's peak contraction. Stop when your body forms a straight line from shoulders to knees.`,
+    },
+    calf_raise: {
+      concentric: `Rising onto your toes (plantarflexion) contracts the ${p} — pushing the heel away from the ground. The peak squeeze at the very top is where the ${p} is fully shortened.`,
+      eccentric: `Lowering the heel as far below the step as possible stretches the ${p} fibers under tension. The calf is notoriously stubborn and responds best to deep full-range eccentric work.`,
+      why: `The calf (gastrocnemius + soleus) is a postural muscle that fires constantly during walking — making it highly fatigue-resistant. Overloading with heavy weight and slow eccentrics are the main growth stimuli.`,
+      setup: `Stand on a step or platform so your heels can drop below it. Use the ${equipment.toLowerCase()} for load. Keep a slight bend in the knee for soleus work, or straight leg for gastrocnemius.`,
+      movement: `Full range every rep: heels drop all the way down, then rise all the way up. Partial calf raises are one of the most common wasted reps in the gym.`,
+      feel: `A burning stretch in the lower leg at the bottom and a tight squeeze at the top. Calves can tolerate very high rep ranges — 15–25 reps per set is often appropriate.`,
+      mistake: `Partial reps (never dropping the heel) or bouncing at the bottom. The calf needs to be fully stretched to get a strong reflex contraction — short-range reps don't provide this stimulus.`,
+    },
+    plank: {
+      concentric: `There is no movement — the ${p} contract isometrically (without changing length) to resist spinal extension, flexion, and rotation.`,
+      eccentric: `The challenge is sustaining tension throughout — as fatigue sets in, the core wants to collapse. Maintaining position is active work, not passive holding.`,
+      why: `The ${p} stabilizes the spine during virtually every compound lift. A strong plank position directly transfers to better form in deadlifts, squats, overhead press, and rows.`,
+      setup: `Forearms on the floor (elbows under shoulders), body in a straight line from head to heels. Squeeze your glutes and engage your core — don't let your hips rise or sag.`,
+      movement: `This is a static hold. Push your elbows into the floor, think about "pulling your elbows toward your feet" to activate the lats. Breathe steadily.`,
+      feel: `Tension throughout your entire mid-section — not just the front. If you only feel your lower back or shoulders, re-check alignment.`,
+      mistake: `Letting the hips rise or sag. A sagging hips plank loads the lower back instead of the core. A high-hipped plank is resting, not working.`,
+    },
+    crunch: {
+      concentric: `Shortening the distance between your ribcage and pelvis by curling the spine — the ${p} contract and shorten to flex the lumbar spine.`,
+      eccentric: `Lowering back down with control as the ${p} lengthen — don't let your head fall to the floor. Controlled eccentric keeps the abs under tension.`,
+      why: `The ${p} run vertically from the pelvis to the ribcage. Their primary function is spinal flexion — the exact motion in a crunch. Planks build stabilization endurance; crunches build flexion strength.`,
+      setup: `Lie flat, knees bent. Hands behind your head or crossed on your chest — don't pull on your neck. Press your lower back into the floor.`,
+      movement: `Curl your ribcage toward your pelvis, not your head toward your knees. The movement is short — your shoulder blades should only clear the floor by a few inches.`,
+      feel: `The burn should be directly in your abs — the center of your stomach. Neck or lower back pain means you're pulling with your neck or hyperextending.`,
+      mistake: `Pulling on your neck or using momentum to sit all the way up. True crunch range of motion is small — quality contraction beats large range here.`,
+    },
+    generic: {
+      concentric: `During the lifting/working phase of this movement, the ${p} shortens and contracts to produce force against the resistance.`,
+      eccentric: `During the lowering/returning phase, the ${p} lengthens under load — this phase is often undertrained but is critical for muscle growth. Control it for 2–3 seconds.`,
+      why: ex.is_compound
+        ? `This compound movement loads the ${p} while multiple joints move together, allowing heavier loads and greater total muscle recruitment${sec.length ? ` with support from ${joinParts(sec)}` : ''}.`
+        : `The single-joint isolation nature of this exercise keeps tension focused on the ${p} throughout the range, without other muscle groups sharing the load.`,
+      setup: `Set yourself up so your body feels balanced, brace your torso, and position the ${equipment.toLowerCase()} so the movement starts under control.`,
+      movement: `Move through a full, controlled range of motion. Think about driving the weight with ${p} rather than just swinging it. Avoid cutting the range short.`,
+      feel: `You should mostly feel this in the ${p}${sec.length ? `, with some support from ${joinParts(sec).toLowerCase()}` : ''}. Sharp or joint pain means stop — that's not the muscle working.`,
+      mistake: `Using too much momentum or shortening the range of motion. Both rob the ${p} of the stimulus you're there to provide.`,
+    },
+  };
+
+  const pd = phaseDescriptions[pattern];
 
   return {
     howTo: ex.description
       ? ex.description
-      : `Move the weight with control, keep your body stable, and use ${equipment.toLowerCase()} in a smooth range of motion.` ,
-    hits: `This exercise mainly trains ${primary.toLowerCase()}${supportText}.`,
-    why: ex.is_compound
-      ? `It hits ${primary.toLowerCase()} because multiple joints are moving together, which lets ${primary.toLowerCase()} work hard while nearby muscles assist and stabilize.`
-      : `It hits ${primary.toLowerCase()} because the movement keeps tension focused there instead of spreading the work across many muscle groups.`,
-    setup: `Set yourself up so your body feels balanced, brace your torso, and position the ${equipment.toLowerCase()} so the movement starts under control.`,
-    movement: `Move through a controlled full range, avoid rushing, and think about driving the weight with ${primary.toLowerCase()} instead of just swinging it.`,
-    feel: `You should mostly feel this in ${primary.toLowerCase()}${secondary.length ? ` with some support from ${joinParts(secondary).toLowerCase()}` : ''}, not in random joints or sharp pain spots.`,
-    mistake: `A common mistake is using too much momentum or shortening the range of motion, which takes work away from ${primary.toLowerCase()}.`,
+      : `Use ${equipment.toLowerCase()} with full control through the entire range of motion. Move deliberately — the goal is to load the ${p}, not just move the weight.`,
+    hits: `Primarily targets the ${p}${supportText}. ${ex.is_compound ? `As a compound movement, multiple muscle groups contribute — but ${p} is the prime mover.` : `As an isolation movement, it keeps tension concentrated on the ${p}.`}`,
+    why: pd.why,
+    setup: pd.setup,
+    movement: pd.movement,
+    feel: pd.feel,
+    mistake: pd.mistake,
+    concentric: pd.concentric,
+    eccentric: pd.eccentric,
   };
 }
 
@@ -247,7 +781,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isPlanUpdating = false, onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isPlanUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditSupplements, onAddSupplement, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   const theme = getTheme(userProfile?.themePreference);
@@ -255,6 +789,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const workoutPalette = theme.sections.workout;
   const mealPalette = theme.sections.meals;
   const plannerPalette = theme.sections.planner;
+  const aiPalette = theme.sections.ai;
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
@@ -262,9 +797,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [menuOpen, setMenuOpen]           = useState(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
+  const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
+  const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
+  const [selectedSupplement, setSelectedSupplement] = useState<SupplementEntry | null>(null);
+  const [suppLibSearch, setSuppLibSearch] = useState('');
+  const [suppLibCategory, setSuppLibCategory] = useState<string>('all');
+  const [suppAiQuery, setSuppAiQuery] = useState('');
+  const [suppAiLoading, setSuppAiLoading] = useState(false);
+  const [suppAiResult, setSuppAiResult] = useState<SupplementEntry | null>(null);
+  const [suppAiNotFound, setSuppAiNotFound] = useState(false);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
+  const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
   const [exerciseSearch, setExerciseSearch] = useState('');
   const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
@@ -282,6 +828,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
 
+  // Skip reason modal
+  const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
+  const [selectedSkipReason, setSelectedSkipReason]   = useState('');
+  const [customSkipReason, setCustomSkipReason]       = useState('');
+  const [skipReasonsByDate, setSkipReasonsByDate]     = useState<Record<string, string>>({});
+
   // Meal tracking
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
@@ -289,6 +841,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
   const [cardioProfile, setCardioProfile] = useState<string | null>(null);
+
+  // Supplement stack (from props — managed by Index so it survives remounts)
+  const supplementStack = supplementStackProp;
+  const [checkedSupplements, setCheckedSupplements] = useState<Set<string>>(new Set());
+
+  // Coach notes (from props — managed by Index so they survive remounts)
+  const trainerNote = trainerNoteProp;
+  const nutritionistNote = nutritionistNoteProp;
+  const [showNutritionistNote, setShowNutritionistNote] = useState(false);
+  const [showTrainerNote, setShowTrainerNote] = useState(false);
 
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
@@ -357,6 +919,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setSkippedDates(skipped);
     setCheckedMealsByDate(checkMap);
 
+    // Load skip reasons from local history
+    const history = await loadWorkoutHistory();
+    const reasonMap: Record<string, string> = {};
+    for (const s of history) {
+      if (s.skipped && s.skipReason) reasonMap[s.date] = s.skipReason;
+    }
+    setSkipReasonsByDate(reasonMap);
+
     // Check workout completion from backend DB (not AsyncStorage)
     try {
       if (authToken) {
@@ -413,6 +983,66 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       })
     );
     setNutritionPlansByDate(Object.fromEntries(localEntries));
+
+  };
+
+  const applySuppResult = (res: Awaited<ReturnType<typeof lookupSupplement>>, fallbackName: string) => {
+    if (!res.found) {
+      setSuppAiNotFound(true);
+    } else {
+      setSuppAiResult({
+        name:       res.name ?? fallbackName,
+        category:   res.category ?? 'Other',
+        icon:       '💊',
+        tagline:    res.tagline ?? '',
+        whatItDoes: res.whatItDoes ?? '',
+        evidence:   (res.evidence as any) ?? 'limited',
+        dose:       res.dose ?? '',
+        timing:     res.timing ?? '',
+        goodFor:    res.goodFor ?? [],
+        cautions:   res.cautions ?? '',
+      });
+    }
+  };
+
+  const handleSuppAiSearch = async () => {
+    const q = suppAiQuery.trim();
+    if (!q || !authToken) return;
+    setSuppAiLoading(true);
+    setSuppAiResult(null);
+    setSuppAiNotFound(false);
+    try {
+      const res = await lookupSupplement(authToken, q);
+      applySuppResult(res, q);
+    } catch (e: any) {
+      Alert.alert('Lookup failed', e?.message ?? 'Could not look up this supplement.');
+    } finally {
+      setSuppAiLoading(false);
+    }
+  };
+
+  const handleSuppPhotoSearch = async () => {
+    if (!authToken) return;
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      const cam = await ImagePicker.requestCameraPermissionsAsync();
+      if (!cam.granted) { Alert.alert('Permission needed', 'Allow camera or photo library access.'); return; }
+    }
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    const asset = result.assets[0];
+    setSuppAiLoading(true);
+    setSuppAiResult(null);
+    setSuppAiNotFound(false);
+    setSuppAiQuery('');
+    try {
+      const res = await lookupSupplementFromPhoto(authToken, { image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' });
+      applySuppResult(res, 'Unknown supplement');
+    } catch (e: any) {
+      Alert.alert('Photo lookup failed', e?.message ?? 'Could not identify supplement from photo.');
+    } finally {
+      setSuppAiLoading(false);
+    }
   };
 
   const openExerciseLibrary = useCallback(async () => {
@@ -536,6 +1166,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         0
       );
 
+      // Last 3 calendar days — includes skips so the trainer knows recent context
+      const last3Days = [0, 1, 2].map(offset => {
+        const d = new Date();
+        d.setDate(d.getDate() - offset);
+        const dKey = dateKey(d);
+        const session = workoutHistory.find(s => s.date.startsWith(dKey));
+        if (session) {
+          if (session.skipped) {
+            return {
+              date: dKey,
+              status: `skipped${session.skipReason ? ` — ${session.skipReason}` : ''}`,
+              focus: session.focus,
+              durationMinutes: null as number | null,
+              setsLogged: 0,
+            };
+          }
+          return {
+            date: dKey,
+            status: session.completed ? 'completed' : 'incomplete',
+            focus: session.focus,
+            durationMinutes: Math.round(session.durationSeconds / 60),
+            setsLogged: session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0),
+          };
+        }
+        // Fall back to in-memory skippedDates for today
+        if (skippedDates.has(dKey)) {
+          return { date: dKey, status: 'skipped', focus: null, durationMinutes: null, setsLogged: 0 };
+        }
+        return { date: dKey, status: 'no record', focus: null, durationMinutes: null, setsLogged: 0 };
+      });
+
       const progress = {
         goal: userProfile.goal,
         todayDone,
@@ -546,6 +1207,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         totalSessions: workoutHistory.length,
         totalSetsLogged,
         workoutHistory: recentHistory,
+        recentDays: last3Days,
       };
 
       // Build a structured summary of the current plan so the AI always knows what to modify
@@ -696,24 +1358,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [persistDayState]);
 
 
-  const handleSkipToday = useCallback(async (focus: string) => {
-    Alert.alert(
-      'Skip Today?',
-      'This will mark today as skipped. The workout will be available again tomorrow.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Skip',
-          style: 'destructive',
-          onPress: async () => {
-            const today = todayKey();
-            setSkippedDates(prev => new Set([...prev, today]));
-            await persistDayState(today, { skipped_focus: focus });
-          },
-        },
-      ]
-    );
+  const handleToggleRoutine = useCallback(async (date: string, mealType: string) => {
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      const meal = (current as any)[mealType] as MealSuggestion | undefined;
+      if (!meal) return prev;
+      nextPlan = { ...current, [mealType]: { ...meal, isRoutine: !meal.isRoutine } } as DailyNutritionPlan;
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
   }, [persistDayState]);
+
+  const handleSkipToday = useCallback((focus: string) => {
+    setSelectedSkipReason('');
+    setCustomSkipReason('');
+    setSkipReasonFocus(focus);
+  }, []);
+
+  const confirmSkip = useCallback(async () => {
+    const focus = skipReasonFocus;
+    if (!focus) return;
+    const reason = customSkipReason.trim() || selectedSkipReason || undefined;
+    setSkipReasonFocus(null);
+    setSelectedSkipReason('');
+    setCustomSkipReason('');
+    const today = todayKey();
+    setSkippedDates(prev => new Set([...prev, today]));
+    if (reason) setSkipReasonsByDate(prev => ({ ...prev, [today]: reason }));
+    await persistDayState(today, { skipped_focus: focus });
+    await saveSkipToHistory(today, focus, reason);
+  }, [skipReasonFocus, selectedSkipReason, customSkipReason, persistDayState]);
 
   const handleUnskipDay = useCallback(async (date: string) => {
     setSkippedDates(prev => {
@@ -738,7 +1415,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const schedule  = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek) : [];
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'rose'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'arctic', 'rose'].includes(userProfile.themePreference ?? 'midnight');  // blossom is now dark
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -750,10 +1427,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     <LinearGradient colors={gradientColors} style={styles.container} locations={[0, 0.4, 1]}>
       <StatusBar style={statusBarStyle} />
 
-      {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + 6, backgroundColor: themeColors.surfaceRaised, borderBottomColor: themeColors.border }]}>
+      {/* Header — very subtle top-to-bottom primary wash */}
+      <LinearGradient
+        colors={[themeColors.primary + '18', themeColors.surfaceRaised]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={[styles.header, { paddingTop: insets.top, borderBottomColor: themeColors.border }]}>
         <Image
-          source={require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png')}
+          source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
           style={styles.headerLogo}
           resizeMode="contain"
         />
@@ -763,7 +1444,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
           <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
 
       {/* AI plan updating — full overlay, hides stale plans */}
       {isPlanUpdating ? (
@@ -800,9 +1481,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {!isPlanUpdating && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'workout' ? (
           <>
+            <SectionBar
+              icon="🏋️"
+              label="This Week"
+              subtitle={`${schedule.filter(s => !s.isRest).length} workouts planned`}
+              palette={workoutPalette}
+            />
+
+            {/* Trainer plan note — only shown when a note exists */}
+            {trainerNote ? (
+              <TouchableOpacity
+                style={[styles.planNoteRow, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '55' }]}
+                onPress={() => setShowTrainerNote(true)}
+                activeOpacity={0.75}>
+                <View style={[styles.planNoteIconWrap, { backgroundColor: workoutPalette.strong + '22' }]}>
+                  <Text style={styles.planNoteIcon}>📋</Text>
+                </View>
+                <View style={styles.planNoteBody}>
+                  <Text style={[styles.planNoteTitle, { color: workoutPalette.text }]}>Trainer's Plan Explanation</Text>
+                  <Text style={[styles.planNoteSub, { color: workoutPalette.text + 'AA' }]}>Why your trainer built this workout structure</Text>
+                </View>
+                <Text style={[styles.planNoteChevron, { color: workoutPalette.strong }]}>›</Text>
+              </TouchableOpacity>
+            ) : null}
+
             {(availabilityItems.length > 0 || cardioProfile) && (
               <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
-                <Text style={[styles.insightTitle, { color: themeColors.textPrimary }]}>Available Muscle/Cardio Focus</Text>
+                <Text style={[styles.insightTitle, { color: themeColors.textPrimary }]}>Muscle Focus</Text>
                 {cardioProfile ? <Text style={[styles.insightSubtitle, { color: themeColors.textSecondary }]}>{cardioProfile}</Text> : null}
                 <View style={styles.insightChips}>
                   {availabilityItems.map(item => (
@@ -826,6 +1531,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   isToday={isToday}
                   isCompleted={isCompleted}
                   isSkipped={isSkipped}
+                  skipReason={skipReasonsByDate[key]}
                   expanded={expandedDay === i}
                   onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
                   onStartWorkout={onStartWorkout}
@@ -837,16 +1543,48 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           </>
         ) : (
           <>
+            <SectionBar
+              icon="🥗"
+              label="Meal Plan"
+              subtitle="7 days"
+              palette={mealPalette}
+            />
+
+            {/* Nutritionist plan note — only shown when a note exists */}
+            {nutritionistNote ? (
+              <TouchableOpacity
+                style={[styles.planNoteRow, { backgroundColor: mealPalette.soft, borderColor: mealPalette.strong + '55' }]}
+                onPress={() => setShowNutritionistNote(true)}
+                activeOpacity={0.75}>
+                <View style={[styles.planNoteIconWrap, { backgroundColor: mealPalette.strong + '22' }]}>
+                  <Text style={styles.planNoteIcon}>🥗</Text>
+                </View>
+                <View style={styles.planNoteBody}>
+                  <Text style={[styles.planNoteTitle, { color: mealPalette.text }]}>Nutritionist's Plan Explanation</Text>
+                  <Text style={[styles.planNoteSub, { color: mealPalette.text + 'AA' }]}>Why your nutritionist chose this calorie & macro strategy</Text>
+                </View>
+                <Text style={[styles.planNoteChevron, { color: mealPalette.strong }]}>›</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {/* Supplement stack panel removed from meal/nutrition section */}
+
             {mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
               if (!plan) return null;
               const isExpanded = expandedMealDays.has(d.key);
               const meals = [plan.breakfast, plan.lunch, plan.dinner, plan.snack].filter(Boolean) as MealSuggestion[];
               const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
+              const mealPreview = [
+                plan.breakfast ? '🌅' : null,
+                plan.lunch     ? '🥗' : null,
+                plan.dinner    ? '🍽️' : null,
+                plan.snack     ? '🥜' : null,
+              ].filter(Boolean).join('  ');
               return (
                 <View key={d.key} style={[styles.mealAccordionCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
                   <TouchableOpacity
-                    style={[styles.mealAccordionHeader, { backgroundColor: mealPalette.soft }]}
+                    style={[styles.mealAccordionHeader, { backgroundColor: mealPalette.soft, borderBottomColor: mealPalette.strong + '30' }]}
                     onPress={() => setExpandedMealDays(prev => {
                       const next = new Set(prev);
                       if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
@@ -856,7 +1594,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   >
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.mealAccordionTitle, { color: themeColors.textPrimary }]}>{mealDayLabel(d.date, idx)}</Text>
-                      <Text style={[styles.mealAccordionMeta, { color: themeColors.textSecondary }]}>{Math.round(totalCalories)} cal total</Text>
+                      <Text style={[styles.mealAccordionMeta, { color: themeColors.textSecondary }]}>
+                        {Math.round(totalCalories)} cal  ·  {mealPreview}
+                      </Text>
                     </View>
                     <Text style={[styles.mealAccordionChevron, { color: themeColors.textMuted }]}>{isExpanded ? '▲' : '▼'}</Text>
                   </TouchableOpacity>
@@ -871,6 +1611,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onAddSnack={() => handleAddSnack(d.key)}
                       onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
                       onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
+                      onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                     />
                   )}
                 </View>
@@ -907,6 +1648,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               { label: 'Account',          onPress: onViewAccount },
               { label: 'View Progress',    onPress: onViewProgress },
               { label: 'Exercise Library', onPress: openExerciseLibrary },
+              { label: 'Supplements',      onPress: onEditSupplements },
               { label: 'Edit Plan',        onPress: onEditProfile },
               { label: 'Equipment',        onPress: onEditEquipment },
               { label: 'Food Options',     onPress: onEditFoods },
@@ -929,134 +1671,306 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </TouchableOpacity>
       </Modal>
 
-      <Modal visible={showExerciseLibrary} transparent animationType="slide" onRequestClose={() => setShowExerciseLibrary(false)}>
+      <Modal visible={showExerciseLibrary} transparent animationType="slide" onRequestClose={() => {
+        if (selectedExercise) { setSelectedExercise(null); return; }
+        if (selectedMuscle) { setSelectedMuscle(null); return; }
+        setShowExerciseLibrary(false);
+      }}>
         <View style={styles.libraryBackdrop}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
+
+            {/* Header */}
             <View style={styles.libraryHeader}>
-              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>{selectedExercise ? selectedExercise.name : 'Exercise Library'}</Text>
+              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>
+                {selectedExercise ? selectedExercise.name : selectedMuscle ? selectedMuscle.name : 'Library'}
+              </Text>
               <TouchableOpacity onPress={() => {
-                if (selectedExercise) {
-                  setSelectedExercise(null);
-                  return;
-                }
+                if (selectedExercise) { setSelectedExercise(null); return; }
+                if (selectedMuscle) { setSelectedMuscle(null); return; }
                 setShowExerciseLibrary(false);
               }}>
-                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>Close</Text>
+                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>
+                  {selectedExercise || selectedMuscle ? '← Back' : 'Close'}
+                </Text>
               </TouchableOpacity>
             </View>
 
-            {exerciseLibraryLoading ? (
-              <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
-            ) : selectedExercise ? (
+            {/* Tab bar — only show when not in detail view */}
+            {!selectedExercise && !selectedMuscle && (
+              <View style={[styles.libTabBar, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                <TouchableOpacity
+                  style={[styles.libTab, libraryActiveTab === 'exercises' && { borderBottomColor: workoutPalette.strong }]}
+                  onPress={() => setLibraryActiveTab('exercises')}>
+                  <Text style={[styles.libTabText, { color: libraryActiveTab === 'exercises' ? workoutPalette.strong : themeColors.textMuted }]}>Exercises</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.libTab, libraryActiveTab === 'muscles' && { borderBottomColor: aiPalette.strong }]}
+                  onPress={() => setLibraryActiveTab('muscles')}>
+                  <Text style={[styles.libTabText, { color: libraryActiveTab === 'muscles' ? aiPalette.strong : themeColors.textMuted }]}>Muscles</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* ── EXERCISE DETAIL ──────────────────────────────────────────────── */}
+            {selectedExercise ? (
               <ScrollView contentContainerStyle={styles.detailContent}>
                 {(() => {
                   const guide = buildExerciseGuide(selectedExercise);
                   return (
                     <>
-                      <View style={styles.detailTopCard}>
-                        <Text style={styles.detailMeta}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
+                      <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
+                        <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
                         {selectedExercise.secondary_muscles?.length ? (
-                          <Text style={styles.detailMeta}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
+                          <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
-                        {selectedExercise.equipment ? <Text style={styles.detailMeta}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
-                        <TouchableOpacity style={styles.detailVideoBtn} onPress={() => openExerciseVideo(selectedExercise.name)}>
-                          <Text style={styles.detailVideoBtnText}>Watch Form Video</Text>
+                        {selectedExercise.equipment ? <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
+                        <TouchableOpacity style={[styles.detailVideoBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => openExerciseVideo(selectedExercise.name)}>
+                          <Text style={styles.detailVideoBtnText}>▶  Watch Form Video</Text>
                         </TouchableOpacity>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>How To Perform It</Text>
-                        <Text style={styles.detailSectionText}>{guide.howTo}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How To Perform It</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.howTo}</Text>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>Setup</Text>
-                        <Text style={styles.detailSectionText}>{guide.setup}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Setup</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.setup}</Text>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>Movement Cue</Text>
-                        <Text style={styles.detailSectionText}>{guide.movement}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Movement Cue</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.movement}</Text>
+                      </View>
+
+                      {/* Muscle phase breakdown */}
+                      <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                        <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Muscle Phase Breakdown</Text>
+                        <View style={styles.detailPhaseRow}>
+                          <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
+                            <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ LIFTING</Text>
+                          </View>
+                          <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{guide.concentric}</Text>
+                        </View>
+                        <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
+                        <View style={styles.detailPhaseRow}>
+                          <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
+                            <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ LOWERING</Text>
+                          </View>
+                          <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{guide.eccentric}</Text>
+                        </View>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>What It Hits</Text>
-                        <Text style={styles.detailSectionText}>{guide.hits}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>What It Hits & Why</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.hits}</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6 }]}>{guide.why}</Text>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>Why It Hits That</Text>
-                        <Text style={styles.detailSectionText}>{guide.why}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How It Should Feel</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.feel}</Text>
                       </View>
 
                       <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>How It Should Feel</Text>
-                        <Text style={styles.detailSectionText}>{guide.feel}</Text>
-                      </View>
-
-                      <View style={styles.detailSection}>
-                        <Text style={styles.detailSectionTitle}>Common Mistake</Text>
-                        <Text style={styles.detailSectionText}>{guide.mistake}</Text>
+                        <Text style={[styles.detailSectionTitle, { color: themeColors.error ?? '#FF4444' }]}>Common Mistake</Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.mistake}</Text>
                       </View>
                     </>
                   );
                 })()}
               </ScrollView>
+
+            /* ── MUSCLE DETAIL ──────────────────────────────────────────────── */
+            ) : selectedMuscle ? (
+              <ScrollView contentContainerStyle={styles.detailContent}>
+                <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55' }]}>
+                  <Text style={{ fontSize: 40, textAlign: 'center', marginBottom: 6 }}>{selectedMuscle.emoji}</Text>
+                  <Text style={[styles.detailMeta, { color: selectedMuscle.tagColor, fontWeight: '700', fontSize: 13 }]}>{selectedMuscle.commonName.toUpperCase()} · {selectedMuscle.bodyRegion}</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6 }]}>{selectedMuscle.shortDescription}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Location</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.location}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Structure</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.structure}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Primary Function</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.primaryFunction}</Text>
+                </View>
+
+                {/* Phase breakdown */}
+                <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                  <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Contraction Phases</Text>
+                  <View style={styles.detailPhaseRow}>
+                    <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
+                      <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ CONCENTRIC</Text>
+                    </View>
+                    <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.concentric}</Text>
+                  </View>
+                  <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
+                  <View style={styles.detailPhaseRow}>
+                    <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
+                      <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ ECCENTRIC</Text>
+                    </View>
+                    <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.eccentric}</Text>
+                  </View>
+                  {selectedMuscle.phases.isometric && (
+                    <>
+                      <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
+                      <View style={styles.detailPhaseRow}>
+                        <View style={[styles.detailPhaseBadge, { backgroundColor: aiPalette.strong + '22' }]}>
+                          <Text style={[styles.detailPhaseBadgeLabel, { color: aiPalette.strong }]}>■ ISOMETRIC</Text>
+                        </View>
+                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.isometric}</Text>
+                      </View>
+                    </>
+                  )}
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How To Feel It</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.howToFeel}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Mind-Muscle Connection</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.mindMuscleConnection}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Best Exercises</Text>
+                  {selectedMuscle.bestExercises.map((ex, i) => (
+                    <Text key={i} style={[styles.detailSectionText, { color: themeColors.textSecondary, marginBottom: 3 }]}>• {ex}</Text>
+                  ))}
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.error ?? '#FF4444' }]}>Common Mistakes</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.commonMistakes}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Growth Tip</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.growthTip}</Text>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Recovery</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.recoveryNote}</Text>
+                </View>
+              </ScrollView>
+
+            /* ── EXERCISES LIST ──────────────────────────────────────────────── */
+            ) : libraryActiveTab === 'exercises' ? (
+              exerciseLibraryLoading ? (
+                <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
+              ) : (
+                <ScrollView contentContainerStyle={styles.libraryList}>
+                  <TextInput
+                    value={exerciseSearch}
+                    onChangeText={setExerciseSearch}
+                    placeholder="Search exercises, muscles, or equipment"
+                    placeholderTextColor={themeColors.textMuted}
+                    style={[styles.librarySearchInput, { backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                  />
+
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                    <TouchableOpacity
+                      style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
+                      onPress={() => setExerciseMuscleFilter('all')}>
+                      <Text style={[styles.libraryFilterText, exerciseMuscleFilter === 'all' && styles.libraryFilterTextActive]}>All Muscles</Text>
+                    </TouchableOpacity>
+                    {exerciseMuscleOptions.map((muscle) => (
+                      <TouchableOpacity
+                        key={muscle}
+                        style={[styles.libraryFilterChip, exerciseMuscleFilter === muscle && styles.libraryFilterChipActive]}
+                        onPress={() => setExerciseMuscleFilter(muscle)}>
+                        <Text style={[styles.libraryFilterText, exerciseMuscleFilter === muscle && styles.libraryFilterTextActive]}>{humanizeToken(muscle)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                    <TouchableOpacity
+                      style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
+                      onPress={() => setExerciseEquipmentFilter('all')}>
+                      <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === 'all' && styles.libraryFilterTextActive]}>All Equipment</Text>
+                    </TouchableOpacity>
+                    {exerciseEquipmentOptions.map((equipment) => (
+                      <TouchableOpacity
+                        key={equipment}
+                        style={[styles.libraryFilterChip, exerciseEquipmentFilter === equipment && styles.libraryFilterChipActive]}
+                        onPress={() => setExerciseEquipmentFilter(equipment)}>
+                        <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === equipment && styles.libraryFilterTextActive]}>{humanizeToken(equipment)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+
+                  {filteredExerciseLibrary.length === 0 ? (
+                    <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
+                  ) : filteredExerciseLibrary.map((ex) => (
+                    <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
+                      <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
+                      <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
+                        {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
+                        {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
+                      </Text>
+                      {ex.description ? <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.description}</Text> : null}
+                      <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap for form guide →</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )
+
+            /* ── MUSCLE LIST ──────────────────────────────────────────────────── */
             ) : (
               <ScrollView contentContainerStyle={styles.libraryList}>
-                <TextInput
-                  value={exerciseSearch}
-                  onChangeText={setExerciseSearch}
-                  placeholder="Search exercises, muscles, or equipment"
-                  placeholderTextColor={themeColors.textMuted}
-                  style={[styles.librarySearchInput, { backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
-                />
-
+                {/* Region filter */}
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
-                  <TouchableOpacity
-                    style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
-                    onPress={() => setExerciseMuscleFilter('all')}>
-                    <Text style={[styles.libraryFilterText, exerciseMuscleFilter === 'all' && styles.libraryFilterTextActive]}>All Muscles</Text>
-                  </TouchableOpacity>
-                  {exerciseMuscleOptions.map((muscle) => (
-                    <TouchableOpacity
-                      key={muscle}
-                      style={[styles.libraryFilterChip, exerciseMuscleFilter === muscle && styles.libraryFilterChipActive]}
-                      onPress={() => setExerciseMuscleFilter(muscle)}>
-                      <Text style={[styles.libraryFilterText, exerciseMuscleFilter === muscle && styles.libraryFilterTextActive]}>{humanizeToken(muscle)}</Text>
-                    </TouchableOpacity>
-                  ))}
+                  {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map((region) => {
+                    const active = muscleRegionFilter === region;
+                    return (
+                      <TouchableOpacity
+                        key={region}
+                        style={[styles.libraryFilterChip, active && { backgroundColor: aiPalette.strong, borderColor: aiPalette.strong }]}
+                        onPress={() => setMuscleRegionFilter(region)}>
+                        <Text style={[styles.libraryFilterText, active && { color: '#FFFFFF' }]}>
+                          {region === 'all' ? 'All Muscles' : region}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </ScrollView>
 
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
-                  <TouchableOpacity
-                    style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
-                    onPress={() => setExerciseEquipmentFilter('all')}>
-                    <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === 'all' && styles.libraryFilterTextActive]}>All Equipment</Text>
-                  </TouchableOpacity>
-                  {exerciseEquipmentOptions.map((equipment) => (
+                {MUSCLE_LIBRARY
+                  .filter(m => muscleRegionFilter === 'all' || m.bodyRegion.toLowerCase().includes(muscleRegionFilter.toLowerCase()))
+                  .map((muscle) => (
                     <TouchableOpacity
-                      key={equipment}
-                      style={[styles.libraryFilterChip, exerciseEquipmentFilter === equipment && styles.libraryFilterChipActive]}
-                      onPress={() => setExerciseEquipmentFilter(equipment)}>
-                      <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === equipment && styles.libraryFilterTextActive]}>{humanizeToken(equipment)}</Text>
+                      key={muscle.id}
+                      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}
+                      activeOpacity={0.8}
+                      onPress={() => setSelectedMuscle(muscle)}>
+                      <View style={styles.muscleItemRow}>
+                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '22' }]}>
+                          <Text style={{ fontSize: 22 }}>{muscle.emoji}</Text>
+                        </View>
+                        <View style={styles.muscleItemBody}>
+                          <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{muscle.name}</Text>
+                          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]}>{muscle.commonName} · {muscle.bodyRegion}</Text>
+                          <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]} numberOfLines={2}>{muscle.shortDescription}</Text>
+                        </View>
+                      </View>
+                      <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap to learn →</Text>
                     </TouchableOpacity>
                   ))}
-                </ScrollView>
-
-                {filteredExerciseLibrary.length === 0 ? (
-                  <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
-                ) : filteredExerciseLibrary.map((ex) => (
-                  <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
-                    <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
-                    <Text style={[styles.libraryItemMeta, { color: themeColors.primary }]}>
-                      {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
-                      {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
-                    </Text>
-                    {ex.description ? <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.description}</Text> : null}
-                    <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap for form guide</Text>
-                  </TouchableOpacity>
-                ))}
               </ScrollView>
             )}
           </View>
@@ -1188,10 +2102,414 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Floating AI chat button */}
+      {/* Skip reason modal */}
+      <Modal visible={!!skipReasonFocus} transparent animationType="slide" onRequestClose={() => setSkipReasonFocus(null)}>
+        <View style={styles.skipReasonBackdrop}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+            <View style={[styles.skipReasonSheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
+              <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
 
+              <Text style={[styles.skipReasonTitle, { color: themeColors.textPrimary }]}>Skip Today's Workout?</Text>
+              <Text style={[styles.skipReasonFocusLabel, { color: themeColors.textSecondary }]}>
+                {skipReasonFocus} · Let your trainer know why
+              </Text>
+
+              <View style={styles.skipReasonChips}>
+                {SKIP_REASONS.map(r => {
+                  const active = selectedSkipReason === r.label;
+                  return (
+                    <TouchableOpacity
+                      key={r.label}
+                      style={[styles.skipReasonChip, {
+                        borderColor: active ? themeColors.warning : themeColors.border,
+                        backgroundColor: active ? themeColors.warning + '22' : themeColors.surfaceRaised,
+                      }]}
+                      onPress={() => { setSelectedSkipReason(r.label); setCustomSkipReason(''); }}
+                      activeOpacity={0.8}>
+                      <Text style={[styles.skipReasonChipText, { color: active ? themeColors.warning : themeColors.textSecondary }]}>
+                        {r.emoji}  {r.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <TextInput
+                value={customSkipReason}
+                onChangeText={text => { setCustomSkipReason(text); setSelectedSkipReason(''); }}
+                placeholder="Other reason…"
+                placeholderTextColor={themeColors.textMuted}
+                style={[styles.skipReasonInput, {
+                  borderColor: customSkipReason ? themeColors.warning : themeColors.border,
+                  backgroundColor: themeColors.surfaceRaised,
+                  color: themeColors.textPrimary,
+                }]}
+              />
+
+              <View style={styles.skipReasonBtns}>
+                <TouchableOpacity
+                  style={[styles.skipReasonCancel, { borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised }]}
+                  onPress={() => { setSkipReasonFocus(null); setSelectedSkipReason(''); setCustomSkipReason(''); }}>
+                  <Text style={[styles.skipReasonCancelText, { color: themeColors.textSecondary }]}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.skipReasonConfirm, { backgroundColor: themeColors.warning }]}
+                  onPress={confirmSkip}>
+                  <Text style={styles.skipReasonConfirmText}>Skip Workout</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* Supplement Library Modal */}
+      <Modal visible={showSupplementLibrary} transparent animationType="slide" onRequestClose={() => {
+        if (selectedSupplement) { setSelectedSupplement(null); return; }
+        setShowSupplementLibrary(false);
+      }}>
+        <View style={styles.libraryBackdrop}>
+          <View style={[styles.librarySheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
+            <View style={styles.libraryHeader}>
+              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>
+                {selectedSupplement ? selectedSupplement.name : 'Supplement Library'}
+              </Text>
+              <TouchableOpacity onPress={() => {
+                if (selectedSupplement) { setSelectedSupplement(null); return; }
+                setShowSupplementLibrary(false);
+              }}>
+                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>
+                  {selectedSupplement ? '← Back' : 'Close'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {selectedSupplement ? (
+              <ScrollView contentContainerStyle={styles.detailContent}>
+                {/* Top card */}
+                <View style={[styles.detailTopCard, { backgroundColor: mealPalette.soft, borderColor: mealPalette.strong + '40' }]}>
+                  <Text style={{ fontSize: 36, textAlign: 'center', marginBottom: 8 }}>{selectedSupplement.icon}</Text>
+                  <Text style={[styles.detailMeta, { color: mealPalette.text, fontWeight: '700' }]}>{selectedSupplement.category.toUpperCase()}</Text>
+                  <Text style={[{ fontSize: 14, color: mealPalette.text, textAlign: 'center', marginTop: 4, lineHeight: 20 }]}>{selectedSupplement.tagline}</Text>
+                  <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: 10, gap: 8, alignItems: 'center' }}>
+                    <View style={{
+                      paddingHorizontal: 12, paddingVertical: 5, borderRadius: radius.full,
+                      backgroundColor: selectedSupplement.evidence === 'strong' ? '#00C48820' : selectedSupplement.evidence === 'moderate' ? '#FFB30020' : '#FF555520',
+                      borderWidth: 1,
+                      borderColor: selectedSupplement.evidence === 'strong' ? '#00C488' : selectedSupplement.evidence === 'moderate' ? '#FFB300' : '#FF5555',
+                    }}>
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: selectedSupplement.evidence === 'strong' ? '#00C488' : selectedSupplement.evidence === 'moderate' ? '#FFB300' : '#FF5555' }}>
+                        {selectedSupplement.evidence === 'strong' ? '✓ Well-studied' : selectedSupplement.evidence === 'moderate' ? '◑ Some evidence' : '⚠ Early research'}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: mealPalette.text + '99' }}>
+                      {selectedSupplement.evidence === 'strong' ? 'Multiple strong clinical trials' : selectedSupplement.evidence === 'moderate' ? 'Promising, more research needed' : 'Limited or mixed results'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>What It Does</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedSupplement.whatItDoes}</Text>
+                </View>
+
+                <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                  <View style={styles.detailPhaseRow}>
+                    <Text style={[styles.detailPhaseBadgeLabel, { color: themeColors.textSecondary, width: 70 }]}>DOSE</Text>
+                    <Text style={[styles.detailPhaseText, { color: themeColors.textPrimary, fontWeight: '600' }]}>{selectedSupplement.dose}</Text>
+                  </View>
+                  <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
+                  <View style={styles.detailPhaseRow}>
+                    <Text style={[styles.detailPhaseBadgeLabel, { color: themeColors.textSecondary, width: 70 }]}>TIMING</Text>
+                    <Text style={[styles.detailPhaseText, { color: themeColors.textPrimary }]}>{selectedSupplement.timing}</Text>
+                  </View>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Best For</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {selectedSupplement.goodFor.map(g => (
+                      <View key={g} style={[{ backgroundColor: mealPalette.strong + '22', borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4 }]}>
+                        <Text style={{ fontSize: 12, color: mealPalette.strong, fontWeight: '600' }}>{g}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.detailSection}>
+                  <Text style={[styles.detailSectionTitle, { color: themeColors.error ?? '#FF4444' }]}>Cautions</Text>
+                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedSupplement.cautions}</Text>
+                </View>
+
+                {/* Add to My Supplements */}
+                {(() => {
+                  const alreadyAdded = (userProfile?.supplementsAvailable ?? []).includes(selectedSupplement.name);
+                  return (
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: alreadyAdded ? themeColors.surfaceRaised : themeColors.primary,
+                        borderRadius: radius.md, paddingVertical: 14, alignItems: 'center',
+                        borderWidth: alreadyAdded ? 1 : 0, borderColor: themeColors.border,
+                      }}
+                      disabled={alreadyAdded}
+                      onPress={() => {
+                        onAddSupplement(selectedSupplement.name);
+                        Alert.alert('Added', `${selectedSupplement.name} added to My Supplements.`);
+                      }}>
+                      <Text style={{ color: alreadyAdded ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 15 }}>
+                        {alreadyAdded ? '✓ In My Supplements' : '+ Add to My Supplements'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })()}
+              </ScrollView>
+            ) : (
+              <>
+                {/* AI search — text + photo */}
+                <View style={{ paddingHorizontal: 16, marginBottom: 6, gap: 6 }}>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TextInput
+                      style={[styles.libSearch, { flex: 1, marginHorizontal: 0, marginBottom: 0, backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                      value={suppAiQuery}
+                      onChangeText={(t) => { setSuppAiQuery(t); setSuppAiResult(null); setSuppAiNotFound(false); }}
+                      placeholder="Search any supplement with AI…"
+                      placeholderTextColor={themeColors.textMuted}
+                      returnKeyType="search"
+                      onSubmitEditing={handleSuppAiSearch}
+                    />
+                    <TouchableOpacity
+                      style={{ backgroundColor: themeColors.primary, borderRadius: radius.md, paddingHorizontal: 13, justifyContent: 'center' }}
+                      onPress={handleSuppAiSearch}
+                      disabled={suppAiLoading}>
+                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>
+                        {suppAiLoading ? '…' : '→'}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingHorizontal: 13, justifyContent: 'center', borderWidth: 1, borderColor: themeColors.border }}
+                      onPress={handleSuppPhotoSearch}
+                      disabled={suppAiLoading}>
+                      <Text style={{ fontSize: 18 }}>📷</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Type a name or take a photo of any supplement label</Text>
+                </View>
+
+                {/* AI result */}
+                {suppAiNotFound && (
+                  <View style={{ marginHorizontal: 16, marginBottom: 10, padding: 12, backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: themeColors.border }}>
+                    <Text style={{ fontSize: 13, color: themeColors.textMuted, textAlign: 'center' }}>
+                      Could not identify "{suppAiQuery}" as a supplement. Try a different name or photo.
+                    </Text>
+                  </View>
+                )}
+                {suppAiResult && (
+                  <View style={{ marginHorizontal: 16, marginBottom: 12, backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: themeColors.border, padding: 14, gap: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                      <Text style={{ fontSize: 26 }}>💊</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>{suppAiResult.name}</Text>
+                        <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 2, lineHeight: 17 }}>{suppAiResult.tagline}</Text>
+                      </View>
+                    </View>
+                    {/* Evidence badge */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <View style={{
+                        paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full,
+                        backgroundColor: suppAiResult.evidence === 'strong' ? '#00C48820' : suppAiResult.evidence === 'moderate' ? '#FFB30020' : '#FF555520',
+                        borderWidth: 1,
+                        borderColor: suppAiResult.evidence === 'strong' ? '#00C488' : suppAiResult.evidence === 'moderate' ? '#FFB300' : '#FF5555',
+                      }}>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: suppAiResult.evidence === 'strong' ? '#00C488' : suppAiResult.evidence === 'moderate' ? '#FFB300' : '#FF5555' }}>
+                          {suppAiResult.evidence === 'strong' ? '✓ Well-studied' : suppAiResult.evidence === 'moderate' ? '◑ Some evidence' : '⚠ Early research'}
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                        {suppAiResult.evidence === 'strong' ? 'Multiple strong clinical trials' : suppAiResult.evidence === 'moderate' ? 'Promising but more research needed' : 'Limited or mixed study results'}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 13, color: themeColors.textSecondary, lineHeight: 19 }}>{suppAiResult.whatItDoes}</Text>
+                    <View style={{ flexDirection: 'row', gap: 12 }}>
+                      <Text style={{ fontSize: 12, color: themeColors.textMuted }}>📏 <Text style={{ color: themeColors.textPrimary, fontWeight: '600' }}>{suppAiResult.dose}</Text></Text>
+                      <Text style={{ fontSize: 12, color: themeColors.textMuted }}>⏱ <Text style={{ color: themeColors.textPrimary, fontWeight: '600' }}>{suppAiResult.timing}</Text></Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TouchableOpacity
+                        style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: radius.md, paddingVertical: 11, alignItems: 'center' }}
+                        onPress={() => {
+                          onAddSupplement(suppAiResult.name);
+                          setSuppAiResult(null);
+                          setSuppAiQuery('');
+                          Alert.alert('Added', `${suppAiResult.name} added to My Supplements.`);
+                        }}>
+                        <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>+ Add to My Supplements</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: themeColors.border }}
+                        onPress={() => setSelectedSupplement(suppAiResult)}>
+                        <Text style={{ fontSize: 12, color: themeColors.textSecondary, fontWeight: '600' }}>Full Info</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+
+                {/* Divider + built-in library */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 10, gap: 10 }}>
+                  <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, fontWeight: '600' }}>BUILT-IN LIBRARY</Text>
+                  <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                </View>
+                <TextInput
+                  style={[styles.libSearch, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                  value={suppLibSearch}
+                  onChangeText={setSuppLibSearch}
+                  placeholder="Filter library…"
+                  placeholderTextColor={themeColors.textMuted}
+                />
+                {/* Category filter chips */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ marginBottom: 6 }}
+                  contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 4, gap: 6 }}>
+                  {[
+                    { key: 'all', label: 'All' },
+                    { key: 'Protein', label: '🥛 Protein' },
+                    { key: 'Performance', label: '⚡ Performance' },
+                    { key: 'Recovery', label: '💪 Recovery' },
+                    { key: 'Health', label: '❤️ Health' },
+                    { key: 'Weight Management', label: '🔥 Weight' },
+                    { key: 'Sleep & Stress', label: '😴 Sleep' },
+                  ].map(({ key, label }) => (
+                    <TouchableOpacity
+                      key={key}
+                      style={{
+                        paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.full,
+                        borderWidth: 1,
+                        borderColor: suppLibCategory === key ? themeColors.primary : themeColors.border,
+                        backgroundColor: suppLibCategory === key ? themeColors.primary + '22' : themeColors.surfaceRaised,
+                      }}
+                      onPress={() => setSuppLibCategory(key)}>
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: suppLibCategory === key ? themeColors.primary : themeColors.textMuted }}>
+                        {label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                {/* Evidence legend */}
+                <View style={{ flexDirection: 'row', gap: 12, paddingHorizontal: 16, marginBottom: 8 }}>
+                  {[['#00C488', '✓ Well-studied'], ['#FFB300', '◑ Some evidence'], ['#FF5555', '⚠ Early research']].map(([color, label]) => (
+                    <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Text style={{ fontSize: 11, color, fontWeight: '700' }}>{label.split(' ')[0]}</Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{label.split(' ').slice(1).join(' ')}</Text>
+                    </View>
+                  ))}
+                </View>
+                <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+                  {SUPPLEMENT_LIBRARY
+                    .filter(s => {
+                      const q = suppLibSearch.toLowerCase();
+                      const matchSearch = !q || s.name.toLowerCase().includes(q) || s.tagline.toLowerCase().includes(q) || s.category.toLowerCase().includes(q);
+                      const matchCat = suppLibCategory === 'all' || s.category === suppLibCategory;
+                      return matchSearch && matchCat;
+                    })
+                    .map(s => (
+                      <TouchableOpacity
+                        key={s.name}
+                        style={[styles.libRow, { borderBottomColor: themeColors.border }]}
+                        onPress={() => setSelectedSupplement(s)}>
+                        <Text style={{ fontSize: 22, marginRight: 12, width: 32, textAlign: 'center' }}>{s.icon}</Text>
+                        <View style={{ flex: 1, gap: 2 }}>
+                          <Text style={[styles.libRowName, { color: themeColors.textPrimary }]}>{s.name}</Text>
+                          <Text style={[styles.libRowSub, { color: themeColors.textMuted }]} numberOfLines={1}>{s.tagline}</Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end', gap: 6 }}>
+                          <View style={{
+                            paddingHorizontal: 7, paddingVertical: 3, borderRadius: radius.full,
+                            backgroundColor: s.evidence === 'strong' ? '#00C48818' : s.evidence === 'moderate' ? '#FFB30018' : '#FF555518',
+                          }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: s.evidence === 'strong' ? '#00C488' : s.evidence === 'moderate' ? '#FFB300' : '#FF5555' }}>
+                              {s.evidence === 'strong' ? '✓ Strong' : s.evidence === 'moderate' ? '◑ Moderate' : '⚠ Limited'}
+                            </Text>
+                          </View>
+                          <Text style={[styles.libRowChevron, { color: themeColors.textMuted }]}>›</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                </ScrollView>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Nutritionist note modal */}
+      <Modal visible={showNutritionistNote} transparent animationType="slide" onRequestClose={() => setShowNutritionistNote(false)}>
+        <View style={styles.noteModalBackdrop}>
+          <View style={[styles.noteModalSheet, { backgroundColor: themeColors.surface, borderTopColor: mealPalette.strong + '60' }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
+            <View style={styles.noteModalHeader}>
+              <Text style={[styles.noteModalIcon]}>🥗</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>From Your Nutritionist</Text>
+                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this meal plan was chosen</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowNutritionistNote(false)}>
+                <Text style={[styles.noteModalClose, { color: mealPalette.strong }]}>Done</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={styles.noteModalBody}>
+              {nutritionistNote ? (
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{nutritionistNote}</Text>
+              ) : (
+                <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                  <Text style={styles.noteModalEmptyIcon}>🌱</Text>
+                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>No note yet</Text>
+                  <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
+                    Once you generate an AI meal plan, your nutritionist will leave a note here explaining the calorie strategy and macro split rationale for your specific goal.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Trainer note modal */}
+      <Modal visible={showTrainerNote} transparent animationType="slide" onRequestClose={() => setShowTrainerNote(false)}>
+        <View style={styles.noteModalBackdrop}>
+          <View style={[styles.noteModalSheet, { backgroundColor: themeColors.surface, borderTopColor: workoutPalette.strong + '60' }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
+            <View style={styles.noteModalHeader}>
+              <Text style={[styles.noteModalIcon]}>🏋️</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>From Your Trainer</Text>
+                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this workout plan was built this way</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowTrainerNote(false)}>
+                <Text style={[styles.noteModalClose, { color: workoutPalette.strong }]}>Done</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={styles.noteModalBody}>
+              {trainerNote ? (
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{trainerNote}</Text>
+              ) : (
+                <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                  <Text style={styles.noteModalEmptyIcon}>🏗️</Text>
+                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>No note yet</Text>
+                  <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
+                    Once you generate an AI workout plan, your trainer will leave a note here explaining the structure, why they picked these exercises, and how it targets your specific goal.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Floating AI chat button — purple/teal for AI identity */}
       <TouchableOpacity
-        style={[styles.fab, { backgroundColor: themeColors.primary }]}
+        style={[styles.fab, { backgroundColor: aiPalette.strong }]}
         onPress={() => setShowTrainerModal(true)}
         activeOpacity={0.85}>
         <Image
@@ -1204,12 +2522,52 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   );
 }
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
+// ── SectionBar ────────────────────────────────────────────────────────────────
+
+function SectionBar({
+  icon, label, subtitle, palette,
+}: {
+  icon: string;
+  label: string;
+  subtitle?: string;
+  palette: { soft: string; strong: string; text: string };
+}) {
+  return (
+    <View style={[sbStyles.bar, { backgroundColor: palette.soft, borderColor: palette.strong + '40' }]}>
+      <Text style={sbStyles.icon}>{icon}</Text>
+      <Text style={[sbStyles.label, { color: palette.text }]}>{label}</Text>
+      {subtitle && (
+        <Text style={[sbStyles.subtitle, { color: palette.text + 'BB' }]}>{subtitle}</Text>
+      )}
+    </View>
+  );
+}
+
+const sbStyles = StyleSheet.create({
+  bar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 10,
+    borderWidth: 1,
+  },
+  icon:     { fontSize: 16 },
+  label:    { fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.8 },
+  subtitle: { fontSize: 12, fontWeight: '500', flex: 1, textAlign: 'right' },
+});
+
+// ── DayCard ───────────────────────────────────────────────────────────────────
+
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
   isCompleted: boolean;
   isSkipped: boolean;
+  skipReason?: string;
   expanded: boolean;
   onPress: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
@@ -1225,8 +2583,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, o
   // Rest day
   if (item.isRest) {
     return (
-      <View style={[styles.dayCard, { backgroundColor: tc.surface, borderColor: tc.border }, isToday && { borderColor: tc.primary, borderLeftColor: tc.primary }]}>
-        <View style={styles.dayCardRow}>
+      <View style={[styles.dayCard, { backgroundColor: tc.surface, borderColor: isToday ? tc.primary + '88' : tc.border }]}>
+        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: tc.primary }]} />}
+        <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 14 }]}>
           <View style={styles.dayCardLeft}>
             <Text style={[styles.dayCardDow, { color: isToday ? tc.primary : tc.textSecondary }]}>{dow}</Text>
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
@@ -1243,20 +2602,24 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, o
   // Skipped day
   if (isSkipped) {
     return (
-      <View style={[styles.dayCard, { backgroundColor: tc.surface, borderColor: tc.border }, isToday && { borderColor: tc.primary, borderLeftColor: tc.primary }, styles.dayCardSkipped]}>
-        <View style={styles.dayCardRow}>
+      <View style={[styles.dayCard, styles.dayCardSkipped, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+        <View style={[styles.dayCardRow, { paddingTop: 14 }]}>
           <View style={styles.dayCardLeft}>
-            <Text style={[styles.dayCardDow, { color: isToday ? tc.primary : tc.textSecondary }]}>{dow}</Text>
+            <Text style={[styles.dayCardDow, { color: tc.textSecondary }]}>{dow}</Text>
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
           </View>
           <View style={styles.dayCardRight}>
             <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+            {skipReason ? (
+              <Text style={[styles.exerciseCount, { color: tc.warning }]} numberOfLines={1}>
+                {skipReason}
+              </Text>
+            ) : null}
           </View>
           <View style={[styles.skippedBadge, { backgroundColor: tc.warning + '22', borderColor: tc.warning }]}>
             <Text style={[styles.skippedBadgeText, { color: tc.warning }]}>Skipped</Text>
           </View>
         </View>
-        <Text style={[styles.skippedHint, { color: tc.textMuted }]}>You can restore this workout if you skipped it by mistake.</Text>
         <View style={styles.actionRow}>
           <TouchableOpacity style={[styles.unskipBtn, { backgroundColor: tc.surface, borderColor: tc.primary }]} onPress={onUnskip}>
             <Text style={[styles.unskipBtnText, { color: tc.primary }]}>Unskip Workout</Text>
@@ -1266,19 +2629,24 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, o
     );
   }
 
+  // Accent color for today vs completed
+  const accentColor = isCompleted ? tc.success : workoutPalette.strong;
+  const borderColor = isCompleted ? tc.success + '88' : isToday ? workoutPalette.strong + '88' : tc.border;
+
   return (
     <TouchableOpacity
       style={[
         styles.dayCard,
-        { backgroundColor: tc.surface, borderColor: tc.border },
-        isToday && { borderColor: tc.primary, borderLeftColor: tc.primary },
-        isCompleted && { borderColor: tc.success, borderLeftColor: tc.success },
+        { backgroundColor: isToday ? tc.surfaceRaised : tc.surface, borderColor },
       ]}
       onPress={onPress}
       activeOpacity={0.8}>
-      <View style={styles.dayCardRow}>
+      {(isToday || isCompleted) && (
+        <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor }]} />
+      )}
+      <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 14 }]}>
         <View style={styles.dayCardLeft}>
-          <Text style={[styles.dayCardDow, { color: isToday ? tc.primary : tc.textSecondary }]}>{dow}</Text>
+          <Text style={[styles.dayCardDow, { color: isToday ? accentColor : tc.textSecondary }]}>{dow}</Text>
           <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
         </View>
         <View style={styles.dayCardRight}>
@@ -1339,8 +2707,8 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, expanded, o
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8, borderBottomWidth: 1 },
-  headerLogo: { width: 200, height: 200 * 0.44 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 2, borderBottomWidth: 1 },
+  headerLogo: { width: 220, height: 220 * 0.44 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
@@ -1356,18 +2724,18 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 28,
     right: 20,
-    width: 58,
-    height: 58,
-    borderRadius: 29,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 8,
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 10,
   },
-  fabIcon: { width: 38, height: 38 },
+  fabIcon: { width: 62, height: 62 },
 
   coachModePicker: {
     flexDirection: 'row',
@@ -1445,24 +2813,25 @@ const styles = StyleSheet.create({
   warmupTitle: { fontSize: 14, fontWeight: '800' },
   warmupStep: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
 
-  tabs:      { flexDirection: 'row', marginHorizontal: 16, marginTop: 14, marginBottom: 14, borderRadius: radius.full, padding: 3, borderWidth: 1, borderColor: colors.border },
-  tab:       { flex: 1, paddingVertical: 11, borderRadius: radius.full, alignItems: 'center', justifyContent: 'center' },
-  tabActive: { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
+  tabs:      { flexDirection: 'row', marginHorizontal: 16, marginTop: 14, marginBottom: 14, borderRadius: radius.full, padding: 4, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  tab:       { flex: 1, paddingVertical: 10, borderRadius: radius.full, alignItems: 'center', justifyContent: 'center' },
+  tabActive: { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.18, shadowRadius: 4, elevation: 3 },
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
 
   scrollView:    { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
 
-  dayCard:          { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 14, marginBottom: 10 },
-  dayCardToday:     { borderColor: colors.primary, borderLeftWidth: 3, borderLeftColor: colors.primary },
-  dayCardComplete:  { borderColor: colors.success, borderLeftWidth: 3, borderLeftColor: colors.success },
-  dayCardSkipped:   { opacity: 0.6 },
-  dayCardRow:       { flexDirection: 'row', alignItems: 'center' },
-  dayCardLeft:      { width: 64 },
-  dayCardRight:     { flex: 1 },
-  dayCardDow:       { fontSize: 13, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
-  dayCardDowToday:  { color: colors.primary },
-  dayCardDate:      { fontSize: 11, color: colors.textMuted },
+  dayCard:         { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 0, marginBottom: 10, overflow: 'hidden' },
+  dayCardTopAccent: { height: 3, marginBottom: 12, borderRadius: 0 },
+  dayCardToday:    { borderColor: colors.primary },
+  dayCardComplete: { borderColor: colors.success },
+  dayCardSkipped:  { opacity: 0.6 },
+  dayCardRow:      { flexDirection: 'row', alignItems: 'center' },
+  dayCardLeft:     { width: 64 },
+  dayCardRight:    { flex: 1 },
+  dayCardDow:      { fontSize: 13, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
+  dayCardDowToday: { color: colors.primary },
+  dayCardDate:     { fontSize: 11, color: colors.textMuted },
 
   focusLabel:    { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 2 },
   exerciseCount: { fontSize: 12, color: colors.textMuted },
@@ -1510,7 +2879,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 12,
-    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: 'transparent',
   },
   mealAccordionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
   mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
@@ -1633,7 +3003,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  detailVideoBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  detailVideoBtnText: { fontSize: 12, color: '#FFFFFF', fontWeight: '700' },
   detailSection: {
     backgroundColor: colors.surfaceRaised,
     borderRadius: radius.md,
@@ -1643,6 +3013,67 @@ const styles = StyleSheet.create({
   },
   detailSectionTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   detailSectionText: { fontSize: 13, lineHeight: 20, color: colors.textSecondary },
+  // Phase breakdown block
+  detailPhaseBlock: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 12,
+    gap: 10,
+  },
+  detailPhaseTitle: { fontSize: 13, fontWeight: '700', marginBottom: 4 },
+  detailPhaseRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  detailPhaseBadge: {
+    borderRadius: radius.sm,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+    minWidth: 84,
+    alignItems: 'center',
+  },
+  detailPhaseBadgeLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
+  detailPhaseText: { flex: 1, fontSize: 12, lineHeight: 18 },
+  detailPhaseDivider: { height: 1, marginVertical: 2 },
+  // Library tabs
+  libTabBar: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginBottom: 4,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  libTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  libTabText: { fontSize: 13, fontWeight: '700' },
+  // Muscle list item
+  muscleItemRow: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', marginBottom: 6 },
+  muscleItemEmoji: { width: 44, height: 44, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
+  muscleItemBody: { flex: 1, gap: 2 },
+  // Shared supplement library styles
+  libSearch: {
+    marginHorizontal: 16, marginBottom: 8,
+    borderWidth: 1, borderRadius: radius.md,
+    paddingHorizontal: 12, paddingVertical: 9,
+    fontSize: 14,
+  },
+  libFilterChip: {
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderRadius: radius.full, borderWidth: 1,
+  },
+  libFilterChipText: { fontSize: 12, fontWeight: '600' },
+  libRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: 1,
+  },
+  libRowName: { fontSize: 14, fontWeight: '700', marginBottom: 2 },
+  libRowSub: { fontSize: 12, lineHeight: 17 },
+  libRowChevron: { fontSize: 18, fontWeight: '600' },
 
   trainerFullScreen: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
   trainerSheet: {
@@ -1739,4 +3170,140 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   trainerSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+
+  // ── Plan note row (trainer / nutritionist explanation) ────────────────────────
+  planNoteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 12,
+  },
+  planNoteIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  planNoteIcon: { fontSize: 20 },
+  planNoteBody: { flex: 1, gap: 2 },
+  planNoteTitle: { fontSize: 13, fontWeight: '800' },
+  planNoteSub: { fontSize: 11, lineHeight: 16 },
+  planNoteChevron: { fontSize: 22, fontWeight: '300' },
+
+  // ── Supplement stack panel ────────────────────────────────────────────────────
+  supplementPanel: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 12,
+  },
+  supplementPanelHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 },
+  supplementPanelChevron: { fontSize: 20, fontWeight: '300' },
+  supplementPanelTitle: { fontSize: 14, fontWeight: '800' },
+  supplementPanelSubtitle: { fontSize: 11, marginBottom: 10 },
+  supplementList: { gap: 8 },
+  supplementItem: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 10,
+    gap: 4,
+  },
+  supplementItemTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  supplementCheck: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  supplementCheckMark: { fontSize: 12, color: '#FFFFFF', fontWeight: '800' },
+  supplementName: { flex: 1, fontSize: 13, fontWeight: '700' },
+  supplementDose: { fontSize: 12, fontWeight: '600' },
+  supplementTiming: { fontSize: 11, marginLeft: 28 },
+  supplementPurpose: { fontSize: 11, marginLeft: 28 },
+
+  // ── Coach note modal ──────────────────────────────────────────────────────────
+  // ── Skip reason modal ─────────────────────────────────────────────────────────
+  skipReasonBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  skipReasonSheet: {
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    paddingTop: 14,
+    paddingHorizontal: 16,
+    paddingBottom: 32,
+    gap: 14,
+  },
+  skipReasonTitle: { fontSize: 18, fontWeight: '800', textAlign: 'center' },
+  skipReasonFocusLabel: { fontSize: 13, textAlign: 'center', marginTop: -8 },
+  skipReasonChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  skipReasonChip: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  skipReasonChipText: { fontSize: 13, fontWeight: '600' },
+  skipReasonInput: {
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  skipReasonBtns: { flexDirection: 'row', gap: 10, marginTop: 4 },
+  skipReasonCancel: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  skipReasonCancelText: { fontSize: 14, fontWeight: '600' },
+  skipReasonConfirm: {
+    flex: 2,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  skipReasonConfirmText: { fontSize: 14, fontWeight: '800', color: '#FFFFFF' },
+
+  noteModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
+  noteModalSheet: {
+    maxHeight: '65%',
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 2,
+    paddingTop: 14,
+    paddingBottom: 28,
+  },
+  noteModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  noteModalIcon: { fontSize: 26 },
+  noteModalTitle: { fontSize: 15, fontWeight: '800' },
+  noteModalSubtitle: { fontSize: 11, marginTop: 1 },
+  noteModalClose: { fontSize: 14, fontWeight: '700' },
+  noteModalBody: { paddingHorizontal: 16, paddingBottom: 16 },
+  noteModalText: { fontSize: 14, lineHeight: 22 },
+  noteModalEmpty: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 20,
+    alignItems: 'center',
+    gap: 8,
+  },
+  noteModalEmptyIcon: { fontSize: 36 },
+  noteModalEmptyTitle: { fontSize: 15, fontWeight: '700' },
+  noteModalEmptyText: { fontSize: 13, lineHeight: 20, textAlign: 'center', opacity: 0.8 },
 });

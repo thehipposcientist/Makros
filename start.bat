@@ -18,4 +18,4 @@ timeout /t 2 /nobreak >nul
 
 echo [2/2] Starting Expo (with cache clear)...
 echo.
-npx expo start --clear
+npx expo start --clear --tunnel

@@ -60,8 +60,9 @@ export async function isTodayWorkoutDone(): Promise<boolean> {
 // ── Skipped days ──────────────────────────────────────────────────────────────
 
 export interface SkippedDay {
-  date: string;  // YYYY-MM-DD
-  focus: string; // workout focus that was skipped
+  date: string;    // YYYY-MM-DD
+  focus: string;   // workout focus that was skipped
+  reason?: string; // user-selected or typed reason
 }
 
 export async function getSkippedDays(): Promise<SkippedDay[]> {
@@ -73,12 +74,43 @@ export async function getSkippedDays(): Promise<SkippedDay[]> {
   }
 }
 
-export async function addSkippedDay(date: string, focus: string): Promise<void> {
+export async function addSkippedDay(date: string, focus: string, reason?: string): Promise<void> {
   const days = await getSkippedDays();
-  if (!days.find(d => d.date === date)) {
-    days.unshift({ date, focus });
-    await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(days.slice(0, 365)));
+  const idx = days.findIndex(d => d.date === date);
+  const entry: SkippedDay = { date, focus, ...(reason ? { reason } : {}) };
+  if (idx >= 0) {
+    days[idx] = entry;
+  } else {
+    days.unshift(entry);
   }
+  await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(days.slice(0, 365)));
+}
+
+/**
+ * Saves a skipped day as a WorkoutSession entry in the main history so it
+ * appears in the unified timeline visible to the AI trainer.
+ */
+export async function saveSkipToHistory(date: string, focus: string, reason?: string): Promise<void> {
+  const history = await loadWorkoutHistory();
+  // Don't duplicate — upsert by id
+  const id = `skip_${date}`;
+  const entry: import('../types').WorkoutSession = {
+    id,
+    date,
+    focus,
+    durationSeconds: 0,
+    exercises: [],
+    completed: false,
+    skipped: true,
+    ...(reason ? { skipReason: reason } : {}),
+  };
+  const idx = history.findIndex(s => s.id === id);
+  if (idx >= 0) {
+    history[idx] = entry;
+  } else {
+    history.unshift(entry);
+  }
+  await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
 }
 
 export async function removeSkippedDay(date: string): Promise<void> {

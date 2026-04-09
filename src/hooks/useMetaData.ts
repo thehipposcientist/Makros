@@ -80,7 +80,7 @@ const CACHE_KEY = 'metaData_v1';
 const DEFAULT_GOAL_CONFIG: GoalConfig = {
   weight_goals:   ['fat_loss', 'toning', 'muscle_gain'],
   timeline_goals: ['body_recomp', 'strength', 'endurance', 'athletic_performance'],
-  lifestyle_goals:['maintain', 'flexibility', 'stress_relief'],
+  lifestyle_goals:['maintain', 'flexibility', 'stress_relief', 'longevity'],
   timeline_weeks: {
     body_recomp:          { conservative: 12, moderate: 24, aggressive: 52 },
     strength:             { conservative: 4,  moderate: 12, aggressive: 26 },

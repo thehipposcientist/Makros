@@ -83,6 +83,8 @@ class PlanRequest(BaseModel):
     cookingSkill: str | None = None           # beginner | intermediate | advanced
     prepTimeMinutes: int | None = None        # max cook/prep time per meal
     budgetLevel: str | None = None            # low | medium | high
+    supplementsAvailable: list[str] = []      # supplements the user already takes/has
+    userContext: str | None = None             # recent activity log for personalization
 
 
 class CompletedSetIn(BaseModel):
@@ -138,11 +140,29 @@ class FoodPhotoRequest(BaseModel):
     mime_type: str = "image/jpeg"
 
 
+class ScanFoodsImageItem(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
+
+
+class ScanFoodsRequest(BaseModel):
+    images: list[ScanFoodsImageItem]
+    context: str | None = None
+
+
 class FormPhotoRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
     exercise_name: str | None = None
     question: str | None = None
+
+
+class SupplementLookupRequest(BaseModel):
+    name: str
+
+class SupplementPhotoRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
 
 
 progression_engine = WorkoutProgressionEngine()
@@ -530,6 +550,7 @@ def build_prompt(req: PlanRequest) -> str:
     height_str    = f"{ps.heightFeet}'{ps.heightInches}\""
     equipment_str = ", ".join(req.equipment) if req.equipment else "bodyweight only"
     foods_str     = ", ".join(req.foodsAvailable) if req.foodsAvailable else "general healthy foods"
+    supps_str     = ", ".join(req.supplementsAvailable) if req.supplementsAvailable else None
 
     # ── Equipment-based forbidden list ───────────────────────────────────────
     has_barbell   = any(e in {"Barbell", "Squat rack", "Power rack", "Smith machine"} for e in req.equipment)
@@ -676,12 +697,14 @@ FORBIDDEN (user does NOT own): {forbidden_str}
 {preferred_str}
 {disliked_str}
 {injury_str}
+{f"Recent history context:{chr(10)}{req.userContext}" if req.userContext else ""}
 
 ═══ GOAL-SPECIFIC WORKOUT RULE (follow strictly) ═══
 {goal_rule}
 
 ═══ NUTRITION CONTEXT ═══
 Foods available: {foods_str}
+Supplements the user already takes: {supps_str if supps_str else "none specified — recommend what's best for their goal"}
 {diet_context}
 Meals per day: {t['meals']}
 
@@ -698,6 +721,7 @@ WORKOUT:
 - ONLY use exercises requiring equipment from the user's available list.
 - Respect the goal rule, experience level, injuries, and disliked exercises above.
 - If an exercise library is provided, use ONLY exercises from that list.
+- REQUIRED: "trainerNote" must be a thorough, personalised paragraph (aim for 150-250 words) covering: why this specific split was chosen for this user, how the session structure matches their schedule and goal, the progression logic (volume, intensity, rep ranges), which muscle groups are prioritised and why, any adjustments made for their experience level or injuries, and what they should focus on to make the most progress. Be specific — reference their actual goal, days per week, and equipment. DO NOT omit this field.
 
 NUTRITION:
 - Use foods from the user's available list or close real-food substitutes.
@@ -705,6 +729,8 @@ NUTRITION:
 - For each meal, write a realistic recipe name, ingredient list with amounts, and brief instructions.
 - Add an "estimated_alignment" field (e.g. "high protein, moderate carb") — do NOT provide exact per-meal macro numbers.
 - The overall targets in "targets" must match the server-computed values exactly.
+- REQUIRED: "nutritionistNote" must be a thorough, personalised paragraph (aim for 150-250 words) covering: why this specific calorie target was set, how the macro split (protein/carbs/fat) was chosen for this user's goal and body, meal timing strategy, which foods were prioritised from their available list and why, any dietary adjustments made, and practical advice for hitting their targets consistently. Be specific — reference their actual calorie goal, macro numbers, and goal. Do NOT mention supplements here. DO NOT omit this field.
+- REQUIRED: "supplementStack" must be a non-empty array of 2-4 evidence-based supplements. Prioritise supplements from the user's existing list if applicable — then add any critical missing ones. Include name, dose, timing, and purpose for each. DO NOT omit this field.
 
 Return ONLY valid JSON — no markdown, no extra text — matching this schema exactly:
 
@@ -712,6 +738,7 @@ Return ONLY valid JSON — no markdown, no extra text — matching this schema e
   "workout_plan": {{
     "name": "string",
     "totalDays": {req.daysPerWeek},
+    "trainerNote": "Detailed personalised explanation (150-250 words) of why this specific workout split, volume, intensity, and exercise selection was chosen for this user's goal, schedule, experience level, and available equipment.",
     "days": [
       {{
         "day": "Day 1",
@@ -735,6 +762,15 @@ Return ONLY valid JSON — no markdown, no extra text — matching this schema e
       "carbs": {t['carbs']},
       "fat": {t['fat']}
     }},
+    "nutritionistNote": "Detailed personalised explanation (150-250 words) of why this specific calorie target, macro split, food choices, and meal structure was chosen for this user's goal, body stats, and available foods.",
+    "supplementStack": [
+      {{
+        "name": "Supplement name (e.g. Creatine Monohydrate)",
+        "dose": "Dose with unit (e.g. 5g)",
+        "timing": "When to take it (e.g. Post-workout or anytime)",
+        "purpose": "One sentence on why this supplement helps for this goal"
+      }}
+    ],
 {meal_schema}
   }}
 }}"""
@@ -771,6 +807,16 @@ def _validate_plans(plans: dict, req: PlanRequest) -> None:
     missing = required_meals - set(np_.keys())
     if missing:
         raise ValueError(f"nutrition_plan missing meal keys: {', '.join(sorted(missing))}")
+
+    # Validate required note fields (minimum 80 chars to reject lazy 1-sentence responses)
+    trainer_note = wp.get("trainerNote", "")
+    if not trainer_note or len(trainer_note) < 80:
+        raise ValueError(f"trainerNote too short ({len(trainer_note)} chars) — must be a detailed personalised explanation")
+    nutritionist_note = np_.get("nutritionistNote", "")
+    if not nutritionist_note or len(nutritionist_note) < 80:
+        raise ValueError(f"nutritionistNote too short ({len(nutritionist_note)} chars) — must be a detailed personalised explanation")
+    if not np_.get("supplementStack"):
+        raise ValueError("nutrition_plan missing required 'supplementStack'")
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -875,41 +921,56 @@ def generate_plans(
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
+    prompt = build_prompt(req)
 
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert fitness coach and registered dietitian. "
-                        "Always respond with valid JSON only — no markdown fences, no extra text."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": build_prompt(req),
-                },
-            ],
-            temperature=0.7,
-            max_tokens=2500,
-        )
+    last_error: Exception | None = None
+    for attempt in range(1, 4):  # up to 3 attempts
+        try:
+            response = client.chat.completions.create(
+                model=get_openai_model(),
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert fitness coach and registered dietitian. "
+                            "Always respond with valid JSON only — no markdown fences, no extra text. "
+                            "You MUST include trainerNote, nutritionistNote, and supplementStack in your response."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                temperature=0.7,
+            )
 
-        content = response.choices[0].message.content
-        plans   = json.loads(content)
+            content = response.choices[0].message.content
+            plans   = json.loads(content)
 
-        _validate_plans(plans, req)
+            # Debug logging
+            trainer_note      = plans.get("workout_plan", {}).get("trainerNote", "")
+            nutritionist_note = plans.get("nutrition_plan", {}).get("nutritionistNote", "")
+            supp_count        = len(plans.get("nutrition_plan", {}).get("supplementStack", []))
+            print(f"[AI /plans] attempt {attempt} — trainerNote: {bool(trainer_note)}, nutritionistNote: {bool(nutritionist_note)}, supplements: {supp_count}")
+            print(f"[AI /plans] trainerNote preview: {repr(trainer_note[:120]) if trainer_note else 'EMPTY'}")
+            print(f"[AI /plans] nutritionistNote preview: {repr(nutritionist_note[:120]) if nutritionist_note else 'EMPTY'}")
 
-        return plans
+            _validate_plans(plans, req)
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
-    except ValueError as e:
-        raise HTTPException(status_code=502, detail=f"AI response failed validation: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+            return plans
+
+        except json.JSONDecodeError as e:
+            last_error = ValueError(f"AI returned invalid JSON (attempt {attempt})")
+            print(f"[AI /plans] attempt {attempt} JSON error: {e}")
+        except ValueError as e:
+            last_error = e
+            print(f"[AI /plans] attempt {attempt} validation failed: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+
+    raise HTTPException(status_code=502, detail=f"AI response failed after 3 attempts: {last_error}")
 
 
 @router.post("/trainer-question")
@@ -1111,18 +1172,37 @@ def analyze_food_photo(
 
 @router.post("/scan-foods")
 def scan_foods_photo(
-    body: FoodPhotoRequest,
+    body: ScanFoodsRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Identify multiple individual food items from a photo, each with macros per serving."""
+    """Identify multiple individual food items from one or more photos, each with macros per serving."""
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-    if not body.image_base64:
-        raise HTTPException(status_code=400, detail="image_base64 is required")
+    if not body.images:
+        raise HTTPException(status_code=400, detail="At least one image is required")
 
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
     client = OpenAI(api_key=api_key)
+
+    context_hint = f"\nExtra context from the user: {body.context}" if body.context else ""
+
+    # Build content blocks: text prompt first, then all images
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"List every individual food item you can identify across all provided image(s). "
+                "For each one, provide a short common name, typical serving size, and estimated macros. "
+                f"{context_hint}"
+                "Return exactly this JSON schema — no extra text: "
+                '{"foods": [{"name": string, "serving": string, "calories": number, '
+                '"protein": number, "carbs": number, "fat": number}]}'
+            ),
+        }
+    ]
+    for img in body.images:
+        image_data_url = f"data:{img.mime_type};base64,{img.image_base64}"
+        user_content.append({"type": "image_url", "image_url": {"url": image_data_url}})
 
     try:
         response = client.chat.completions.create(
@@ -1132,9 +1212,103 @@ def scan_foods_photo(
                 {
                     "role": "system",
                     "content": (
-                        "You are a nutrition expert. Identify every distinct food item visible in the image. "
+                        "You are a nutrition expert. Identify every distinct food item visible in the image(s). "
                         "For each item, estimate its name, a typical serving size, and macros per that serving. "
                         "Return valid JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+            temperature=0.2,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
+
+
+@router.post("/supplement-info")
+def get_supplement_info(
+    body: SupplementLookupRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Look up evidence-based info for any supplement by name."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Supplement name is required")
+
+    client = OpenAI(api_key=api_key)
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a sports nutrition expert with deep knowledge of supplements, "
+                        "their mechanisms, evidence base, and safe use. "
+                        "Always respond with valid JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f'Look up this supplement: "{body.name.strip()}"\n\n'
+                        "If it is a real, recognized supplement or ingredient, return a JSON object with:\n"
+                        '- "found": true\n'
+                        '- "name": canonical common name\n'
+                        '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
+                        '- "tagline": one short sentence describing what it is\n'
+                        '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
+                        '- "evidence": one of "strong", "moderate", or "limited" based on the research base\n'
+                        '- "dose": typical effective dose with unit (e.g. "5g daily")\n'
+                        '- "timing": when to take it (e.g. "Post-workout or anytime")\n'
+                        '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
+                        '- "cautions": 1-2 sentences on side effects, interactions, or who should avoid it\n\n'
+                        'If not a real supplement or completely unrecognized, return {"found": false, "name": "' + body.name.strip() + '"}'
+                    ),
+                },
+            ],
+            temperature=0.3,
+        )
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supplement lookup failed: {str(e)}")
+
+
+@router.post("/supplement-photo")
+def get_supplement_from_photo(
+    body: SupplementPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify a supplement from a photo of its label/packaging and return evidence-based info."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    client = OpenAI(api_key=api_key)
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+
+    try:
+        response = client.chat.completions.create(
+            model=get_openai_model(),
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a sports nutrition expert. Identify supplements from photos of labels, "
+                        "packaging, or pills, then provide evidence-based information. "
+                        "Always respond with valid JSON only."
                     ),
                 },
                 {
@@ -1143,25 +1317,32 @@ def scan_foods_photo(
                         {
                             "type": "text",
                             "text": (
-                                "List every individual food item you can identify in this image. "
-                                "For each one, provide a short common name, typical serving size, and estimated macros. "
-                                "Return exactly this JSON schema — no extra text: "
-                                '{"foods": [{"name": string, "serving": string, "calories": number, '
-                                '"protein": number, "carbs": number, "fat": number}]}'
+                                "Identify the supplement shown in this image. "
+                                "If you can identify it, return a JSON object with:\n"
+                                '- "found": true\n'
+                                '- "name": canonical common name of the active ingredient/supplement\n'
+                                '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
+                                '- "tagline": one short sentence describing what it is\n'
+                                '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
+                                '- "evidence": one of "strong", "moderate", or "limited"\n'
+                                '- "dose": typical effective dose with unit\n'
+                                '- "timing": when to take it\n'
+                                '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
+                                '- "cautions": 1-2 sentences on side effects or who should avoid it\n\n'
+                                'If you cannot identify a supplement, return {"found": false, "name": ""}'
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": image_data_url}},
                     ],
                 },
             ],
-            temperature=0.2,
-            max_tokens=600,
+            temperature=0.3,
         )
         return json.loads(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Supplement photo lookup failed: {str(e)}")
 
 
 @router.post("/scan-equipment")

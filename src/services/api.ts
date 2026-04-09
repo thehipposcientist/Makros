@@ -1,9 +1,14 @@
 import Constants from 'expo-constants';
 
+const LOCAL_BACKEND_IP = '192.168.1.220'; // your dev machine's LAN IP
+
 function getBaseUrl(): string {
   if (__DEV__) {
-    // Derive the dev machine's IP from Expo's host URI so it works on a real device
-    const host = Constants.expoConfig?.hostUri?.split(':')[0] ?? '127.0.0.1';
+    const hostUri = Constants.expoConfig?.hostUri ?? '';
+    // In tunnel mode (ngrok/exp.direct), hostUri is the ngrok domain — can't use it
+    // for the backend. Fall back to the machine's actual LAN IP instead.
+    const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct') || !hostUri;
+    const host = isTunnel ? LOCAL_BACKEND_IP : (hostUri.split(':')[0] ?? LOCAL_BACKEND_IP);
     return `http://${host}:8000`;
   }
   return 'https://your-production-api.com';
@@ -34,7 +39,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
   } catch (e: any) {
     clearTimeout(timer);
     if (e.name === 'AbortError') {
-      throw new Error('Request timed out — the AI is taking too long. Please try a shorter question.');
+      throw new Error(`Request timed out. Backend: ${getBaseUrl()} — is it reachable?`);
     }
     if (e.message === 'Network request failed') {
       throw new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
@@ -96,19 +101,44 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
 }
 
 
-export async function getAIPlans(token: string, profile: import('../types').UserProfile) {
+export async function getAIPlans(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[] },
+) {
+  // Convert structured injury entries to a string list for the backend
+  const injuriesOrLimitations: string[] = (profile.injuryEntries ?? [])
+    .filter(e => e.status !== 'resolved')
+    .map(e => `${e.description} (${e.bodyPart}, status: ${e.status})`);
+
+  // Also append legacy free-text injuries if present
+  if (profile.injuries && injuriesOrLimitations.length === 0) {
+    injuriesOrLimitations.push(profile.injuries);
+  }
+
+  // Build context string from recent user log entries
+  const logContext = (options?.userLog ?? [])
+    .slice(0, 10)
+    .map(e => `[${e.date.slice(0, 10)}] ${e.summary}`)
+    .join('\n');
+
   return request<{ workout_plan: import('../types').WorkoutPlan; nutrition_plan: import('../types').DailyNutritionPlan }>('/ai/plans', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({
-      goal:           profile.goal,
-      goalDetails:    profile.goalDetails,
-      physicalStats:  profile.physicalStats,
-      daysPerWeek:    profile.daysPerWeek,
-      equipment:      profile.equipment,
-      foodsAvailable: profile.foodsAvailable,
+      goal:                   profile.goal,
+      goalDetails:            profile.goalDetails,
+      physicalStats:          profile.physicalStats,
+      daysPerWeek:            profile.daysPerWeek,
+      workoutDurationMinutes: profile.workoutDurationMinutes,
+      equipment:              profile.equipment,
+      foodsAvailable:         profile.foodsAvailable,
+      supplementsAvailable:   profile.supplementsAvailable ?? [],
+      experienceLevel:        profile.experienceLevel,
+      injuriesOrLimitations,
+      userContext:            logContext || undefined,
     }),
-  });
+  }, 90000);
 }
 
 export async function getWeightRecommendation(
@@ -366,7 +396,10 @@ export async function analyzeFoodPhoto(
 
 export async function scanFoodsPhoto(
   token: string,
-  payload: { image_base64: string; mime_type?: string },
+  payload: {
+    images: Array<{ image_base64: string; mime_type?: string }>;
+    context?: string;
+  },
 ): Promise<{
   foods: Array<{
     name: string;
@@ -381,6 +414,50 @@ export async function scanFoodsPhoto(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function lookupSupplementFromPhoto(
+  token: string,
+  payload: { image_base64: string; mime_type?: string },
+): Promise<{
+  found: boolean;
+  name: string;
+  category?: string;
+  tagline?: string;
+  whatItDoes?: string;
+  evidence?: 'strong' | 'moderate' | 'limited';
+  dose?: string;
+  timing?: string;
+  goodFor?: string[];
+  cautions?: string;
+}> {
+  return request('/ai/supplement-photo', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function lookupSupplement(
+  token: string,
+  name: string,
+): Promise<{
+  found: boolean;
+  name: string;
+  category?: string;
+  tagline?: string;
+  whatItDoes?: string;
+  evidence?: 'strong' | 'moderate' | 'limited';
+  dose?: string;
+  timing?: string;
+  goodFor?: string[];
+  cautions?: string;
+}> {
+  return request('/ai/supplement-info', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name }),
   });
 }
 

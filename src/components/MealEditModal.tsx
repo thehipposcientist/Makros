@@ -97,8 +97,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     setScanLoading(true);
     try {
       const res = await scanFoodsPhoto(authToken, {
-        image_base64: asset.base64!,
-        mime_type: asset.mimeType ?? 'image/jpeg',
+        images: [{ image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' }],
       });
       const names = res.foods.map(f => f.name);
       if (names.length === 0) {

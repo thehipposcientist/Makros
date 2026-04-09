@@ -4,10 +4,11 @@ import {
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName } from '../types';
+import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto } from '../services/api';
+
 
 interface EditProfileScreenProps {
   authToken: string;
@@ -236,6 +237,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [customFoods, setCustomFoods] = useState<CustomFoodItem[]>(profile.customFoods ?? []);
   const [savedMeals, setSavedMeals]   = useState<SavedMealTemplate[]>(profile.savedMeals ?? []);
   const [mealRoutine, setMealRoutine] = useState(profile.mealRoutine ?? '');
+  const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
+  const [showAddInjury, setShowAddInjury] = useState(false);
+  const [injuryDesc, setInjuryDesc]   = useState('');
+  const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>('all');
 
@@ -243,8 +248,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [addFoodVisible,    setAddFoodVisible]    = useState(false);
   const [photoMealLoading,  setPhotoMealLoading]  = useState(false);
   const [photoMealDraft,    setPhotoMealDraft]    = useState<PhotoMealDraft | null>(null);
+  const [photoMealContext,  setPhotoMealContext]  = useState('');   // e.g. "split into 4 servings, I eat 3"
+  const [photoMealServings, setPhotoMealServings] = useState('1');  // my portion out of total
   const [scanFoodsLoading,  setScanFoodsLoading]  = useState(false);
   const [scannedFoods,      setScannedFoods]      = useState<ScannedFoodItem[] | null>(null);
+  const [pendingImages,     setPendingImages]     = useState<Array<{ image_base64: string; mime_type: string }>>([]);
+  const [scanContext,       setScanContext]       = useState('');
   const [equipModalVisible, setEquipModalVisible] = useState(false);
   const [newEquipName,      setNewEquipName]      = useState('');
   const [equipError,        setEquipError]        = useState('');
@@ -300,6 +309,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         mime_type: asset.mimeType ?? 'image/jpeg',
       });
       setPhotoMealDraft(analysis);
+      setPhotoMealContext('');
+      setPhotoMealServings('1');
     } catch (e: any) {
       Alert.alert('Analysis failed', e?.message ?? 'Could not analyze this food photo.');
     } finally {
@@ -307,7 +318,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
-  const handleScanFoods = async (source: 'camera' | 'library') => {
+  const handleAddScanPhotos = async (source: 'camera' | 'library') => {
     if (!authToken) {
       Alert.alert('Sign in required', 'You need to be signed in to scan foods.');
       return;
@@ -321,22 +332,28 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
     const result = source === 'camera'
       ? await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any })
-      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, allowsMultipleSelection: true, mediaTypes: ['images'] as any });
 
-    if (result.canceled || !result.assets?.[0]?.base64) return;
+    if (result.canceled || !result.assets?.length) return;
+    const newImages = result.assets
+      .filter(a => a.base64)
+      .map(a => ({ image_base64: a.base64!, mime_type: a.mimeType ?? 'image/jpeg' }));
+    setPendingImages(prev => [...prev, ...newImages]);
+  };
 
+  const handleScanFoods = async () => {
+    if (!authToken || pendingImages.length === 0) return;
     setScanFoodsLoading(true);
     try {
-      const asset = result.assets[0];
-      const imageBase64 = asset.base64;
-      if (!imageBase64) return;
       const response = await scanFoodsPhoto(authToken, {
-        image_base64: imageBase64,
-        mime_type: asset.mimeType ?? 'image/jpeg',
+        images: pendingImages,
+        context: scanContext.trim() || undefined,
       });
       setScannedFoods((response.foods ?? []).map(f => ({ ...f, selected: true })));
+      setPendingImages([]);
+      setScanContext('');
     } catch (e: any) {
-      Alert.alert('Scan failed', e?.message ?? 'Could not identify foods from this photo.');
+      Alert.alert('Scan failed', e?.message ?? 'Could not identify foods from these photos.');
     } finally {
       setScanFoodsLoading(false);
     }
@@ -364,19 +381,32 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   const confirmPhotoMeal = () => {
     if (!photoMealDraft) return;
+    // Apply serving fraction — e.g. if batch makes 4 servings and user eats 3, multiply by 3/4
+    const fraction = (() => {
+      const parts = photoMealServings.trim().split('/');
+      if (parts.length === 2) {
+        const n = parseFloat(parts[0]), d = parseFloat(parts[1]);
+        return (!isNaN(n) && !isNaN(d) && d > 0) ? n / d : 1;
+      }
+      const n = parseFloat(photoMealServings);
+      return (!isNaN(n) && n > 0) ? n : 1;
+    })();
+    const name = photoMealDraft.meal_name.trim() || 'Saved Photo Meal';
     setSavedMeals(prev => [
       {
         id: `${Date.now()}`,
-        name: photoMealDraft.meal_name.trim() || 'Saved Photo Meal',
+        name,
         items: photoMealDraft.items,
-        calories: Math.round(photoMealDraft.calories),
-        protein: Math.round(photoMealDraft.protein),
-        carbs: Math.round(photoMealDraft.carbs),
-        fat: Math.round(photoMealDraft.fat),
+        calories: Math.round(photoMealDraft.calories * fraction),
+        protein:  Math.round(photoMealDraft.protein  * fraction),
+        carbs:    Math.round(photoMealDraft.carbs    * fraction),
+        fat:      Math.round(photoMealDraft.fat      * fraction),
       },
-      ...prev.filter(m => m.name !== (photoMealDraft.meal_name.trim() || 'Saved Photo Meal')),
+      ...prev.filter(m => m.name !== name),
     ]);
     setPhotoMealDraft(null);
+    setPhotoMealContext('');
+    setPhotoMealServings('1');
   };
 
   const handleSave = () => {
@@ -406,6 +436,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       customFoods,
       savedMeals,
       mealRoutine: mealRoutine.trim() || undefined,
+      injuryEntries: injuryEntries.length > 0 ? injuryEntries : undefined,
       physicalStats: {
         ...profile.physicalStats,
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
@@ -630,8 +661,120 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             numberOfLines={4}
           />
         </View>
+
+        {/* ── Injuries & Limitations ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Injuries & Limitations</Text>
+          <Text style={styles.sectionHint}>
+            Your trainer tracks these and adjusts your plan. Update status as you recover.
+          </Text>
+          {injuryEntries.length === 0 ? (
+            <View style={[styles.injuryEmptyCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+              <Text style={[styles.injuryEmptyText, { color: tc.textMuted }]}>No injuries logged — great!</Text>
+            </View>
+          ) : (
+            <View style={styles.injuryList}>
+              {injuryEntries.map((entry, idx) => {
+                const statusColors: Record<InjuryStatus, string> = {
+                  active:     '#FF5555',
+                  recovering: '#FFB300',
+                  resolved:   '#00C488',
+                };
+                const statusLabels: Record<InjuryStatus, string> = {
+                  active:     '🔴 Active',
+                  recovering: '🟡 Recovering',
+                  resolved:   '✅ Resolved',
+                };
+                return (
+                  <View key={entry.id} style={[styles.injuryCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                    <View style={styles.injuryCardTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.injuryDesc, { color: tc.textPrimary }]}>{entry.description}</Text>
+                        <Text style={[styles.injuryBodyPart, { color: tc.textMuted }]}>{entry.bodyPart}</Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => setInjuryEntries(prev => prev.filter((_, i) => i !== idx))}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Text style={[{ color: tc.error, fontSize: 13, fontWeight: '700' }]}>Remove</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.statusRow}>
+                      {(['active', 'recovering', 'resolved'] as InjuryStatus[]).map(s => (
+                        <TouchableOpacity
+                          key={s}
+                          style={[
+                            styles.statusBtn,
+                            { borderColor: entry.status === s ? statusColors[s] : tc.border },
+                            entry.status === s && { backgroundColor: statusColors[s] + '22' },
+                          ]}
+                          onPress={() => setInjuryEntries(prev =>
+                            prev.map((e, i) => i === idx ? { ...e, status: s } : e)
+                          )}>
+                          <Text style={[styles.statusBtnText, { color: entry.status === s ? statusColors[s] : tc.textMuted }]}>
+                            {statusLabels[s]}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+          <TouchableOpacity
+            style={[styles.addInjuryBtn, { borderColor: tc.border }]}
+            onPress={() => { setInjuryDesc(''); setInjuryBodyPart(''); setShowAddInjury(true); }}>
+            <Text style={[styles.addInjuryBtnText, { color: tc.primary }]}>+ Add Injury / Limitation</Text>
+          </TouchableOpacity>
+        </View>
         </>
         )}
+
+        {/* Add Injury Modal */}
+        <Modal visible={showAddInjury} transparent animationType="slide" onRequestClose={() => setShowAddInjury(false)}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+            <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowAddInjury(false)}>
+              <View style={[styles.modalSheet, { backgroundColor: tc.surface, borderTopColor: tc.border }]} onStartShouldSetResponder={() => true}>
+                <Text style={[styles.modalTitle, { color: tc.textPrimary }]}>Add Injury / Limitation</Text>
+                <Text style={[styles.sectionHint, { marginBottom: 12 }]}>Your trainer will avoid movements that aggravate this area.</Text>
+                <Text style={[styles.modalFieldLabel, { color: tc.textSecondary }]}>Description</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: tc.textPrimary, borderColor: tc.border, backgroundColor: tc.background }]}
+                  placeholder="e.g. Lower back pain when deadlifting"
+                  placeholderTextColor={tc.textMuted}
+                  value={injuryDesc}
+                  onChangeText={setInjuryDesc}
+                  autoFocus
+                />
+                <Text style={[styles.modalFieldLabel, { color: tc.textSecondary, marginTop: 12 }]}>Body Part</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: tc.textPrimary, borderColor: tc.border, backgroundColor: tc.background }]}
+                  placeholder="e.g. Lower back, knee, shoulder"
+                  placeholderTextColor={tc.textMuted}
+                  value={injuryBodyPart}
+                  onChangeText={setInjuryBodyPart}
+                />
+                <TouchableOpacity
+                  style={[styles.modalConfirmBtn, { backgroundColor: tc.primary, marginTop: 20 }]}
+                  onPress={() => {
+                    const desc = injuryDesc.trim();
+                    const part = injuryBodyPart.trim();
+                    if (!desc) { Alert.alert('Required', 'Please enter a description.'); return; }
+                    setInjuryEntries(prev => [...prev, {
+                      id: Date.now().toString(),
+                      description: desc,
+                      bodyPart: part || 'Unspecified',
+                      reportedAt: new Date().toISOString(),
+                      status: 'active',
+                    }]);
+                    setShowAddInjury(false);
+                  }}>
+                  <Text style={[styles.modalConfirmText, { color: '#fff' }]}>Add</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          </KeyboardAvoidingView>
+        </Modal>
 
         {mode === 'theme' && (
         <View style={styles.section}>
@@ -663,8 +806,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <View style={styles.themeSwatches}>
                     <View style={[styles.themeSwatch, { backgroundColor: theme.sections.workout.strong }]} />
                     <View style={[styles.themeSwatch, { backgroundColor: theme.sections.meals.strong }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.planner.strong }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.surfaceRaised }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.ai.strong }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.primary }]} />
                   </View>
                 </TouchableOpacity>
               );
@@ -733,13 +876,45 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'foods' && (
         <View style={styles.section}>
-          <View style={styles.sectionTopRow}>
-            <Text style={styles.sectionLabel}>
-              Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
-            </Text>
-            <TouchableOpacity style={styles.sectionAddBtn} onPress={() => setAddFoodVisible(true)}>
-              <Text style={styles.sectionAddBtnText}>+ Add food</Text>
-            </TouchableOpacity>
+          <View style={{ marginBottom: 8 }}>
+            <View style={styles.sectionTopRow}>
+              <Text style={styles.sectionLabel}>
+                Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
+              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('camera')} disabled={scanFoodsLoading}>
+                <Text style={styles.sectionAddBtnText}>📷 Camera</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('library')} disabled={scanFoodsLoading}>
+                <Text style={styles.sectionAddBtnText}>🖼 Library</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => setAddFoodVisible(true)}>
+                <Text style={styles.sectionAddBtnText}>+ Manual</Text>
+              </TouchableOpacity>
+            </View>
+            {pendingImages.length > 0 && (
+              <View style={{ gap: 6, marginBottom: 6 }}>
+                <TextInput
+                  style={styles.searchInput}
+                  value={scanContext}
+                  onChangeText={setScanContext}
+                  placeholder="Context (e.g. batch of 4, I eat 3 servings)"
+                  placeholderTextColor={tc.textMuted}
+                />
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { alignItems: 'center', backgroundColor: tc.primary + '22', borderColor: tc.primary }]}
+                  onPress={handleScanFoods}
+                  disabled={scanFoodsLoading}>
+                  <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>
+                    {scanFoodsLoading ? 'Scanning…' : `Scan ${pendingImages.length} Photo${pendingImages.length > 1 ? 's' : ''}`}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => { setPendingImages([]); setScanContext(''); }}>
+                  <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center' }}>Clear photos</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
@@ -836,20 +1011,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               )}
             </>
           )}
-          <TouchableOpacity style={styles.addTriggerBtn} onPress={() => setAddFoodVisible(true)}>
-            <Text style={styles.addTriggerText}>+ Add food</Text>
-          </TouchableOpacity>
-          <View style={styles.photoActionsRow}>
-            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleScanFoods('camera')} disabled={scanFoodsLoading}>
-              <Text style={styles.addTriggerText}>{scanFoodsLoading ? 'Scanning...' : '📷 Scan foods (camera)'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.addTriggerBtn} onPress={() => handleScanFoods('library')} disabled={scanFoodsLoading}>
-              <Text style={styles.addTriggerText}>🖼 Scan foods (library)</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.addTriggerBtn, { opacity: 0.7 }]} onPress={() => handleAnalyzeFoodPhoto('camera')} disabled={photoMealLoading}>
-              <Text style={styles.addTriggerText}>{photoMealLoading ? 'Analyzing...' : '+ Scan meal photo'}</Text>
-            </TouchableOpacity>
-          </View>
         </View>
         )}
 
@@ -952,6 +1113,31 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 <Text style={styles.photoMealItems}>{photoMealDraft?.items.join(' · ')}</Text>
               </View>
 
+              {/* Servings context */}
+              <View style={styles.photoServingsRow}>
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <Text style={styles.photoServingsLabel}>My portion</Text>
+                  <TextInput
+                    style={styles.photoServingsInput}
+                    value={photoMealServings}
+                    onChangeText={setPhotoMealServings}
+                    placeholder="e.g. 3/4 or 0.75"
+                    placeholderTextColor={tc.textMuted}
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+                <View style={{ flex: 2 }}>
+                  <Text style={styles.photoServingsLabel}>Context (optional)</Text>
+                  <TextInput
+                    style={styles.photoServingsInput}
+                    value={photoMealContext}
+                    onChangeText={setPhotoMealContext}
+                    placeholder="e.g. batch of 4, I eat 3 servings"
+                    placeholderTextColor={tc.textMuted}
+                  />
+                </View>
+              </View>
+
               <View style={styles.photoMacroGrid}>
                 <View style={styles.photoMacroTile}>
                   <Text style={styles.photoMacroValue}>{Math.round(photoMealDraft?.calories ?? 0)}</Text>
@@ -1016,6 +1202,28 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     minHeight: 100,
     textAlignVertical: 'top',
   },
+
+  // Injury styles
+  injuryEmptyCard: { borderRadius: radius.md, borderWidth: 1, padding: 14, alignItems: 'center', marginBottom: 10 },
+  injuryEmptyText: { fontSize: 13 },
+  injuryList: { gap: 10, marginBottom: 10 },
+  injuryCard: { borderRadius: radius.md, borderWidth: 1, padding: 12, gap: 8 },
+  injuryCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  injuryDesc: { fontSize: 14, fontWeight: '600' },
+  injuryBodyPart: { fontSize: 12, marginTop: 2 },
+  statusRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  statusBtn: { borderRadius: radius.full, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 5 },
+  statusBtnText: { fontSize: 11, fontWeight: '700' },
+  addInjuryBtn: { borderRadius: radius.md, borderWidth: 1, paddingVertical: 12, alignItems: 'center', borderStyle: 'dashed' as any },
+  addInjuryBtnText: { fontSize: 14, fontWeight: '600' },
+  // Modal styles (reused for add injury)
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalSheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderTopWidth: 1, padding: 20, paddingBottom: 40 },
+  modalTitle: { fontSize: 17, fontWeight: '700', marginBottom: 6 },
+  modalFieldLabel: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },
+  modalInput: { borderWidth: 1, borderRadius: radius.md, padding: 12, fontSize: 15 },
+  modalConfirmBtn: { borderRadius: radius.md, paddingVertical: 14, alignItems: 'center' },
+  modalConfirmText: { fontSize: 15, fontWeight: '700' },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   goalCard: { width: '31%', backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, paddingVertical: 12, paddingHorizontal: 8, alignItems: 'center', gap: 6 },
@@ -1165,6 +1373,9 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     backgroundColor: colors.background,
     color: colors.textPrimary,
   },
+  photoServingsRow:  { flexDirection: 'row', marginTop: 12, marginBottom: 4 },
+  photoServingsLabel: { fontSize: 11, fontWeight: '600', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 },
+  photoServingsInput: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, backgroundColor: colors.background, color: colors.textPrimary },
   photoMacroGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   photoMacroTile: {
     width: '47%',

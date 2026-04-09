@@ -6,10 +6,11 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
-import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName } from '../types';
+import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary } from '../services/api';
-import { colors, getTheme, radius } from '../constants/theme';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion } from '../services/api';
+import { getTheme, radius } from '../constants/theme';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 
 interface WorkoutCoachMessage {
@@ -114,6 +115,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const theme = getTheme(themeName);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
+  const styles = createStyles(themeColors);
   const startTime = useRef(Date.now());
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
@@ -168,6 +170,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
   const [finishedSession, setFinishedSession] = useState<WorkoutSession | null>(null);
+
+  // Post-workout feedback
+  const [summaryStep, setSummaryStep] = useState<'summary' | 'feedback'>('summary');
+  const [feedbackFeeling, setFeedbackFeeling] = useState<string | null>(null);
+  const [feedbackIntensity, setFeedbackIntensity] = useState<number | null>(null);
+  const [feedbackSoreness, setFeedbackSoreness] = useState<string[]>([]);
+  const [feedbackNotes, setFeedbackNotes] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
 
   const [finishModalVisible, setFinishModalVisible] = useState(false);
   const [coachModalVisible, setCoachModalVisible] = useState(false);
@@ -649,7 +660,76 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [refreshRecommendationForExercise]);
 
+  const handleSubmitFeedback = async (skip = false) => {
+    setFeedbackSubmitting(true);
+    try {
+      if (!skip && authToken && (feedbackFeeling || feedbackIntensity)) {
+        const feelingLabels: Record<string, string> = {
+          great: 'great — felt strong and energized',
+          good: 'good — solid session',
+          okay: 'okay — got through it',
+          rough: 'rough — struggled throughout',
+        };
+        const intensityLabels: Record<number, string> = {
+          1: 'way too easy',
+          2: 'a bit easy',
+          3: 'just right',
+          4: 'hard but manageable',
+          5: 'too hard / overwhelming',
+        };
+        const feelingText = feedbackFeeling ? feelingLabels[feedbackFeeling] : 'neutral';
+        const intensityText = feedbackIntensity ? intensityLabels[feedbackIntensity] : 'moderate';
+        const sorenessText = feedbackSoreness.length > 0 ? ` Soreness noted in: ${feedbackSoreness.join(', ')}.` : '';
+        const notesText = feedbackNotes.trim() ? ` User note: "${feedbackNotes.trim()}".` : '';
+
+        const question = `I just finished ${workout.focus}. Overall feeling: ${feelingText}. Perceived intensity: ${intensityText}.${sorenessText}${notesText} Based on this feedback, should my upcoming workouts be adjusted? If the intensity was wrong or I had soreness concerns, please update the plan.`;
+
+        const resp = await askTrainerQuestion(authToken, {
+          question,
+          mode: 'trainer',
+          profile: { goal },
+          conversation: [],
+        });
+
+        if (resp.needs_plan_update && resp.updated_workout_plan) {
+          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
+          setFeedbackResult(resp.answer || 'Your upcoming workouts have been adjusted based on your feedback.');
+          // Brief pause so user sees the result
+          await new Promise(r => setTimeout(r, 2400));
+        }
+      }
+
+      // Persist feedback onto the saved session
+      if (finishedSession && feedbackFeeling && feedbackIntensity) {
+        await saveWorkoutSession({
+          ...finishedSession,
+          feedback: {
+            feeling: feedbackFeeling as WorkoutFeeling,
+            intensity: feedbackIntensity as WorkoutIntensity,
+            sorenessAreas: feedbackSoreness,
+            notes: feedbackNotes,
+          },
+        });
+      }
+    } catch {
+      // Non-fatal — just close
+    } finally {
+      setFeedbackSubmitting(false);
+      setSummaryVisible(false);
+      setSummaryStep('summary');
+      if (finishedSession) onFinish(finishedSession);
+    }
+  };
+
   const handleFinish = async () => {
+    // Reset feedback state for fresh form
+    setSummaryStep('summary');
+    setFeedbackFeeling(null);
+    setFeedbackIntensity(null);
+    setFeedbackSoreness([]);
+    setFeedbackNotes('');
+    setFeedbackResult(null);
+
     const now = new Date();
     const session: WorkoutSession = {
       id: `${Date.now()}`,
@@ -1001,7 +1081,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {/* ── AI tip — shown prominently above set rows ── */}
                   {isAiLoading && (
                     <View style={styles.aiBubble}>
-                      <ActivityIndicator size="small" color={colors.accent} />
+                      <ActivityIndicator size="small" color={themeColors.accent} />
                       <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
                     </View>
                   )}
@@ -1066,7 +1146,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   }}
                                   keyboardType="decimal-pad"
                                   placeholder="e.g. 5 or 0:30"
-                                  placeholderTextColor={colors.textMuted}
+                                  placeholderTextColor={themeColors.textMuted}
                                   editable={!isLogged}
                                   selectTextOnFocus
                                   returnKeyType="done"
@@ -1076,7 +1156,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
                                   onPress={() => { if (!isLogged) handleLogSetInline(i, slot, false); }}
                                   disabled={isLogged}>
-                                  <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: colors.textMuted }]}>
+                                  <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
                                     {isLogged ? '✓' : '○'}
                                   </Text>
                                 </TouchableOpacity>
@@ -1098,7 +1178,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
                                 keyboardType="decimal-pad"
                                 placeholder="lbs"
-                                placeholderTextColor={colors.textMuted}
+                                placeholderTextColor={themeColors.textMuted}
                                 editable={!isLogged}
                                 selectTextOnFocus
                                 returnKeyType="next"
@@ -1114,14 +1194,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
                                 keyboardType="number-pad"
                                 placeholder="reps"
-                                placeholderTextColor={colors.textMuted}
+                                placeholderTextColor={themeColors.textMuted}
                                 editable={!isLogged}
                                 selectTextOnFocus
                                 returnKeyType="done"
                               />
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               <View style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}>
-                                <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: colors.textMuted }]}>
+                                <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
                                   {isLogged ? '✓' : '○'}
                                 </Text>
                               </View>
@@ -1216,7 +1296,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     onChangeText={setLogWeight}
                     keyboardType="decimal-pad"
                     placeholder="0"
-                    placeholderTextColor={colors.textMuted}
+                    placeholderTextColor={themeColors.textMuted}
                     autoFocus
                     selectTextOnFocus
                   />
@@ -1229,7 +1309,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     onChangeText={setLogReps}
                     keyboardType="number-pad"
                     placeholder="0"
-                    placeholderTextColor={colors.textMuted}
+                    placeholderTextColor={themeColors.textMuted}
                     selectTextOnFocus
                   />
                 </View>
@@ -1261,66 +1341,217 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       </Modal>
 
-      {/* Post-Workout Summary Modal */}
-      <Modal visible={summaryVisible} transparent animationType="fade" onRequestClose={() => { setSummaryVisible(false); if (finishedSession) onFinish(finishedSession); }}>
-        <View style={styles.finishBackdrop}>
-          <ScrollView contentContainerStyle={styles.summaryScroll}>
-            <View style={styles.summaryModal}>
-              <Text style={styles.summaryTitle}>Workout Complete!</Text>
-              <Text style={styles.summarySubtitle}>{workout.focus}  ·  {formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
+      {/* Post-Workout Summary Modal — Step 1: Summary / Step 2: Feedback */}
+      <Modal visible={summaryVisible} transparent animationType="slide" onRequestClose={() => handleSubmitFeedback(true)}>
+        <View style={styles.summaryBackdrop}>
+          <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
-              {summaryLoading ? (
-                <View style={styles.summaryLoadingRow}>
-                  <ActivityIndicator color={colors.primary} />
-                  <Text style={styles.summaryLoadingText}>Generating summary...</Text>
+            {summaryStep === 'summary' ? (
+              /* ── Step 1: Workout Summary ─────────────────────────────────────── */
+              <View style={styles.summaryModal}>
+                {/* Header */}
+                <View style={styles.summaryHeaderBlock}>
+                  <Text style={styles.summaryEmoji}>🏆</Text>
+                  <Text style={styles.summaryTitle}>Workout Complete!</Text>
+                  <Text style={styles.summarySubtitle}>{workout.focus}</Text>
                 </View>
-              ) : (
-                <>
-                  {summaryData && (
-                    <View style={styles.summaryCaloriesRow}>
-                      <Text style={styles.summaryCaloriesValue}>~{summaryData.caloriesBurned}</Text>
-                      <Text style={styles.summaryCaloriesLabel}>calories burned</Text>
+
+                {/* Stats row */}
+                <View style={styles.summaryStatsRow}>
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
+                    <Text style={styles.summaryStatLabel}>Duration</Text>
+                  </View>
+                  <View style={styles.summaryStatDivider} />
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0}</Text>
+                    <Text style={styles.summaryStatLabel}>Sets Logged</Text>
+                  </View>
+                  <View style={styles.summaryStatDivider} />
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{completedCount}/{exercises.length}</Text>
+                    <Text style={styles.summaryStatLabel}>Exercises</Text>
+                  </View>
+                </View>
+
+                {/* AI loading / content */}
+                {summaryLoading ? (
+                  <View style={styles.summaryLoadingRow}>
+                    <ActivityIndicator color={themeColors.primary} />
+                    <Text style={styles.summaryLoadingText}>Coach is reviewing your session…</Text>
+                  </View>
+                ) : (
+                  <>
+                    {summaryData?.caloriesBurned ? (
+                      <View style={styles.summaryCaloriesRow}>
+                        <Text style={styles.summaryCaloriesValue}>~{summaryData.caloriesBurned}</Text>
+                        <Text style={styles.summaryCaloriesLabel}>calories burned</Text>
+                      </View>
+                    ) : null}
+
+                    {summaryData?.motivationMessage ? (
+                      <View style={styles.summaryMotivation}>
+                        <Text style={styles.summaryMotivationIcon}>💬</Text>
+                        <Text style={styles.summaryMotivationText}>{summaryData.motivationMessage}</Text>
+                      </View>
+                    ) : null}
+
+                    {(summaryData?.achievements?.length ?? 0) > 0 && (
+                      <View style={styles.summarySection}>
+                        <Text style={styles.summarySectionTitle}>🎯  Today's Best Sets</Text>
+                        {summaryData!.achievements.map((a, i) => (
+                          <Text key={i} style={styles.summaryItem}>{a}</Text>
+                        ))}
+                      </View>
+                    )}
+
+                    {(summaryData?.recommendations?.length ?? 0) > 0 && (
+                      <View style={styles.summarySection}>
+                        <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
+                        {summaryData!.recommendations.map((r, i) => (
+                          <Text key={i} style={styles.summaryItem}>• {r}</Text>
+                        ))}
+                      </View>
+                    )}
+                  </>
+                )}
+
+                {/* CTA: go to feedback */}
+                <TouchableOpacity
+                  style={styles.summaryFeedbackBtn}
+                  onPress={() => setSummaryStep('feedback')}
+                  activeOpacity={0.85}>
+                  <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  →</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
+                  <Text style={styles.summarySkipText}>Skip & Close</Text>
+                </TouchableOpacity>
+              </View>
+
+            ) : (
+              /* ── Step 2: Feedback Form ───────────────────────────────────────── */
+              <View style={styles.summaryModal}>
+                {feedbackSubmitting ? (
+                  /* Submitting / result state */
+                  <View style={styles.feedbackSubmittingBlock}>
+                    {feedbackResult ? (
+                      <>
+                        <Text style={styles.feedbackResultIcon}>✅</Text>
+                        <Text style={styles.feedbackResultTitle}>Plan Updated</Text>
+                        <Text style={styles.feedbackResultText}>{feedbackResult}</Text>
+                      </>
+                    ) : (
+                      <>
+                        <ActivityIndicator size="large" color={themeColors.primary} />
+                        <Text style={styles.feedbackSubmittingText}>Updating your plan based on feedback…</Text>
+                      </>
+                    )}
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.summaryHeaderBlock}>
+                      <Text style={styles.summaryTitle}>How Did It Go?</Text>
+                      <Text style={styles.summarySubtitle}>Your answer helps the AI trainer tune upcoming workouts</Text>
                     </View>
-                  )}
 
-                  {summaryData?.motivationMessage ? (
-                    <View style={styles.summaryMotivation}>
-                      <Text style={styles.summaryMotivationText}>{summaryData.motivationMessage}</Text>
+                    {/* Overall feeling */}
+                    <View style={styles.feedbackGroup}>
+                      <Text style={styles.feedbackGroupLabel}>Overall feeling</Text>
+                      <View style={styles.feedbackRow}>
+                        {([
+                          { value: 'rough', label: '😓 Rough' },
+                          { value: 'okay',  label: '😐 Okay' },
+                          { value: 'good',  label: '💪 Good' },
+                          { value: 'great', label: '🔥 Great' },
+                        ] as const).map(opt => (
+                          <TouchableOpacity
+                            key={opt.value}
+                            style={[styles.feedbackChip, feedbackFeeling === opt.value && styles.feedbackChipActive]}
+                            onPress={() => setFeedbackFeeling(opt.value)}
+                            activeOpacity={0.8}>
+                            <Text style={[styles.feedbackChipText, feedbackFeeling === opt.value && styles.feedbackChipTextActive]}>
+                              {opt.label}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
                     </View>
-                  ) : null}
 
-                  {(summaryData?.achievements?.length ?? 0) > 0 && (
-                    <View style={styles.summarySection}>
-                      <Text style={styles.summarySectionTitle}>Today's Best Sets</Text>
-                      {summaryData!.achievements.map((a, i) => (
-                        <Text key={i} style={styles.summaryItem}>{a}</Text>
-                      ))}
+                    {/* Perceived intensity */}
+                    <View style={styles.feedbackGroup}>
+                      <Text style={styles.feedbackGroupLabel}>Intensity</Text>
+                      <View style={styles.feedbackRow}>
+                        {([
+                          { value: 1, label: 'Too Easy' },
+                          { value: 2, label: 'Easy' },
+                          { value: 3, label: 'Just Right' },
+                          { value: 4, label: 'Hard' },
+                          { value: 5, label: 'Too Hard' },
+                        ] as const).map(opt => (
+                          <TouchableOpacity
+                            key={opt.value}
+                            style={[styles.feedbackIntensityChip, feedbackIntensity === opt.value && styles.feedbackChipActive]}
+                            onPress={() => setFeedbackIntensity(opt.value)}
+                            activeOpacity={0.8}>
+                            <Text style={[styles.feedbackChipText, feedbackIntensity === opt.value && styles.feedbackChipTextActive]}>
+                              {opt.label}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
                     </View>
-                  )}
 
-                  {(summaryData?.recommendations?.length ?? 0) > 0 && (
-                    <View style={styles.summarySection}>
-                      <Text style={styles.summarySectionTitle}>Recovery Tips</Text>
-                      {summaryData!.recommendations.map((r, i) => (
-                        <Text key={i} style={styles.summaryItem}>• {r}</Text>
-                      ))}
+                    {/* Soreness */}
+                    <View style={styles.feedbackGroup}>
+                      <Text style={styles.feedbackGroupLabel}>Any soreness? <Text style={styles.feedbackOptional}>(optional)</Text></Text>
+                      <View style={styles.feedbackSorenessGrid}>
+                        {['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Knees', 'Lower Back'].map(area => {
+                          const active = feedbackSoreness.includes(area);
+                          return (
+                            <TouchableOpacity
+                              key={area}
+                              style={[styles.feedbackSorenessChip, active && styles.feedbackSorenessChipActive]}
+                              onPress={() => setFeedbackSoreness(prev =>
+                                active ? prev.filter(a => a !== area) : [...prev, area]
+                              )}
+                              activeOpacity={0.8}>
+                              <Text style={[styles.feedbackSorenessText, active && styles.feedbackSorenessTextActive]}>{area}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
                     </View>
-                  )}
 
-                  {!summaryData && (
-                    <Text style={styles.summaryMotivationText}>
-                      {completedCount}/{exercises.length} exercises  ·  {finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0} sets logged
-                    </Text>
-                  )}
-                </>
-              )}
+                    {/* Notes */}
+                    <View style={styles.feedbackGroup}>
+                      <Text style={styles.feedbackGroupLabel}>Notes <Text style={styles.feedbackOptional}>(optional)</Text></Text>
+                      <TextInput
+                        value={feedbackNotes}
+                        onChangeText={setFeedbackNotes}
+                        placeholder="e.g. left shoulder felt tight, energy was low..."
+                        placeholderTextColor={themeColors.textMuted}
+                        style={styles.feedbackNotesInput}
+                        multiline
+                        numberOfLines={3}
+                      />
+                    </View>
 
-              <TouchableOpacity
-                style={styles.finishConfirmBtn}
-                onPress={() => { setSummaryVisible(false); if (finishedSession) onFinish(finishedSession); }}>
-                <Text style={styles.finishConfirmText}>Done</Text>
-              </TouchableOpacity>
-            </View>
+                    {/* Submit */}
+                    <TouchableOpacity
+                      style={[styles.summaryFeedbackBtn, (!feedbackFeeling && !feedbackIntensity) && { opacity: 0.5 }]}
+                      onPress={() => handleSubmitFeedback(false)}
+                      disabled={!feedbackFeeling && !feedbackIntensity}
+                      activeOpacity={0.85}>
+                      <Text style={styles.summaryFeedbackBtnText}>Submit & Let AI Adjust Plan</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
+                      <Text style={styles.summarySkipText}>Skip</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            )}
+
           </ScrollView>
         </View>
       </Modal>
@@ -1389,12 +1620,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 value={coachInput}
                 onChangeText={setCoachInput}
                 placeholder="Ask about form or pain..."
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={themeColors.textMuted}
                 style={styles.coachInput}
                 multiline
               />
               <TouchableOpacity style={styles.coachSendBtn} onPress={handleAskWorkoutCoach} disabled={coachLoading || coachPhotoLoading}>
-                {coachLoading ? <ActivityIndicator size="small" color={colors.background} /> : <Text style={styles.coachSendText}>Send</Text>}
+                {coachLoading ? <ActivityIndicator size="small" color={themeColors.background} /> : <Text style={styles.coachSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -1415,12 +1646,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               value={exerciseSearch}
               onChangeText={setExerciseSearch}
               placeholder="Search exercise library..."
-              placeholderTextColor={colors.textMuted}
+              placeholderTextColor={themeColors.textMuted}
               style={styles.addExerciseSearch}
             />
 
             {exerciseLibraryLoading ? (
-              <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 12 }} />
+              <ActivityIndicator size="small" color={themeColors.primary} style={{ marginTop: 12 }} />
             ) : (
               <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
                 {filteredExerciseLibrary.length === 0 ? (
@@ -1443,7 +1674,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   warmupCard: {
     borderWidth: 1.5,
     borderRadius: radius.lg,
@@ -1454,120 +1685,120 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   warmupTitle: { fontSize: 16, fontWeight: '800', marginBottom: 2 },
-  warmupStep: { fontSize: 13, color: colors.textPrimary, lineHeight: 20 },
+  warmupStep: { fontSize: 13, color: tc.textPrimary, lineHeight: 20 },
   warmupActions: { flexDirection: 'row', gap: 10, marginTop: 12, alignSelf: 'stretch' },
   warmupDoneBtn: {
     borderRadius: radius.md,
     paddingVertical: 14,
     alignItems: 'center',
   },
-  warmupDoneBtnText: { color: colors.background, fontWeight: '700', fontSize: 15 },
+  warmupDoneBtnText: { color: tc.background, fontWeight: '700', fontSize: 15 },
   warmupCoachBtn: { borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 16, paddingVertical: 14, alignItems: 'center', justifyContent: 'center' },
   warmupCoachBtnText: { fontSize: 13, fontWeight: '700' },
-  container: { flex: 1, backgroundColor: colors.background },
+  container: { flex: 1, backgroundColor: tc.background },
 
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12, gap: 12 },
-  focusLabel:   { fontSize: 18, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
-  timer:        { fontSize: 32, fontWeight: '800', color: colors.primary },
+  focusLabel:   { fontSize: 18, fontWeight: '700', color: tc.textPrimary, marginBottom: 2 },
+  timer:        { fontSize: 32, fontWeight: '800', color: tc.primary },
   headerRight:  { alignItems: 'center' },
-  progressText: { fontSize: 22, fontWeight: '700', color: colors.textPrimary },
-  progressSub:  { fontSize: 11, color: colors.textSecondary },
-  cancelBtn:    { padding: 8, backgroundColor: colors.surface, borderRadius: radius.full, borderWidth: 1, borderColor: colors.border },
-  cancelBtnText:{ fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
-  coachBtn: { paddingHorizontal: 10, paddingVertical: 8, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.primary },
-  coachBtnText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  progressText: { fontSize: 22, fontWeight: '700', color: tc.textPrimary },
+  progressSub:  { fontSize: 11, color: tc.textSecondary },
+  cancelBtn:    { padding: 8, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.border },
+  cancelBtnText:{ fontSize: 14, color: tc.textSecondary, fontWeight: '600' },
+  coachBtn: { paddingHorizontal: 10, paddingVertical: 8, backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary },
+  coachBtnText: { fontSize: 12, color: tc.primary, fontWeight: '700' },
 
-  progressBarTrack: { height: 3, backgroundColor: colors.border, marginHorizontal: 16, borderRadius: 2, marginBottom: 16 },
-  progressBarFill:  { height: 3, backgroundColor: colors.primary, borderRadius: 2 },
+  progressBarTrack: { height: 3, backgroundColor: tc.border, marginHorizontal: 16, borderRadius: 2, marginBottom: 16 },
+  progressBarFill:  { height: 3, backgroundColor: tc.primary, borderRadius: 2 },
 
   restBanner: {
     marginHorizontal: 16,
     marginBottom: 12,
-    backgroundColor: colors.primary + '18',
+    backgroundColor: tc.primary + '18',
     borderRadius: radius.lg,
     borderWidth: 2,
-    borderColor: colors.primary,
+    borderColor: tc.primary,
     paddingHorizontal: 12,
     paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
-  restBannerUrgent: { borderColor: colors.warning, backgroundColor: colors.warning + '18' },
+  restBannerUrgent: { borderColor: tc.warning, backgroundColor: tc.warning + '18' },
   restBannerLeft: { alignItems: 'center', minWidth: 64 },
-  restBannerLabel: { fontSize: 9, fontWeight: '800', color: colors.primary, textTransform: 'uppercase', letterSpacing: 1 },
-  restBannerTime: { fontSize: 32, fontWeight: '900', color: colors.primary, lineHeight: 36 },
-  restBannerTimeUrgent: { color: colors.warning },
+  restBannerLabel: { fontSize: 9, fontWeight: '800', color: tc.primary, textTransform: 'uppercase', letterSpacing: 1 },
+  restBannerTime: { fontSize: 32, fontWeight: '900', color: tc.primary, lineHeight: 36 },
+  restBannerTimeUrgent: { color: tc.warning },
   restBannerCenter: { flex: 1, gap: 2, minWidth: 0 },
-  restExerciseText: { fontSize: 11, color: colors.primary, fontWeight: '700' },
-  restTargetText: { fontSize: 13, color: colors.textPrimary, fontWeight: '700' },
-  restCueText: { fontSize: 11, color: colors.textSecondary, lineHeight: 16 },
+  restExerciseText: { fontSize: 11, color: tc.primary, fontWeight: '700' },
+  restTargetText: { fontSize: 13, color: tc.textPrimary, fontWeight: '700' },
+  restCueText: { fontSize: 11, color: tc.textSecondary, lineHeight: 16 },
   restBannerActions: { flexDirection: 'column', gap: 5, alignItems: 'stretch' },
   restBannerBtn: {
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+    borderColor: tc.border,
+    backgroundColor: tc.surface,
     alignItems: 'center',
   },
-  restBannerBtnText: { fontSize: 11, color: colors.textPrimary, fontWeight: '700' },
-  restBannerBtnPrimary: { borderColor: colors.primary, backgroundColor: colors.primary },
-  restBannerBtnPrimaryText: { fontSize: 11, color: colors.background, fontWeight: '700' },
+  restBannerBtnText: { fontSize: 11, color: tc.textPrimary, fontWeight: '700' },
+  restBannerBtnPrimary: { borderColor: tc.primary, backgroundColor: tc.primary },
+  restBannerBtnPrimaryText: { fontSize: 11, color: tc.background, fontWeight: '700' },
 
   scroll:        { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
 
-  exerciseCard:       { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 14, marginBottom: 10 },
-  exerciseCardDone:   { borderColor: colors.primary, opacity: 0.85 },
-  exerciseCardActive: { borderColor: colors.primary },
+  exerciseCard:       { backgroundColor: tc.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: tc.border, padding: 14, marginBottom: 10 },
+  exerciseCardDone:   { borderColor: tc.primary, opacity: 0.85 },
+  exerciseCardActive: { borderColor: tc.primary },
 
   exerciseHeader:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  exerciseName:     { fontSize: 15, fontWeight: '600', color: colors.textPrimary, marginBottom: 2 },
-  exerciseNameDone: { color: colors.textSecondary, textDecorationLine: 'line-through' },
-  exerciseMeta:     { fontSize: 12, color: colors.textMuted },
+  exerciseName:     { fontSize: 15, fontWeight: '600', color: tc.textPrimary, marginBottom: 2 },
+  exerciseNameDone: { color: tc.textSecondary, textDecorationLine: 'line-through' },
+  exerciseMeta:     { fontSize: 12, color: tc.textMuted },
 
-  setsBadge:        { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
-  setsBadgeDone:    { backgroundColor: colors.primary, borderColor: colors.primary },
-  setsBadgeText:    { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
-  setsBadgeTextDone:{ color: colors.background },
+  setsBadge:        { backgroundColor: tc.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: tc.border },
+  setsBadgeDone:    { backgroundColor: tc.primary, borderColor: tc.primary },
+  setsBadgeText:    { fontSize: 12, fontWeight: '700', color: tc.textSecondary },
+  setsBadgeTextDone:{ color: tc.background },
 
   // Small red remove button in the header
   removeBtn: {
     width: 26, height: 26,
     borderRadius: 13,
-    backgroundColor: colors.error + '18',
+    backgroundColor: tc.error + '18',
     borderWidth: 1,
-    borderColor: colors.error,
+    borderColor: tc.error,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  removeBtnText: { fontSize: 18, color: colors.error, fontWeight: '800', lineHeight: 22 },
+  removeBtnText: { fontSize: 18, color: tc.error, fontWeight: '800', lineHeight: 22 },
 
   exerciseDetail: { marginTop: 12, gap: 10 },
 
   // Add Exercise button — below all cards
   addExerciseBtn: {
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.md,
     paddingVertical: 12,
     alignItems: 'center',
     marginBottom: 10,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: tc.surfaceRaised,
   },
-  addExerciseBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
+  addExerciseBtnText: { fontSize: 13, color: tc.textSecondary, fontWeight: '600' },
 
   // Warm-up note within exercise card
   warmupNoteCard: {
-    backgroundColor: colors.warning + '18',
+    backgroundColor: tc.warning + '18',
     borderRadius: radius.md,
     padding: 10,
     borderLeftWidth: 3,
-    borderLeftColor: colors.warning,
+    borderLeftColor: tc.warning,
   },
-  warmupNoteText: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
+  warmupNoteText: { fontSize: 12, color: tc.textPrimary, lineHeight: 18 },
 
   // Form video link within exercise card
   formVideoLink: {
@@ -1576,226 +1807,326 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: colors.primary,
-    backgroundColor: colors.primary + '14',
+    borderColor: tc.primary,
+    backgroundColor: tc.primary + '14',
   },
-  formVideoLinkText: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  formVideoLinkText: { fontSize: 12, color: tc.primary, fontWeight: '700' },
 
   // Inline set logging
-  inlineSetsHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: colors.border },
-  inlineSetsLabel: { flex: 1, fontSize: 10, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
+  inlineSetsHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: tc.border },
+  inlineSetsLabel: { flex: 1, fontSize: 10, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
   inlineSetRow: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border + '66',
+    paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '66',
   },
   inlineSetRowDone: { opacity: 0.75 },
-  inlineSetNum: { width: 20, fontSize: 13, fontWeight: '700', color: colors.textSecondary, textAlign: 'center' },
+  inlineSetNum: { width: 20, fontSize: 13, fontWeight: '700', color: tc.textSecondary, textAlign: 'center' },
   inlineInput: {
-    flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm,
+    flex: 1, borderWidth: 1, borderColor: tc.border, borderRadius: radius.sm,
     paddingVertical: 8, paddingHorizontal: 6, fontSize: 16, fontWeight: '700',
-    color: colors.textPrimary, backgroundColor: colors.surfaceRaised, textAlign: 'center',
+    color: tc.textPrimary, backgroundColor: tc.surfaceRaised, textAlign: 'center',
   },
-  inlineInputDone: { borderColor: colors.primary + '60', backgroundColor: colors.primary + '14', color: colors.primary },
-  inlineLastResult: { flex: 1, fontSize: 11, color: colors.textMuted, textAlign: 'center' },
+  inlineInputDone: { borderColor: tc.primary + '60', backgroundColor: tc.primary + '14', color: tc.primary },
+  inlineLastResult: { flex: 1, fontSize: 11, color: tc.textMuted, textAlign: 'center' },
   inlineLogBtn: {
     width: 40, paddingVertical: 8, borderRadius: radius.sm,
-    backgroundColor: colors.primary, alignItems: 'center',
+    backgroundColor: tc.primary, alignItems: 'center',
   },
-  inlineLogBtnText: { fontSize: 12, fontWeight: '700', color: colors.background },
+  inlineLogBtnText: { fontSize: 12, fontWeight: '700', color: tc.background },
   inlineLoggedBadgePending: { backgroundColor: 'transparent' },
   inlineLoggedBadge: {
     width: 40, paddingVertical: 8, borderRadius: radius.sm,
-    backgroundColor: colors.primary + '20', alignItems: 'center',
+    backgroundColor: tc.primary + '20', alignItems: 'center',
   },
-  inlineLoggedBadgeText: { fontSize: 14, color: colors.primary, fontWeight: '800' },
+  inlineLoggedBadgeText: { fontSize: 14, color: tc.primary, fontWeight: '800' },
 
   setsLog: { gap: 6 },
-  setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
-  setNum:  { fontSize: 12, color: colors.textMuted, width: 44 },
-  setData: { flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary },
-  setCheck:{ fontSize: 12, color: colors.primary, fontWeight: '700' },
+  setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: tc.border },
+  setNum:  { fontSize: 12, color: tc.textMuted, width: 44 },
+  setData: { flex: 1, fontSize: 13, fontWeight: '600', color: tc.textPrimary },
+  setCheck:{ fontSize: 12, color: tc.primary, fontWeight: '700' },
   feedbackCard: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
-  feedbackTitle: { fontSize: 11, fontWeight: '600', color: colors.textMuted, marginRight: 2 },
+  feedbackTitle: { fontSize: 11, fontWeight: '600', color: tc.textMuted, marginRight: 2 },
   feedbackRow: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   feedbackChip: {
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+    borderColor: tc.border,
+    backgroundColor: tc.surface,
   },
-  feedbackChipActive:     { borderColor: colors.primary, backgroundColor: colors.primary + '20' },
-  feedbackChipPain:       { borderColor: colors.error + '80' },
-  feedbackChipPainActive: { borderColor: colors.error, backgroundColor: colors.error + '20' },
-  feedbackChipText:       { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
-  feedbackChipTextActive: { color: colors.primary },
-  feedbackChipTextPain:   { color: colors.error },
+  feedbackChipActive:     { borderColor: tc.primary, backgroundColor: tc.primary + '20' },
+  feedbackChipPain:       { borderColor: tc.error + '80' },
+  feedbackChipPainActive: { borderColor: tc.error, backgroundColor: tc.error + '20' },
+  feedbackChipText:       { fontSize: 12, fontWeight: '600', color: tc.textSecondary },
+  feedbackChipTextActive: { color: tc.primary },
+  feedbackChipTextPain:   { color: tc.error },
 
-  aiBubble:      { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceRaised, borderRadius: radius.md, padding: 12, borderLeftWidth: 3, borderLeftColor: colors.accent },
-  aiBubbleError: { borderLeftColor: colors.error },
-  aiLabel:       { fontSize: 10, fontWeight: '700', color: colors.accent, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 3 },
-  aiText:        { fontSize: 13, color: colors.textPrimary },
-  aiLoadingText: { fontSize: 13, color: colors.textSecondary },
-  aiErrorText:   { fontSize: 12, color: colors.error, flex: 1 },
+  aiBubble:      { flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: radius.md, padding: 12, borderLeftWidth: 3, borderLeftColor: tc.accent },
+  aiBubbleError: { borderLeftColor: tc.error },
+  aiLabel:       { fontSize: 10, fontWeight: '700', color: tc.accent, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 3 },
+  aiText:        { fontSize: 13, color: tc.textPrimary },
+  aiLoadingText: { fontSize: 13, color: tc.textSecondary },
+  aiErrorText:   { fontSize: 12, color: tc.error, flex: 1 },
 
-  logSetBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' },
-  logSetBtnText: { color: colors.background, fontSize: 15, fontWeight: '700' },
+  logSetBtn:     { backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' },
+  logSetBtnText: { color: tc.background, fontSize: 15, fontWeight: '700' },
 
   doneRow:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, gap: 12 },
-  doneText:     { fontSize: 13, color: colors.primary, fontWeight: '600' },
-  addSetBtn:    { borderWidth: 1, borderColor: colors.primary, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 6 },
-  addSetBtnText:{ fontSize: 13, color: colors.primary, fontWeight: '600' },
+  doneText:     { fontSize: 13, color: tc.primary, fontWeight: '600' },
+  addSetBtn:    { borderWidth: 1, borderColor: tc.primary, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 6 },
+  addSetBtnText:{ fontSize: 13, color: tc.primary, fontWeight: '600' },
 
-  finishBtn:         { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8, borderWidth: 1, borderColor: colors.primary },
-  finishBtnDisabled: { borderColor: colors.border, opacity: 0.5 },
-  finishBtnText:     { fontSize: 16, fontWeight: '700', color: colors.primary },
+  finishBtn:         { backgroundColor: tc.surface, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8, borderWidth: 1, borderColor: tc.primary },
+  finishBtnDisabled: { borderColor: tc.border, opacity: 0.5 },
+  finishBtnText:     { fontSize: 16, fontWeight: '700', color: tc.primary },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   logModal: {
-    backgroundColor: colors.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
-    padding: 24, paddingBottom: 40, gap: 16, borderTopWidth: 1, borderTopColor: colors.border,
+    backgroundColor: tc.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+    padding: 24, paddingBottom: 40, gap: 16, borderTopWidth: 1, borderTopColor: tc.border,
   },
-  logHandle:     { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: 4 },
-  logModalTitle: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
-  logModalSub:   { fontSize: 13, color: colors.textSecondary, marginTop: -8 },
+  logHandle:     { width: 36, height: 4, backgroundColor: tc.border, borderRadius: 2, alignSelf: 'center', marginBottom: 4 },
+  logModalTitle: { fontSize: 18, fontWeight: '700', color: tc.textPrimary },
+  logModalSub:   { fontSize: 13, color: tc.textSecondary, marginTop: -8 },
   logInputRow:   { flexDirection: 'row', gap: 12 },
   logInputWrap:  { flex: 1, gap: 6 },
-  logInputLabel: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  logInputLabel: { fontSize: 12, fontWeight: '600', color: tc.textSecondary },
   logInput: {
-    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
-    padding: 14, fontSize: 28, fontWeight: '700', color: colors.textPrimary,
-    backgroundColor: colors.background, textAlign: 'center',
+    borderWidth: 1, borderColor: tc.border, borderRadius: radius.md,
+    padding: 14, fontSize: 28, fontWeight: '700', color: tc.textPrimary,
+    backgroundColor: tc.background, textAlign: 'center',
   },
-  logConfirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center' },
-  logConfirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
+  logConfirmBtn:  { backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center' },
+  logConfirmText: { color: tc.background, fontSize: 16, fontWeight: '700' },
 
   lastTimeCard: {
-    backgroundColor: colors.accent + '16',
+    backgroundColor: tc.accent + '16',
     borderRadius: radius.md,
     borderWidth: 1.5,
-    borderColor: colors.accent + '88',
+    borderColor: tc.accent + '88',
     padding: 10,
     gap: 6,
   },
   lastTimeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  lastTimeTitle: { fontSize: 12, fontWeight: '800', color: colors.accent, textTransform: 'uppercase', letterSpacing: 0.7 },
-  lastTimeBest: { fontSize: 11, color: colors.textPrimary, fontWeight: '700' },
+  lastTimeTitle: { fontSize: 12, fontWeight: '800', color: tc.accent, textTransform: 'uppercase', letterSpacing: 0.7 },
+  lastTimeBest: { fontSize: 11, color: tc.textPrimary, fontWeight: '700' },
   lastTimeRow:      { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
-  lastTimeSetNum:   { fontSize: 11, color: colors.textMuted, width: 36 },
-  lastTimeData:     { flex: 1, fontSize: 12, color: colors.textPrimary, fontWeight: '700' },
-  lastTimeFeedback: { fontSize: 11, color: colors.accent, fontWeight: '700' },
+  lastTimeSetNum:   { fontSize: 11, color: tc.textMuted, width: 36 },
+  lastTimeData:     { flex: 1, fontSize: 12, color: tc.textPrimary, fontWeight: '700' },
+  lastTimeFeedback: { fontSize: 11, color: tc.accent, fontWeight: '700' },
 
   finishBackdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
-  finishModal:       { backgroundColor: colors.surface, borderRadius: radius.xl, padding: 28, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: colors.border, width: '85%' },
-  finishModalTitle:  { fontSize: 26, fontWeight: '800', color: colors.textPrimary },
-  finishModalBody:   { fontSize: 14, color: colors.textSecondary, textAlign: 'center' },
-  finishConfirmBtn:  { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', width: '100%', marginTop: 8 },
-  finishConfirmText: { color: colors.background, fontSize: 16, fontWeight: '700' },
-  finishCancelText:  { fontSize: 14, color: colors.textMuted, marginTop: 4 },
+  finishModal:       { backgroundColor: tc.surface, borderRadius: radius.xl, padding: 28, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: tc.border, width: '85%' },
+  finishModalTitle:  { fontSize: 26, fontWeight: '800', color: tc.textPrimary },
+  finishModalBody:   { fontSize: 14, color: tc.textSecondary, textAlign: 'center' },
+  finishConfirmBtn:  { backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', width: '100%', marginTop: 8 },
+  finishConfirmText: { color: tc.background, fontSize: 16, fontWeight: '700' },
+  finishCancelText:  { fontSize: 14, color: tc.textMuted, marginTop: 4 },
 
-  summaryScroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 24 },
+  summaryScroll: { flexGrow: 1, justifyContent: 'flex-end' },
   summaryModal: {
-    backgroundColor: colors.surface, borderRadius: radius.xl,
-    padding: 24, gap: 14, borderWidth: 1, borderColor: colors.border,
-    width: '90%',
+    backgroundColor: tc.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    padding: 24,
+    paddingBottom: 40,
+    gap: 16,
+    borderTopWidth: 1,
+    borderTopColor: tc.border,
   },
-  summaryTitle:    { fontSize: 26, fontWeight: '800', color: colors.textPrimary, textAlign: 'center' },
-  summarySubtitle: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', marginTop: -8 },
-  summaryLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center', paddingVertical: 12 },
-  summaryLoadingText: { fontSize: 13, color: colors.textSecondary },
-  summaryCaloriesRow: { alignItems: 'center', paddingVertical: 8, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.border },
-  summaryCaloriesValue: { fontSize: 40, fontWeight: '800', color: colors.primary },
-  summaryCaloriesLabel: { fontSize: 12, color: colors.textSecondary, marginTop: -4 },
+  summaryTitle:    { fontSize: 22, fontWeight: '800', color: tc.textPrimary, textAlign: 'center' },
+  summarySubtitle: { fontSize: 13, color: tc.textSecondary, textAlign: 'center' },
+  summaryLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center', paddingVertical: 16 },
+  summaryLoadingText: { fontSize: 13, color: tc.textSecondary },
+  summaryCaloriesRow: {
+    alignItems: 'center', paddingVertical: 10,
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: tc.border,
+  },
+  summaryCaloriesValue: { fontSize: 38, fontWeight: '800', color: tc.primary },
+  summaryCaloriesLabel: { fontSize: 12, color: tc.textSecondary, marginTop: -2 },
   summaryMotivation: {
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.md,
+    padding: 14,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: tc.border,
+    alignItems: 'center',
+  },
+  summaryMotivationText: { fontSize: 14, color: tc.textPrimary, lineHeight: 20, textAlign: 'center' },
+  summarySection: { gap: 6 },
+  summarySectionTitle: { fontSize: 12, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6 },
+  summaryItem: { fontSize: 13, color: tc.textPrimary, lineHeight: 18 },
+
+  // Summary redesign
+  summaryBackdrop:  { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
+  summaryHeaderBlock: { alignItems: 'center', gap: 4, paddingBottom: 4 },
+  summaryEmoji:     { fontSize: 40, marginBottom: 4 },
+  summaryStatsRow:  { flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: tc.border, paddingVertical: 14 },
+  summaryStat:      { flex: 1, alignItems: 'center', gap: 3 },
+  summaryStatDivider: { width: 1, height: 32, backgroundColor: tc.border },
+  summaryStatValue: { fontSize: 22, fontWeight: '800', color: tc.textPrimary },
+  summaryStatLabel: { fontSize: 11, color: tc.textSecondary, fontWeight: '500', textTransform: 'uppercase', letterSpacing: 0.4 },
+  summaryMotivationIcon: { fontSize: 16, marginBottom: 4 },
+  summaryFeedbackBtn: {
+    backgroundColor: tc.primary,
+    borderRadius: radius.md,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  summaryFeedbackBtnText: { color: tc.background, fontSize: 15, fontWeight: '700' },
+  summarySkipBtn:    { alignItems: 'center', paddingVertical: 10 },
+  summarySkipText:   { fontSize: 13, color: tc.textMuted },
+
+  // Feedback form
+  feedbackGroup:     { gap: 10 },
+  feedbackGroupLabel: { fontSize: 13, fontWeight: '700', color: tc.textPrimary },
+  feedbackOptional:  { fontSize: 12, color: tc.textMuted, fontWeight: '400' },
+  feedbackRow:       { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  feedbackChip: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: tc.border,
+    backgroundColor: tc.surfaceRaised,
+    alignItems: 'center',
+    minWidth: 72,
+  },
+  feedbackChipActive: {
+    borderColor: tc.primary,
+    backgroundColor: tc.primary + '20',
+  },
+  feedbackChipText:       { fontSize: 13, color: tc.textSecondary, fontWeight: '600', textAlign: 'center' },
+  feedbackChipTextActive: { color: tc.primary },
+
+  feedbackIntensityChip: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: tc.border,
+    backgroundColor: tc.surfaceRaised,
+    alignItems: 'center',
+    minWidth: 56,
+  },
+
+  feedbackSorenessGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  feedbackSorenessChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: radius.full,
+    borderWidth: 1.5,
+    borderColor: tc.border,
+    backgroundColor: tc.surfaceRaised,
+  },
+  feedbackSorenessChipActive: { borderColor: tc.warning, backgroundColor: tc.warning + '1A' },
+  feedbackSorenessText:       { fontSize: 13, color: tc.textSecondary, fontWeight: '600' },
+  feedbackSorenessTextActive: { color: tc.warning },
+
+  feedbackNotesInput: {
+    borderWidth: 1,
+    borderColor: tc.border,
     borderRadius: radius.md,
     padding: 12,
-    borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
+    color: tc.textPrimary,
+    backgroundColor: tc.background,
+    fontSize: 13,
+    lineHeight: 20,
+    minHeight: 72,
+    textAlignVertical: 'top',
   },
-  summaryMotivationText: { fontSize: 14, color: colors.textPrimary, lineHeight: 20, textAlign: 'center' },
-  summarySection: { gap: 6 },
-  summarySectionTitle: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6 },
-  summaryItem: { fontSize: 13, color: colors.textPrimary, lineHeight: 18 },
+
+  feedbackSubmittingBlock: { alignItems: 'center', gap: 14, paddingVertical: 32 },
+  feedbackSubmittingText:  { fontSize: 14, color: tc.textSecondary, textAlign: 'center', lineHeight: 20 },
+  feedbackResultIcon:      { fontSize: 44 },
+  feedbackResultTitle:     { fontSize: 20, fontWeight: '800', color: tc.success },
+  feedbackResultText:      { fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 20 },
 
   coachSheet: {
     maxHeight: '82%',
-    backgroundColor: colors.surface,
+    backgroundColor: tc.surface,
     borderTopLeftRadius: radius.xl,
     borderTopRightRadius: radius.xl,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
+    borderTopColor: tc.border,
     paddingTop: 14,
     paddingBottom: 12,
   },
   coachHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8 },
-  coachTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
-  coachClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
-  coachHint: { fontSize: 12, color: colors.textSecondary, paddingHorizontal: 16, marginBottom: 8 },
+  coachTitle: { fontSize: 17, fontWeight: '700', color: tc.textPrimary },
+  coachClose: { fontSize: 14, fontWeight: '700', color: tc.primary },
+  coachHint: { fontSize: 12, color: tc.textSecondary, paddingHorizontal: 16, marginBottom: 8 },
   coachPromptRow: { gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
   coachPromptChip: {
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.full,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: tc.surfaceRaised,
     paddingVertical: 7,
     paddingHorizontal: 12,
   },
-  coachPromptChipText: { fontSize: 12, color: colors.textPrimary, fontWeight: '600' },
+  coachPromptChipText: { fontSize: 12, color: tc.textPrimary, fontWeight: '600' },
   coachActionRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 8 },
   coachActionBtn: {
     flex: 1,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: tc.surfaceRaised,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     paddingVertical: 10,
     alignItems: 'center',
   },
-  coachActionText: { fontSize: 12, fontWeight: '700', color: colors.primary },
-  coachSubHint: { fontSize: 11, color: colors.textMuted, paddingHorizontal: 16, marginBottom: 6 },
+  coachActionText: { fontSize: 12, fontWeight: '700', color: tc.primary },
+  coachSubHint: { fontSize: 11, color: tc.textMuted, paddingHorizontal: 16, marginBottom: 6 },
   coachChatList: { paddingHorizontal: 16, paddingBottom: 10, gap: 8 },
   coachEmpty: {
     fontSize: 12,
-    color: colors.textMuted,
-    backgroundColor: colors.surfaceRaised,
+    color: tc.textMuted,
+    backgroundColor: tc.surfaceRaised,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.md,
     padding: 10,
   },
   coachBubble: { borderRadius: radius.md, borderWidth: 1, padding: 10 },
-  coachBubbleUser: { backgroundColor: colors.primary, borderColor: colors.primary, alignSelf: 'flex-end', maxWidth: '90%' },
-  coachBubbleAssistant: { backgroundColor: colors.surfaceRaised, borderColor: colors.border, alignSelf: 'flex-start', maxWidth: '95%' },
-  coachBubbleText: { fontSize: 13, color: colors.textPrimary },
+  coachBubbleUser: { backgroundColor: tc.primary, borderColor: tc.primary, alignSelf: 'flex-end', maxWidth: '90%' },
+  coachBubbleAssistant: { backgroundColor: tc.surfaceRaised, borderColor: tc.border, alignSelf: 'flex-start', maxWidth: '95%' },
+  coachBubbleText: { fontSize: 13, color: tc.textPrimary },
   coachInputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
   coachInput: {
     flex: 1,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.md,
     paddingHorizontal: 10,
     paddingVertical: 8,
     maxHeight: 110,
-    backgroundColor: colors.background,
-    color: colors.textPrimary,
+    backgroundColor: tc.background,
+    color: tc.textPrimary,
   },
-  coachSendBtn: { backgroundColor: colors.primary, borderRadius: radius.md, minWidth: 64, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
-  coachSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+  coachSendBtn: { backgroundColor: tc.primary, borderRadius: radius.md, minWidth: 64, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
+  coachSendText: { color: tc.background, fontSize: 13, fontWeight: '700' },
   addExerciseSearch: {
     marginHorizontal: 16,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.md,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    backgroundColor: colors.background,
-    color: colors.textPrimary,
+    backgroundColor: tc.background,
+    color: tc.textPrimary,
   },
   addExerciseList: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 16, gap: 8 },
   addExerciseItem: {
@@ -1803,12 +2134,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: tc.border,
     borderRadius: radius.md,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: tc.surfaceRaised,
     padding: 12,
   },
-  addExerciseName: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
-  addExerciseMeta: { fontSize: 12, color: colors.textSecondary },
-  addExerciseUse: { fontSize: 12, color: colors.primary, fontWeight: '700' },
-});
+  addExerciseName: { fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginBottom: 2 },
+  addExerciseMeta: { fontSize: 12, color: tc.textSecondary },
+  addExerciseUse: { fontSize: 12, color: tc.primary, fontWeight: '700' },
+}); }

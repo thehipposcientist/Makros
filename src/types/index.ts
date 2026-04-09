@@ -10,12 +10,17 @@ export type Goal =
   | 'toning'
   | 'maintain'
   | 'flexibility'
-  | 'stress_relief';
+  | 'stress_relief'
+  | 'longevity';
 
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
-export type AppThemeName = 'midnight' | 'cocoa' | 'neon' | 'forest' | 'slate' | 'sunrise' | 'arctic' | 'rose' | 'wine' | 'ocean' | 'ember' | 'amethyst' | 'copper';
+export type AppThemeName =
+  | 'midnight' | 'neon'    | 'ocean'   | 'forest'
+  | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
+  | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
+  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom';
 
 export interface GoalOption {
   value: Goal;
@@ -70,6 +75,28 @@ export interface SavedMealTemplate {
   fat: number;
 }
 
+// ─── Injury tracking ─────────────────────────────────────────────────────────
+
+export type InjuryStatus = 'active' | 'recovering' | 'resolved';
+
+export interface InjuryEntry {
+  id: string;
+  description: string;           // e.g. "Lower back pain when deadlifting"
+  bodyPart: string;              // e.g. "Lower back"
+  reportedAt: string;            // ISO date string
+  status: InjuryStatus;
+  notes?: string;                // optional follow-up notes
+}
+
+// ─── User history log ─────────────────────────────────────────────────────────
+
+export interface UserLogEntry {
+  id: string;
+  date: string;                  // ISO date string
+  type: 'injury_added' | 'injury_status_update' | 'plan_generated' | 'weight_updated' | 'goal_updated';
+  summary: string;               // human-readable one-liner
+}
+
 export interface UserProfile {
   goal: Goal;
   goalDetails: GoalDetails;
@@ -79,10 +106,12 @@ export interface UserProfile {
   workoutDurationMinutes: number;
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   foodsAvailable: string[];
+  supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
   savedMeals?: SavedMealTemplate[];
   mealRoutine?: string;          // user's fixed meal habits
-  injuries?: string;             // injuries or physical limitations
+  injuries?: string;             // legacy: free-text injuries
+  injuryEntries?: InjuryEntry[]; // structured injury tracking with statuses
   experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
 }
@@ -107,6 +136,7 @@ export interface WorkoutPlan {
   name: string;
   totalDays: number;
   days: WorkoutDay[];
+  trainerNote?: string;  // AI explanation of why this plan was structured this way
 }
 
 // ─── Nutrition plan types ─────────────────────────────────────────────────────
@@ -127,6 +157,15 @@ export interface MealSuggestion {
   carbs?: number;
   fat?: number;
   instructions?: string; // brief recipe/cooking notes
+  isRoutine?: boolean;   // user eats this meal every day — AI keeps it fixed
+}
+
+export interface SupplementItem {
+  name: string;          // e.g. "Creatine Monohydrate"
+  dose: string;          // e.g. "5g"
+  timing: string;        // e.g. "Post-workout or anytime"
+  purpose: string;       // e.g. "Increases muscle power and recovery"
+  checked?: boolean;     // user has taken it today
 }
 
 export interface WorkoutSummary {
@@ -144,6 +183,8 @@ export interface DailyNutritionPlan {
   extraMeals?: MealSuggestion[];
   removedMeals?: string[];
   targets: NutritionTargets;
+  nutritionistNote?: string;   // AI explanation of why this plan was chosen
+  supplementStack?: SupplementItem[]; // recommended supplements
 }
 
 export interface DailyPlan {
@@ -180,6 +221,21 @@ export interface WorkoutSession {
   durationSeconds: number;
   exercises: SessionExercise[];
   completed: boolean;
+  skipped?: boolean;      // true when the user skipped this day
+  skipReason?: string;    // reason selected or typed by user
+  feedback?: PostWorkoutFeedback;  // collected after finish
+}
+
+// ─── Post-workout feedback ────────────────────────────────────────────────────
+
+export type WorkoutFeeling = 'great' | 'good' | 'okay' | 'rough';
+export type WorkoutIntensity = 1 | 2 | 3 | 4 | 5; // 1=way too easy → 5=way too hard
+
+export interface PostWorkoutFeedback {
+  feeling: WorkoutFeeling;
+  intensity: WorkoutIntensity;
+  sorenessAreas: string[];
+  notes: string;
 }
 
 // ─── Navigation types ─────────────────────────────────────────────────────────

@@ -21,18 +21,59 @@ import {
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto } from '../services/api';
 
-const logo = require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png');
+const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'mealRoutine' | 'context';
+type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'context';
 
 function getSteps(goal: Goal, lifestyleGoals: Set<string>): StepKey[] {
   if (lifestyleGoals.has(goal)) {
-    return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'mealRoutine', 'context'];
+    return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
   }
-  return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'mealRoutine', 'context'];
+  return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
 }
+
+// ─── Supplement categories ────────────────────────────────────────────────────
+
+const SUPPLEMENT_CATEGORIES = [
+  {
+    key: 'protein',
+    icon: '🥛',
+    label: 'Protein',
+    items: ['Whey Protein', 'Casein Protein', 'Plant Protein', 'Egg White Protein', 'Collagen Peptides'],
+  },
+  {
+    key: 'performance',
+    icon: '⚡',
+    label: 'Performance',
+    items: ['Creatine Monohydrate', 'Beta-Alanine', 'L-Citrulline', 'Pre-Workout', 'Caffeine', 'HMB'],
+  },
+  {
+    key: 'recovery',
+    icon: '💪',
+    label: 'Recovery & Muscle',
+    items: ['BCAA', 'EAA', 'L-Glutamine', 'Tart Cherry Extract', 'Electrolytes'],
+  },
+  {
+    key: 'health',
+    icon: '❤️',
+    label: 'Health & Vitamins',
+    items: ['Vitamin D', 'Omega-3 / Fish Oil', 'Zinc', 'Multivitamin', 'Vitamin C', 'Iron', 'B12'],
+  },
+  {
+    key: 'weight',
+    icon: '🔥',
+    label: 'Weight Management',
+    items: ['L-Carnitine', 'CLA', 'Green Tea Extract', 'Psyllium Fiber', 'Thermogenic'],
+  },
+  {
+    key: 'sleep',
+    icon: '😴',
+    label: 'Sleep & Stress',
+    items: ['Melatonin', 'Ashwagandha', 'ZMA', 'Magnesium Glycinate', 'L-Theanine'],
+  },
+];
 
 // ─── Equipment templates ──────────────────────────────────────────────────────
 
@@ -153,6 +194,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
   const [foodScanLoading, setFoodScanLoading] = useState(false);
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
+
+  // Step 7 — Supplements
+  const [supplementsAvailable, setSupplementsAvailable] = useState<string[]>([]);
   const [showFoodScanModal, setShowFoodScanModal] = useState(false);
 
   // Step 7 — Meal routine
@@ -253,6 +297,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       workoutDurationMinutes: workoutDuration,
       equipment:              selectedEquipment,
       foodsAvailable,
+      supplementsAvailable: supplementsAvailable.length > 0 ? supplementsAvailable : undefined,
       customFoods: [],
       mealRoutine:         mealRoutine.trim()         || undefined,
       injuries:            injuries.trim()            || undefined,
@@ -334,7 +379,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     try {
       const allItems: { name: string; selected: boolean }[] = [];
       for (const base64 of images) {
-        const resp = await scanFoodsPhoto(authToken, { image_base64: base64 });
+        const resp = await scanFoodsPhoto(authToken, { images: [{ image_base64: base64 }] });
         const items = (resp.foods ?? []).map((f: any) => ({ name: f.name, selected: true }));
         for (const item of items) {
           if (!allItems.some(existing => existing.name === item.name)) {
@@ -819,6 +864,45 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     </View>
   );
 
+  const toggleSupplement = (name: string) => {
+    setSupplementsAvailable(prev =>
+      prev.includes(name) ? prev.filter(s => s !== name) : [...prev, name]
+    );
+  };
+
+  const renderSupplementsStep = () => (
+    <View style={styles.stepContainer}>
+      <Text style={styles.stepTitle}>What supplements do you take?</Text>
+      <Text style={styles.stepDescription}>
+        Select what you already have or use — your AI trainer will factor these into your supplement recommendations
+        {supplementsAvailable.length > 0 ? `  ·  ${supplementsAvailable.length} selected` : ''}
+      </Text>
+
+      {SUPPLEMENT_CATEGORIES.map(category => (
+        <View key={category.key} style={styles.foodCategory}>
+          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+          <View style={styles.foodChips}>
+            {category.items.map(item => {
+              const selected = supplementsAvailable.includes(item);
+              return (
+                <TouchableOpacity
+                  key={item}
+                  style={[styles.foodChip, selected && styles.foodChipActive]}
+                  onPress={() => toggleSupplement(item)}>
+                  <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                    {item}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      ))}
+
+      <Text style={styles.hint}>Skip if you don't take any — the AI will recommend what's best for your goal</Text>
+    </View>
+  );
+
   const renderMealRoutineStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Meal Routine</Text>
@@ -909,6 +993,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       case 'trainingDays':  return renderTrainingDaysStep();
       case 'equipment':     return renderEquipmentStep();
       case 'foods':         return renderFoodsStep();
+      case 'supplements':   return renderSupplementsStep();
       case 'mealRoutine':   return renderMealRoutineStep();
       case 'context':       return renderContextStep();
     }

@@ -8,7 +8,7 @@ import { login, register } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 const { width: SCREEN_W } = Dimensions.get('window');
-const logo = require('../../assets/images/Apple dumbbell logo with _MAKROS_ text.png');
+const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 
 interface AuthScreenProps {
   onAuthenticated: (token: string, isNewUser: boolean) => void;
@@ -215,7 +215,7 @@ const styles = StyleSheet.create({
   content: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 60, paddingBottom: 24 },
 
   logoContainer: { alignItems: 'center', marginBottom: 24 },
-  logo:          { width: SCREEN_W * 0.88, height: SCREEN_W * 0.88 * 0.44 },
+  logo:          { width: SCREEN_W * 0.96, height: SCREEN_W * 0.96 * 0.44 },
   tagline:       { fontSize: 15, color: colors.textSecondary, marginTop: 14, textAlign: 'center', fontWeight: '500', letterSpacing: 0.2 },
   featureRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14, justifyContent: 'center' },
   featureChip:   { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.border },
