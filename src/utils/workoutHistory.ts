@@ -1,8 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, CompletedSet } from '../types';
+import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry } from '../types';
 
-const HISTORY_KEY = 'workoutHistory';
-const SKIPPED_KEY = 'skippedWorkouts';
+const HISTORY_KEY        = 'workoutHistory';
+const SKIPPED_KEY        = 'skippedWorkouts';
+const SUMMARIES_KEY      = 'workoutSummaries';
+const GOAL_HIST_KEY      = 'goalHistory';
+const PLAN_CHANGES_KEY   = 'planChangeHistory';
+const MEAL_ROUTINES_KEY  = 'mealRoutines';
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -117,6 +121,102 @@ export async function removeSkippedDay(date: string): Promise<void> {
   const days = await getSkippedDays();
   const nextDays = days.filter(day => day.date !== date);
   await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(nextDays));
+}
+
+// ── Workout summaries ─────────────────────────────────────────────────────────
+
+export async function saveWorkoutSummary(summary: StoredWorkoutSummary): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
+    const existing: StoredWorkoutSummary[] = raw ? JSON.parse(raw) : [];
+    existing.unshift(summary);
+    await AsyncStorage.setItem(SUMMARIES_KEY, JSON.stringify(existing.slice(0, 100)));
+  } catch {}
+}
+
+export async function loadWorkoutSummaries(): Promise<StoredWorkoutSummary[]> {
+  try {
+    const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+// ── Goal history ──────────────────────────────────────────────────────────────
+
+export async function loadGoalHistory(): Promise<GoalHistoryEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(GOAL_HIST_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Call when the user switches goals. Closes the current open entry and opens a new one.
+ */
+export async function recordGoalChange(
+  newGoal: import('../types').Goal,
+  newPace: import('../types').GoalPace,
+  startWeightLbs?: number,
+): Promise<void> {
+  try {
+    const history = await loadGoalHistory();
+    const now = new Date().toISOString();
+    const nowDate = now.slice(0, 10); // YYYY-MM-DD
+    // Close the currently open entry (no endedAt), dropping any that started AND ended today
+    const updated = history
+      .map(e => (!e.endedAt ? { ...e, endedAt: now } : e))
+      .filter(e => !e.endedAt || e.startedAt.slice(0, 10) !== e.endedAt.slice(0, 10));
+    const newEntry: GoalHistoryEntry = {
+      id: Date.now().toString(),
+      goal: newGoal,
+      pace: newPace,
+      startedAt: now,
+      startWeightLbs,
+    };
+    updated.unshift(newEntry);
+    await AsyncStorage.setItem(GOAL_HIST_KEY, JSON.stringify(updated.slice(0, 50)));
+  } catch {}
+}
+
+// ── Meal routines ─────────────────────────────────────────────────────────────
+
+export async function loadMealRoutines(): Promise<MealRoutineEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(MEAL_ROUTINES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveMealRoutines(routines: MealRoutineEntry[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(MEAL_ROUTINES_KEY, JSON.stringify(routines));
+  } catch {}
+}
+
+// ── Plan change history ───────────────────────────────────────────────────────
+
+export async function savePlanChange(entry: PlanChangeEntry): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(PLAN_CHANGES_KEY);
+    const existing: PlanChangeEntry[] = raw ? JSON.parse(raw) : [];
+    existing.unshift(entry);
+    await AsyncStorage.setItem(PLAN_CHANGES_KEY, JSON.stringify(existing.slice(0, 200)));
+  } catch {}
+}
+
+export async function loadPlanChanges(): Promise<PlanChangeEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(PLAN_CHANGES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Personal Records ──────────────────────────────────────────────────────────

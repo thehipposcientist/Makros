@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -57,8 +58,10 @@ class GoalDetailsIn(BaseModel):
 
 
 class PlanRequest(BaseModel):
-    # Core (required)
+    """Full plan generation — both workout and nutrition."""
     goal: str
+    secondaryGoal: str | None = None
+    focusedMuscleGroup: str | None = None
     goalDetails: GoalDetailsIn
     physicalStats: PhysicalStatsIn
     daysPerWeek: int
@@ -67,24 +70,55 @@ class PlanRequest(BaseModel):
     foodsAvailable: list[str]
 
     # Training context (optional)
-    experienceLevel: str | None = None        # beginner | intermediate | advanced
-    recoveryLevel: str | None = None          # low | normal | high
-    workoutFocus: str | None = None           # e.g. "upper body", "full body"
-    preferredSplit: str | None = None         # e.g. "PPL", "upper/lower", "full body"
-    preferredExercises: list[str] = []        # exercises the user likes
-    dislikedExercises: list[str] = []         # exercises to avoid
-    injuriesOrLimitations: list[str] = []     # e.g. ["bad knees", "lower back pain"]
-    exerciseLibrary: list[dict] = []          # [{name, equipment, primary_muscle, ...}]
+    experienceLevel: str | None = None
+    recoveryLevel: str | None = None
+    workoutFocus: str | None = None
+    preferredSplit: str | None = None
+    preferredExercises: list[str] = []
+    dislikedExercises: list[str] = []
+    injuriesOrLimitations: list[str] = []
+    exerciseLibrary: list[dict] = []
 
     # Nutrition context (optional)
-    dietaryPreference: str | None = None      # e.g. "vegan", "vegetarian", "keto", "halal"
-    allergies: list[str] = []                 # e.g. ["nuts", "dairy"]
-    mealsPerDay: int = 3                      # 2, 3, or 4
-    cookingSkill: str | None = None           # beginner | intermediate | advanced
-    prepTimeMinutes: int | None = None        # max cook/prep time per meal
-    budgetLevel: str | None = None            # low | medium | high
-    supplementsAvailable: list[str] = []      # supplements the user already takes/has
-    userContext: str | None = None             # recent activity log for personalization
+    dietaryPreference: str | None = None
+    allergies: list[str] = []
+    mealsPerDay: int = 3
+    cookingSkill: str | None = None
+    prepTimeMinutes: int | None = None
+    budgetLevel: str | None = None
+    supplementsAvailable: list[str] = []
+    userContext: str | None = None
+
+
+class WorkoutOnlyRequest(BaseModel):
+    """Workout-only plan generation — no food/nutrition fields."""
+    goal: str
+    secondaryGoal: str | None = None
+    focusedMuscleGroup: str | None = None
+    goalDetails: GoalDetailsIn
+    physicalStats: PhysicalStatsIn
+    daysPerWeek: int
+    workoutDurationMinutes: int = 60
+    equipment: list[str]
+
+    experienceLevel: str | None = None
+    injuriesOrLimitations: list[str] = []
+    userContext: str | None = None
+
+
+class NutritionOnlyRequest(BaseModel):
+    """Nutrition-only plan generation — no equipment fields."""
+    goal: str
+    goalDetails: GoalDetailsIn
+    physicalStats: PhysicalStatsIn
+    daysPerWeek: int
+
+    foodsAvailable: list[str]
+    supplementsAvailable: list[str] = []
+    dietaryPreference: str | None = None
+    allergies: list[str] = []
+    mealsPerDay: int = 3
+    userContext: str | None = None
 
 
 class CompletedSetIn(BaseModel):
@@ -118,11 +152,13 @@ class WeightRecommendRequest(BaseModel):
 
 class TrainerQuestionRequest(BaseModel):
     question: str
+    mode: str = "trainer"          # "trainer" | "nutritionist"
     profile: dict
     workoutPlan: dict | None = None
     nutritionPlan: dict | None = None
     progress: dict | None = None
     conversation: list[dict] | None = None
+    userContext: str | None = None  # recent activity log, same as plan generation
     image_base64: str | None = None
     mime_type: str = "image/jpeg"
 
@@ -498,7 +534,6 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
             f'      "protein": {prot},\n'
             f'      "carbs": {carb},\n'
             f'      "fat": {fat_g},\n'
-            f'      "instructions": "1-3 sentence method.",\n'
             f'      "estimated_alignment": "e.g. high protein, moderate carb"\n'
             f'    }}'
         )
@@ -543,7 +578,8 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
     return summary, schema
 
 
-def build_prompt(req: PlanRequest) -> str:
+def build_workout_prompt(req: PlanRequest) -> str:
+    """Prompt for workout plan only — runs in parallel with nutrition prompt."""
     ps  = req.physicalStats
     t   = compute_tdee_and_targets(req)
 
@@ -619,8 +655,27 @@ def build_prompt(req: PlanRequest) -> str:
             "GOAL IS STRESS RELIEF: Low-intensity, enjoyable movement. Light strength, easy cardio, yoga. "
             "Keep sessions feel-good, not exhausting."
         ),
+        "longevity": (
+            "GOAL IS LONGEVITY: Focus on joint-friendly compound movements, mobility work, and sustainable "
+            "training. Moderate intensity, controlled tempo, emphasis on form and recovery. "
+            "Avoid maximal loading or high-impact movements."
+        ),
     }
-    goal_rule = goal_workout_rules.get(req.goal, f"Goal is {req.goal} — choose appropriate exercise selection and intensity.")
+    primary_rule = goal_workout_rules.get(req.goal, f"Goal is {req.goal} — choose appropriate exercise selection and intensity.")
+    if req.secondaryGoal and req.secondaryGoal != req.goal:
+        secondary_rule = goal_workout_rules.get(req.secondaryGoal, "")
+        goal_rule = (
+            f"PRIMARY GOAL: {primary_rule}\n"
+            f"SECONDARY GOAL (blend into programming where possible): {secondary_rule}"
+        )
+    else:
+        goal_rule = primary_rule
+    focused_muscle_line = (
+        f"FOCUSED MUSCLE GROUP: The user wants to emphasise {req.focusedMuscleGroup} — "
+        f"include at least one dedicated {req.focusedMuscleGroup} session per week and "
+        f"prioritise {req.focusedMuscleGroup} volume across the plan."
+        if req.focusedMuscleGroup else ""
+    )
 
     # ── Experience / recovery / split context ────────────────────────────────
     exp_str      = req.experienceLevel or "intermediate"
@@ -671,90 +726,118 @@ def build_prompt(req: PlanRequest) -> str:
     # ── Per-meal targets and JSON schema ────────────────────────────────────
     meal_summary, meal_schema = _meal_schema_and_targets(t)
 
-    # ── Final prompt ─────────────────────────────────────────────────────────
-    return f"""You are an expert fitness coach and registered dietitian.
-Generate a personalised weekly workout plan and daily nutrition plan for this user.
+    # ── Workout prompt ────────────────────────────────────────────────────────
+    return f"""You are an expert fitness coach.
+Generate a personalised {req.daysPerWeek}-day weekly workout plan for this user.
 
-═══ USER PROFILE ═══
-- Goal: {req.goal} (pace: {req.goalDetails.pace})
-- Age: {ps.age}  Gender: {ps.gender}
-- Weight: {ps.weightLbs} lbs  Height: {height_str}
+USER PROFILE:
+- Primary goal: {req.goal} (pace: {req.goalDetails.pace}){f"  |  Secondary goal: {req.secondaryGoal}" if req.secondaryGoal else ""}
+- Age: {ps.age}  Gender: {ps.gender}  Weight: {ps.weightLbs} lbs  Height: {height_str}
 {f"- Target weight: {req.goalDetails.targetWeightLbs} lbs" if req.goalDetails.targetWeightLbs else ""}
 - Training days/week: {req.daysPerWeek}  Session length: {req.workoutDurationMinutes} min
-- Experience level: {exp_str}
-- Recovery level: {recovery_str}
-- Preferred split: {split_str}
-- Workout focus: {focus_str}
-- Calorie strategy: {t['goal_rate_summary']}
+- Experience: {exp_str}  Recovery: {recovery_str}
+- Preferred split: {split_str}  Focus: {focus_str}
 
-═══ EQUIPMENT ═══
+EQUIPMENT:
 Available: {equipment_str}
 Cardio equipment: {', '.join(cardio_equipment) if cardio_equipment else 'none'}
 FORBIDDEN (user does NOT own): {forbidden_str}
 
-═══ WORKOUT PERSONALISATION ═══
 {library_str}
 {preferred_str}
 {disliked_str}
 {injury_str}
-{f"Recent history context:{chr(10)}{req.userContext}" if req.userContext else ""}
+{f"Recent history:{chr(10)}{req.userContext}" if req.userContext else ""}
 
-═══ GOAL-SPECIFIC WORKOUT RULE (follow strictly) ═══
-{goal_rule}
+GOAL RULE (follow strictly): {goal_rule}
+{focused_muscle_line}
 
-═══ NUTRITION CONTEXT ═══
-Foods available: {foods_str}
-Supplements the user already takes: {supps_str if supps_str else "none specified — recommend what's best for their goal"}
-{diet_context}
-Meals per day: {t['meals']}
-
-═══ DAILY NUTRITION TARGETS (server-computed — include in targets exactly) ═══
-Total: {t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
-Per-meal approximate targets (for your reference only — do NOT force exact matches):
-{meal_summary}
-
-═══ INSTRUCTIONS ═══
-WORKOUT:
+INSTRUCTIONS:
 - Provide exactly {req.daysPerWeek} training day objects.
-- Each exercise: realistic sets, reps string (e.g. "8-10"), restSeconds integer, equipment string.
-- Sessions should fill approximately {req.workoutDurationMinutes} minutes (roughly 8 min per exercise slot).
-- ONLY use exercises requiring equipment from the user's available list.
-- Respect the goal rule, experience level, injuries, and disliked exercises above.
+- Each exercise: sets (int), reps (string e.g. "8-10"), restSeconds (int), equipment (string).
+- Sessions should fill ~{req.workoutDurationMinutes} minutes (roughly 8 min per exercise slot).
+- ONLY use exercises requiring equipment from the available list.
 - If an exercise library is provided, use ONLY exercises from that list.
-- REQUIRED: "trainerNote" must be a thorough, personalised paragraph (aim for 150-250 words) covering: why this specific split was chosen for this user, how the session structure matches their schedule and goal, the progression logic (volume, intensity, rep ranges), which muscle groups are prioritised and why, any adjustments made for their experience level or injuries, and what they should focus on to make the most progress. Be specific — reference their actual goal, days per week, and equipment. DO NOT omit this field.
+- If recent workout history is provided, check which muscles were trained in the last 1-2 days and give them adequate recovery — do not schedule the same primary muscle group within 48 hours.
 
-NUTRITION:
-- Use foods from the user's available list or close real-food substitutes.
-- Respect dietary preference, allergies, cooking skill, prep time, and budget.
-- For each meal, write a realistic recipe name, ingredient list with amounts, and brief instructions.
-- Add an "estimated_alignment" field (e.g. "high protein, moderate carb") — do NOT provide exact per-meal macro numbers.
-- The overall targets in "targets" must match the server-computed values exactly.
-- REQUIRED: "nutritionistNote" must be a thorough, personalised paragraph (aim for 150-250 words) covering: why this specific calorie target was set, how the macro split (protein/carbs/fat) was chosen for this user's goal and body, meal timing strategy, which foods were prioritised from their available list and why, any dietary adjustments made, and practical advice for hitting their targets consistently. Be specific — reference their actual calorie goal, macro numbers, and goal. Do NOT mention supplements here. DO NOT omit this field.
-- REQUIRED: "supplementStack" must be a non-empty array of 2-4 evidence-based supplements. Prioritise supplements from the user's existing list if applicable — then add any critical missing ones. Include name, dose, timing, and purpose for each. DO NOT omit this field.
-
-Return ONLY valid JSON — no markdown, no extra text — matching this schema exactly:
-
+Return ONLY valid JSON matching this schema exactly:
 {{
+  "trainerNote": "60-80 word explanation of why this split suits this user's goal and equipment.",
   "workout_plan": {{
     "name": "string",
     "totalDays": {req.daysPerWeek},
-    "trainerNote": "Detailed personalised explanation (150-250 words) of why this specific workout split, volume, intensity, and exercise selection was chosen for this user's goal, schedule, experience level, and available equipment.",
     "days": [
       {{
         "day": "Day 1",
         "focus": "string",
         "exercises": [
-          {{
-            "name": "string",
-            "sets": 3,
-            "reps": "8-10",
-            "restSeconds": 60,
-            "equipment": "string"
-          }}
+          {{"name": "string", "sets": 3, "reps": "8-10", "restSeconds": 60, "equipment": "string"}}
         ]
       }}
     ]
-  }},
+  }}
+}}
+
+IMPORTANT: Each day must have exactly 5 exercises. No more, no fewer."""
+
+
+def build_nutrition_prompt(req: PlanRequest) -> str:
+    """Prompt for nutrition plan only — runs in parallel with workout prompt."""
+    ps  = req.physicalStats
+    t   = compute_tdee_and_targets(req)
+    foods_str = ", ".join(req.foodsAvailable) if req.foodsAvailable else "general healthy foods"
+    supps_str = ", ".join(req.supplementsAvailable) if req.supplementsAvailable else None
+
+    diet_lines: list[str] = []
+    if req.dietaryPreference:
+        diet_lines.append(f"Dietary preference: {req.dietaryPreference}")
+    if req.allergies:
+        diet_lines.append(f"Allergies (NEVER include): {', '.join(req.allergies)}")
+    if req.cookingSkill:
+        diet_lines.append(f"Cooking skill: {req.cookingSkill}")
+    if req.prepTimeMinutes:
+        diet_lines.append(f"Max prep time: {req.prepTimeMinutes} min")
+    if req.budgetLevel:
+        diet_lines.append(f"Budget: {req.budgetLevel}")
+    diet_context = "\n".join(f"- {l}" for l in diet_lines) if diet_lines else "- No special restrictions"
+
+    height_str = f"{ps.heightFeet}'{ps.heightInches}\""
+    _, meal_schema = _meal_schema_and_targets(t)
+    meal_summary, _ = _meal_schema_and_targets(t)
+
+    return f"""You are a registered dietitian.
+Generate a personalised daily nutrition plan for this user.
+
+USER PROFILE:
+- Goal: {req.goal} (pace: {req.goalDetails.pace})
+- Age: {ps.age}  Gender: {ps.gender}  Weight: {ps.weightLbs} lbs  Height: {height_str}
+- Calorie strategy: {t['goal_rate_summary']}
+
+STRICT FOOD CONSTRAINT — THIS IS NON-NEGOTIABLE:
+The user's ONLY available foods are: {foods_str}
+
+Every single ingredient in every meal MUST come from this list and nowhere else.
+Do NOT add any food that is not in this list — not as a variation, not as a substitution, not as a garnish.
+If a food is not on the list above, it does not exist for this user. Do not use it.
+
+Supplements user already takes: {supps_str if supps_str else "none — recommend best for goal"}
+{diet_context}
+Meals per day: {t['meals']}
+
+DAILY TARGETS (include these exactly in "targets"):
+{t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
+Per-meal approximate targets (reference only):
+{meal_summary}
+
+INSTRUCTIONS:
+- Every ingredient must be from the available foods list above — no exceptions.
+- For each meal: recipe name and ingredient list with amounts.
+- Add "estimated_alignment" field (e.g. "high protein, moderate carb").
+- supplementStack: 2-4 evidence-based supplements. Prioritise from user's existing list, add critical missing ones.
+
+Return ONLY valid JSON matching this schema exactly:
+{{
+  "nutritionistNote": "60-80 word explanation of calorie target, macro split, and food choices for this user.",
   "nutrition_plan": {{
     "targets": {{
       "calories": {t['calories']},
@@ -762,14 +845,8 @@ Return ONLY valid JSON — no markdown, no extra text — matching this schema e
       "carbs": {t['carbs']},
       "fat": {t['fat']}
     }},
-    "nutritionistNote": "Detailed personalised explanation (150-250 words) of why this specific calorie target, macro split, food choices, and meal structure was chosen for this user's goal, body stats, and available foods.",
     "supplementStack": [
-      {{
-        "name": "Supplement name (e.g. Creatine Monohydrate)",
-        "dose": "Dose with unit (e.g. 5g)",
-        "timing": "When to take it (e.g. Post-workout or anytime)",
-        "purpose": "One sentence on why this supplement helps for this goal"
-      }}
+      {{"name": "string", "dose": "string", "timing": "string", "purpose": "string"}}
     ],
 {meal_schema}
   }}
@@ -779,7 +856,7 @@ Return ONLY valid JSON — no markdown, no extra text — matching this schema e
 # ─── Validation helper ────────────────────────────────────────────────────────
 
 def _validate_plans(plans: dict, req: PlanRequest) -> None:
-    """Raise ValueError with a descriptive message if the AI response is structurally invalid."""
+    """Raise ValueError only for hard structural failures that make the plan unusable."""
     if "workout_plan" not in plans:
         raise ValueError("AI response missing 'workout_plan'")
     if "nutrition_plan" not in plans:
@@ -787,36 +864,138 @@ def _validate_plans(plans: dict, req: PlanRequest) -> None:
 
     wp = plans["workout_plan"]
     days = wp.get("days", [])
-    if len(days) != req.daysPerWeek:
+    # Accept if AI generates at least 1 day (it may round down on very long plans)
+    if not days:
+        raise ValueError("workout_plan.days is empty")
+    if len(days) < req.daysPerWeek - 1:
         raise ValueError(
-            f"workout_plan.days has {len(days)} entries, expected {req.daysPerWeek}"
+            f"workout_plan.days has only {len(days)} entries, expected {req.daysPerWeek}"
         )
 
     np_ = plans["nutrition_plan"]
     if "targets" not in np_:
         raise ValueError("nutrition_plan missing 'targets'")
 
-    meals = req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
-    if meals == 2:
-        required_meals = {"lunch", "dinner"}
-    elif meals == 4:
-        required_meals = {"breakfast", "lunch", "dinner", "snack"}
-    else:
-        required_meals = {"breakfast", "lunch", "dinner"}
+    # Require at least one meal key — don't hard-fail on missing snack etc.
+    meal_keys = {"breakfast", "lunch", "dinner", "snack"}
+    if not any(k in np_ for k in meal_keys):
+        raise ValueError("nutrition_plan has no meal entries")
 
-    missing = required_meals - set(np_.keys())
-    if missing:
-        raise ValueError(f"nutrition_plan missing meal keys: {', '.join(sorted(missing))}")
-
-    # Validate required note fields (minimum 80 chars to reject lazy 1-sentence responses)
-    trainer_note = wp.get("trainerNote", "")
-    if not trainer_note or len(trainer_note) < 80:
-        raise ValueError(f"trainerNote too short ({len(trainer_note)} chars) — must be a detailed personalised explanation")
-    nutritionist_note = np_.get("nutritionistNote", "")
-    if not nutritionist_note or len(nutritionist_note) < 80:
-        raise ValueError(f"nutritionistNote too short ({len(nutritionist_note)} chars) — must be a detailed personalised explanation")
+    # Notes and supplementStack are logged but NOT blocking — the plan works without them
+    trainer_note = plans.get("trainerNote", "") or wp.get("trainerNote", "")
+    nutritionist_note = plans.get("nutritionistNote", "") or np_.get("nutritionistNote", "")
+    if not trainer_note:
+        print("[AI /plans] WARNING: trainerNote missing from response")
+    if not nutritionist_note:
+        print("[AI /plans] WARNING: nutritionistNote missing from response")
     if not np_.get("supplementStack"):
-        raise ValueError("nutrition_plan missing required 'supplementStack'")
+        print("[AI /plans] WARNING: supplementStack missing from response")
+
+
+# ─── Parallel AI call helpers ────────────────────────────────────────────────
+
+def _call_workout_ai(client: OpenAI, prompt: str) -> dict:
+    """Synchronous OpenAI call for the workout plan (run in a thread)."""
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        try:
+            response = client.chat.completions.create(
+                model=get_openai_model(),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You are an expert fitness coach. Always respond with valid JSON only — no markdown, no extra text."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                timeout=100,
+            )
+            data = json.loads(response.choices[0].message.content)
+            if not data.get("workout_plan") or not data["workout_plan"].get("days"):
+                raise ValueError("workout_plan missing or has no days")
+            print(f"[AI /plans workout] attempt {attempt} OK — {len(data['workout_plan']['days'])} days, trainerNote: {bool(data.get('trainerNote'))}")
+            return data
+        except json.JSONDecodeError as e:
+            last_error = ValueError(f"invalid JSON attempt {attempt}: {e}")
+        except ValueError as e:
+            last_error = e
+            print(f"[AI /plans workout] attempt {attempt} failed: {e}")
+        except Exception as e:
+            raise
+    raise ValueError(f"Workout generation failed after 2 attempts: {last_error}")
+
+
+def _check_food_violations(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
+    """
+    Return a list of food strings that appear in the plan but are NOT covered
+    by the allowed_foods list.  A food item is 'covered' if at least one allowed
+    food name is a case-insensitive substring of the ingredient string.
+    """
+    if not allowed_foods:
+        return []
+    allowed_lower = [f.lower() for f in allowed_foods]
+    meal_keys = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
+    violations: list[str] = []
+    for key in meal_keys:
+        meal = nutrition_plan.get(key)
+        if not meal or not isinstance(meal, dict):
+            continue
+        for food_item in meal.get("foods", []):
+            item_lower = str(food_item).lower()
+            # Strip quantities like "150g ", "2 tbsp " before checking
+            # covered = at least one allowed food is a substring of the item
+            if not any(a in item_lower for a in allowed_lower):
+                violations.append(food_item)
+    return violations
+
+
+def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | None = None) -> dict:
+    """Synchronous OpenAI call for the nutrition plan (run in a thread)."""
+    last_error: Exception | None = None
+    violation_note = ""
+    for attempt in range(1, 4):  # up to 3 attempts
+        try:
+            full_prompt = prompt + violation_note
+            response = client.chat.completions.create(
+                model=get_openai_model(),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You are a registered dietitian. Always respond with valid JSON only — no markdown, no extra text."},
+                    {"role": "user", "content": full_prompt},
+                ],
+                temperature=0.7,
+                timeout=100,
+            )
+            data = json.loads(response.choices[0].message.content)
+            np_ = data.get("nutrition_plan", {})
+            if not np_.get("targets"):
+                raise ValueError("nutrition_plan missing targets")
+            meal_keys_set = {"breakfast", "lunch", "dinner", "snack"}
+            if not any(k in np_ for k in meal_keys_set):
+                raise ValueError("nutrition_plan has no meal entries")
+
+            # Food constraint check — reject and retry if forbidden foods used
+            if allowed_foods:
+                violations = _check_food_violations(np_, allowed_foods)
+                if violations:
+                    unique_v = list(dict.fromkeys(violations))[:10]
+                    violation_note = (
+                        f"\n\nPREVIOUS ATTEMPT VIOLATION — the following ingredients are NOT in the user's food list "
+                        f"and must be replaced immediately: {', '.join(unique_v)}.\n"
+                        f"Use ONLY foods from the list provided. Every single ingredient must be from that list. "
+                        f"Do not include any other foods under any circumstances."
+                    )
+                    raise ValueError(f"Forbidden foods used: {unique_v}")
+
+            print(f"[AI /plans nutrition] attempt {attempt} OK — nutritionistNote: {bool(data.get('nutritionistNote'))}")
+            return data
+        except json.JSONDecodeError as e:
+            last_error = ValueError(f"invalid JSON attempt {attempt}: {e}")
+        except ValueError as e:
+            last_error = e
+            print(f"[AI /plans nutrition] attempt {attempt} failed: {e}")
+        except Exception as e:
+            raise
+    raise ValueError(f"Nutrition generation failed after {attempt} attempts: {last_error}")
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -911,66 +1090,120 @@ def recommend_weight(
 
 
 @router.post("/plans")
-def generate_plans(
+async def generate_plans(
     req: PlanRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a personalised workout + nutrition plan via AI."""
+    """Generate both workout and nutrition plans in parallel."""
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
-    prompt = build_prompt(req)
+    print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}")
+    try:
+        workout_data, nutrition_data = await asyncio.gather(
+            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req)),
+            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req), req.foodsAvailable),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
 
-    last_error: Exception | None = None
-    for attempt in range(1, 4):  # up to 3 attempts
-        try:
-            response = client.chat.completions.create(
-                model=get_openai_model(),
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert fitness coach and registered dietitian. "
-                            "Always respond with valid JSON only — no markdown fences, no extra text. "
-                            "You MUST include trainerNote, nutritionistNote, and supplementStack in your response."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                temperature=0.7,
-            )
+    result = {
+        "trainerNote":      workout_data.get("trainerNote", ""),
+        "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
+        "workout_plan":     workout_data["workout_plan"],
+        "nutrition_plan":   nutrition_data["nutrition_plan"],
+    }
+    print(f"[AI /plans] done — workout days={len(result['workout_plan'].get('days', []))}")
+    return result
 
-            content = response.choices[0].message.content
-            plans   = json.loads(content)
 
-            # Debug logging
-            trainer_note      = plans.get("workout_plan", {}).get("trainerNote", "")
-            nutritionist_note = plans.get("nutrition_plan", {}).get("nutritionistNote", "")
-            supp_count        = len(plans.get("nutrition_plan", {}).get("supplementStack", []))
-            print(f"[AI /plans] attempt {attempt} — trainerNote: {bool(trainer_note)}, nutritionistNote: {bool(nutritionist_note)}, supplements: {supp_count}")
-            print(f"[AI /plans] trainerNote preview: {repr(trainer_note[:120]) if trainer_note else 'EMPTY'}")
-            print(f"[AI /plans] nutritionistNote preview: {repr(nutritionist_note[:120]) if nutritionist_note else 'EMPTY'}")
+@router.post("/plans/workout")
+async def generate_workout_plan(
+    req: WorkoutOnlyRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a workout plan only — called when equipment changes."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
-            _validate_plans(plans, req)
+    # Build a PlanRequest with only workout-relevant fields populated
+    plan_req = PlanRequest(
+        goal=req.goal,
+        secondaryGoal=req.secondaryGoal,
+        focusedMuscleGroup=req.focusedMuscleGroup,
+        goalDetails=req.goalDetails,
+        physicalStats=req.physicalStats,
+        daysPerWeek=req.daysPerWeek,
+        workoutDurationMinutes=req.workoutDurationMinutes,
+        equipment=req.equipment,
+        foodsAvailable=[],
+        experienceLevel=req.experienceLevel,
+        injuriesOrLimitations=req.injuriesOrLimitations,
+        userContext=req.userContext,
+    )
 
-            return plans
+    client = OpenAI(api_key=api_key)
+    print(f"[AI /plans/workout] generating — goal={req.goal}, days={req.daysPerWeek}, equipment={len(req.equipment)}")
+    try:
+        workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req))
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
 
-        except json.JSONDecodeError as e:
-            last_error = ValueError(f"AI returned invalid JSON (attempt {attempt})")
-            print(f"[AI /plans] attempt {attempt} JSON error: {e}")
-        except ValueError as e:
-            last_error = e
-            print(f"[AI /plans] attempt {attempt} validation failed: {e}")
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+    result = {
+        "trainerNote":  workout_data.get("trainerNote", ""),
+        "workout_plan": workout_data["workout_plan"],
+    }
+    print(f"[AI /plans/workout] done — days={len(result['workout_plan'].get('days', []))}, trainerNote={bool(result['trainerNote'])}")
+    return result
 
-    raise HTTPException(status_code=502, detail=f"AI response failed after 3 attempts: {last_error}")
+
+@router.post("/plans/nutrition")
+async def generate_nutrition_plan(
+    req: NutritionOnlyRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a nutrition plan only — called when foods change."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    # Build a PlanRequest with only nutrition-relevant fields populated
+    plan_req = PlanRequest(
+        goal=req.goal,
+        goalDetails=req.goalDetails,
+        physicalStats=req.physicalStats,
+        daysPerWeek=req.daysPerWeek,
+        equipment=[],
+        foodsAvailable=req.foodsAvailable,
+        supplementsAvailable=req.supplementsAvailable,
+        dietaryPreference=req.dietaryPreference,
+        allergies=req.allergies,
+        mealsPerDay=req.mealsPerDay,
+        userContext=req.userContext,
+    )
+
+    client = OpenAI(api_key=api_key)
+    print(f"[AI /plans/nutrition] generating — goal={req.goal}, foods={len(req.foodsAvailable)}")
+    try:
+        nutrition_data = await asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(plan_req), req.foodsAvailable)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+
+    result = {
+        "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
+        "nutrition_plan":   nutrition_data["nutrition_plan"],
+    }
+    print(f"[AI /plans/nutrition] done — nutritionistNote={bool(result['nutritionistNote'])}")
+    return result
 
 
 @router.post("/trainer-question")
@@ -987,25 +1220,72 @@ def ask_trainer_question(
     if len(q) < 6:
         raise HTTPException(status_code=400, detail="Question is too short")
 
-    context_blob = {
-        "profile": body.profile,
-        "workoutPlan": body.workoutPlan,
-        "nutritionPlan": body.nutritionPlan,
-        "progress": body.progress,
-    }
-    trimmed_convo = (body.conversation or [])[-12:]
+    is_nutritionist = body.mode == "nutritionist"
+
+    # Only send context relevant to this coach's domain
+    context_blob: dict = {"profile": body.profile, "progress": body.progress}
+    if is_nutritionist:
+        context_blob["nutritionPlan"] = body.nutritionPlan
+    else:
+        context_blob["workoutPlan"] = body.workoutPlan
+    if body.userContext:
+        context_blob["recentActivityLog"] = body.userContext
+
+    trimmed_convo = (body.conversation or [])[-14:]
+
+    # Schema differs by mode — AI can only update its own side
+    if is_nutritionist:
+        plan_schema = (
+            '  "updated_workout_plan": null,\n'
+            '  "updated_nutrition_plan": <full nutrition plan object matching original structure, or null>\n'
+        )
+        system_prompt = (
+            "You are an expert registered dietitian and sports nutritionist. "
+            "You have access to the user's full profile, nutrition plan, and activity log. "
+            "Give detailed, personalised nutritional advice. Always reference specific foods, quantities, "
+            "and macros from their actual plan. When updating the nutrition plan, include realistic "
+            "ingredient amounts (e.g. '150g chicken breast', '1 cup cooked oats', '2 tbsp peanut butter'). "
+            "If the user asks to modify meals, swap foods, or change targets, set needs_plan_update=true "
+            "and return the COMPLETE updated nutrition plan (full structure, not partial). "
+            "Never return a partial plan — always include all meal keys even if unchanged. "
+            "IMPORTANT: updated_workout_plan must always be null — you only manage nutrition. "
+            "Return JSON only."
+        )
+    else:
+        plan_schema = (
+            '  "updated_workout_plan": <full workout plan object matching original structure, or null>,\n'
+            '  "updated_nutrition_plan": null\n'
+        )
+        system_prompt = (
+            "You are an expert strength and conditioning coach. "
+            "You have access to the user's full profile, workout plan, progress history, and activity log. "
+            "Give detailed, personalised training advice. Always reference specific exercises, sets, "
+            "reps, and weights from their actual plan. "
+            "Always check the profile's 'injuries' field first — if injuries are present, "
+            "remove or substitute any exercises that stress those areas. "
+            "If the user asks for plan changes, exercise swaps, or injury modifications, "
+            "set needs_plan_update=true and return the COMPLETE updated workout plan "
+            "(all days, all exercises — not just the changed ones). "
+            "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
+            "IMPORTANT: updated_nutrition_plan must always be null — you only manage training. "
+            "Return JSON only."
+        )
 
     user_text = (
-        "Recent conversation (most recent last):\n"
+        f"Recent conversation (most recent last):\n"
         f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
-        "User question:\n"
-        f"{q}\n\n"
-        "Context JSON:\n"
-        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
-        "Return this JSON schema exactly:\n"
-        '{"answer": string, "action_items": [string], '
-        '"needs_plan_update": boolean, "safety_note": string, '
-        '"updated_workout_plan": object|null, "updated_nutrition_plan": object|null}'
+        f"User question:\n{q}\n\n"
+        f"Full context JSON:\n{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+        "Return ONLY valid JSON matching this schema exactly - no markdown, no extra text:\n"
+        '{\n'
+        '  "answer": "Detailed, personalised response to the user",\n'
+        '  "action_items": ["specific actionable step 1", "..."],\n'
+        '  "needs_plan_update": true|false,\n'
+        '  "safety_note": "string or empty string",\n'
+        + plan_schema +
+        '}\n\n'
+        "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
+        "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly."
     )
 
     # Build user message — use vision format if image is attached
@@ -1026,35 +1306,42 @@ def ask_trainer_question(
     else:
         user_message = {"role": "user", "content": user_text}
 
+    # Debug: log what we're sending
+    print(f"[trainer-question] mode={body.mode} question={repr(q[:120])}")
+    print(f"[trainer-question] convo_turns={len(trimmed_convo)} has_image={bool(body.image_base64)} has_userContext={bool(body.userContext)}")
+    print(f"[trainer-question] context keys: {list(context_blob.keys())}")
+
     client = OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # vision requires gpt-4o
+            model="gpt-4o",
             response_format={"type": "json_object"},
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert strength coach and injury-aware trainer. "
-                        "Always check the profile's 'injuries' field first — if injuries are present, "
-                        "remove or substitute any exercises that stress those areas before answering. "
-                        "Use the provided workout plan, nutrition plan, and progress context to give practical advice. "
-                        "If the user shares a photo of their meal, analyze the foods visible and factor that into your advice. "
-                        "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
-                        "When the user asks for plan changes or you need to accommodate injuries, "
-                        "set needs_plan_update=true and include a fully updated plan object. "
-                        "Return JSON only."
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
                 user_message,
             ],
             temperature=0.4,
-            max_tokens=2000,
+            max_tokens=4000,  # enough for a full updated plan
         )
-        return json.loads(response.choices[0].message.content)
-    except json.JSONDecodeError:
+        raw = response.choices[0].message.content
+        result = json.loads(raw)
+
+        # Debug: log what we're returning
+        print(f"[trainer-question] needs_plan_update={result.get('needs_plan_update')} has_workout_update={bool(result.get('updated_workout_plan'))} has_nutrition_update={bool(result.get('updated_nutrition_plan'))}")
+        print(f"[trainer-question] answer preview: {repr(result.get('answer', '')[:200])}")
+        if result.get('updated_workout_plan'):
+            wp = result['updated_workout_plan']
+            print(f"[trainer-question] updated_workout_plan keys: {list(wp.keys()) if isinstance(wp, dict) else 'NOT A DICT'}")
+        if result.get('updated_nutrition_plan'):
+            np_ = result['updated_nutrition_plan']
+            print(f"[trainer-question] updated_nutrition_plan keys: {list(np_.keys()) if isinstance(np_, dict) else 'NOT A DICT'}")
+
+        return result
+    except json.JSONDecodeError as e:
+        print(f"[trainer-question] JSON decode error: {e}")
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
+        print(f"[trainer-question] Exception: {e}")
         raise HTTPException(status_code=502, detail=f"Trainer question failed: {str(e)}")
 
 

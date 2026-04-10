@@ -53,6 +53,8 @@ EXERCISES = [
     ("Inverted Row",              "back",       ["biceps"],                      "home",       True,  "Horizontal bodyweight pull from a low bar"),
     ("Superman Hold",             "back",       ["glutes"],                      "bodyweight", False, "Posterior chain and spinal erector isometric hold"),
     ("Thoracic Rotation",         "back",       ["core"],                        "bodyweight", False, "Controlled rotation drill for thoracic spine mobility"),
+    ("Back Extension (Back Focused)",  "back",  ["glutes", "hamstrings"],        "gym",        False, "45° hyperextension bench — neutral spine targets spinal erectors"),
+    ("Back Extension (Glute Focused)", "glutes", ["hamstrings", "back"],         "gym",        False, "45° hyperextension bench — posterior pelvic tilt maximises glute activation"),
 
     # ── Shoulders ─────────────────────────────────────────────────────────────
     ("Overhead Press",            "shoulders",  ["triceps"],                     "gym",        True,  "Standing or seated barbell shoulder press"),

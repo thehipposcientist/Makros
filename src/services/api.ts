@@ -101,44 +101,146 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
 }
 
 
-export async function getAIPlans(
-  token: string,
+function buildLogContext(
   profile: import('../types').UserProfile,
-  options?: { userLog?: import('../types').UserLogEntry[] },
-) {
-  // Convert structured injury entries to a string list for the backend
-  const injuriesOrLimitations: string[] = (profile.injuryEntries ?? [])
-    .filter(e => e.status !== 'resolved')
-    .map(e => `${e.description} (${e.bodyPart}, status: ${e.status})`);
-
-  // Also append legacy free-text injuries if present
-  if (profile.injuries && injuriesOrLimitations.length === 0) {
-    injuriesOrLimitations.push(profile.injuries);
+  userLog?: import('../types').UserLogEntry[],
+  extraContext?: string,
+): string | undefined {
+  const parts: string[] = [];
+  // Onboarding context — what the user said they last trained at signup
+  if (profile.lastWorkoutContext) {
+    parts.push(`User's recent activity (from sign-up): ${profile.lastWorkoutContext}`);
   }
-
-  // Build context string from recent user log entries
-  const logContext = (options?.userLog ?? [])
+  // Any extra context built by the caller (e.g. recent workout sessions)
+  if (extraContext) parts.push(extraContext);
+  // User activity log
+  const logLines = (userLog ?? [])
     .slice(0, 10)
     .map(e => `[${e.date.slice(0, 10)}] ${e.summary}`)
     .join('\n');
+  if (logLines) parts.push(logLines);
+  return parts.length ? parts.join('\n\n') : undefined;
+}
 
-  return request<{ workout_plan: import('../types').WorkoutPlan; nutrition_plan: import('../types').DailyNutritionPlan }>('/ai/plans', {
+function buildInjuries(profile: import('../types').UserProfile): string[] {
+  const list: string[] = (profile.injuryEntries ?? [])
+    .filter((e: any) => e.status !== 'resolved')
+    .map((e: any) => `${e.description} (${e.bodyPart}, status: ${e.status})`);
+  if (profile.injuries && list.length === 0) list.push(profile.injuries);
+  return list;
+}
+
+/** Full plan — called on first sign-up or when goal/pace changes (updates both sides). */
+export async function getAIPlans(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+) {
+  const injuriesOrLimitations = buildInjuries(profile);
+  const payload = {
+    goal:                   profile.goal,
+    secondaryGoal:          profile.secondaryGoal,
+    focusedMuscleGroup:     profile.focusedMuscleGroup,
+    goalDetails:            profile.goalDetails,
+    physicalStats:          profile.physicalStats,
+    daysPerWeek:            profile.daysPerWeek,
+    workoutDurationMinutes: profile.workoutDurationMinutes,
+    equipment:              profile.equipment,
+    foodsAvailable:         profile.foodsAvailable,
+    supplementsAvailable:   profile.supplementsAvailable ?? [],
+    experienceLevel:        profile.experienceLevel,
+    injuriesOrLimitations,
+    userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
+  };
+
+  console.log('[getAIPlans] SEND → /ai/plans', {
+    goal: payload.goal, daysPerWeek: payload.daysPerWeek,
+    equipment: payload.equipment.length, foods: payload.foodsAvailable.length,
+  });
+
+  const result = await request<any>('/ai/plans', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      goal:                   profile.goal,
-      goalDetails:            profile.goalDetails,
-      physicalStats:          profile.physicalStats,
-      daysPerWeek:            profile.daysPerWeek,
-      workoutDurationMinutes: profile.workoutDurationMinutes,
-      equipment:              profile.equipment,
-      foodsAvailable:         profile.foodsAvailable,
-      supplementsAvailable:   profile.supplementsAvailable ?? [],
-      experienceLevel:        profile.experienceLevel,
-      injuriesOrLimitations,
-      userContext:            logContext || undefined,
-    }),
-  }, 90000);
+    body: JSON.stringify(payload),
+  }, 240000);
+
+  console.log('[getAIPlans] RECV ←', {
+    trainerNote: (result?.trainerNote ?? result?.workout_plan?.trainerNote)?.slice(0, 80) ?? 'MISSING',
+    nutritionistNote: (result?.nutritionistNote ?? result?.nutrition_plan?.nutritionistNote)?.slice(0, 80) ?? 'MISSING',
+    workoutDays: result?.workout_plan?.days?.length ?? 0,
+  });
+  return result;
+}
+
+/** Workout-only plan — called when equipment changes. No food data sent. */
+export async function getAIWorkoutPlan(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+) {
+  const payload = {
+    goal:                   profile.goal,
+    secondaryGoal:          profile.secondaryGoal,
+    focusedMuscleGroup:     profile.focusedMuscleGroup,
+    goalDetails:            profile.goalDetails,
+    physicalStats:          profile.physicalStats,
+    daysPerWeek:            profile.daysPerWeek,
+    workoutDurationMinutes: profile.workoutDurationMinutes,
+    equipment:              profile.equipment,
+    experienceLevel:        profile.experienceLevel,
+    injuriesOrLimitations:  buildInjuries(profile),
+    userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
+  };
+
+  console.log('[getAIWorkoutPlan] SEND → /ai/plans/workout', {
+    goal: payload.goal, daysPerWeek: payload.daysPerWeek, equipment: payload.equipment.length,
+  });
+
+  const result = await request<any>('/ai/plans/workout', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 240000);
+
+  console.log('[getAIWorkoutPlan] RECV ←', {
+    trainerNote: result?.trainerNote?.slice(0, 80) ?? 'MISSING',
+    workoutDays: result?.workout_plan?.days?.length ?? 0,
+  });
+  return result;
+}
+
+/** Nutrition-only plan — called when foods change. No equipment data sent. */
+export async function getAINutritionPlan(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+) {
+  const payload = {
+    goal:                 profile.goal,
+    goalDetails:          profile.goalDetails,
+    physicalStats:        profile.physicalStats,
+    daysPerWeek:          profile.daysPerWeek,
+    foodsAvailable:       profile.foodsAvailable,
+    supplementsAvailable: profile.supplementsAvailable ?? [],
+    dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
+    allergies:            (profile as any).allergies ?? [],
+    userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
+  };
+
+  console.log('[getAINutritionPlan] SEND → /ai/plans/nutrition', {
+    goal: payload.goal, daysPerWeek: payload.daysPerWeek, foods: payload.foodsAvailable.length,
+  });
+
+  const result = await request<any>('/ai/plans/nutrition', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 240000);
+
+  console.log('[getAINutritionPlan] RECV ←', {
+    nutritionistNote: result?.nutritionistNote?.slice(0, 80) ?? 'MISSING',
+  });
+  return result;
 }
 
 export async function getWeightRecommendation(
@@ -343,6 +445,7 @@ export async function askTrainerQuestion(
     conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
     image_base64?: string;
     mime_type?: string;
+    userContext?: string;
   },
 ): Promise<{
   answer: string;
@@ -352,11 +455,42 @@ export async function askTrainerQuestion(
   updated_workout_plan?: any | null;
   updated_nutrition_plan?: any | null;
 }> {
-  return request('/ai/trainer-question', {
+  console.log('[askTrainerQuestion] SEND →', {
+    mode: payload.mode,
+    question: payload.question.slice(0, 120),
+    hasImage: !!payload.image_base64,
+    conversationLength: payload.conversation?.length ?? 0,
+    hasUserContext: !!payload.userContext,
+    userContextPreview: payload.userContext?.slice(0, 100),
+    profileKeys: Object.keys(payload.profile ?? {}),
+    workoutDayCount: payload.workoutPlan?.workoutDays?.length ?? (payload.workoutPlan?.days?.length ?? 0),
+    todayMealsCount: payload.currentPlanContext?.todayMeals?.length ?? 0,
+  });
+
+  const resp = await request<{
+    answer: string;
+    action_items: string[];
+    needs_plan_update: boolean;
+    safety_note: string;
+    updated_workout_plan?: any | null;
+    updated_nutrition_plan?: any | null;
+  }>('/ai/trainer-question', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   }, 60000);
+
+  console.log('[askTrainerQuestion] RECV ←', {
+    answerPreview: resp.answer?.slice(0, 150),
+    needs_plan_update: resp.needs_plan_update,
+    hasUpdatedWorkout: !!resp.updated_workout_plan,
+    hasUpdatedNutrition: !!resp.updated_nutrition_plan,
+    updatedWorkoutKeys: resp.updated_workout_plan ? Object.keys(resp.updated_workout_plan) : null,
+    updatedNutritionKeys: resp.updated_nutrition_plan ? Object.keys(resp.updated_nutrition_plan) : null,
+    actionItemCount: resp.action_items?.length ?? 0,
+  });
+
+  return resp;
 }
 
 export async function askWorkoutQuestion(
@@ -369,11 +503,26 @@ export async function askWorkoutQuestion(
     loggedSets?: any[];
   },
 ): Promise<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }> {
-  return request('/ai/workout-question', {
+  console.log('[askWorkoutQuestion] SEND →', {
+    question: payload.question.slice(0, 120),
+    activeExercise: payload.activeExerciseName,
+    currentSet: payload.currentSetNumber,
+    loggedSetsCount: payload.loggedSets?.length ?? 0,
+  });
+
+  const resp = await request<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }>('/ai/workout-question', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
+
+  console.log('[askWorkoutQuestion] RECV ←', {
+    answerPreview: resp.answer?.slice(0, 150),
+    quickCuesCount: resp.quick_cues?.length ?? 0,
+    adjustment: resp.adjustment?.slice(0, 80),
+  });
+
+  return resp;
 }
 
 export async function analyzeFoodPhoto(

@@ -31,7 +31,8 @@ export default function NutritionCard({
   const colors = theme.colors;
   const section = theme.sections.meals;
   const styles = createStyles(colors, section);
-  const { breakfast, lunch, dinner, snack, extraMeals: extraMealsList, targets } = nutritionPlan;
+  const { breakfast, lunch, dinner, snack, extraMeals: extraMealsList, targets: rawTargets } = nutritionPlan;
+  const targets = rawTargets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
   const removed = new Set(nutritionPlan.removedMeals ?? []);
 
   const allMeals: Array<{ key: string; emoji: string; meal: MealSuggestion | undefined }> = [

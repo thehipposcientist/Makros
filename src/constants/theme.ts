@@ -2,7 +2,8 @@ export type AppThemeName =
   | 'midnight' | 'neon'    | 'ocean'   | 'forest'
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
-  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom';
+  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
+  | 'parchment'| 'meadow';
 
 export interface ThemeColors {
   background: string;
@@ -581,6 +582,66 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#300830', strong: '#FF1890', text: '#FF90D0' },  // HOT PINK
       planner: { soft: '#281808', strong: '#FFD020', text: '#FFF080' },
       account: { soft: '#300828', strong: '#FF40A0', text: '#FFA8D8' },
+    },
+  },
+
+  // ── LIGHT / NEUTRAL ──────────────────────────────────────────────────────────
+
+  parchment: {
+    name: 'parchment',
+    label: 'Parchment & Bark',
+    description: 'Clean white background with warm coffee-brown primary — natural, calm, and earthy.',
+    colors: {
+      background:    '#FAF7F4',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#F0EAE2',
+      border:        '#D8C8B8',
+      primary:       '#7C4F2A',  // rich coffee-brown
+      primaryDark:   '#5A3418',
+      primaryLight:  '#B08A60',
+      accent:        '#C07830',  // warm amber
+      textPrimary:   '#2A1E14',
+      textSecondary: '#6A4E38',
+      textMuted:     '#A08870',
+      error:         '#C43030',
+      warning:       '#B87800',
+      success:       '#307848',
+    },
+    sections: {
+      workout: { soft: '#E8E0D8', strong: '#7C4F2A', text: '#3A200C' },  // BROWN
+      meals:   { soft: '#D8EDDC', strong: '#307848', text: '#0E4020' },  // forest green
+      ai:      { soft: '#E8E4F4', strong: '#5848A8', text: '#201060' },  // slate-violet
+      planner: { soft: '#F4EAD8', strong: '#C07830', text: '#6A3E08' },
+      account: { soft: '#F0E8E0', strong: '#8A5030', text: '#3A1808' },
+    },
+  },
+
+  meadow: {
+    name: 'meadow',
+    label: 'Meadow Fresh',
+    description: 'Crisp white background with vibrant grass-green primary — fresh, clean, outdoorsy.',
+    colors: {
+      background:    '#F4FAF5',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#E4F4E8',
+      border:        '#B8D8BE',
+      primary:       '#2A8048',  // rich grass-green
+      primaryDark:   '#1A5C30',
+      primaryLight:  '#72C890',
+      accent:        '#E07830',  // warm terracotta contrast
+      textPrimary:   '#0E2418',
+      textSecondary: '#2E6040',
+      textMuted:     '#6A9870',
+      error:         '#CC2E28',
+      warning:       '#AC6800',
+      success:       '#2A8048',
+    },
+    sections: {
+      workout: { soft: '#D8EEE0', strong: '#2A8048', text: '#0A3818' },  // GRASS GREEN
+      meals:   { soft: '#E8F4E4', strong: '#3EA860', text: '#1A5C30' },  // EMERALD
+      ai:      { soft: '#E4EEFF', strong: '#3858C8', text: '#102080' },  // blue
+      planner: { soft: '#FFF0E4', strong: '#E07830', text: '#6A2E08' },
+      account: { soft: '#F0FAF2', strong: '#2A8048', text: '#0A3818' },
     },
   },
 

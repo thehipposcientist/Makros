@@ -10,7 +10,8 @@ import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/pla
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveSkipToHistory,
+  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveSkipToHistory, loadWorkoutSummaries,
+  savePlanChange,
 } from '../utils/workoutHistory';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -26,7 +27,8 @@ interface HomeScreenProps {
   authToken: string;
   userProfile: UserProfile | null;
   planRefreshKey?: number;
-  isPlanUpdating?: boolean;
+  isWorkoutUpdating?: boolean;
+  isNutritionUpdating?: boolean;
   trainerNote?: string | null;
   nutritionistNote?: string | null;
   supplementStack?: SupplementItem[];
@@ -781,7 +783,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isPlanUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditSupplements, onAddSupplement, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditSupplements, onAddSupplement, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   const theme = getTheme(userProfile?.themePreference);
@@ -818,6 +820,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [coachMode, setCoachMode] = useState<'trainer' | 'nutritionist'>('trainer');
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
+  const [isChatPlanUpdating, setIsChatPlanUpdating] = useState(false);
   const [attachedImage, setAttachedImage] = useState<{ base64: string; uri: string } | null>(null);
   const [workoutChat, setWorkoutChat] = useState<TrainerChatMessage[]>([]);
   const [nutritionChat, setNutritionChat] = useState<TrainerChatMessage[]>([]);
@@ -827,6 +830,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
+  const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
 
   // Skip reason modal
   const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
@@ -939,6 +943,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } catch {
       setTodayDone(await isTodayWorkoutDone());
     }
+
+    // Load today's stored workout summary
+    const summaries = await loadWorkoutSummaries();
+    const todaySummaryEntry = summaries.find(s => s.date.startsWith(today)) ?? null;
+    setTodaySummary(todaySummaryEntry);
   };
 
   const loadPlans = async (profile: UserProfile) => {
@@ -1099,7 +1108,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (prevExercises !== nextExercises) notes.push(`Weekly exercises: ${prevExercises} → ${nextExercises}`);
     }
 
-    if (prevNutrition && nextNutrition) {
+    if (prevNutrition && nextNutrition && prevNutrition.targets && nextNutrition.targets) {
       const prevCal = prevNutrition.targets.calories;
       const nextCal = nextNutrition.targets.calories;
       if (prevCal !== nextCal) notes.push(`Calories: ${prevCal} → ${nextCal}`);
@@ -1135,6 +1144,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
     try {
       const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+
+      // Load userLog for AI context (same as plan generation)
+      const userLogRaw = await AsyncStorage.getItem('userLog');
+      const userLog: Array<{ date: string; summary: string }> = userLogRaw ? JSON.parse(userLogRaw) : [];
+      const userContext = userLog
+        .slice(0, 10)
+        .map(e => `[${e.date.slice(0, 10)}] ${e.summary}`)
+        .join('\n') || undefined;
+
       const workoutHistory = await loadWorkoutHistory();
       const recentHistory = workoutHistory.slice(0, 40).map((s) => ({
         date: s.date,
@@ -1254,6 +1272,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         conversation: nextChat.slice(-8),
         image_base64: imageToSend?.base64 ?? undefined,
         mime_type: 'image/jpeg',
+        userContext,
       });
 
       const actionLines = (resp.action_items ?? []).slice(0, 4).map((x: string) => `• ${x}`).join('\n');
@@ -1265,26 +1284,70 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       setActiveChat(prev => [...prev, { role: 'assistant', content: combined }]);
 
-      const hasUpdate = !!resp.updated_workout_plan || !!resp.updated_nutrition_plan;
+      // Enforce mode boundary — trainer can only update workout, nutritionist can only update nutrition
+      const canUpdateWorkout   = coachMode === 'trainer';
+      const canUpdateNutrition = coachMode === 'nutritionist';
+      const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
       if (resp.needs_plan_update && hasUpdate) {
-        const prevWorkout = workoutPlan;
-        const nextWorkout = (resp.updated_workout_plan as WorkoutPlan | undefined) ?? null;
-        const nextNutrition = (resp.updated_nutrition_plan as DailyNutritionPlan | undefined) ?? null;
+        setIsChatPlanUpdating(true);
+        try {
+          const prevWorkout = workoutPlan;
+          const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
+          let appliedNutrition: DailyNutritionPlan | null = null;
 
-        if (resp.updated_workout_plan) {
-          setWorkoutPlan(resp.updated_workout_plan as WorkoutPlan);
+          if (canUpdateWorkout && resp.updated_workout_plan) {
+            setWorkoutPlan(resp.updated_workout_plan as WorkoutPlan);
+            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
+            console.log('[handleAskTrainer] updated workout plan saved to AsyncStorage');
+          }
+          if (canUpdateNutrition && resp.updated_nutrition_plan) {
+            const today = todayKey();
+            // Merge partial update into existing plan — AI may only return changed meals
+            const existingPlan = nutritionPlansByDate[today] ?? null;
+            const partial = resp.updated_nutrition_plan as Partial<DailyNutritionPlan>;
+            const mergedPlan: DailyNutritionPlan = existingPlan
+              ? {
+                  ...existingPlan,
+                  ...partial,
+                  // Never let the AI overwrite targets with undefined
+                  targets: partial.targets ?? existingPlan.targets,
+                }
+              : resp.updated_nutrition_plan as DailyNutritionPlan;
+            appliedNutrition = mergedPlan;
+            setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
+            await saveNutritionPlan(today, mergedPlan);
+            await persistDayState(today, { nutrition_plan: mergedPlan });
+            // Auto-reveal the updated plan
+            setActiveTab('meals');
+            setExpandedMealDays(prev => { const next = new Set(prev); next.add(today); return next; });
+            console.log('[handleAskTrainer] updated nutrition plan saved to AsyncStorage (merged)');
+          }
+          if (resp.updated_workout_plan && !resp.updated_nutrition_plan) {
+            setActiveTab('workout');
+          }
+          const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
+          setUpdateSummary(changeSummary);
+          setActiveChat(prev => [...prev, { role: 'assistant', content: 'I applied those updates to your plan.' }]);
+          // Save to plan change history so user can review it in Progress
+          await savePlanChange({
+            id: Date.now().toString(),
+            changedAt: new Date().toISOString(),
+            changedBy: coachMode === 'trainer' ? 'trainer' : 'nutritionist',
+            summary: changeSummary,
+            question: q,
+          });
+        } finally {
+          setIsChatPlanUpdating(false);
         }
-        if (resp.updated_nutrition_plan) {
-          const today = todayKey();
-          setNutritionPlansByDate(prev => ({ ...prev, [today]: resp.updated_nutrition_plan as DailyNutritionPlan }));
-          await saveNutritionPlan(today, resp.updated_nutrition_plan as DailyNutritionPlan);
-          await persistDayState(today, { nutrition_plan: resp.updated_nutrition_plan });
-        }
-        setUpdateSummary(summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, nextNutrition));
-        setActiveChat(prev => [...prev, { role: 'assistant', content: 'I applied those trainer updates to your current plan.' }]);
       }
     } catch (e: any) {
-      setActiveChat(prev => [...prev, { role: 'assistant', content: `Could not answer right now. ${e?.message ?? ''}` }]);
+      const msg = e?.message ?? '';
+      const isInternalError = msg.includes('calories') || msg.includes('undefined') || msg.includes('null') || msg.includes('Cannot read');
+      const userMsg = isInternalError
+        ? 'I got your message but had trouble applying the plan changes. Please try again.'
+        : `Could not answer right now. ${msg}`;
+      setActiveChat(prev => [...prev, { role: 'assistant', content: userMsg }]);
+      if (isInternalError) console.error('[handleAskTrainer] internal error:', e);
     } finally {
       setTrainerLoading(false);
     }
@@ -1432,7 +1495,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         colors={[themeColors.primary + '18', themeColors.surfaceRaised]}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
-        style={[styles.header, { paddingTop: insets.top, borderBottomColor: themeColors.border }]}>
+        style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: themeColors.border }]}>
         <Image
           source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
           style={styles.headerLogo}
@@ -1446,8 +1509,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </TouchableOpacity>
       </LinearGradient>
 
-      {/* AI plan updating — full overlay, hides stale plans */}
-      {isPlanUpdating ? (
+      {/* AI plan updating — full overlay only when both sides regenerate simultaneously */}
+      {isWorkoutUpdating && isNutritionUpdating ? (
         <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
@@ -1457,8 +1520,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       ) : null}
 
+      {/* Chat-triggered plan update — slim inline banner */}
+      {isChatPlanUpdating && !isWorkoutUpdating && !isNutritionUpdating ? (
+        <View style={[styles.chatPlanUpdateBanner, { backgroundColor: themeColors.primary + '18', borderBottomColor: themeColors.primary + '33' }]}>
+          <ActivityIndicator size="small" color={themeColors.primary} />
+          <Text style={[styles.chatPlanUpdateText, { color: themeColors.primary }]}>Applying plan updates…</Text>
+        </View>
+      ) : null}
+
       {/* Tab toggle — pill style */}
-      {!isPlanUpdating && <View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+      {!(isWorkoutUpdating && isNutritionUpdating) && <View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'workout' && [styles.tabActive, { backgroundColor: workoutPalette.strong }]]}
           onPress={() => setActiveTab('workout')}
@@ -1478,8 +1549,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       </View>}
 
       {/* Tab content */}
-      {!isPlanUpdating && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+      {!(isWorkoutUpdating && isNutritionUpdating) && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'workout' ? (
+          isWorkoutUpdating ? (
+            <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
+              <ActivityIndicator size="large" color={workoutPalette.strong} />
+              <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your workout plan</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>Generating a new schedule based on your updated equipment…</Text>
+            </View>
+          ) : (
           <>
             <SectionBar
               icon="🏋️"
@@ -1532,6 +1610,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   isCompleted={isCompleted}
                   isSkipped={isSkipped}
                   skipReason={skipReasonsByDate[key]}
+                  completedSummary={isCompleted ? todaySummary : null}
                   expanded={expandedDay === i}
                   onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
                   onStartWorkout={onStartWorkout}
@@ -1541,7 +1620,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })}
           </>
+          )
         ) : (
+          isNutritionUpdating ? (
+            <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
+              <ActivityIndicator size="large" color={mealPalette.strong} />
+              <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your meal plan</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>Generating a new meal plan based on your updated foods…</Text>
+            </View>
+          ) : (
           <>
             <SectionBar
               icon="🥗"
@@ -1566,8 +1653,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={[styles.planNoteChevron, { color: mealPalette.strong }]}>›</Text>
               </TouchableOpacity>
             ) : null}
-
-            {/* Supplement stack panel removed from meal/nutrition section */}
 
             {mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
@@ -1618,6 +1703,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })}
           </>
+          )
         )}
       </ScrollView>}
 
@@ -2042,7 +2128,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               {trainerLoading && (
                 <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%' }]}>
                   <ActivityIndicator size="small" color={themeColors.primary} />
-                  <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted, marginTop: 4, fontSize: 12 }]}>Thinking…</Text>
+                  <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted, marginTop: 4 }]}>Thinking…</Text>
                 </View>
               )}
             </ScrollView>
@@ -2561,13 +2647,14 @@ const sbStyles = StyleSheet.create({
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
   isCompleted: boolean;
   isSkipped: boolean;
   skipReason?: string;
+  completedSummary?: import('../types').StoredWorkoutSummary | null;
   expanded: boolean;
   onPress: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
@@ -2676,8 +2763,37 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
       {expanded && (
         <View style={styles.expandedContent}>
           {isCompleted ? (
-            <View style={[styles.completedBanner, { backgroundColor: tc.success + '1A', borderColor: tc.success }]}>
-              <Text style={[styles.completedBannerText, { color: tc.success }]}>Workout completed today!</Text>
+            <View style={{ gap: 10 }}>
+              <View style={[styles.completedBanner, { backgroundColor: tc.success + '1A', borderColor: tc.success }]}>
+                <Text style={[styles.completedBannerText, { color: tc.success }]}>Workout completed today!</Text>
+              </View>
+              {completedSummary ? (
+                <View style={[styles.completedBanner, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, gap: 8, alignItems: 'flex-start' }]}>
+                  <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                      {completedSummary.totalSets} sets
+                    </Text>
+                    <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                      {completedSummary.totalReps} reps
+                    </Text>
+                    <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                      ~{completedSummary.caloriesBurned} kcal
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>
+                    {completedSummary.motivationMessage}
+                  </Text>
+                  {completedSummary.achievements?.length > 0 && (
+                    <View style={{ gap: 3 }}>
+                      {completedSummary.achievements.map((a, i) => (
+                        <Text key={i} style={{ fontSize: 12, color: tc.success }}>✓ {a}</Text>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              ) : null}
             </View>
           ) : (
             <>
@@ -2707,8 +2823,8 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 2, borderBottomWidth: 1 },
-  headerLogo: { width: 220, height: 220 * 0.44 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, borderBottomWidth: 1 },
+  headerLogo: { width: 230, height: 100 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
@@ -2719,6 +2835,18 @@ const styles = StyleSheet.create({
   },
   planLoadingTitle:    { fontSize: 20, fontWeight: '700', textAlign: 'center' },
   planLoadingSubtitle: { fontSize: 14, textAlign: 'center', lineHeight: 22, opacity: 0.7 },
+
+  tabPlanLoadingFull: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    gap: 16, paddingHorizontal: 40, paddingTop: 80,
+  },
+
+  chatPlanUpdateBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: 1,
+  },
+  chatPlanUpdateText: { fontSize: 13, fontWeight: '600' },
 
   fab: {
     position: 'absolute',
@@ -3110,18 +3238,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   trainerEmpty: {
-    fontSize: 12,
+    fontSize: 15,
     color: colors.textMuted,
     backgroundColor: colors.surfaceRaised,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: radius.md,
-    padding: 10,
+    padding: 14,
+    lineHeight: 22,
   },
   trainerBubble: {
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     borderWidth: 1,
-    padding: 10,
+    padding: 14,
   },
   trainerBubbleUser: {
     backgroundColor: colors.primary,
@@ -3135,7 +3264,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     maxWidth: '95%',
   },
-  trainerBubbleText: { fontSize: 13, color: colors.textPrimary },
+  trainerBubbleText: { fontSize: 16, color: colors.textPrimary, lineHeight: 24 },
   attachPreviewRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
   attachPreview: { width: 48, height: 48, borderRadius: 8, backgroundColor: colors.border },
   attachRemoveBtn: { padding: 4 },
@@ -3155,21 +3284,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.md,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    maxHeight: 120,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    maxHeight: 140,
+    fontSize: 16,
     color: colors.textPrimary,
     backgroundColor: colors.background,
   },
   trainerSendBtn: {
     backgroundColor: colors.primary,
     borderRadius: radius.md,
-    minWidth: 64,
-    paddingVertical: 11,
+    minWidth: 68,
+    paddingVertical: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  trainerSendText: { color: colors.background, fontSize: 13, fontWeight: '700' },
+  trainerSendText: { color: colors.background, fontSize: 15, fontWeight: '700' },
 
   // ── Plan note row (trainer / nutritionist explanation) ────────────────────────
   planNoteRow: {

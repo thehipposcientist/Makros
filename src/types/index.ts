@@ -20,7 +20,8 @@ export type AppThemeName =
   | 'midnight' | 'neon'    | 'ocean'   | 'forest'
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
-  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom';
+  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
+  | 'parchment'| 'meadow';
 
 export interface GoalOption {
   value: Goal;
@@ -99,6 +100,8 @@ export interface UserLogEntry {
 
 export interface UserProfile {
   goal: Goal;
+  secondaryGoal?: Goal;          // optional second goal (combined goals, max 2)
+  focusedMuscleGroup?: string;   // e.g. 'Chest', 'Legs' — AI prioritises this muscle group
   goalDetails: GoalDetails;
   themePreference?: AppThemeName;
   physicalStats: PhysicalStats;
@@ -173,6 +176,48 @@ export interface WorkoutSummary {
   motivationMessage: string;
   achievements: string[];
   recommendations: string[];
+}
+
+export interface StoredWorkoutSummary extends WorkoutSummary {
+  id: string;
+  date: string;        // ISO
+  focus: string;
+  durationSeconds: number;
+  totalSets: number;
+  totalReps: number;
+}
+
+export interface GoalHistoryEntry {
+  id: string;
+  goal: Goal;
+  pace: GoalPace;
+  startedAt: string;          // ISO
+  endedAt?: string;           // ISO — undefined means current active goal
+  startWeightLbs?: number;
+}
+
+export interface PlanChangeEntry {
+  id: string;
+  changedAt: string;          // ISO timestamp
+  changedBy: 'trainer' | 'nutritionist';
+  summary: string;            // human-readable description of what changed
+  question: string;           // the chat message that triggered the change
+}
+
+export interface MealRoutineFood {
+  id: string;
+  name: string;
+  quantity?: string;          // e.g. "1 cup", "200g"
+}
+
+export interface MealRoutineEntry {
+  id: string;
+  name: string;               // e.g. "High Protein Breakfast"
+  mealType?: string;          // breakfast | lunch | dinner | snack | custom
+  foods: MealRoutineFood[];
+  notes?: string;
+  photoUri?: string;          // local file URI from camera/gallery
+  createdAt: string;          // ISO
 }
 
 export interface DailyNutritionPlan {

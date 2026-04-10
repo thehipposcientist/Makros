@@ -7,7 +7,11 @@ echo  ██║╚██╔╝██║██╔══██║██╔═█�
 echo  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║  ██║╚██████╔╝███████║
 echo  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 echo.
-echo Starting Makros...
+echo Starting Makros (TUNNEL mode)...
+echo.
+echo NOTE: Tunnel mode requires a free ngrok account.
+echo       If you see an error, run: npx ngrok authtoken YOUR_TOKEN
+echo       Get your token at: https://dashboard.ngrok.com/get-started/your-authtoken
 echo.
 
 echo [0/2] Clearing old backend processes on port 8000...
@@ -18,13 +22,10 @@ echo       Done.
 echo.
 
 echo [1/2] Starting backend (port 8000)...
-echo Note: If you update .env variables, restart the backend window manually
 start "Makros Backend" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
-timeout /t 3 /nobreak >nul
+timeout /t 2 /nobreak >nul
 
-echo [2/2] Starting Expo (LAN mode)...
-echo       Phone must be on the same WiFi as this PC.
-echo       If connection fails, run: start-tunnel.bat
+echo [2/2] Starting Expo (tunnel)...
 echo.
-npx expo start --clear
+npx expo start --clear --tunnel

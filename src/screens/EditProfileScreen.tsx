@@ -1,13 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
+  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus } from '../types';
+import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto } from '../services/api';
+import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 
 
 interface EditProfileScreenProps {
@@ -36,6 +37,8 @@ interface ScannedFoodItem {
   fat: number;
   selected: boolean;
 }
+
+const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Full Body'] as const;
 
 const DURATION_OPTIONS = [
   { value: 30, label: '30 min', desc: 'Express' },
@@ -211,8 +214,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const weightGoals   = new Set(meta.goalConfig.weight_goals);
   const timelineGoals = new Set(meta.goalConfig.timeline_goals);
 
-  // Goal
-  const [goal, setGoal]   = useState<Goal>(profile.goal);
+  // Goal (up to 2 combined goals; first = primary)
+  const [goals, setGoals] = useState<Goal[]>([
+    profile.goal,
+    ...(profile.secondaryGoal ? [profile.secondaryGoal] : []),
+  ]);
+  const [focusedMuscleGroup, setFocusedMuscleGroup] = useState<string>(profile.focusedMuscleGroup ?? '');
   const [pace, setPace]   = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
@@ -260,8 +267,102 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [weightModalVisible, setWeightModalVisible] = useState(false);
   const [weightInput,        setWeightInput]        = useState(targetWeight);
 
+  // Meal routines
+  const [mealRoutines, setMealRoutinesState] = useState<MealRoutineEntry[]>([]);
+  const [routineModalVisible, setRoutineModalVisible] = useState(false);
+  const [editingRoutine, setEditingRoutine] = useState<MealRoutineEntry | null>(null);
+  const [routineName, setRoutineName] = useState('');
+  const [routineMealType, setRoutineMealType] = useState('');
+  const [routineFoods, setRoutineFoods] = useState<MealRoutineFood[]>([]);
+  const [routineFoodInput, setRoutineFoodInput] = useState('');
+  const [routineFoodQtyInput, setRoutineFoodQtyInput] = useState('');
+  const [routineNotes, setRoutineNotes] = useState('');
+  const [routinePhotoUri, setRoutinePhotoUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadMealRoutines().then(setMealRoutinesState);
+  }, []);
+
   const toggleEquipment = (name: string) =>
     setEquipment(prev => prev.includes(name) ? prev.filter(e => e !== name) : [...prev, name]);
+
+  // ── Routine handlers ──────────────────────────────────────────────────────
+
+  const openAddRoutine = () => {
+    setEditingRoutine(null);
+    setRoutineName('');
+    setRoutineMealType('');
+    setRoutineFoods([]);
+    setRoutineFoodInput('');
+    setRoutineFoodQtyInput('');
+    setRoutineNotes('');
+    setRoutinePhotoUri(null);
+    setRoutineModalVisible(true);
+  };
+
+  const openEditRoutine = (r: MealRoutineEntry) => {
+    setEditingRoutine(r);
+    setRoutineName(r.name);
+    setRoutineMealType(r.mealType ?? '');
+    setRoutineFoods([...r.foods]);
+    setRoutineFoodInput('');
+    setRoutineFoodQtyInput('');
+    setRoutineNotes(r.notes ?? '');
+    setRoutinePhotoUri(r.photoUri ?? null);
+    setRoutineModalVisible(true);
+  };
+
+  const handleRoutinePickPhoto = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (perm.granted) {
+      const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.8, mediaTypes: ['images'] as any });
+      if (!result.canceled && result.assets?.[0]) { setRoutinePhotoUri(result.assets[0].uri); return; }
+    }
+    const cam = await ImagePicker.requestCameraPermissionsAsync();
+    if (!cam.granted) { Alert.alert('Permission needed', 'Allow camera or photo library access.'); return; }
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.8, mediaTypes: ['images'] as any });
+    if (!result.canceled && result.assets?.[0]) setRoutinePhotoUri(result.assets[0].uri);
+  };
+
+  const handleRoutineAddFood = () => {
+    const name = routineFoodInput.trim();
+    if (!name) return;
+    const food: MealRoutineFood = { id: Date.now().toString(), name, quantity: routineFoodQtyInput.trim() || undefined };
+    setRoutineFoods(prev => [...prev, food]);
+    setRoutineFoodInput('');
+    setRoutineFoodQtyInput('');
+  };
+
+  const handleRoutineSave = async () => {
+    const name = routineName.trim();
+    if (!name) { Alert.alert('Name required', 'Give this routine a name.'); return; }
+    const entry: MealRoutineEntry = {
+      id: editingRoutine?.id ?? Date.now().toString(),
+      name,
+      mealType: routineMealType || undefined,
+      foods: routineFoods,
+      notes: routineNotes.trim() || undefined,
+      photoUri: routinePhotoUri ?? undefined,
+      createdAt: editingRoutine?.createdAt ?? new Date().toISOString(),
+    };
+    const next = editingRoutine
+      ? mealRoutines.map(r => r.id === editingRoutine.id ? entry : r)
+      : [...mealRoutines, entry];
+    setMealRoutinesState(next);
+    await saveMealRoutines(next);
+    setRoutineModalVisible(false);
+  };
+
+  const handleRoutineDelete = async (id: string) => {
+    Alert.alert('Delete routine?', 'This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        const next = mealRoutines.filter(r => r.id !== id);
+        setMealRoutinesState(next);
+        await saveMealRoutines(next);
+      }},
+    ]);
+  };
 
   const toggleFood = (name: string) =>
     setFoods(prev => prev.includes(name) ? prev.filter(f => f !== name) : [...prev, name]);
@@ -410,16 +511,19 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
 
   const handleSave = () => {
-    const isWeightGoal   = weightGoals.has(goal);
-    const isTimelineGoal = timelineGoals.has(goal);
-    const timelineWeeks  = isTimelineGoal ? (meta.goalConfig.timeline_weeks[goal]?.[pace] ?? undefined) : undefined;
+    const primaryGoal    = goals[0];
+    const isWeightGoal   = weightGoals.has(primaryGoal);
+    const isTimelineGoal = timelineGoals.has(primaryGoal);
+    const timelineWeeks  = isTimelineGoal ? (meta.goalConfig.timeline_weeks[primaryGoal]?.[pace] ?? undefined) : undefined;
     const targetWeightLbs = isWeightGoal && targetWeight ? parseFloat(targetWeight) : undefined;
     const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-    const targetEventVal = eventGoals.has(goal) && targetEvent.trim() ? targetEvent.trim() : undefined;
+    const targetEventVal = eventGoals.has(primaryGoal) && targetEvent.trim() ? targetEvent.trim() : undefined;
 
     onSave({
       ...profile,
-      goal,
+      goal: primaryGoal,
+      secondaryGoal: goals[1],
+      focusedMuscleGroup: focusedMuscleGroup || undefined,
       themePreference,
       // Preserve goal start metadata so editing current weight does not reset "initial" weight.
       goalDetails: {
@@ -446,8 +550,19 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const isWeightGoal   = weightGoals.has(goal);
-  const paceOptions    = pacesForGoal(goal, meta.paces);
+  const toggleGoal = (value: Goal) => {
+    setGoals(prev => {
+      if (prev.includes(value)) {
+        if (prev.length === 1) return prev;
+        return prev.filter(g => g !== value);
+      }
+      if (prev.length >= 2) return [prev[0], value];
+      return [...prev, value];
+    });
+  };
+
+  const isWeightGoal   = weightGoals.has(goals[0]);
+  const paceOptions    = pacesForGoal(goals[0], meta.paces);
   const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.map(i => i.name)));
   const customEquipItems   = equipment.filter(e => !standardEquipNames.has(e));
   const standardFoodNames  = new Set(meta.allFoods.map(f => f.name));
@@ -505,26 +620,54 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         <>
         {/* ── Goal ── */}
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Goal</Text>
+          <Text style={styles.sectionLabel}>Goal <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>({goals.length}/2 selected)</Text></Text>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <View style={styles.goalGrid}>
               {meta.goals.map(opt => {
-                const selected = goal === opt.value;
+                const selected = goals.includes(opt.value as Goal);
+                const isPrimary = goals[0] === opt.value;
                 return (
                   <TouchableOpacity
                     key={opt.value}
                     style={[styles.goalCard, selected && styles.goalCardActive]}
-                    onPress={() => { setGoal(opt.value as Goal); setPace('moderate'); }}>
+                    onPress={() => { toggleGoal(opt.value as Goal); if (!goals.includes(opt.value as Goal)) setPace('moderate'); }}>
                     <Text style={styles.goalIcon}>{opt.icon}</Text>
-                    <Text style={[styles.goalLabel, selected && styles.goalLabelActive]} numberOfLines={2}>
-                      {opt.label}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', gap: 4 }}>
+                      <Text style={[styles.goalLabel, selected && styles.goalLabelActive]} numberOfLines={1}>
+                        {opt.label}
+                      </Text>
+                      {selected && (
+                        <View style={[styles.goalBadge, !isPrimary && styles.goalBadgeSecondary]}>
+                          <Text style={styles.goalBadgeText}>{isPrimary ? 'Primary' : '+2nd'}</Text>
+                        </View>
+                      )}
+                    </View>
                   </TouchableOpacity>
                 );
               })}
             </View>
           )}
         </View>
+
+        {/* ── Focused muscle group ── */}
+        {['strength', 'muscle_gain', 'body_recomp'].includes(goals[0]) && (
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Focus Muscle Group <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(optional)</Text></Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {MUSCLE_GROUPS.map(mg => {
+                const active = focusedMuscleGroup === mg;
+                return (
+                  <TouchableOpacity
+                    key={mg}
+                    style={[styles.chip, active && styles.chipActive]}
+                    onPress={() => setFocusedMuscleGroup(prev => prev === mg ? '' : mg)}>
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{mg}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
 
         {/* ── Pace / Timeline ── */}
         {paceOptions.length > 0 && (
@@ -584,15 +727,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         {/* ── Target event (strength / endurance / athletic goals) ── */}
         {(() => {
           const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-          if (!eventGoals.has(goal)) return null;
+          if (!eventGoals.has(goals[0])) return null;
           const label =
-            goal === 'strength'             ? 'Strength Target (optional)' :
-            goal === 'endurance'            ? 'Endurance Target (optional)' :
-                                              'Performance Target (optional)';
+            goals[0] === 'strength'             ? 'Strength Target (optional)' :
+            goals[0] === 'endurance'            ? 'Endurance Target (optional)' :
+                                                  'Performance Target (optional)';
           const placeholder =
-            goal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
-            goal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
-                                              'e.g. sub-40s 100m, dunk a basketball';
+            goals[0] === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
+            goals[0] === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
+                                                  'e.g. sub-40s 100m, dunk a basketball';
           return (
             <View style={styles.section}>
               <Text style={styles.sectionLabel}>{label}</Text>
@@ -1009,6 +1152,59 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   </View>
                 </View>
               )}
+
+              {/* ── Meal Routines ──────────────────────────────────────── */}
+              <View style={[styles.chipGroup, { marginTop: 8 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <Text style={styles.chipGroupLabel}>🍱  Meal Routines</Text>
+                  <TouchableOpacity
+                    onPress={openAddRoutine}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary + '18', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 5 }}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={{ fontSize: 16, color: tc.primary, lineHeight: 20 }}>+</Text>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Add</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: -6, marginBottom: 10, lineHeight: 16 }}>
+                  Save your regular meals here. The AI planner uses these when building your meal plan.
+                </Text>
+                {mealRoutines.length === 0 ? (
+                  <TouchableOpacity
+                    onPress={openAddRoutine}
+                    style={{ borderWidth: 1, borderColor: tc.border, borderStyle: 'dashed', borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', gap: 4, backgroundColor: tc.surface }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 24 }}>🍽️</Text>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, fontWeight: '600' }}>Add your first routine</Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, textAlign: 'center', paddingHorizontal: 16 }}>e.g. "High Protein Breakfast" with eggs, oats, banana</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View style={styles.savedMealsList}>
+                    {mealRoutines.map(r => (
+                      <TouchableOpacity key={r.id} onPress={() => openEditRoutine(r)} activeOpacity={0.8}>
+                        <View style={[styles.savedMealCard, { gap: 0 }]}>
+                          {r.photoUri && (
+                            <Image source={{ uri: r.photoUri }} style={{ width: 52, height: 52, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, marginRight: 10 }} resizeMode="cover" />
+                          )}
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.savedMealName}>{r.name}{r.mealType ? ` · ${r.mealType}` : ''}</Text>
+                            {r.foods.length > 0 && (
+                              <Text style={styles.savedMealMeta} numberOfLines={1}>
+                                {r.foods.map(f => f.name + (f.quantity ? ` (${f.quantity})` : '')).join(', ')}
+                              </Text>
+                            )}
+                            {r.notes && <Text style={styles.savedMealMeta} numberOfLines={1}>{r.notes}</Text>}
+                          </View>
+                          <TouchableOpacity onPress={() => handleRoutineDelete(r.id)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                            <Text style={styles.savedMealDelete}>Delete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+              </View>
             </>
           )}
         </View>
@@ -1046,6 +1242,77 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         confirmLabel="Add" error={equipError} themeColors={tc}
       />
       <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} themeColors={tc} />
+
+      {/* ── Meal Routine modal ── */}
+      <Modal visible={routineModalVisible} transparent animationType="slide" onRequestClose={() => setRoutineModalVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+          <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' }} activeOpacity={1} onPress={() => setRoutineModalVisible(false)} />
+          <View style={{ backgroundColor: tc.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, borderTopWidth: 1, borderTopColor: tc.border, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 32, maxHeight: '90%' }}>
+            <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: tc.border, alignSelf: 'center', marginBottom: 14 }} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <Text style={{ fontSize: 17, fontWeight: '800', color: tc.textPrimary }}>{editingRoutine ? 'Edit Routine' : 'New Routine'}</Text>
+              <TouchableOpacity onPress={() => setRoutineModalVisible(false)}><Text style={{ fontSize: 14, color: tc.textMuted, fontWeight: '600' }}>Cancel</Text></TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {/* Photo */}
+              <TouchableOpacity onPress={handleRoutinePickPhoto} activeOpacity={0.8} style={{ borderRadius: radius.lg, overflow: 'hidden', marginBottom: 14, height: 130, backgroundColor: tc.surfaceRaised, alignItems: 'center', justifyContent: 'center', borderWidth: routinePhotoUri ? 0 : 1, borderStyle: 'dashed', borderColor: tc.border }}>
+                {routinePhotoUri ? (
+                  <Image source={{ uri: routinePhotoUri }} style={{ width: '100%', height: 130 }} resizeMode="cover" />
+                ) : (
+                  <View style={{ alignItems: 'center', gap: 4 }}>
+                    <Text style={{ fontSize: 28 }}>📷</Text>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, fontWeight: '600' }}>Add photo (optional)</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              {/* Name */}
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Routine Name *</Text>
+              <TextInput value={routineName} onChangeText={setRoutineName} placeholder="e.g. High Protein Breakfast" placeholderTextColor={tc.textMuted} style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, color: tc.textPrimary, backgroundColor: tc.surfaceRaised, marginBottom: 14 }} />
+              {/* Meal type */}
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Meal Type (optional)</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+                {['breakfast', 'lunch', 'dinner', 'snack', 'custom'].map(t => (
+                  <TouchableOpacity key={t} onPress={() => setRoutineMealType(routineMealType === t ? '' : t)} style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.full, borderWidth: 1, borderColor: routineMealType === t ? tc.primary : tc.border, backgroundColor: routineMealType === t ? tc.primary + '22' : 'transparent' }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: routineMealType === t ? tc.primary : tc.textSecondary, textTransform: 'capitalize' }}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {/* Foods */}
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Foods</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                <TextInput value={routineFoodInput} onChangeText={setRoutineFoodInput} placeholder="Food name" placeholderTextColor={tc.textMuted} style={{ flex: 2, borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised }} />
+                <TextInput value={routineFoodQtyInput} onChangeText={setRoutineFoodQtyInput} placeholder="Qty" placeholderTextColor={tc.textMuted} style={{ flex: 1, borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised }} />
+                <TouchableOpacity onPress={handleRoutineAddFood} style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingHorizontal: 14, justifyContent: 'center' }}>
+                  <Text style={{ fontSize: 20, color: '#fff', fontWeight: '700', lineHeight: 24 }}>+</Text>
+                </TouchableOpacity>
+              </View>
+              {routineFoods.length > 0 && (
+                <View style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, marginBottom: 14, overflow: 'hidden' }}>
+                  {routineFoods.map((f, fi) => (
+                    <View key={f.id} style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: fi < routineFoods.length - 1 ? 1 : 0, borderBottomColor: tc.border }}>
+                      <Text style={{ flex: 1, fontSize: 14, color: tc.textPrimary }}>{f.name}{f.quantity ? ` — ${f.quantity}` : ''}</Text>
+                      <TouchableOpacity onPress={() => setRoutineFoods(prev => prev.filter(x => x.id !== f.id))} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                        <Text style={{ fontSize: 16, color: tc.error }}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+              {/* Notes */}
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Notes (optional)</Text>
+              <TextInput value={routineNotes} onChangeText={setRoutineNotes} placeholder="e.g. I have this every morning before the gym" placeholderTextColor={tc.textMuted} multiline style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised, minHeight: 60, textAlignVertical: 'top', marginBottom: 20 }} />
+              <TouchableOpacity onPress={handleRoutineSave} style={{ backgroundColor: tc.primary, borderRadius: radius.lg, paddingVertical: 14, alignItems: 'center', marginBottom: 8 }} activeOpacity={0.85}>
+                <Text style={{ fontSize: 15, fontWeight: '800', color: '#fff' }}>{editingRoutine ? 'Save Changes' : 'Save Routine'}</Text>
+              </TouchableOpacity>
+              {editingRoutine && (
+                <TouchableOpacity onPress={() => { setRoutineModalVisible(false); handleRoutineDelete(editingRoutine.id); }} style={{ paddingVertical: 12, alignItems: 'center' }} activeOpacity={0.7}>
+                  <Text style={{ fontSize: 14, color: tc.error, fontWeight: '600' }}>Delete this routine</Text>
+                </TouchableOpacity>
+              )}
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* ── Scanned Foods Modal ── */}
       <Modal visible={!!scannedFoods} transparent animationType="slide" onRequestClose={() => setScannedFoods(null)}>
@@ -1231,6 +1498,9 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   goalIcon:       { fontSize: 22 },
   goalLabel:      { fontSize: 11, color: colors.textSecondary, textAlign: 'center', fontWeight: '500' },
   goalLabelActive:{ color: colors.primary, fontWeight: '700' },
+  goalBadge:         { backgroundColor: colors.primary, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1 },
+  goalBadgeSecondary:{ backgroundColor: colors.border },
+  goalBadgeText:     { fontSize: 8, fontWeight: '700', color: '#fff' },
 
   paceList: { gap: 8 },
   paceCard: { backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, padding: 12, gap: 4 },

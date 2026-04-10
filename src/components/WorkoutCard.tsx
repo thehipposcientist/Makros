@@ -1,6 +1,6 @@
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { WorkoutDay } from '../types';
-import { AppThemeName } from '../types';
+import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { WorkoutDay, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 
 interface WorkoutCardProps {
@@ -10,172 +10,259 @@ interface WorkoutCardProps {
 }
 
 export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }: WorkoutCardProps) {
-  const theme = getTheme(themeName);
-  const colors = theme.colors;
-  const section = theme.sections.workout;
-  const styles = createStyles(colors, section);
+  const theme  = getTheme(themeName);
+  const c      = theme.colors;
+  const s      = theme.sections.workout;
+  const styles = createStyles(c, s);
+
+  const totalSets        = workout.exercises.reduce((sum, ex) => sum + (Number(ex.sets) || 3), 0);
+  const estimatedMinutes = Math.round(workout.exercises.length * 8);
 
   return (
     <View style={styles.card}>
-      {/* Icon-based section header with soft blue tint */}
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionIcon}>🏋️</Text>
-        <Text style={styles.sectionLabel}>WORKOUT</Text>
-        <View style={styles.sectionDivider} />
-        <Text style={styles.sectionMeta}>{workout.focus}</Text>
-        <View style={[styles.countBadge, { backgroundColor: section.strong + '22', borderColor: section.strong + '55' }]}>
-          <Text style={[styles.countText, { color: section.text }]}>{workout.exercises.length} exercises</Text>
+
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <View style={styles.header}>
+        <View style={[styles.headerIconCircle, { backgroundColor: s.strong + '1E' }]}>
+          <Ionicons name="barbell-outline" size={17} color={s.strong} />
+        </View>
+        <View style={styles.headerMid}>
+          <Text style={[styles.headerSection, { color: s.strong }]}>WORKOUT</Text>
+          <Text style={[styles.headerFocus, { color: c.textPrimary }]} numberOfLines={1}>
+            {workout.focus}
+          </Text>
+        </View>
+        <View style={[styles.headerCountBadge, { backgroundColor: s.strong + '18', borderColor: s.strong + '44' }]}>
+          <Text style={[styles.headerCountNum, { color: s.strong }]}>{workout.exercises.length}</Text>
+          <Text style={[styles.headerCountLabel, { color: s.strong + 'CC' }]}>ex</Text>
         </View>
       </View>
 
-      {/* Exercise list */}
-      <View style={styles.body}>
-        <View style={styles.exercisesContainer}>
-          {workout.exercises.map((exercise, index) => (
-            <View key={index} style={styles.exerciseItem}>
-              <View style={styles.exerciseRow}>
-                <View style={styles.indexBadge}>
-                  <Text style={styles.indexText}>{index + 1}</Text>
-                </View>
-                <View style={styles.exerciseInfo}>
-                  <Text style={styles.exerciseName}>{exercise.name}</Text>
-                  <Text style={styles.equipment}>{exercise.equipment}</Text>
-                </View>
-              </View>
-              <View style={styles.badges}>
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{exercise.sets} × {exercise.reps}</Text>
-                </View>
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>Rest {exercise.restSeconds}s</Text>
-                </View>
-                {onOpenExerciseVideo ? (
-                  <TouchableOpacity
-                    style={styles.videoBadge}
-                    onPress={() => onOpenExerciseVideo(exercise.name)}>
-                    <Text style={styles.videoBadgeText}>Form ↗</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            </View>
-          ))}
-        </View>
+      {/* ── Stats strip ────────────────────────────────────────────────── */}
+      <View style={[styles.statsStrip, { backgroundColor: s.soft, borderBottomColor: s.strong + '1E' }]}>
+        <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} c={c} />
+        <View style={[styles.statsDivider, { backgroundColor: s.strong + '30' }]} />
+        <StatItem icon="layers-outline" value={`${totalSets} sets total`} color={s.strong} c={c} />
+      </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>Focus on form · rest fully between sets</Text>
+      {/* ── Exercise list ───────────────────────────────────────────────── */}
+      <View style={styles.body}>
+        {workout.exercises.map((exercise, index) => (
+          <ExerciseRow
+            key={index}
+            index={index}
+            exercise={exercise}
+            isLast={index === workout.exercises.length - 1}
+            section={s}
+            c={c}
+            styles={styles}
+            onOpenVideo={onOpenExerciseVideo}
+          />
+        ))}
+      </View>
+
+      {/* ── Footer ─────────────────────────────────────────────────────── */}
+      <View style={[styles.footer, { borderTopColor: c.border }]}>
+        <Ionicons name="information-circle-outline" size={12} color={c.textMuted} />
+        <Text style={[styles.footerText, { color: c.textMuted }]}>
+          Focus on form · rest fully between sets
+        </Text>
+      </View>
+
+    </View>
+  );
+}
+
+// ── StatItem ──────────────────────────────────────────────────────────────────
+
+function StatItem({ icon, value, color, c }: {
+  icon: keyof typeof Ionicons.glyphMap;
+  value: string;
+  color: string;
+  c: ReturnType<typeof getTheme>['colors'];
+}) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+      <Ionicons name={icon} size={12} color={color} />
+      <Text style={{ fontSize: 11, fontWeight: '600', color, letterSpacing: 0.2 }}>{value}</Text>
+    </View>
+  );
+}
+
+// ── ExerciseRow ───────────────────────────────────────────────────────────────
+
+function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo }: {
+  index: number;
+  exercise: WorkoutDay['exercises'][number];
+  isLast: boolean;
+  section: ReturnType<typeof getTheme>['sections']['workout'];
+  c: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+  onOpenVideo?: (name: string) => void;
+}) {
+  return (
+    <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
+      {/* Number */}
+      <View style={[styles.exNum, { backgroundColor: section.strong }]}>
+        <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
+      </View>
+
+      {/* Info */}
+      <View style={styles.exInfo}>
+        <Text style={[styles.exName, { color: c.textPrimary }]}>{exercise.name}</Text>
+        {exercise.equipment ? (
+          <Text style={[styles.exEquipment, { color: c.textMuted }]}>{exercise.equipment}</Text>
+        ) : null}
+
+        {/* Chips */}
+        <View style={styles.exChips}>
+          <Chip
+            icon="repeat-outline"
+            label={`${exercise.sets} × ${exercise.reps}`}
+            strong={section.strong}
+            soft={section.soft}
+            text={section.text}
+          />
+          <Chip
+            icon="timer-outline"
+            label={`${exercise.restSeconds}s rest`}
+            strong={section.strong}
+            soft={section.soft}
+            text={section.text}
+          />
+          {onOpenVideo && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.videoChip,
+                { borderColor: section.strong, backgroundColor: pressed ? section.strong + '28' : section.strong + '12' },
+              ]}
+              onPress={() => onOpenVideo(exercise.name)}>
+              <Ionicons name="open-outline" size={11} color={section.strong} />
+              <Text style={[styles.videoChipText, { color: section.strong }]}>Form</Text>
+            </Pressable>
+          )}
         </View>
       </View>
     </View>
   );
 }
 
+// ── Chip ──────────────────────────────────────────────────────────────────────
+
+function Chip({ icon, label, strong, soft, text }: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  strong: string;
+  soft: string;
+  text: string;
+}) {
+  return (
+    <View style={[chipStyles.chip, { backgroundColor: soft, borderColor: strong + '33' }]}>
+      <Ionicons name={icon} size={10} color={text} />
+      <Text style={[chipStyles.label, { color: text }]}>{label}</Text>
+    </View>
+  );
+}
+
+const chipStyles = StyleSheet.create({
+  chip:  { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderRadius: radius.full, paddingHorizontal: 9, paddingVertical: 4 },
+  label: { fontSize: 11, fontWeight: '600' },
+});
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 const createStyles = (
-  colors: ReturnType<typeof getTheme>['colors'],
-  section: ReturnType<typeof getTheme>['sections']['workout'],
+  c: ReturnType<typeof getTheme>['colors'],
+  s: ReturnType<typeof getTheme>['sections']['workout'],
 ) => StyleSheet.create({
+
   card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    marginBottom: 16,
+    backgroundColor: c.surface,
+    borderRadius: radius.xl,
+    marginBottom: 12,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
   },
 
-  // ── Section identity header ──────────────────────────────────────────────────
-  sectionHeader: {
+  // Header
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: section.soft,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: section.strong + '30',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: s.soft,
   },
-  sectionIcon: { fontSize: 15 },
-  sectionLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: section.text,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  sectionDivider: {
-    width: 1,
-    height: 12,
-    backgroundColor: section.strong + '44',
-    marginHorizontal: 2,
-  },
-  sectionMeta: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: section.text,
-    flex: 1,
-  },
-  countBadge: {
-    borderRadius: radius.full,
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  countText: { fontSize: 11, fontWeight: '700' },
-
-  // ── Body ─────────────────────────────────────────────────────────────────────
-  body: { padding: 14 },
-
-  exercisesContainer: { gap: 8, marginBottom: 14 },
-
-  exerciseItem: {
-    backgroundColor: colors.surfaceRaised,
+  headerIconCircle: {
+    width: 36,
+    height: 36,
     borderRadius: radius.md,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    gap: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-
-  exerciseRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-
-  indexBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: section.soft,
+  headerMid: { flex: 1, gap: 1 },
+  headerSection: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2, textTransform: 'uppercase' },
+  headerFocus:   { fontSize: 15, fontWeight: '700' },
+  headerCountBadge: {
+    borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: section.strong + '55',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  headerCountNum:   { fontSize: 16, fontWeight: '800' },
+  headerCountLabel: { fontSize: 9, fontWeight: '600', letterSpacing: 0.5 },
+
+  // Stats strip
+  statsStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+  },
+  statsDivider: { width: 1, height: 12 },
+
+  // Body
+  body: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 8 },
+
+  // Exercise row
+  exRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingVertical: 12,
+  },
+  exNum: {
+    width: 28,
+    height: 28,
+    borderRadius: radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 1,
     flexShrink: 0,
   },
-  indexText: { fontSize: 11, fontWeight: '800', color: section.text },
+  exNumText:   { fontSize: 10, fontWeight: '900', color: '#fff', letterSpacing: 0.5 },
+  exInfo:      { flex: 1, gap: 3 },
+  exName:      { fontSize: 14, fontWeight: '700', lineHeight: 19 },
+  exEquipment: { fontSize: 11, fontWeight: '500', marginBottom: 6 },
+  exChips:     { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
 
-  exerciseInfo: { flex: 1 },
-  exerciseName: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
-  equipment:    { fontSize: 11, color: colors.textMuted },
-
-  badges: { flexDirection: 'row', gap: 7, flexWrap: 'wrap', marginLeft: 34 },
-  badge: {
-    backgroundColor: section.soft,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: radius.sm,
+  videoChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     borderWidth: 1,
-    borderColor: section.strong + '40',
+    borderRadius: radius.full,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
   },
-  badgeText: { fontSize: 12, color: section.text, fontWeight: '600' },
+  videoChipText: { fontSize: 11, fontWeight: '700' },
 
-  videoBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: section.strong,
-    backgroundColor: section.strong + '14',
-  },
-  videoBadgeText: { fontSize: 12, color: section.strong, fontWeight: '700' },
-
-  footer: { paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },
-  footerText: { fontSize: 12, color: colors.textMuted, textAlign: 'center' },
+  // Footer
+  footer:     { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: 1 },
+  footerText: { fontSize: 11 },
 });

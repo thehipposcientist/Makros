@@ -33,7 +33,16 @@
       "Bash(cmd.exe /c \"dir E:\\\\WorkoutPal\\\\backend\")",
       "Bash(cmd.exe:*)",
       "Bash(powershell.exe:*)",
-      "Bash(ipconfig)"
+      "Bash(ipconfig)",
+      "Bash(npx @expo/ngrok --version)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); const all={...p.dependencies,...p.devDependencies}; Object.keys\\(all\\).filter\\(k=>k.includes\\('ngrok'\\)\\).forEach\\(k=>console.log\\(k,all[k]\\)\\)\")",
+      "Bash(venv/Scripts/python -c \"import py_compile; py_compile.compile\\('app/routers/ai.py', doraise=True\\)\")",
+      "Bash(venv/Scripts/python -c ':*)",
+      "Bash(curl:*)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(taskkill //F //IM uvicorn.exe)",
+      "Bash(venv/Scripts/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(venv/Scripts/python:*)"
     ]
   }
 }

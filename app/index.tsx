@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, upsertDayState } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -11,6 +11,7 @@ import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import { colors, getTheme, radius } from '../src/constants/theme';
+import { recordGoalChange, loadWorkoutHistory, todayKey } from '../src/utils/workoutHistory';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -50,7 +51,8 @@ export default function Index() {
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'plan' | 'equipment' | 'foods' | 'theme'>('plan');
   const [planRefreshKey, setPlanRefreshKey] = useState(0);
-  const [isPlanUpdating, setIsPlanUpdating] = useState(false);
+  const [isWorkoutUpdating, setIsWorkoutUpdating] = useState(false);
+  const [isNutritionUpdating, setIsNutritionUpdating] = useState(false);
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
@@ -134,6 +136,11 @@ export default function Index() {
 
   const handleSaveProfile = async (updated: UserProfile) => {
     const stamped = stampGoalStart(updated, userProfile);
+    // Record goal history when goal or pace changes
+    const goalChanged = !userProfile || userProfile.goal !== updated.goal || userProfile.goalDetails.pace !== updated.goalDetails.pace;
+    if (goalChanged) {
+      await recordGoalChange(updated.goal, updated.goalDetails.pace, updated.physicalStats.weightLbs);
+    }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
     setIsEditing(false);
@@ -143,50 +150,78 @@ export default function Index() {
 
       const shouldRegen = editMode === 'plan' || editMode === 'foods' || editMode === 'equipment';
       if (shouldRegen) {
-        if (editMode !== 'equipment') await AsyncStorage.removeItem('mealEdits');
-        setIsPlanUpdating(true);
+        // Preserve today's logged meals — only clear future/past edits
+        if (editMode !== 'equipment') {
+          const today = todayKey();
+          const rawEdits = await AsyncStorage.getItem('mealEdits');
+          if (rawEdits) {
+            try {
+              const allEdits = JSON.parse(rawEdits);
+              const todayEdit = allEdits[today];
+              if (todayEdit) {
+                await AsyncStorage.setItem('mealEdits', JSON.stringify({ [today]: todayEdit }));
+              } else {
+                await AsyncStorage.removeItem('mealEdits');
+              }
+            } catch { await AsyncStorage.removeItem('mealEdits'); }
+          }
+        }
+
         const userLogRaw = await AsyncStorage.getItem('userLog');
-        const userLog = userLogRaw ? JSON.parse(userLogRaw) : [];
-        getAIPlans(authToken, stamped, { userLog })
+        const userLog: import('../src/types').UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+
+        // Build last 3 workout sessions as context — AI uses this to assess muscle recovery
+        // and avoid scheduling the same muscles back-to-back
+        const recentSessions = (await loadWorkoutHistory())
+          .filter(s => !s.skipped && s.completed)
+          .slice(0, 3);
+        const sessionLines = recentSessions.length
+          ? 'Last 3 completed workouts (use to assess muscle recovery and schedule accordingly):\n' +
+            recentSessions.map(s => {
+              const muscleGroups = (s.exercises ?? [])
+                .map(e => e.name)
+                .slice(0, 5)
+                .join(', ');
+              return `  [${s.date.slice(0, 10)}] ${s.focus}${muscleGroups ? `: ${muscleGroups}` : ''}`;
+            }).join('\n')
+          : '';
+        const extraContext = sessionLines || undefined;
+
+        const updatesWorkout   = editMode === 'equipment' || editMode === 'plan';
+        const updatesNutrition = editMode === 'foods'     || editMode === 'plan';
+
+        if (updatesWorkout)   setIsWorkoutUpdating(true);
+        if (updatesNutrition) setIsNutritionUpdating(true);
+
+        const planCall =
+          (updatesWorkout && !updatesNutrition) ? getAIWorkoutPlan(authToken, stamped, { userLog, extraContext }) :
+          (updatesNutrition && !updatesWorkout)  ? getAINutritionPlan(authToken, stamped, { userLog, extraContext }) :
+          getAIPlans(authToken, stamped, { userLog, extraContext });
+
+        planCall
           .then(async (aiPlans) => {
-            const updateWorkout   = editMode === 'plan' || editMode === 'equipment';
-            const updateNutrition = editMode === 'plan' || editMode === 'foods';
 
-            // Debug: log raw note values from backend
-            console.log('[getAIPlans] raw trainerNote:', JSON.stringify(aiPlans.workout_plan?.trainerNote));
-            console.log('[getAIPlans] raw nutritionistNote:', JSON.stringify(aiPlans.nutrition_plan?.nutritionistNote));
-            console.log('[getAIPlans] supplementStack count:', aiPlans.nutrition_plan?.supplementStack?.length ?? 0);
-
-            if (updateWorkout) {
+            if (updatesWorkout && aiPlans.workout_plan) {
+              const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
               await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-              if (aiPlans.workout_plan.trainerNote) {
-                await AsyncStorage.setItem('trainerNote', aiPlans.workout_plan.trainerNote);
-                setTrainerNote(aiPlans.workout_plan.trainerNote);
-                console.log('[getAIPlans] trainerNote saved ✓');
-              } else {
-                console.warn('[getAIPlans] trainerNote missing from response!');
-              }
+              if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
             }
-            if (updateNutrition) {
+
+            if (updatesNutrition && aiPlans.nutrition_plan) {
+              const nnNote = aiPlans.nutritionistNote || aiPlans.nutrition_plan?.nutritionistNote || null;
               await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan));
-              if (aiPlans.nutrition_plan.nutritionistNote) {
-                await AsyncStorage.setItem('nutritionistNote', aiPlans.nutrition_plan.nutritionistNote);
-                setNutritionistNote(aiPlans.nutrition_plan.nutritionistNote);
-                console.log('[getAIPlans] nutritionistNote saved ✓');
-              } else {
-                console.warn('[getAIPlans] nutritionistNote missing from response!');
-              }
-              if (aiPlans.nutrition_plan.supplementStack?.length) {
+              if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
+              if (aiPlans.nutrition_plan?.supplementStack?.length) {
                 await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.nutrition_plan.supplementStack));
                 setSupplementStack(aiPlans.nutrition_plan.supplementStack);
               }
               const today = new Date();
-              const token = authToken;
+              const tok = authToken;
               for (let i = 0; i < 3; i++) {
                 const d = new Date(today);
                 d.setDate(today.getDate() + i);
                 const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                upsertDayState(token, key, { nutrition_plan: aiPlans.nutrition_plan }).catch(() => null);
+                upsertDayState(tok, key, { nutrition_plan: aiPlans.nutrition_plan }).catch(() => null);
               }
             }
 
@@ -194,10 +229,13 @@ export default function Index() {
             setPlanRefreshKey(k => k + 1);
           })
           .catch((err) => {
-            console.error('[getAIPlans] failed:', err?.message ?? err);
+            console.error('[planCall] failed:', err?.message ?? err);
             Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
           })
-          .finally(() => setIsPlanUpdating(false));
+          .finally(() => {
+            if (updatesWorkout)   setIsWorkoutUpdating(false);
+            if (updatesNutrition) setIsNutritionUpdating(false);
+          });
       }
     }
   };
@@ -283,7 +321,8 @@ export default function Index() {
         authToken={authToken}
         userProfile={userProfile}
         planRefreshKey={planRefreshKey}
-        isPlanUpdating={isPlanUpdating}
+        isWorkoutUpdating={isWorkoutUpdating}
+        isNutritionUpdating={isNutritionUpdating}
         trainerNote={trainerNote}
         nutritionistNote={nutritionistNote}
         supplementStack={supplementStack}

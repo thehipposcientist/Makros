@@ -7,10 +7,11 @@ import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary } from '../utils/workoutHistory';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion } from '../services/api';
 import { getTheme, radius } from '../constants/theme';
+import * as Notifications from 'expo-notifications';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 
 interface WorkoutCoachMessage {
@@ -152,6 +153,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [logWeight, setLogWeight] = useState('');
   const [logReps, setLogReps] = useState('');
 
+  // Edit logged set modal
+  const [editSetVisible, setEditSetVisible] = useState(false);
+  const [editSetExIdx, setEditSetExIdx] = useState(0);
+  const [editSetIdx, setEditSetIdx] = useState(0);
+  const [editSetWeight, setEditSetWeight] = useState('');
+  const [editSetReps, setEditSetReps] = useState('');
+
   // Auto rest timer between sets
   const [restRemaining, setRestRemaining] = useState(0);
   const [restForExercise, setRestForExercise] = useState<string | null>(null);
@@ -258,6 +266,33 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setLogReps(String(last.reps));
     }
   }, [exercises]);
+
+  const openEditSet = useCallback((exIdx: number, setIdx: number) => {
+    const set = exercises[exIdx]?.sets[setIdx];
+    if (!set) return;
+    setEditSetExIdx(exIdx);
+    setEditSetIdx(setIdx);
+    setEditSetWeight(String(set.weightLbs));
+    setEditSetReps(String(set.reps));
+    setEditSetVisible(true);
+  }, [exercises]);
+
+  const handleSaveEditedSet = useCallback(() => {
+    const w = parseFloat(editSetWeight);
+    const r = parseInt(editSetReps, 10);
+    if (isNaN(w) || isNaN(r) || r <= 0 || w < 0) {
+      Alert.alert('Invalid values', 'Enter a valid weight and reps.');
+      return;
+    }
+    setExercises(prev => prev.map((ex, i) => {
+      if (i !== editSetExIdx) return ex;
+      const updatedSets = ex.sets.map((s, si) =>
+        si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
+      );
+      return { ...ex, sets: updatedSets };
+    }));
+    setEditSetVisible(false);
+  }, [editSetExIdx, editSetIdx, editSetWeight, editSetReps]);
 
   // Log a specific set slot inline (no modal)
   const handleLogSetInline = useCallback(async (exIdx: number, setSlot: number, silent = false) => {
@@ -417,10 +452,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (remaining === 0) {
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
-        Vibration.vibrate([0, 250, 120, 250]);
+        Vibration.vibrate([0, 300, 150, 300, 150, 300]);
         cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
         restNotificationIds.current = null;
-        Alert.alert('Rest Complete', `${restExerciseNameRef.current ?? 'Current exercise'} — ready for the next set.`);
+        // Fire an immediate notification so the system plays its alert sound
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Rest Complete — Go!',
+            body: `${restExerciseNameRef.current ?? 'Next exercise'} — start your next set`,
+            sound: 'default',
+          },
+          trigger: null,
+        }).catch(() => undefined);
       }
     }, 500); // 500ms tick for smooth countdown without drift
   }, []);
@@ -765,6 +808,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           weightLbs,
         });
         setSummaryData(s);
+        // Persist summary so user can review it later in Progress
+        const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
+        const totalReps = session.exercises.reduce((sum, ex) => ex.sets.reduce((rs, set) => rs + set.reps, sum), 0);
+        await saveWorkoutSummary({
+          ...s,
+          id: session.id,
+          date: session.date,
+          focus: session.focus,
+          durationSeconds: session.durationSeconds,
+          totalSets,
+          totalReps,
+        });
       }
     } catch {
       /* show basic summary without AI */
@@ -1060,8 +1115,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {isActive && (
                 <View style={styles.exerciseDetail}>
 
-                  {/* ── Exercise-specific warm-up note ── */}
-                  {(() => {
+                  {/* ── Exercise-specific warm-up note — hidden once first set is logged ── */}
+                  {ex.sets.length === 0 && (() => {
                     const note = getExerciseWarmupNote(ex.name, i === 0);
                     return note ? (
                       <View style={styles.warmupNoteCard}>
@@ -1154,8 +1209,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                                 <TouchableOpacity
                                   style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
-                                  onPress={() => { if (!isLogged) handleLogSetInline(i, slot, false); }}
-                                  disabled={isLogged}>
+                                  onPress={() => { if (!isLogged) handleLogSetInline(i, slot, false); }}>
                                   <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
                                     {isLogged ? '✓' : '○'}
                                   </Text>
@@ -1200,11 +1254,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 returnKeyType="done"
                               />
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
-                              <View style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}>
+                              <TouchableOpacity
+                                style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
+                                onPress={() => {
+                                  if (isLogged) { openEditSet(i, slot); }
+                                  else { handleLogSetInline(i, slot, false); }
+                                }}>
                                 <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                  {isLogged ? '✓' : '○'}
+                                  {isLogged ? '✏' : '○'}
                                 </Text>
-                              </View>
+                              </TouchableOpacity>
                             </View>
                           );
                         })}
@@ -1632,6 +1691,47 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </KeyboardAvoidingView>
       </Modal>
 
+      {/* Edit Logged Set Modal */}
+      <Modal visible={editSetVisible} transparent animationType="fade" onRequestClose={() => setEditSetVisible(false)}>
+        <View style={styles.finishBackdrop}>
+          <View style={[styles.finishModal, { padding: 24, gap: 14 }]}>
+            <Text style={[styles.summaryTitle, { fontSize: 18 }]}>Edit Set</Text>
+            <View style={{ gap: 10 }}>
+              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Weight (lbs)</Text>
+              <TextInput
+                value={editSetWeight}
+                onChangeText={setEditSetWeight}
+                keyboardType="decimal-pad"
+                style={[styles.addExerciseSearch, { marginTop: 0 }]}
+                placeholderTextColor={themeColors.textMuted}
+                placeholder="0"
+              />
+              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Reps</Text>
+              <TextInput
+                value={editSetReps}
+                onChangeText={setEditSetReps}
+                keyboardType="number-pad"
+                style={[styles.addExerciseSearch, { marginTop: 0 }]}
+                placeholderTextColor={themeColors.textMuted}
+                placeholder="0"
+              />
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={[styles.warmupCoachBtn, { flex: 1 }]}
+                onPress={() => setEditSetVisible(false)}>
+                <Text style={[styles.warmupCoachBtnText, { color: themeColors.textSecondary }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.warmupDoneBtn, { flex: 1, backgroundColor: workoutPalette.strong }]}
+                onPress={handleSaveEditedSet}>
+                <Text style={styles.warmupDoneBtnText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={addExerciseModalVisible} transparent animationType="slide" onRequestClose={() => setAddExerciseModalVisible(false)}>
         <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.coachSheet}>
@@ -1846,12 +1946,11 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   setData: { flex: 1, fontSize: 13, fontWeight: '600', color: tc.textPrimary },
   setCheck:{ fontSize: 12, color: tc.primary, fontWeight: '700' },
   feedbackCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
     gap: 6,
   },
-  feedbackTitle: { fontSize: 11, fontWeight: '600', color: tc.textMuted, marginRight: 2 },
-  feedbackRow: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  feedbackTitle: { fontSize: 11, fontWeight: '600', color: tc.textMuted },
+  feedbackRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   feedbackChip: {
     paddingVertical: 6,
     paddingHorizontal: 10,

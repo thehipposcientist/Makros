@@ -75,6 +75,10 @@ const SUPPLEMENT_CATEGORIES = [
   },
 ];
 
+// ─── Muscle group options ─────────────────────────────────────────────────────
+
+const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Full Body'] as const;
+
 // ─── Equipment templates ──────────────────────────────────────────────────────
 
 interface EquipmentTemplate {
@@ -165,8 +169,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   // Step tracking
   const [currentStep, setCurrentStep] = useState(0);
 
-  // Step 1 — Goal
-  const [goal, setGoal] = useState<Goal>('fat_loss');
+  // Step 1 — Goal (up to 2 combined goals; first = primary)
+  const [goals, setGoals] = useState<Goal[]>(['fat_loss']);
+  const [focusedMuscleGroup, setFocusedMuscleGroup] = useState('');
 
   // Step 2 — Goal details
   const [pace, setPace] = useState<GoalPace>('moderate');
@@ -207,9 +212,22 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [experienceLevel, setExperienceLevel] = useState<'beginner' | 'intermediate' | 'advanced' | ''>('');
   const [lastWorkoutContext, setLastWorkoutContext] = useState('');
 
-  const steps = getSteps(goal, lifestyleGoals);
+  const steps = getSteps(goals[0], lifestyleGoals);
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
+
+  const toggleGoal = (value: Goal) => {
+    setGoals(prev => {
+      if (prev.includes(value)) {
+        if (prev.length === 1) return prev; // can't deselect last goal
+        return prev.filter(g => g !== value);
+      }
+      if (prev.length >= 2) {
+        return [prev[0], value]; // replace secondary
+      }
+      return [...prev, value];
+    });
+  };
 
   const toggleEquipment = (eq: string) => {
     setSelectedEquipment(prev =>
@@ -224,7 +242,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const validate = (): string | null => {
     switch (currentStepKey) {
       case 'goalDetails':
-        if (weightGoals.has(goal) && targetWeight) {
+        if (weightGoals.has(goals[0]) && targetWeight) {
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
         }
@@ -271,13 +289,14 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   };
 
   const handleComplete = () => {
+    const primaryGoal = goals[0];
     const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
     const goalDetails: GoalDetails = {
       pace,
-      targetWeightLbs: weightGoals.has(goal) && targetWeight ? parseFloat(targetWeight) : undefined,
-      targetEvent:     eventGoals.has(goal) && targetEvent.trim() ? targetEvent.trim() : undefined,
-      timelineWeeks:   timelineGoals.has(goal)
-        ? (meta.goalConfig.timeline_weeks[goal]?.[pace] ?? undefined)
+      targetWeightLbs: weightGoals.has(primaryGoal) && targetWeight ? parseFloat(targetWeight) : undefined,
+      targetEvent:     eventGoals.has(primaryGoal) && targetEvent.trim() ? targetEvent.trim() : undefined,
+      timelineWeeks:   timelineGoals.has(primaryGoal)
+        ? (meta.goalConfig.timeline_weeks[primaryGoal]?.[pace] ?? undefined)
         : undefined,
     };
 
@@ -290,7 +309,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     };
 
     onComplete({
-      goal,
+      goal:               primaryGoal,
+      secondaryGoal:      goals[1],
+      focusedMuscleGroup: focusedMuscleGroup || undefined,
       goalDetails,
       physicalStats,
       daysPerWeek:            parseInt(daysPerWeek),
@@ -418,22 +439,32 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderGoalStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>What's Your Goal?</Text>
-      <Text style={styles.stepDescription}>Choose the one that best matches what you want to achieve</Text>
+      <Text style={styles.stepDescription}>
+        Select up to 2 goals · {goals.length} selected
+      </Text>
       {meta.loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
         <View style={styles.goalGrid}>
           {meta.goals.map(opt => {
-            const active = goal === opt.value;
+            const active = goals.includes(opt.value as Goal);
+            const isPrimary = goals[0] === opt.value;
             return (
               <TouchableOpacity
                 key={opt.value}
                 style={[styles.goalCard, active && styles.goalCardActive]}
-                onPress={() => setGoal(opt.value as Goal)}
+                onPress={() => toggleGoal(opt.value as Goal)}
                 activeOpacity={0.75}
               >
                 <Text style={styles.goalIcon}>{opt.icon}</Text>
-                <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{opt.label}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
+                  <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{opt.label}</Text>
+                  {active && (
+                    <View style={[styles.goalBadge, !isPrimary && styles.goalBadgeSecondary]}>
+                      <Text style={styles.goalBadgeText}>{isPrimary ? 'Primary' : '+2nd'}</Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{opt.description}</Text>
               </TouchableOpacity>
             );
@@ -444,16 +475,18 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   );
 
   const renderGoalDetailsStep = () => {
-    const paceOpts = pacesForGoal(goal, meta.paces);
-    const showTargetWeight = weightGoals.has(goal);
+    const primaryGoal = goals[0];
+    const paceOpts = pacesForGoal(primaryGoal, meta.paces);
+    const showTargetWeight = weightGoals.has(primaryGoal);
     const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-    const showTargetEvent = eventGoals.has(goal);
-    const goalLabel = meta.goals.find(g => g.value === goal)?.label ?? '';
+    const showTargetEvent = eventGoals.has(primaryGoal);
+    const showMuscleGroup = ['strength', 'muscle_gain', 'body_recomp'].includes(primaryGoal);
+    const goalLabel = meta.goals.find(g => g.value === primaryGoal)?.label ?? '';
 
     const eventPlaceholder =
-      goal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
-      goal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
-      goal === 'athletic_performance' ? 'e.g. sub-40s 100m, dunk a basketball' :
+      primaryGoal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
+      primaryGoal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
+      primaryGoal === 'athletic_performance' ? 'e.g. sub-40s 100m, dunk a basketball' :
       'Describe your target';
 
     return (
@@ -518,6 +551,27 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
             );
           })}
         </View>
+
+        {showMuscleGroup && (
+          <View style={[styles.fieldGroup, { marginTop: 20 }]}>
+            <Text style={styles.fieldLabel}>
+              Focus muscle group <Text style={styles.optional}>(optional)</Text>
+            </Text>
+            <View style={styles.foodChips}>
+              {MUSCLE_GROUPS.map(mg => (
+                <TouchableOpacity
+                  key={mg}
+                  style={[styles.foodChip, focusedMuscleGroup === mg && styles.foodChipActive]}
+                  onPress={() => setFocusedMuscleGroup(prev => prev === mg ? '' : mg)}>
+                  <Text style={[styles.foodChipText, focusedMuscleGroup === mg && styles.foodChipTextActive]}>
+                    {mg}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.hint}>AI will emphasise this in your training split</Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -1057,9 +1111,12 @@ const styles = StyleSheet.create({
   goalCard: { width: '48%', padding: 14, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   goalIcon: { fontSize: 26, marginBottom: 6 },
-  goalLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
+  goalLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
   goalLabelActive: { color: colors.primary },
-  goalDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
+  goalBadge: { backgroundColor: colors.primary, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
+  goalBadgeSecondary: { backgroundColor: colors.border },
+  goalBadgeText: { fontSize: 9, fontWeight: '700', color: '#fff' },
+  goalDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 16, textAlign: 'center' },
   goalDescActive: { color: colors.primaryLight },
 
   paceCards: { flexDirection: 'row', gap: 8, marginTop: 8 },

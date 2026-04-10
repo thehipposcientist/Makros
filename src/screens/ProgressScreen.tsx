@@ -3,8 +3,8 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
   TextInput, Alert,
 } from 'react-native';
-import { WorkoutSession, UserProfile } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR } from '../utils/workoutHistory';
+import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry } from '../types';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges } from '../utils/workoutHistory';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights } from '../services/api';
@@ -83,7 +83,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history' | 'charts'>('prs');
+  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'summaries'>('prs');
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
   const [prs, setPrs] = useState<PR[]>([]);
@@ -95,11 +95,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [progressionHint, setProgressionHint] = useState<string>('');
   const [editingWeight, setEditingWeight] = useState(false);
   const [weightInput, setWeightInput] = useState('');
+  const [summaries, setSummaries] = useState<StoredWorkoutSummary[]>([]);
+  const [goalHistory, setGoalHistory] = useState<GoalHistoryEntry[]>([]);
+  const [planChanges, setPlanChanges] = useState<PlanChangeEntry[]>([]);
 
   useEffect(() => {
-    Promise.all([getPersonalRecords(), loadWorkoutHistory()]).then(([p, h]) => {
+    Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
       setPrs(p);
       setHistory(h);
+      setSummaries(s);
+      setGoalHistory(g);
+      setPlanChanges(c);
       setLoading(false);
       if (authToken && p.length > 0) {
         getProgressionInsights(authToken, p[0].exerciseName)
@@ -152,6 +158,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           style={[styles.tab, tab === 'history' && styles.tabActive]}
           onPress={() => setTab('history')}>
           <Text style={[styles.tabText, tab === 'history' && styles.tabTextActive]}>History</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, tab === 'summaries' && styles.tabActive]}
+          onPress={() => setTab('summaries')}>
+          <Text style={[styles.tabText, tab === 'summaries' && styles.tabTextActive]}>Summaries</Text>
         </TouchableOpacity>
       </View>
 
@@ -370,7 +381,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
         </ScrollView>
-      ) : (
+      ) : tab === 'history' ? (
         <ScrollView contentContainerStyle={styles.content}>
           {history.length === 0 ? (
             <View style={styles.emptyBox}>
@@ -434,6 +445,122 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               })}
             </>
           )}
+        </ScrollView>
+      ) : (
+        /* ── Summaries + Goal History tab ─────────────────────────── */
+        <ScrollView contentContainerStyle={styles.content}>
+
+          {/* Goal History */}
+          <Text style={styles.sectionLabel}>Goal History</Text>
+          {goalHistory.filter(entry => {
+            if (!entry.endedAt) return true; // still active
+            const s = new Date(entry.startedAt);
+            const e = new Date(entry.endedAt);
+            return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
+          }).length === 0 ? (
+            <View style={[styles.emptyBox, { marginBottom: 16 }]}>
+              <Text style={styles.emptyBody}>No goal changes recorded yet. Switch goals to start tracking.</Text>
+            </View>
+          ) : goalHistory.filter(entry => {
+            if (!entry.endedAt) return true;
+            const s = new Date(entry.startedAt);
+            const e = new Date(entry.endedAt);
+            return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
+          }).map((entry, i) => {
+            const goalLabel = meta.goals.find(g => g.value === entry.goal)?.label ?? entry.goal;
+            const start = new Date(entry.startedAt);
+            const end = entry.endedAt ? new Date(entry.endedAt) : null;
+            const days = end
+              ? Math.round((end.getTime() - start.getTime()) / 86400000)
+              : Math.round((Date.now() - start.getTime()) / 86400000);
+            return (
+              <View key={entry.id} style={[styles.sessionCard, { marginBottom: 8 }]}>
+                <View style={styles.sessionHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sessionFocus}>{goalLabel}</Text>
+                    <Text style={styles.sessionDate}>
+                      {`${MONTH_NAMES[start.getMonth()]} ${start.getDate()}, ${start.getFullYear()}`}
+                      {end ? ` → ${MONTH_NAMES[end.getMonth()]} ${end.getDate()}, ${end.getFullYear()}` : ' → now'}
+                    </Text>
+                  </View>
+                  <View style={styles.sessionBadge}>
+                    <Text style={styles.sessionBadgeText}>{days}d</Text>
+                  </View>
+                </View>
+                <View style={styles.sessionStats}>
+                  <Text style={styles.sessionStat}>Pace: {entry.pace}</Text>
+                  {entry.startWeightLbs ? (
+                    <>
+                      <Text style={styles.sessionStatDot}>·</Text>
+                      <Text style={styles.sessionStat}>Started at {entry.startWeightLbs} lbs</Text>
+                    </>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+
+          {/* Workout Summaries */}
+          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Workout Summaries</Text>
+          {summaries.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>🏆</Text>
+              <Text style={styles.emptyTitle}>No summaries yet</Text>
+              <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
+            </View>
+          ) : summaries.map((s, i) => (
+            <View key={s.id ?? i} style={[styles.sessionCard, { gap: 8 }]}>
+              <View style={styles.sessionHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sessionFocus}>{s.focus}</Text>
+                  <Text style={styles.sessionDate}>{formatDate(s.date)}</Text>
+                </View>
+                <View style={styles.sessionBadge}>
+                  <Text style={styles.sessionBadgeText}>{formatDuration(s.durationSeconds)}</Text>
+                </View>
+              </View>
+              <View style={styles.sessionStats}>
+                <Text style={styles.sessionStat}>{s.totalSets} sets</Text>
+                <Text style={styles.sessionStatDot}>·</Text>
+                <Text style={styles.sessionStat}>{s.totalReps} reps</Text>
+                <Text style={styles.sessionStatDot}>·</Text>
+                <Text style={styles.sessionStat}>~{s.caloriesBurned} kcal</Text>
+              </View>
+              <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{s.motivationMessage}</Text>
+              {s.achievements?.length > 0 && (
+                <View style={{ gap: 3 }}>
+                  {s.achievements.map((a, ai) => (
+                    <Text key={ai} style={{ fontSize: 12, color: tc.textMuted }}>• {a}</Text>
+                  ))}
+                </View>
+              )}
+            </View>
+          ))}
+
+          {/* Plan Change History */}
+          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Plan Change History</Text>
+          {planChanges.length === 0 ? (
+            <View style={[styles.emptyBox, { marginBottom: 24 }]}>
+              <Text style={styles.emptyIcon}>📋</Text>
+              <Text style={styles.emptyTitle}>No plan changes yet</Text>
+              <Text style={styles.emptyBody}>When your trainer or nutritionist updates your plan via chat, the changes will be logged here.</Text>
+            </View>
+          ) : planChanges.map((c, i) => {
+            const d = new Date(c.changedAt);
+            const label = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+            return (
+              <View key={c.id ?? i} style={[styles.sessionCard, { gap: 6, marginBottom: 8 }]}>
+                <View style={styles.sessionHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sessionFocus}>{c.changedBy === 'trainer' ? 'Trainer Update' : 'Nutritionist Update'}</Text>
+                    <Text style={styles.sessionDate}>{label}</Text>
+                  </View>
+                </View>
+                <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic', marginBottom: 2 }}>You asked: "{c.question.length > 80 ? c.question.slice(0, 80) + '…' : c.question}"</Text>
+                <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{c.summary}</Text>
+              </View>
+            );
+          })}
         </ScrollView>
       )}
     </View>
