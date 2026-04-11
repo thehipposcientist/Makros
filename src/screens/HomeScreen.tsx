@@ -34,11 +34,9 @@ interface HomeScreenProps {
   nutritionistNote?: string | null;
   supplementStack?: SupplementItem[];
   onSignOut: () => void;
-  onEditProfile: () => void;
-  onEditEquipment: () => void;
-  onEditFoods: () => void;
-  onEditSupplements: () => void;
-  onAddSupplement: (name: string) => void;
+  onEditGoal: () => void;
+  onEditWorkout: () => void;
+  onEditMealPlan: () => void;
   onEditThemes: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
@@ -797,7 +795,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditProfile, onEditEquipment, onEditFoods, onEditSupplements, onAddSupplement, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   const theme = getTheme(userProfile?.themePreference);
@@ -1059,6 +1057,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   };
 
+  // Add supplement to user's profile locally (since supplements now managed via Edit Meal Plan)
+  const handleAddSupplement = async (name: string) => {
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (!raw) return;
+      const p: UserProfile = JSON.parse(raw);
+      if ((p.supplementsAvailable ?? []).includes(name)) return;
+      const updated = { ...p, supplementsAvailable: [...(p.supplementsAvailable ?? []), name] };
+      await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
+    } catch {}
+  };
+
   const handleSuppAiSearch = async () => {
     const q = suppAiQuery.trim();
     if (!q || !authToken) return;
@@ -1136,7 +1146,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   });
 
   const summarizeTrainerUpdate = useCallback((
-    prevWorkout: WorkoutPlan,
+    prevWorkout: WorkoutPlan | null,
     nextWorkout: WorkoutPlan | null,
     prevNutrition: DailyNutritionPlan | null,
     nextNutrition: DailyNutritionPlan | null,
@@ -1169,8 +1179,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const handleAskTrainer = useCallback(async () => {
     const q = trainerInput.trim();
     if (!q) return;
-    if (!authToken || !userProfile || !workoutPlan) {
-      Alert.alert('Unavailable', 'Please sign in and load your plan first.');
+    if (!authToken || !userProfile) {
+      Alert.alert('Unavailable', 'Please sign in first.');
+      return;
+    }
+    if (coachMode === 'trainer' && !workoutPlan) {
+      Alert.alert('Unavailable', 'Your workout plan is still loading. Please try again in a moment.');
       return;
     }
 
@@ -1199,23 +1213,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         .join('\n') || undefined;
 
       const workoutHistory = await loadWorkoutHistory();
-      const recentHistory = workoutHistory.slice(0, 40).map((s) => ({
+      // Only send last 5 sessions (not 40) — keeps payload small enough for model context
+      const recentHistory = workoutHistory.slice(0, 5).map((s) => ({
         date: s.date,
         focus: s.focus,
         durationSeconds: s.durationSeconds,
         completed: s.completed,
-        exercises: (s.exercises ?? []).map((ex) => ({
+        skipped: s.skipped ?? false,
+        exercises: (s.exercises ?? []).slice(0, 6).map((ex) => ({
           name: ex.name,
-          targetSets: ex.targetSets,
-          targetReps: ex.targetReps,
-          targetRestSeconds: ex.targetRestSeconds,
           setsLogged: ex.sets?.length ?? 0,
-          bestSet: (ex.sets ?? []).reduce<{ weightLbs: number; reps: number } | null>((best, set) => {
-            if (!best) return { weightLbs: set.weightLbs, reps: set.reps };
-            const bestScore = best.weightLbs * best.reps;
-            const currentScore = set.weightLbs * set.reps;
-            return currentScore > bestScore ? { weightLbs: set.weightLbs, reps: set.reps } : best;
-          }, null),
         })),
       }));
 
@@ -1250,7 +1257,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             status: session.completed ? 'completed' : 'incomplete',
             focus: session.focus,
             durationMinutes: Math.round(session.durationSeconds / 60),
-            setsLogged: session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0),
+            setsLogged: (session.exercises ?? []).reduce((sum, ex) => sum + (ex.sets ?? []).length, 0),
           };
         }
         // Fall back to in-memory skippedDates for today
@@ -1277,13 +1284,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const currentPlanContext = {
         workoutDays: (workoutPlan?.days ?? []).map(d => ({
           focus: d.focus,
-          exercises: d.exercises.map(e => ({ name: e.name, sets: e.sets, reps: e.reps })),
+          exercises: (d.exercises ?? []).map(e => ({ name: e.name, sets: e.sets, reps: e.reps })),
         })),
         todayMeals: todayPlan
           ? (['breakfast', 'lunch', 'dinner', 'snack'] as const)
               .map(type => {
                 const m = todayPlan[type];
-                return m ? { type, meal: m.meal, foods: m.foods, calories: m.calories, protein: m.protein } : null;
+                return m ? { type, meal: m.meal, foods: m.foods ?? [], calories: m.calories ?? 0, protein: m.protein ?? 0 } : null;
               })
               .filter(Boolean) as Array<{ type: string; meal: string; foods: string[]; calories: number; protein: number }>
           : [],
@@ -1311,15 +1318,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // Pass full workout plan so AI returns the correct structure (with 'days' key, not 'workoutDays')
         workoutPlan: coachMode === 'trainer' ? (workoutPlan ?? undefined) : undefined,
         nutritionPlan: todayPlan ?? undefined,
+        currentPlanContext,
         progress: {
           goal: progress.goal,
           todayDone: progress.todayDone,
           sessionsLast30d: progress.sessionsLast30d,
           totalSessions: progress.totalSessions,
-          todayMeals: currentPlanContext.todayMeals,
-          mealRoutine: currentPlanContext.mealRoutine,
+          recentDays: progress.recentDays,
+          recentHistory: progress.workoutHistory,
         },
-        conversation: nextChat.slice(-8),
+        conversation: nextChat.slice(-6),
         image_base64: imageToSend?.base64 ?? undefined,
         mime_type: 'image/jpeg',
         userContext,
@@ -1332,22 +1340,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         resp.safety_note ? `\nSafety: ${resp.safety_note}` : '',
       ].join('');
 
+      // Show the answer immediately — don't wait for plan application
       setActiveChat(prev => [...prev, { role: 'assistant', content: combined }]);
+      setTrainerLoading(false);
 
       // Enforce mode boundary — trainer can only update workout, nutritionist can only update nutrition
       const canUpdateWorkout   = coachMode === 'trainer';
       const canUpdateNutrition = coachMode === 'nutritionist';
       const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
+      console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
       if (resp.needs_plan_update && hasUpdate) {
+        // Apply plan update asynchronously — answer is already visible
         setIsChatPlanUpdating(true);
+        console.log('[handleAskTrainer] applying plan update...');
         try {
           const prevWorkout = workoutPlan;
           const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
           let appliedNutrition: DailyNutritionPlan | null = null;
 
           if (canUpdateWorkout && resp.updated_workout_plan) {
-            setWorkoutPlan(resp.updated_workout_plan as WorkoutPlan);
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
+            const updatedPlan = resp.updated_workout_plan as WorkoutPlan;
+            const prevDay1 = prevWorkout?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
+            const nextDay1 = updatedPlan?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
+            console.log('[handleAskTrainer] setting workout plan, days:', updatedPlan?.days?.length ?? 'no days key', 'prev day1:', prevDay1, 'next day1:', nextDay1);
+            setWorkoutPlan(updatedPlan);
+            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
             console.log('[handleAskTrainer] updated workout plan saved to AsyncStorage');
           }
           if (canUpdateNutrition && resp.updated_nutrition_plan) {
@@ -1398,6 +1415,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             summary: changeSummary,
             question: q,
           });
+        } catch (planErr: any) {
+          console.error('[handleAskTrainer] plan application error:', planErr);
+          setActiveChat(prev => [...prev, { role: 'assistant', content: 'I understood your request, but had trouble applying the plan changes. You can try asking again or edit your plan from the menu.' }]);
         } finally {
           setIsChatPlanUpdating(false);
         }
@@ -1434,13 +1454,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }
       }
     } catch (e: any) {
-      const msg = e?.message ?? '';
-      const isInternalError = msg.includes('calories') || msg.includes('undefined') || msg.includes('null') || msg.includes('Cannot read');
-      const userMsg = isInternalError
-        ? 'I got your message but had trouble applying the plan changes. Please try again.'
-        : `Could not answer right now. ${msg}`;
+      const msg = e?.message ?? String(e);
+      console.error('[handleAskTrainer] FULL ERROR:', msg, e?.stack ?? '');
+      const isTimeout = msg.includes('timed out') || msg.includes('timeout') || msg.includes('aborted');
+      const isNetwork = msg.includes('Network request failed') || msg.includes("Can't reach");
+      const userMsg = isTimeout
+        ? 'The request took too long. The server may be busy — please try again in a moment.'
+        : isNetwork
+        ? 'Could not reach the server. Check that the backend is running and you are on the same network.'
+        : `Could not answer right now: ${msg.slice(0, 200)}`;
       setActiveChat(prev => [...prev, { role: 'assistant', content: userMsg }]);
-      if (isInternalError) console.error('[handleAskTrainer] internal error:', e);
     } finally {
       setTrainerLoading(false);
     }
@@ -1591,11 +1614,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
         style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: themeColors.border }]}>
-        <Image
-          source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
-          style={styles.headerLogo}
-          resizeMode="contain"
-        />
+        <View style={styles.headerLogoWrap}>
+          <Image
+            source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+            style={bgIsDark(themeColors.background) ? styles.headerLogoDark : styles.headerLogo}
+            resizeMode="contain"
+          />
+        </View>
         <View style={{ flex: 1 }} />
         <TouchableOpacity style={styles.menuBtn} onPress={() => setMenuOpen(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
@@ -1828,11 +1853,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {[
               { label: 'Account',          onPress: onViewAccount },
               { label: 'View Progress',    onPress: onViewProgress },
-              { label: 'Exercise Library', onPress: openExerciseLibrary },
-              { label: 'Supplements',      onPress: onEditSupplements },
-              { label: 'Edit Plan',        onPress: onEditProfile },
-              { label: 'Equipment',        onPress: onEditEquipment },
-              { label: 'Food Options',     onPress: onEditFoods },
+              { label: 'Edit Goal',        onPress: onEditGoal },
+              { label: 'Edit Workout',     onPress: onEditWorkout },
+              { label: 'Edit Meal Plan',   onPress: onEditMealPlan },
               { label: 'Themes',           onPress: onEditThemes },
             ].map((item, idx, arr) => (
               <View key={item.label}>
@@ -2447,17 +2470,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     }
                   } catch {}
                 }
-                // If poor adherence or burned out — suggest refreshing plan
-                const needsRefresh = checkinAdherence <= 2 || checkinEnergy <= 2;
+                // Check for pending profile changes stored during the week
+                let hasPendingChanges = false;
+                try {
+                  const pendingRaw = await AsyncStorage.getItem('pendingProfileChanges');
+                  const pending = pendingRaw ? JSON.parse(pendingRaw) : [];
+                  hasPendingChanges = pending.length > 0;
+                } catch {}
+
+                // If poor adherence, burned out, or pending changes — suggest refreshing plan
+                const needsRefresh = checkinAdherence <= 2 || checkinEnergy <= 2 || hasPendingChanges;
                 if (needsRefresh) {
+                  const reason = hasPendingChanges
+                    ? 'You made changes to your preferences this week. Refresh your plan to apply them?'
+                    : checkinEnergy <= 2
+                    ? 'Sounds like you need a lighter week. Want to generate a deload plan?'
+                    : 'Missed a few sessions — want to simplify next week\'s plan?';
                   Alert.alert(
                     'Adjust your plan?',
-                    checkinEnergy <= 2
-                      ? 'Sounds like you need a lighter week. Want to generate a deload plan?'
-                      : 'Missed a few sessions — want to simplify next week\'s plan?',
+                    reason,
                     [
-                      { text: 'Keep current plan', style: 'cancel' },
-                      { text: 'Yes, refresh plan', onPress: () => onEditProfile() },
+                      { text: 'Keep current plan', style: 'cancel', onPress: async () => {
+                        // Clear pending changes even if user declines — they chose to keep current
+                        await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
+                      }},
+                      { text: 'Yes, refresh plan', onPress: async () => {
+                        await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
+                        onEditGoal();
+                      }},
                     ]
                   );
                 }
@@ -2469,7 +2509,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Continue to next week</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); onEditProfile(); }}
+            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); onEditGoal(); }}
               style={{ alignItems: 'center', paddingVertical: 10 }}>
               <Text style={{ color: themeColors.primary, fontWeight: '600', fontSize: 14 }}>Refresh my plan now</Text>
             </TouchableOpacity>
@@ -2568,7 +2608,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }}
                       disabled={alreadyAdded}
                       onPress={() => {
-                        onAddSupplement(selectedSupplement.name);
+                        handleAddSupplement(selectedSupplement.name);
                         Alert.alert('Added', `${selectedSupplement.name} added to My Supplements.`);
                       }}>
                       <Text style={{ color: alreadyAdded ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 15 }}>
@@ -2652,7 +2692,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <TouchableOpacity
                         style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: radius.md, paddingVertical: 11, alignItems: 'center' }}
                         onPress={() => {
-                          onAddSupplement(suppAiResult.name);
+                          handleAddSupplement(suppAiResult.name);
                           setSuppAiResult(null);
                           setSuppAiQuery('');
                           Alert.alert('Added', `${suppAiResult.name} added to My Supplements.`);
@@ -3052,8 +3092,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, borderBottomWidth: 1 },
-  headerLogo: { width: 230, height: 100 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 0, borderBottomWidth: 1 },
+  headerLogoWrap: { width: 200, height: 60, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  headerLogo: { width: 200, height: 60 },
+  headerLogoDark: { width: 270, height: 90 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },

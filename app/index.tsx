@@ -49,7 +49,7 @@ export default function Index() {
   const [authToken, setAuthToken]         = useState<string | null>(null);
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
-  const [editMode, setEditMode]           = useState<'plan' | 'equipment' | 'foods' | 'theme'>('plan');
+  const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme'>('goal');
   const [planRefreshKey, setPlanRefreshKey] = useState(0);
   const [isWorkoutUpdating, setIsWorkoutUpdating] = useState(false);
   const [isNutritionUpdating, setIsNutritionUpdating] = useState(false);
@@ -195,27 +195,47 @@ export default function Index() {
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
     setIsEditing(false);
-    setEditMode('plan');
+    setEditMode('goal');
     if (authToken) {
       syncOnboarding(authToken, stamped).catch(() => null);
 
-      const shouldRegen = editMode === 'plan' || editMode === 'foods' || editMode === 'equipment';
-      if (shouldRegen) {
+      // Only regenerate plans immediately for GOAL changes (fundamental plan shift).
+      // Workout/mealplan edits (equipment, foods, schedule) are stored as pending
+      // changes and used during the weekly AI re-evaluation on day 7.
+      const shouldRegenNow = editMode === 'goal' && goalChanged;
+      const shouldStorePending = (editMode === 'workout' || editMode === 'mealplan') && !shouldRegenNow;
+
+      if (shouldStorePending) {
+        // Store pending profile changes for weekly re-evaluation
+        try {
+          const raw = await AsyncStorage.getItem('pendingProfileChanges');
+          const pending: Array<{ date: string; editMode: string; summary: string }> = raw ? JSON.parse(raw) : [];
+          const changeSummary = editMode === 'workout'
+            ? `Equipment/schedule updated: ${stamped.equipment.length} items, ${stamped.daysPerWeek} days/week, ${stamped.workoutDurationMinutes}min`
+            : `Meal preferences updated: ${stamped.foodsAvailable.length} foods available`;
+          pending.push({ date: new Date().toISOString(), editMode, summary: changeSummary });
+          // Keep last 20 entries
+          await AsyncStorage.setItem('pendingProfileChanges', JSON.stringify(pending.slice(-20)));
+          await appendUserLog({ type: 'profile_edit', summary: changeSummary + ' (stored for weekly re-evaluation)' });
+        } catch {}
+        setPlanRefreshKey(k => k + 1);
+        return;
+      }
+
+      if (shouldRegenNow) {
         // Preserve today's logged meals — only clear future/past edits
-        if (editMode !== 'equipment') {
-          const today = todayKey();
-          const rawEdits = await AsyncStorage.getItem('mealEdits');
-          if (rawEdits) {
-            try {
-              const allEdits = JSON.parse(rawEdits);
-              const todayEdit = allEdits[today];
-              if (todayEdit) {
-                await AsyncStorage.setItem('mealEdits', JSON.stringify({ [today]: todayEdit }));
-              } else {
-                await AsyncStorage.removeItem('mealEdits');
-              }
-            } catch { await AsyncStorage.removeItem('mealEdits'); }
-          }
+        const today = todayKey();
+        const rawEdits = await AsyncStorage.getItem('mealEdits');
+        if (rawEdits) {
+          try {
+            const allEdits = JSON.parse(rawEdits);
+            const todayEdit = allEdits[today];
+            if (todayEdit) {
+              await AsyncStorage.setItem('mealEdits', JSON.stringify({ [today]: todayEdit }));
+            } else {
+              await AsyncStorage.removeItem('mealEdits');
+            }
+          } catch { await AsyncStorage.removeItem('mealEdits'); }
         }
 
         const userLogRaw = await AsyncStorage.getItem('userLog');
@@ -238,27 +258,22 @@ export default function Index() {
           : '';
         const extraContext = sessionLines || undefined;
 
-        const updatesWorkout   = editMode === 'equipment' || editMode === 'plan';
-        const updatesNutrition = editMode === 'foods'     || editMode === 'plan';
+        // Clear any pending changes since we're doing a full regen now
+        await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
 
-        if (updatesWorkout)   setIsWorkoutUpdating(true);
-        if (updatesNutrition) setIsNutritionUpdating(true);
+        setIsWorkoutUpdating(true);
+        setIsNutritionUpdating(true);
 
-        const planCall =
-          (updatesWorkout && !updatesNutrition) ? getAIWorkoutPlan(authToken, stamped, { userLog, extraContext }) :
-          (updatesNutrition && !updatesWorkout)  ? getAINutritionPlan(authToken, stamped, { userLog, extraContext }) :
-          getAIPlans(authToken, stamped, { userLog, extraContext });
-
-        planCall
+        getAIPlans(authToken, stamped, { userLog, extraContext })
           .then(async (aiPlans) => {
 
-            if (updatesWorkout && aiPlans.workout_plan) {
+            if (aiPlans.workout_plan) {
               const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
               await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
               if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
             }
 
-            if (updatesNutrition && aiPlans.nutrition_plan_a) {
+            if (aiPlans.nutrition_plan_a) {
               const nnNote = aiPlans.nutritionistNote || null;
               await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
               await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a)); // legacy compat
@@ -270,11 +285,11 @@ export default function Index() {
                 setSupplementStack(aiPlans.supplementStack);
               }
               await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-              const today = new Date();
+              const todayDate = new Date();
               const tok = authToken;
               for (let i = 0; i < 3; i++) {
-                const d = new Date(today);
-                d.setDate(today.getDate() + i);
+                const d = new Date(todayDate);
+                d.setDate(todayDate.getDate() + i);
                 const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
                 upsertDayState(tok, key, { nutrition_plan: aiPlans.nutrition_plan }).catch(() => null);
               }
@@ -288,8 +303,8 @@ export default function Index() {
             Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
           })
           .finally(() => {
-            if (updatesWorkout)   setIsWorkoutUpdating(false);
-            if (updatesNutrition) setIsNutritionUpdating(false);
+            setIsWorkoutUpdating(false);
+            setIsNutritionUpdating(false);
           });
       }
     }
@@ -349,7 +364,7 @@ export default function Index() {
   }
 
   if (isEditing) {
-    return <EditProfileScreen authToken={authToken} profile={userProfile} mode={editMode} onSave={handleSaveProfile} onCancel={() => { setIsEditing(false); setEditMode('plan'); }} />;
+    return <EditProfileScreen authToken={authToken} profile={userProfile} mode={editMode} onSave={handleSaveProfile} onCancel={() => { setIsEditing(false); setEditMode('goal'); }} />;
   }
 
   if (activeWorkout) {
@@ -382,19 +397,9 @@ export default function Index() {
         nutritionistNote={nutritionistNote}
         supplementStack={supplementStack}
         onSignOut={handleSignOut}
-        onEditProfile={() => { setEditMode('plan'); setIsEditing(true); }}
-        onEditEquipment={() => { setEditMode('equipment'); setIsEditing(true); }}
-        onEditFoods={() => { setEditMode('foods'); setIsEditing(true); }}
-        onEditSupplements={() => setShowSupplements(true)}
-        onAddSupplement={async (name: string) => {
-          if (!userProfile) return;
-          const current = userProfile.supplementsAvailable ?? [];
-          if (current.includes(name)) return;
-          const updated = { ...userProfile, supplementsAvailable: [...current, name] };
-          await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
-          setUserProfile(updated);
-          if (authToken) syncOnboarding(authToken, updated).catch(() => null);
-        }}
+        onEditGoal={() => { setEditMode('goal'); setIsEditing(true); }}
+        onEditWorkout={() => { setEditMode('workout'); setIsEditing(true); }}
+        onEditMealPlan={() => { setEditMode('mealplan'); setIsEditing(true); }}
         onEditThemes={() => { setEditMode('theme'); setIsEditing(true); }}
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}

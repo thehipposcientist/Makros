@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import re
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import openai
@@ -32,7 +33,7 @@ from app.workout_progression import (
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
-print("[AI ROUTER IMPORTED] CODE_VERSION=TEMP_STRIPPED_V4")
+print("[AI ROUTER IMPORTED] CODE_VERSION=V6_NONE_FIX")
 
 
 def get_openai_api_key() -> str | None:
@@ -51,10 +52,10 @@ def model_meal_parsing() -> str:
     return os.getenv("MODEL_MEAL_PARSING", "gpt-4o-mini")
 
 def model_chat() -> str:
-    return os.getenv("MODEL_CHAT", "gpt-5-mini")
+    return os.getenv("MODEL_CHAT", "gpt-4o-mini")
 
 def model_chat_fallback() -> str:
-    return os.getenv("MODEL_CHAT_FALLBACK", "gpt-5-mini")
+    return os.getenv("MODEL_CHAT_FALLBACK", "gpt-4o-mini")
 
 def model_intent() -> str:
     return os.getenv("MODEL_INTENT", "gpt-4o-mini")
@@ -127,6 +128,9 @@ class PlanRequest(BaseModel):
     supplementsAvailable: list[str] = []
     mealRoutine: str | None = None   # fixed meals/habits the user already follows
     userContext: str | None = None
+
+    # Weekly review (sent when regenerating after a weekly check-in)
+    weeklyReview: dict | None = None   # {adherence: 1-5, energy: 1-5, notes?: str, pendingChanges?: [...]}
 
 
 class WorkoutOnlyRequest(BaseModel):
@@ -242,6 +246,14 @@ class SupplementPhotoRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
 
+class BodyScanRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
+    gender: str | None = None
+    weight_lbs: float | None = None
+    height_inches: float | None = None
+    age: int | None = None
+
 
 progression_engine = WorkoutProgressionEngine()
 
@@ -249,15 +261,54 @@ progression_engine = WorkoutProgressionEngine()
 # ─── Deterministic recommendation helpers (unchanged) ────────────────────────
 
 def map_goal_type(goal: str) -> GoalType:
+    """Map any goal ID (legacy or new hierarchical) to a progression GoalType."""
     g = (goal or "").lower().strip()
-    if g == "strength":
+
+    # Strength-oriented goals → STRENGTH (load-first progression)
+    _STRENGTH_IDS = {
+        "strength", "build_strength", "increase_overall", "improve_1rm",
+        "powerlifting", "improve_squat", "improve_bench", "improve_deadlift",
+        "improve_ohp", "improve_pullups", "improve_grip", "functional_strength",
+        "explosive_strength", "relative_strength",
+        "athletic_performance", "improve_athleticism", "improve_speed",
+        "improve_agility", "improve_power", "improve_vertical",
+        "improve_acceleration", "improve_cod", "improve_balance",
+        "sport_performance", "offseason_training", "inseason_maintenance",
+        "return_to_sport",
+    }
+    if g in _STRENGTH_IDS:
         return GoalType.STRENGTH
-    if g in {"fat_loss", "toning"}:
+
+    # Fat loss / deficit goals → FAT_LOSS (reps-first, moderate load)
+    _FAT_LOSS_IDS = {
+        "fat_loss", "toning", "lose_fat", "get_lean", "cut",
+        "preserve_muscle_cutting",
+    }
+    if g in _FAT_LOSS_IDS:
         return GoalType.FAT_LOSS
-    if g in {"maintain", "flexibility", "stress_relief"}:
-        return GoalType.MAINTAIN
-    if g == "endurance":
+
+    # Endurance / cardio goals → ENDURANCE (high rep, low rest)
+    _ENDURANCE_IDS = {
+        "endurance", "improve_cardio", "improve_conditioning", "aerobic_base",
+        "improve_vo2", "increase_stamina", "running_fitness",
+        "train_5k", "train_10k", "train_half", "train_marathon",
+        "sprint_speed", "interval_perf", "hiking_endurance",
+        "cycling_endurance", "rowing_endurance", "swimming_endurance",
+        "work_capacity",
+    }
+    if g in _ENDURANCE_IDS:
         return GoalType.ENDURANCE
+
+    # Maintenance / lifestyle goals → MAINTAIN (balanced, sustainable)
+    _MAINTAIN_IDS = {
+        "maintain", "maintain_physique", "flexibility", "stress_relief",
+        "longevity", "improve_coordination",
+    }
+    if g in _MAINTAIN_IDS:
+        return GoalType.MAINTAIN
+
+    # Everything else (muscle_gain, body_recomp, build_muscle, lean_bulk,
+    # gain_weight, improve_aesthetics, build_glutes, etc.) → HYPERTROPHY
     return GoalType.HYPERTROPHY
 
 
@@ -279,11 +330,26 @@ def map_feedback(feedback: str | None) -> EffortFeedback | None:
 
 def infer_exercise_category(exercise_name: str) -> ExerciseCategory:
     name = (exercise_name or "").lower()
-    if any(x in name for x in ["machine", "cable", "leg press", "pulldown", "row machine"]):
+    # Machine first (highest priority — overrides other keywords)
+    if any(x in name for x in [
+        "machine", "cable", "smith", "leg press", "pulldown", "lat pull",
+        "seated row machine", "pec deck", "leg extension", "leg curl machine",
+        "hack squat machine", "chest press machine",
+    ]):
         return ExerciseCategory.MACHINE
-    if any(x in name for x in ["push up", "pull up", "plank", "dip", "bodyweight"]):
+    # Bodyweight
+    if any(x in name for x in [
+        "push up", "push-up", "pushup", "pull up", "pull-up", "pullup",
+        "chin up", "chin-up", "chinup", "plank", "dip", "bodyweight",
+        "muscle up", "handstand", "pistol squat", "l-sit", "hollow",
+    ]):
         return ExerciseCategory.BODYWEIGHT
-    if any(x in name for x in ["curl", "extension", "raise", "fly", "kickback", "lateral"]):
+    # Isolation
+    if any(x in name for x in [
+        "curl", "extension", "raise", "fly", "flye", "kickback", "lateral",
+        "pec deck", "face pull", "shrug", "calf raise", "wrist",
+        "concentration", "preacher", "skull crusher", "pushdown",
+    ]):
         return ExerciseCategory.ISOLATION
     return ExerciseCategory.COMPOUND
 
@@ -930,11 +996,15 @@ def build_nutrition_prompt(req: PlanRequest) -> str:
     meal_summary, _ = _meal_schema_and_targets(t)
 
     meal_routine_block = (
-        f"\nUSER'S FIXED MEAL ROUTINE (non-negotiable — you MUST build around this):\n{req.mealRoutine}\n"
-        "Keep any meals the user already eats fixed exactly as described. "
-        "Fill remaining meals with the available foods to hit the daily targets.\n"
-        "IMPORTANT: For every meal that comes from the user's fixed routine above, set \"isRoutine\": true in the meal object. "
-        "For AI-generated meals, set \"isRoutine\": false."
+        f"\nUSER'S FIXED MEAL ROUTINE — READ CAREFULLY AND FOLLOW EXACTLY:\n{req.mealRoutine}\n\n"
+        "ROUTINE RULES (non-negotiable):\n"
+        "1. Parse each meal the user describes above. Include it in ALL 3 plan templates VERBATIM.\n"
+        "2. Use the exact foods and quantities they specified — do NOT substitute or modify routine meals.\n"
+        "3. Set \"isRoutine\": true on every meal that comes from the routine above.\n"
+        "4. Calculate the macros for routine meals accurately based on stated portions.\n"
+        "5. Fill the REMAINING meal slots with AI-generated meals (\"isRoutine\": false) "
+        "using available foods to hit the daily targets after accounting for routine meal macros.\n"
+        "6. If the routine covers breakfast, then your breakfast in ALL 3 templates must be that routine meal.\n"
         if req.mealRoutine else ""
     )
 
@@ -1109,12 +1179,10 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
     All other models: params passed through unchanged.
     """
     model = kwargs.get("model", "")
-    print(f"[_chat_create] CODE_VERSION=TEMP_HARDCODED_V5 model={model!r} keys={list(kwargs.keys())}")
+    print(f"[_chat_create] CODE_VERSION=V6_NONE_FIX model={model!r} keys={list(kwargs.keys())} rf={kwargs.get('response_format')}")
     if _is_gpt5(model):
         kwargs["temperature"] = 1
-        rf = kwargs.get("response_format", {})
-        if isinstance(rf, dict) and rf.get("type") == "json_object":
-            kwargs.pop("response_format", None)
+        # gpt-5 supports json_object and json_schema — keep response_format as-is
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
     return client.chat.completions.create(**kwargs)
@@ -1148,7 +1216,9 @@ def _build_chat_kwargs(
                     "schema": json_schema["schema"],
                 },
             }
-        # else: no response_format — model follows prompt instructions
+        else:
+            # No strict schema — still force JSON output to avoid None content
+            kwargs["response_format"] = {"type": "json_object"}
     else:
         kwargs["response_format"] = {"type": "json_object"}
     return kwargs
@@ -1161,13 +1231,47 @@ def _looks_truncated(content: str) -> bool:
 
 
 def _extract_json(content: str) -> dict:
-    """Extract JSON from model output, stripping any markdown fences."""
+    """Extract JSON from model output, handling markdown fences, trailing commas, and truncation."""
     text = content.strip()
+    # Strip markdown fences
     if text.startswith("```"):
         lines = text.split("\n")
         inner = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         text = inner.strip()
-    return json.loads(text)
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Fix trailing commas before } or ]
+    cleaned = re.sub(r',\s*([}\]])', r'\1', text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    # Try to find the outermost JSON object
+    start = text.find('{')
+    if start >= 0:
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == '{': depth += 1
+            elif text[i] == '}': depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+        else:
+            # Truncated — try to close open braces/brackets
+            tail = text[start:]
+            open_b = tail.count('{') - tail.count('}')
+            open_a = tail.count('[') - tail.count(']')
+            tail += ']' * max(open_a, 0) + '}' * max(open_b, 0)
+            cleaned = re.sub(r',\s*([}\]])', r'\1', tail)
+            return json.loads(cleaned)
+        snippet = text[start:end]
+        cleaned = re.sub(r',\s*([}\]])', r'\1', snippet)
+        return json.loads(cleaned)
+    raise json.JSONDecodeError("No JSON object found", text, 0)
 
 
 # ─── JSON schemas for structured output ───────────────────────────────────────
@@ -1632,9 +1736,18 @@ def recommend_weight(
             phase=map_phase(body.phase),
             week_number=max(1, body.weekNumber or 1),
         )
+        ex_category = infer_exercise_category(body.exerciseName)
+        # Sensible default if no prior sets exist
+        if last_weight is None:
+            last_weight = {
+                ExerciseCategory.COMPOUND: 65.0,
+                ExerciseCategory.ISOLATION: 20.0,
+                ExerciseCategory.MACHINE: 80.0,
+                ExerciseCategory.BODYWEIGHT: 0.0,
+            }.get(ex_category, 45.0)
         prescription = ExercisePrescription(
             exercise_name=body.exerciseName,
-            category=infer_exercise_category(body.exerciseName),
+            category=ex_category,
             planned_sets=planned_sets,
             increment_lbs=max(1.0, body.incrementLbs or 5.0),
             progression_priority=map_progression_priority(goal_type),
@@ -1869,16 +1982,42 @@ def ask_trainer_question(
 
     is_nutritionist = body.mode == "nutritionist"
 
-    # Only send context relevant to this coach's domain
-    context_blob: dict = {"profile": body.profile, "progress": body.progress}
+    # Only send context relevant to this coach's domain — keep payload lean for speed
+    profile_slim = body.profile or {}
+    # Drop heavy fields from profile context to reduce token count
+    if isinstance(profile_slim, dict):
+        for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
+            profile_slim.pop(drop_key, None)
+    context_blob: dict = {"profile": profile_slim, "progress": body.progress}
     if is_nutritionist:
         context_blob["nutritionPlan"] = body.nutritionPlan
     else:
-        context_blob["workoutPlan"] = body.workoutPlan
+        # Slim down workout plan — only send exercise names/sets/reps per day, not full details
+        wp = body.workoutPlan
+        if isinstance(wp, dict) and "days" in wp:
+            slim_days = []
+            for d in wp.get("days", []):
+                slim_exs = [{"name": e.get("name"), "sets": e.get("sets"), "reps": e.get("reps")} for e in (d.get("exercises") or [])]
+                slim_days.append({"day": d.get("day"), "focus": d.get("focus"), "exercises": slim_exs})
+            context_blob["workoutPlan"] = {"name": wp.get("name"), "totalDays": wp.get("totalDays"), "days": slim_days}
+        else:
+            context_blob["workoutPlan"] = wp
     if body.userContext:
-        context_blob["recentActivityLog"] = body.userContext[:2000]
+        context_blob["recentActivityLog"] = body.userContext[:800]
 
-    trimmed_convo = (body.conversation or [])[-14:]
+    # Truncate the serialized context if it's still too large (target ~8k chars)
+    context_str = json.dumps(context_blob, ensure_ascii=True)
+    if len(context_str) > 8000:
+        # Drop workout history from progress to save space
+        if isinstance(context_blob.get("progress"), dict):
+            context_blob["progress"].pop("recentHistory", None)
+            context_blob["progress"].pop("workoutHistory", None)
+        context_str = json.dumps(context_blob, ensure_ascii=True)
+    if len(context_str) > 8000:
+        context_str = context_str[:8000] + '...(truncated)}'
+    print(f"[trainer-question] context_str length: {len(context_str)} chars")
+
+    trimmed_convo = (body.conversation or [])[-6:]
 
     # Schema differs by mode — AI can only update its own side
     if is_nutritionist:
@@ -1937,7 +2076,7 @@ def ask_trainer_question(
         f"Recent conversation (most recent last):\n"
         f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
         f"User question:\n{q}\n\n"
-        f"Full context JSON:\n{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+        f"Context:\n{context_str}\n\n"
         "Return ONLY valid JSON matching this schema exactly - no markdown, no extra text:\n"
         '{\n'
         '  "answer": "Detailed, personalised response to the user",\n'
@@ -1992,19 +2131,70 @@ def ask_trainer_question(
 
     client = OpenAI(api_key=api_key)
     try:
-        _m = model_chat_fallback()
-        print(f"[trainer-question] model={_m}")
+        _m_fast = model_chat()           # Phase 1: fast model for answer
+        _m_full = model_chat_fallback()   # Phase 2: fallback model for plan generation
+        print(f"[trainer-question] phase1_model={_m_fast} phase2_model={_m_full}")
 
-        # Phase 1: try to get answer + plan in one call (2500 tokens).
-        # Most plan updates fit here, avoiding the expensive Phase 2 round-trip.
-        kwargs = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=2500, timeout_secs=55)
+        # Phase 1: answer + optional plan in one call.
+        # Don't pass json_schema for gpt-5 — the trainer schema has optional/typeless
+        # fields (updated_workout_plan: {}) that gpt-5's json_schema mode rejects.
+        # Instead, rely on prompt-enforced JSON which works reliably.
+        kwargs = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=2500, timeout_secs=50)
         response = _chat_create(client, **kwargs)
-        raw = response.choices[0].message.content
+        choice = response.choices[0]
+        raw = choice.message.content
+
+        # Debug: dump full response details
+        print(f"[trainer-question] phase-1 response: finish_reason={getattr(choice, 'finish_reason', '?')} content_is_none={raw is None} content_len={len(raw) if raw else 0}")
+        print(f"[trainer-question] phase-1 message attrs: {[a for a in dir(choice.message) if not a.startswith('_')]}")
+        if hasattr(choice.message, 'refusal') and choice.message.refusal:
+            print(f"[trainer-question] phase-1 REFUSAL: {choice.message.refusal}")
+        if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+            print(f"[trainer-question] phase-1 TOOL_CALLS: {choice.message.tool_calls}")
+
+        # Handle None/empty content — can happen with gpt-5 + json_object format
+        if not raw:
+            refusal = getattr(choice.message, 'refusal', None)
+            finish = getattr(choice, 'finish_reason', 'unknown')
+            print(f"[trainer-question] phase-1 returned empty! finish_reason={finish} refusal={refusal}")
+
+            # Retry 1: same model, NO response_format (prompt-enforced JSON)
+            print(f"[trainer-question] retry-1: {_m_fast} without response_format")
+            kwargs_r1 = dict(model=_m_fast, messages=messages, timeout=55, max_tokens=2500, temperature=1)
+            if _is_gpt5(_m_fast):
+                kwargs_r1["max_completion_tokens"] = kwargs_r1.pop("max_tokens")
+            response = client.chat.completions.create(**kwargs_r1)
+            raw = response.choices[0].message.content
+            print(f"[trainer-question] retry-1 result: len={len(raw) if raw else 0} finish={getattr(response.choices[0], 'finish_reason', '?')}")
+
+        if not raw:
+            # Retry 2: fall back to gpt-4o-mini which reliably supports json_object
+            _m_fallback = "gpt-4o-mini"
+            print(f"[trainer-question] retry-2: falling back to {_m_fallback}")
+            kwargs_r2 = _build_chat_kwargs(_m_fallback, messages, json_schema=None, max_tokens=2500, timeout_secs=55)
+            response = _chat_create(client, **kwargs_r2)
+            raw = response.choices[0].message.content
+            print(f"[trainer-question] retry-2 result: len={len(raw) if raw else 0} finish={getattr(response.choices[0], 'finish_reason', '?')}")
+
+        # Still empty after retries — give up gracefully
+        if not raw:
+            print(f"[trainer-question] still None after retry — returning fallback")
+            return {
+                "answer": "I received your message but couldn't generate a response. Please try rephrasing or asking again.",
+                "action_items": [],
+                "needs_plan_update": False,
+                "safety_note": "",
+                "updated_workout_plan": None,
+                "updated_nutrition_plan": None,
+                "updated_injuries": None,
+                "injury_clarification_needed": False,
+            }
+
         if _looks_truncated(raw):
             print(f"[trainer-question] phase-1 truncated — retrying at 3500 tokens")
-            kwargs1b = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=3500, timeout_secs=65)
+            kwargs1b = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=3500, timeout_secs=60)
             response = _chat_create(client, **kwargs1b)
-            raw = response.choices[0].message.content
+            raw = response.choices[0].message.content or raw
 
         result = _extract_json(raw)
         print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
@@ -2049,7 +2239,7 @@ def ask_trainer_question(
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": phase2_user},
             ]
-            kwargs2 = _build_chat_kwargs(_m, phase2_messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=3500, timeout_secs=65)
+            kwargs2 = _build_chat_kwargs(_m_full, phase2_messages, json_schema=None, max_tokens=3500, timeout_secs=65)
             response2 = _chat_create(client, **kwargs2)
             raw2 = response2.choices[0].message.content
             result2 = _extract_json(raw2)
@@ -2068,7 +2258,18 @@ def ask_trainer_question(
         return result
     except json.JSONDecodeError as e:
         print(f"[trainer-question] JSON decode error: {e}")
-        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+        print(f"[trainer-question] raw content: {repr(raw[:500]) if raw else 'None'}")
+        # Return a graceful fallback so the chat doesn't break
+        return {
+            "answer": "I'm sorry, I had trouble processing that response. Could you try rephrasing your question?",
+            "action_items": [],
+            "needs_plan_update": False,
+            "safety_note": "",
+            "updated_workout_plan": None,
+            "updated_nutrition_plan": None,
+            "updated_injuries": None,
+            "injury_clarification_needed": False,
+        }
     except Exception as e:
         print(f"[trainer-question] Exception: {e}")
         raise HTTPException(status_code=502, detail=f"Trainer question failed: {str(e)}")
@@ -2539,3 +2740,77 @@ def analyze_form_photo(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Form photo analysis failed: {str(e)}")
+
+
+@router.post("/body-scan")
+def body_scan(
+    body: BodyScanRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Estimate body composition from a photo using AI vision."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    context_lines = []
+    if body.gender:
+        context_lines.append(f"Gender: {body.gender}")
+    if body.weight_lbs:
+        context_lines.append(f"Weight: {body.weight_lbs} lbs")
+    if body.height_inches:
+        feet = int(body.height_inches // 12)
+        inches = int(body.height_inches % 12)
+        context_lines.append(f"Height: {feet}'{inches}\"")
+    if body.age:
+        context_lines.append(f"Age: {body.age}")
+    context_str = "\n".join(context_lines) if context_lines else "No additional info provided."
+
+    _scan_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert physique analyst and certified personal trainer. "
+                "Analyze the provided photo to estimate body composition. "
+                "Be honest but encouraging. This is an ESTIMATE — always include a disclaimer. "
+                "Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"User info:\n{context_str}\n\n"
+                        "Analyze this physique photo. Estimate body composition and provide feedback.\n\n"
+                        "Return exactly this JSON:\n"
+                        "{\n"
+                        '  "bodyFatPct": number (estimated body fat percentage, e.g. 18.5),\n'
+                        '  "bodyFatRange": string (e.g. "17-20%"),\n'
+                        '  "muscleMass": string (one of: "low", "below_average", "average", "above_average", "high"),\n'
+                        '  "category": string (e.g. "Athletic", "Lean", "Average", "Overweight"),\n'
+                        '  "strengths": [string] (2-3 visible strong points),\n'
+                        '  "improvements": [string] (2-3 areas to work on),\n'
+                        '  "assessment": string (2-3 sentence overall assessment, encouraging tone),\n'
+                        '  "disclaimer": string (brief note that this is a visual estimate)\n'
+                        "}"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_chat(), _scan_messages, json_schema=None, max_tokens=500, timeout_secs=40)
+        response = _chat_create(client, **kwargs)
+        result = _extract_json(response.choices[0].message.content)
+        return result
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Body scan failed: {str(e)}")

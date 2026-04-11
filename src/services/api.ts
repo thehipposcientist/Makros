@@ -16,8 +16,8 @@ function getBaseUrl(): string {
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
-async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000): Promise<T> {
-  const maxRetries = 2;
+async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000, noRetry = false): Promise<T> {
+  const maxRetries = noRetry ? 0 : 2;
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -123,6 +123,35 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
 }
 
 
+/**
+ * Build a combined meal routine string from free-text + structured MealRoutineEntry[].
+ * This gives the AI a clear, parseable description of what the user eats regularly.
+ */
+async function buildMealRoutineText(profile: import('../types').UserProfile): Promise<string | undefined> {
+  const parts: string[] = [];
+
+  // Free-text routine from onboarding
+  if (profile.mealRoutine?.trim()) {
+    parts.push(profile.mealRoutine.trim());
+  }
+
+  // Structured routines from the meal routine builder
+  try {
+    const { loadMealRoutines } = await import('../utils/workoutHistory');
+    const routines = await loadMealRoutines();
+    if (routines.length > 0) {
+      const lines = routines.map(r => {
+        const foodList = r.foods.map(f => f.quantity ? `${f.quantity} ${f.name}` : f.name).join(', ');
+        const type = r.mealType ? ` (${r.mealType})` : '';
+        return `- ${r.name}${type}: ${foodList}${r.notes ? ` — ${r.notes}` : ''}`;
+      });
+      parts.push('Structured routine meals (keep these EXACTLY as specified):\n' + lines.join('\n'));
+    }
+  } catch { /* no routines stored */ }
+
+  return parts.length > 0 ? parts.join('\n\n') : undefined;
+}
+
 function buildLogContext(
   profile: import('../types').UserProfile,
   userLog?: import('../types').UserLogEntry[],
@@ -152,14 +181,22 @@ function buildInjuries(profile: import('../types').UserProfile): string[] {
   return list;
 }
 
+export interface WeeklyReview {
+  adherence: number;       // 1-5: how many planned workouts completed
+  energy: number;          // 1-5: overall energy/recovery rating
+  notes?: string;          // free-text user feedback
+  pendingChanges?: Array<{ date: string; editMode: string; summary: string }>;
+}
+
 /** Full plan — called on first sign-up or when goal/pace changes (updates both sides). */
 export async function getAIPlans(
   token: string,
   profile: import('../types').UserProfile,
-  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string; weeklyReview?: WeeklyReview },
 ) {
   const injuriesOrLimitations = buildInjuries(profile);
-  const payload = {
+  const mealRoutineText = await buildMealRoutineText(profile);
+  const payload: Record<string, any> = {
     goal:                   profile.goal,
     goalSelection:          profile.goalSelection ?? undefined,
     secondaryGoal:          profile.secondaryGoal,
@@ -173,10 +210,13 @@ export async function getAIPlans(
     supplementsAvailable:   profile.supplementsAvailable ?? [],
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations,
-    mealRoutine:            profile.mealRoutine,
+    mealRoutine:            mealRoutineText,
     customMacros:           profile.customMacros ?? undefined,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
+  if (options?.weeklyReview) {
+    payload.weeklyReview = options.weeklyReview;
+  }
 
   console.log('[getAIPlans] SEND → /ai/plans', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek,
@@ -240,6 +280,7 @@ export async function getAINutritionPlan(
   profile: import('../types').UserProfile,
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
 ) {
+  const mealRoutineText = await buildMealRoutineText(profile);
   const payload = {
     goal:                 profile.goal,
     goalDetails:          profile.goalDetails,
@@ -249,7 +290,7 @@ export async function getAINutritionPlan(
     supplementsAvailable: profile.supplementsAvailable ?? [],
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            (profile as any).allergies ?? [],
-    mealRoutine:          profile.mealRoutine,
+    mealRoutine:          mealRoutineText,
     customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -507,7 +548,7 @@ export async function askTrainerQuestion(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 90000);
+  }, 90000, true);
 
   console.log('[askTrainerQuestion] RECV ←', {
     answerPreview: resp.answer?.slice(0, 150),
@@ -682,5 +723,34 @@ export async function analyzeWorkoutFormPhoto(
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
+}
+
+export interface BodyScanResult {
+  bodyFatPct: number;
+  bodyFatRange: string;
+  muscleMass: string;
+  category: string;
+  strengths: string[];
+  improvements: string[];
+  assessment: string;
+  disclaimer: string;
+}
+
+export async function scanBody(
+  token: string,
+  payload: {
+    image_base64: string;
+    mime_type?: string;
+    gender?: string;
+    weight_lbs?: number;
+    height_inches?: number;
+    age?: number;
+  },
+): Promise<BodyScanResult> {
+  return request('/ai/body-scan', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 45000);
 }
 

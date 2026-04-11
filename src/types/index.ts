@@ -10,7 +10,8 @@ export type AppThemeName =
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
-  | 'parchment'| 'meadow';
+  | 'parchment'| 'meadow'
+  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender';
 
 export interface GoalOption {
   value: string;
@@ -307,6 +308,21 @@ export interface PostWorkoutFeedback {
   intensity: WorkoutIntensity;
   sorenessAreas: string[];
   notes: string;
+}
+
+// ─── Body scan ───────────────────────────────────────────────────────────────
+
+export interface BodyScanEntry {
+  id: string;
+  date: string;
+  bodyFatPct: number;
+  bodyFatRange: string;
+  muscleMass: string;
+  category: string;
+  strengths: string[];
+  improvements: string[];
+  assessment: string;
+  weightLbs?: number;
 }
 
 // ─── Navigation types ─────────────────────────────────────────────────────────

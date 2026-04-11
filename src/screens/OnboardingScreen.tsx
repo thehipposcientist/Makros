@@ -474,11 +474,25 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
         {/* Expand to see all goals by category */}
         <TouchableOpacity
-          style={{ marginTop: 16, alignItems: 'center', paddingVertical: 10 }}
+          style={{
+            marginTop: 16,
+            alignItems: 'center',
+            paddingVertical: 12,
+            paddingHorizontal: 20,
+            backgroundColor: colors.primary + '15',
+            borderRadius: 12,
+            borderWidth: 1.5,
+            borderColor: colors.primary + '40',
+            flexDirection: 'row',
+            justifyContent: 'center',
+            gap: 8,
+          }}
           onPress={() => setShowAllGoals(prev => !prev)}
+          activeOpacity={0.7}
         >
-          <Text style={{ color: colors.primary, fontWeight: '600', fontSize: 14 }}>
-            {showAllGoals ? 'Hide advanced goals' : 'Show more goals'}
+          <Text style={{ fontSize: 16 }}>{showAllGoals ? '▾' : '▸'}</Text>
+          <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>
+            {showAllGoals ? 'Hide Advanced Goals' : 'Explore All Goals'}
           </Text>
         </TouchableOpacity>
 

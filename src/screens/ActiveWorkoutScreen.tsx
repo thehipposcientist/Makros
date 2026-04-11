@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking,
+  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
+import ViewShot from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary } from '../utils/workoutHistory';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -67,10 +69,14 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
-const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio/i;
+const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry/i;
+const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 
-function isTimedExercise(name: string): boolean {
-  return TIMED_EXERCISE_RE.test(name);
+function isTimedExercise(name: string, targetReps?: string): boolean {
+  if (TIMED_EXERCISE_RE.test(name)) return true;
+  // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds"
+  if (targetReps && TIMED_REPS_RE.test(targetReps.trim())) return true;
+  return false;
 }
 
 function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string | null {
@@ -108,6 +114,9 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
     'If a joint feels off, slow down and add one more lighter set before starting work sets.',
   ];
 }
+
+const SHARE_LOGO_LIGHT = require('../../assets/images/main_logo_header-removebg-preview.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
     // Warm-up state
@@ -166,6 +175,49 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [restCue, setRestCue] = useState<string | null>(null);
   const [restNextTarget, setRestNextTarget] = useState<string | null>(null);
 
+  // Timed exercise timer: keyed by "exIdx-setSlot"
+  const [activeTimers, setActiveTimers] = useState<Record<string, { running: boolean; elapsed: number; startedAt: number | null }>>({});
+  const timerIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  const startExerciseTimer = useCallback((key: string) => {
+    setActiveTimers(prev => ({ ...prev, [key]: { running: true, elapsed: prev[key]?.elapsed ?? 0, startedAt: Date.now() } }));
+    if (timerIntervalsRef.current[key]) clearInterval(timerIntervalsRef.current[key]);
+    timerIntervalsRef.current[key] = setInterval(() => {
+      setActiveTimers(prev => {
+        const t = prev[key];
+        if (!t?.running || !t.startedAt) return prev;
+        return { ...prev, [key]: { ...t, elapsed: t.elapsed + 1 } };
+      });
+    }, 1000);
+  }, []);
+
+  const stopExerciseTimer = useCallback((key: string) => {
+    if (timerIntervalsRef.current[key]) {
+      clearInterval(timerIntervalsRef.current[key]);
+      delete timerIntervalsRef.current[key];
+    }
+    setActiveTimers(prev => {
+      const t = prev[key];
+      if (!t) return prev;
+      return { ...prev, [key]: { ...t, running: false, startedAt: null } };
+    });
+  }, []);
+
+  const resetExerciseTimer = useCallback((key: string) => {
+    if (timerIntervalsRef.current[key]) {
+      clearInterval(timerIntervalsRef.current[key]);
+      delete timerIntervalsRef.current[key];
+    }
+    setActiveTimers(prev => ({ ...prev, [key]: { running: false, elapsed: 0, startedAt: null } }));
+  }, []);
+
+  // Cleanup timer intervals on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(timerIntervalsRef.current).forEach(clearInterval);
+    };
+  }, []);
+
   // Per-exercise AI state
   const [aiLoadingIdx, setAiLoadingIdx] = useState<number | null>(null);
   const [aiErrorIdx, setAiErrorIdx]     = useState<number | null>(null);
@@ -187,6 +239,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [feedbackNotes, setFeedbackNotes] = useState('');
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
+  const [shareLoading, setShareLoading] = useState(false);
+  const summaryCardRef = useRef<ViewShot>(null);
+
+  const handleShareSummary = async () => {
+    try {
+      setShareLoading(true);
+      const ref = summaryCardRef.current as any;
+      if (!ref?.capture) return;
+      const uri = await ref.capture();
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Workout Summary' });
+      } else {
+        Alert.alert('Saved', 'Screenshot saved to your device.');
+      }
+    } catch {
+      Alert.alert('Error', 'Could not share the summary.');
+    } finally {
+      setShareLoading(false);
+    }
+  };
 
   const [finishModalVisible, setFinishModalVisible] = useState(false);
   const [coachModalVisible, setCoachModalVisible] = useState(false);
@@ -240,7 +313,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         for (let slot = 0; slot < ex.sets; slot++) {
           const last = lastSets[slot] ?? lastSets[lastSets.length - 1];
           if (last) {
-            if (isTimedExercise(ex.name) && last.durationSeconds != null) {
+            if (isTimedExercise(ex.name, ex.reps) && last.durationSeconds != null) {
               inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: (last.durationSeconds / 60).toFixed(1) };
             } else {
               inputs[`${exIdx}-${slot}`] = { weight: String(last.weightLbs), reps: String(last.reps), duration: '' };
@@ -299,7 +372,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
     const ex = exercises[exIdx];
-    const timed = isTimedExercise(ex?.name ?? '');
+    const timed = isTimedExercise(ex?.name ?? '', ex?.targetReps);
 
     let newSet: CompletedSet;
 
@@ -646,7 +719,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const ex = exercises[exIdx];
     const targetSetCount = ex ? getTargetSetCount(ex.targetSets) : 3;
     if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
-    if (isTimedExercise(ex.name)) return; // No AI weight tip for cardio/timed exercises
+    if (isTimedExercise(ex.name, ex.targetReps)) return; // No AI weight tip for cardio/timed exercises
 
     setAiLoadingIdx(exIdx);
     try {
@@ -1151,7 +1224,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                   {/* ── Inline set rows ── */}
                   {(() => {
-                    const timed = isTimedExercise(ex.name);
+                    const timed = isTimedExercise(ex.name, ex.targetReps);
                     return (
                       <>
                         <View style={styles.inlineSetsHeader}>
@@ -1182,34 +1255,82 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             : '—';
 
                           if (timed) {
+                            const timerKey = `${i}-${slot}`;
+                            const timer = activeTimers[timerKey];
+                            const timerRunning = timer?.running ?? false;
+                            const timerElapsed = timer?.elapsed ?? 0;
+                            const timerMM = Math.floor(timerElapsed / 60).toString().padStart(2, '0');
+                            const timerSS = (timerElapsed % 60).toString().padStart(2, '0');
                             const loggedLabel = logged?.durationSeconds != null
-                              ? `${(logged.durationSeconds / 60).toFixed(1)}`
+                              ? `${Math.floor(logged.durationSeconds / 60)}:${(logged.durationSeconds % 60).toString().padStart(2, '0')}`
                               : '';
                             return (
-                              <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
+                              <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone, { minHeight: 44, paddingVertical: 6 }]}>
                                 <Text style={styles.inlineSetNum}>{slot + 1}</Text>
-                                <TextInput
-                                  style={[styles.inlineInput, { flex: 2 }, isLogged && styles.inlineInputDone]}
-                                  value={isLogged ? loggedLabel : input.duration}
-                                  onChangeText={v => {
-                                    if (!isLogged) {
-                                      setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
-                                    }
-                                  }}
-                                  onEndEditing={() => {
-                                    if (!isLogged) handleLogSetInline(i, slot, true);
-                                  }}
-                                  keyboardType="decimal-pad"
-                                  placeholder="e.g. 5 or 0:30"
-                                  placeholderTextColor={themeColors.textMuted}
-                                  editable={!isLogged}
-                                  selectTextOnFocus
-                                  returnKeyType="done"
-                                />
+                                {isLogged ? (
+                                  <View style={{ flex: 2, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                    <Text style={[styles.timerDisplay, { color: themeColors.textPrimary }]}>{loggedLabel}</Text>
+                                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>logged</Text>
+                                  </View>
+                                ) : (
+                                  <View style={{ flex: 2, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                    <Text style={[styles.timerDisplay, timerRunning && { color: themeColors.primary }]}>
+                                      {timerMM}:{timerSS}
+                                    </Text>
+                                    {!timerRunning && timerElapsed === 0 ? (
+                                      <TouchableOpacity
+                                        style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
+                                        onPress={() => startExerciseTimer(timerKey)}>
+                                        <Text style={styles.timerBtnText}>Start</Text>
+                                      </TouchableOpacity>
+                                    ) : timerRunning ? (
+                                      <TouchableOpacity
+                                        style={[styles.timerBtn, { backgroundColor: '#E53935' }]}
+                                        onPress={() => {
+                                          stopExerciseTimer(timerKey);
+                                          // Auto-fill duration for logging
+                                          const secs = activeTimers[timerKey]?.elapsed ?? 0;
+                                          if (secs > 0) {
+                                            const durStr = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
+                                            setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
+                                          }
+                                        }}>
+                                        <Text style={styles.timerBtnText}>Stop</Text>
+                                      </TouchableOpacity>
+                                    ) : (
+                                      <View style={{ flexDirection: 'row', gap: 4 }}>
+                                        <TouchableOpacity
+                                          style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
+                                          onPress={() => startExerciseTimer(timerKey)}>
+                                          <Text style={styles.timerBtnText}>Resume</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity
+                                          style={[styles.timerBtn, { backgroundColor: themeColors.textMuted }]}
+                                          onPress={() => resetExerciseTimer(timerKey)}>
+                                          <Text style={styles.timerBtnText}>Reset</Text>
+                                        </TouchableOpacity>
+                                      </View>
+                                    )}
+                                  </View>
+                                )}
                                 <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                                 <TouchableOpacity
                                   style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
-                                  onPress={() => { if (!isLogged) handleLogSetInline(i, slot, false); }}>
+                                  onPress={() => {
+                                    if (!isLogged) {
+                                      // Stop timer and log
+                                      if (timerRunning) stopExerciseTimer(timerKey);
+                                      const secs = activeTimers[timerKey]?.elapsed ?? 0;
+                                      if (secs > 0) {
+                                        const durStr = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
+                                        setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
+                                        // Small delay so state updates before logging
+                                        setTimeout(() => handleLogSetInline(i, slot, false), 50);
+                                      } else {
+                                        handleLogSetInline(i, slot, false);
+                                      }
+                                    }
+                                  }}>
                                   <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
                                     {isLogged ? '✓' : '○'}
                                   </Text>
@@ -1406,82 +1527,114 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
             {summaryStep === 'summary' ? (
-              /* ── Step 1: Workout Summary ─────────────────────────────────────── */
+              /* ── Step 1: Shareable Workout Summary Card ────────────────────── */
               <View style={styles.summaryModal}>
-                {/* Header */}
-                <View style={styles.summaryHeaderBlock}>
-                  <Text style={styles.summaryEmoji}>🏆</Text>
-                  <Text style={styles.summaryTitle}>Workout Complete!</Text>
-                  <Text style={styles.summarySubtitle}>{workout.focus}</Text>
-                </View>
+                <ViewShot ref={summaryCardRef} options={{ format: 'png', quality: 1 }}>
+                  <View style={styles.shareCard}>
+                    {/* Gradient-like header band */}
+                    <View style={styles.shareCardHeader}>
+                      <Image
+                        source={themeColors.background === '#000000' || themeColors.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
+                        style={styles.shareCardLogo}
+                        resizeMode="contain"
+                      />
+                      <View style={styles.shareCardDateBadge}>
+                        <Text style={styles.shareCardDateText}>
+                          {(() => { const d = new Date(); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`; })()}
+                        </Text>
+                      </View>
+                    </View>
 
-                {/* Stats row */}
-                <View style={styles.summaryStatsRow}>
-                  <View style={styles.summaryStat}>
-                    <Text style={styles.summaryStatValue}>{formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
-                    <Text style={styles.summaryStatLabel}>Duration</Text>
-                  </View>
-                  <View style={styles.summaryStatDivider} />
-                  <View style={styles.summaryStat}>
-                    <Text style={styles.summaryStatValue}>{finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0}</Text>
-                    <Text style={styles.summaryStatLabel}>Sets Logged</Text>
-                  </View>
-                  <View style={styles.summaryStatDivider} />
-                  <View style={styles.summaryStat}>
-                    <Text style={styles.summaryStatValue}>{completedCount}/{exercises.length}</Text>
-                    <Text style={styles.summaryStatLabel}>Exercises</Text>
-                  </View>
-                </View>
+                    {/* Focus title */}
+                    <Text style={styles.shareCardFocus}>{workout.focus}</Text>
 
-                {/* AI loading / content */}
-                {summaryLoading ? (
+                    {/* Stats grid */}
+                    <View style={styles.shareStatsGrid}>
+                      <View style={styles.shareStatTile}>
+                        <Text style={styles.shareStatIcon}>⏱</Text>
+                        <Text style={styles.shareStatValue}>{formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
+                        <Text style={styles.shareStatLabel}>Duration</Text>
+                      </View>
+                      <View style={styles.shareStatTile}>
+                        <Text style={styles.shareStatIcon}>📊</Text>
+                        <Text style={styles.shareStatValue}>{finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0}</Text>
+                        <Text style={styles.shareStatLabel}>Sets</Text>
+                      </View>
+                      <View style={styles.shareStatTile}>
+                        <Text style={styles.shareStatIcon}>💪</Text>
+                        <Text style={styles.shareStatValue}>{completedCount}/{exercises.length}</Text>
+                        <Text style={styles.shareStatLabel}>Exercises</Text>
+                      </View>
+                      {summaryData?.caloriesBurned ? (
+                        <View style={styles.shareStatTile}>
+                          <Text style={styles.shareStatIcon}>🔥</Text>
+                          <Text style={styles.shareStatValue}>~{summaryData.caloriesBurned}</Text>
+                          <Text style={styles.shareStatLabel}>Calories</Text>
+                        </View>
+                      ) : null}
+                    </View>
+
+                    {/* Best sets */}
+                    {(summaryData?.achievements?.length ?? 0) > 0 && (
+                      <View style={styles.shareAchievements}>
+                        <Text style={styles.shareAchievementsTitle}>Best Sets</Text>
+                        {summaryData!.achievements.slice(0, 4).map((a, i) => (
+                          <View key={i} style={styles.shareAchievementRow}>
+                            <Text style={styles.shareAchievementBullet}>▸</Text>
+                            <Text style={styles.shareAchievementText}>{a}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* AI motivation */}
+                    {summaryData?.motivationMessage ? (
+                      <View style={styles.shareMotivation}>
+                        <Text style={styles.shareMotivationText}>"{summaryData.motivationMessage}"</Text>
+                      </View>
+                    ) : null}
+
+                    {/* Watermark */}
+                    <Text style={styles.shareWatermark}>Tracked with MAKROS</Text>
+                  </View>
+                </ViewShot>
+
+                {/* Loading state */}
+                {summaryLoading && (
                   <View style={styles.summaryLoadingRow}>
                     <ActivityIndicator color={themeColors.primary} />
                     <Text style={styles.summaryLoadingText}>Coach is reviewing your session…</Text>
                   </View>
-                ) : (
-                  <>
-                    {summaryData?.caloriesBurned ? (
-                      <View style={styles.summaryCaloriesRow}>
-                        <Text style={styles.summaryCaloriesValue}>~{summaryData.caloriesBurned}</Text>
-                        <Text style={styles.summaryCaloriesLabel}>calories burned</Text>
-                      </View>
-                    ) : null}
-
-                    {summaryData?.motivationMessage ? (
-                      <View style={styles.summaryMotivation}>
-                        <Text style={styles.summaryMotivationIcon}>💬</Text>
-                        <Text style={styles.summaryMotivationText}>{summaryData.motivationMessage}</Text>
-                      </View>
-                    ) : null}
-
-                    {(summaryData?.achievements?.length ?? 0) > 0 && (
-                      <View style={styles.summarySection}>
-                        <Text style={styles.summarySectionTitle}>🎯  Today's Best Sets</Text>
-                        {summaryData!.achievements.map((a, i) => (
-                          <Text key={i} style={styles.summaryItem}>{a}</Text>
-                        ))}
-                      </View>
-                    )}
-
-                    {(summaryData?.recommendations?.length ?? 0) > 0 && (
-                      <View style={styles.summarySection}>
-                        <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
-                        {summaryData!.recommendations.map((r, i) => (
-                          <Text key={i} style={styles.summaryItem}>• {r}</Text>
-                        ))}
-                      </View>
-                    )}
-                  </>
                 )}
 
-                {/* CTA: go to feedback */}
-                <TouchableOpacity
-                  style={styles.summaryFeedbackBtn}
-                  onPress={() => setSummaryStep('feedback')}
-                  activeOpacity={0.85}>
-                  <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  →</Text>
-                </TouchableOpacity>
+                {/* Recovery tips (outside shareable card) */}
+                {!summaryLoading && (summaryData?.recommendations?.length ?? 0) > 0 && (
+                  <View style={styles.summarySection}>
+                    <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
+                    {summaryData!.recommendations.map((r, i) => (
+                      <Text key={i} style={styles.summaryItem}>• {r}</Text>
+                    ))}
+                  </View>
+                )}
+
+                {/* Share + Feedback buttons */}
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
+                    onPress={handleShareSummary}
+                    disabled={shareLoading || summaryLoading}
+                    activeOpacity={0.85}>
+                    <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                      {shareLoading ? 'Saving…' : '📤 Share'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { flex: 2 }]}
+                    onPress={() => setSummaryStep('feedback')}
+                    activeOpacity={0.85}>
+                    <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  →</Text>
+                  </TouchableOpacity>
+                </View>
                 <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
                   <Text style={styles.summarySkipText}>Skip & Close</Text>
                 </TouchableOpacity>
@@ -1516,7 +1669,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {/* Overall feeling */}
                     <View style={styles.feedbackGroup}>
                       <Text style={styles.feedbackGroupLabel}>Overall feeling</Text>
-                      <View style={styles.feedbackRow}>
+                      <View style={styles.fbFormRow}>
                         {([
                           { value: 'rough', label: '😓 Rough' },
                           { value: 'okay',  label: '😐 Okay' },
@@ -1525,10 +1678,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         ] as const).map(opt => (
                           <TouchableOpacity
                             key={opt.value}
-                            style={[styles.feedbackChip, feedbackFeeling === opt.value && styles.feedbackChipActive]}
+                            style={[styles.fbFormChip, feedbackFeeling === opt.value && styles.fbFormChipActive]}
                             onPress={() => setFeedbackFeeling(opt.value)}
                             activeOpacity={0.8}>
-                            <Text style={[styles.feedbackChipText, feedbackFeeling === opt.value && styles.feedbackChipTextActive]}>
+                            <Text style={[styles.fbFormChipText, feedbackFeeling === opt.value && styles.fbFormChipTextActive]}>
                               {opt.label}
                             </Text>
                           </TouchableOpacity>
@@ -1539,7 +1692,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {/* Perceived intensity */}
                     <View style={styles.feedbackGroup}>
                       <Text style={styles.feedbackGroupLabel}>Intensity</Text>
-                      <View style={styles.feedbackRow}>
+                      <View style={styles.fbFormRow}>
                         {([
                           { value: 1, label: 'Too Easy' },
                           { value: 2, label: 'Easy' },
@@ -1549,10 +1702,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         ] as const).map(opt => (
                           <TouchableOpacity
                             key={opt.value}
-                            style={[styles.feedbackIntensityChip, feedbackIntensity === opt.value && styles.feedbackChipActive]}
+                            style={[styles.feedbackIntensityChip, feedbackIntensity === opt.value && styles.fbFormChipActive]}
                             onPress={() => setFeedbackIntensity(opt.value)}
                             activeOpacity={0.8}>
-                            <Text style={[styles.feedbackChipText, feedbackIntensity === opt.value && styles.feedbackChipTextActive]}>
+                            <Text style={[styles.fbFormChipText, feedbackIntensity === opt.value && styles.fbFormChipTextActive]}>
                               {opt.label}
                             </Text>
                           </TouchableOpacity>
@@ -1940,6 +2093,10 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   },
   inlineLoggedBadgeText: { fontSize: 14, color: tc.primary, fontWeight: '800' },
 
+  timerDisplay: { fontSize: 18, fontWeight: '800', fontVariant: ['tabular-nums'] as any, color: tc.textPrimary, minWidth: 52 },
+  timerBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, alignItems: 'center' as const, justifyContent: 'center' as const },
+  timerBtnText: { fontSize: 12, fontWeight: '700', color: '#FFFFFF' },
+
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: tc.border },
   setNum:  { fontSize: 12, color: tc.textMuted, width: 44 },
@@ -2086,12 +2243,115 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   summarySkipBtn:    { alignItems: 'center', paddingVertical: 10 },
   summarySkipText:   { fontSize: 13, color: tc.textMuted },
 
-  // Feedback form
+  // ── Shareable summary card ──
+  shareCard: {
+    backgroundColor: tc.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: tc.border,
+    overflow: 'hidden',
+  },
+  shareCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 8,
+    backgroundColor: tc.primary + '12',
+    borderBottomWidth: 1,
+    borderBottomColor: tc.border,
+  },
+  shareCardLogo: { width: 200, height: 60 },
+  shareCardDateBadge: {
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.full,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: tc.border,
+  },
+  shareCardDateText: { fontSize: 11, fontWeight: '600', color: tc.textSecondary },
+  shareCardFocus: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: tc.textPrimary,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 4,
+  },
+  shareStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  shareStatTile: {
+    flex: 1,
+    minWidth: '42%' as any,
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: tc.border,
+    paddingVertical: 12,
+    alignItems: 'center',
+    gap: 2,
+  },
+  shareStatIcon: { fontSize: 18, marginBottom: 2 },
+  shareStatValue: { fontSize: 22, fontWeight: '800', color: tc.textPrimary },
+  shareStatLabel: { fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  shareAchievements: {
+    marginHorizontal: 14,
+    marginBottom: 6,
+    backgroundColor: tc.primary + '10',
+    borderRadius: radius.md,
+    padding: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: tc.primary + '30',
+  },
+  shareAchievementsTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: tc.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 2,
+  },
+  shareAchievementRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  shareAchievementBullet: { fontSize: 12, color: tc.primary, fontWeight: '700', lineHeight: 18 },
+  shareAchievementText: { fontSize: 13, color: tc.textPrimary, fontWeight: '600', flex: 1, lineHeight: 18 },
+  shareMotivation: {
+    marginHorizontal: 14,
+    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  shareMotivationText: {
+    fontSize: 13,
+    fontStyle: 'italic',
+    color: tc.textSecondary,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  shareWatermark: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: tc.textMuted,
+    textAlign: 'center',
+    paddingBottom: 12,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
+
+  // Feedback form (post-workout)
   feedbackGroup:     { gap: 10 },
   feedbackGroupLabel: { fontSize: 13, fontWeight: '700', color: tc.textPrimary },
   feedbackOptional:  { fontSize: 12, color: tc.textMuted, fontWeight: '400' },
-  feedbackRow:       { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  feedbackChip: {
+  fbFormRow:       { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  fbFormChip: {
     flex: 1,
     paddingVertical: 10,
     paddingHorizontal: 8,
@@ -2102,12 +2362,12 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     alignItems: 'center',
     minWidth: 72,
   },
-  feedbackChipActive: {
+  fbFormChipActive: {
     borderColor: tc.primary,
     backgroundColor: tc.primary + '20',
   },
-  feedbackChipText:       { fontSize: 13, color: tc.textSecondary, fontWeight: '600', textAlign: 'center' },
-  feedbackChipTextActive: { color: tc.primary },
+  fbFormChipText:       { fontSize: 13, color: tc.textSecondary, fontWeight: '600', textAlign: 'center' },
+  fbFormChipTextActive: { color: tc.primary },
 
   feedbackIntensityChip: {
     flex: 1,

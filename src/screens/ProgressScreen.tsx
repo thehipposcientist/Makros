@@ -1,13 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
-  TextInput, Alert,
+  TextInput, Alert, Image,
 } from 'react-native';
-import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry } from '../types';
+import * as ImagePicker from 'expo-image-picker';
+import ViewShot from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges } from '../utils/workoutHistory';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights } from '../services/api';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 
@@ -83,7 +87,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'summaries'>('prs');
+  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'summaries' | 'body'>('prs');
+  const fitnessScoreRef = useRef<ViewShot>(null);
+  const [shareLoading, setShareLoading] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
   const [prs, setPrs] = useState<PR[]>([]);
@@ -98,6 +104,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [summaries, setSummaries] = useState<StoredWorkoutSummary[]>([]);
   const [goalHistory, setGoalHistory] = useState<GoalHistoryEntry[]>([]);
   const [planChanges, setPlanChanges] = useState<PlanChangeEntry[]>([]);
+  const [bodyScanLoading, setBodyScanLoading] = useState(false);
+  const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
+  const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -118,12 +127,137 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
       getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
     }
+    // Load body scan history
+    AsyncStorage.getItem('bodyScanHistory').then(raw => {
+      if (raw) try { setBodyScanHistory(JSON.parse(raw)); } catch {}
+    });
   }, []);
+
+  const handleShareFitnessScore = async () => {
+    try {
+      setShareLoading(true);
+      const ref = fitnessScoreRef.current as any;
+      if (!ref?.capture) return;
+      const uri = await ref.capture();
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Fitness Score' });
+      } else {
+        Alert.alert('Saved', 'Screenshot saved to your device.');
+      }
+    } catch {
+      Alert.alert('Error', 'Could not share the fitness score.');
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const handleBodyScan = async (source: 'camera' | 'library') => {
+    try {
+      const opts = {
+        mediaTypes: 'images' as any,
+        base64: true,
+        quality: 0.7,
+      };
+      const result = source === 'camera'
+        ? await ImagePicker.launchCameraAsync(opts)
+        : await ImagePicker.launchImageLibraryAsync(opts);
+      if (result.canceled || !result.assets?.[0]?.base64) return;
+
+      setBodyScanLoading(true);
+      setBodyScanResult(null);
+      const asset = result.assets[0];
+      const stats = userProfile.physicalStats;
+      const heightInches = (stats.heightFeet ?? 0) * 12 + (stats.heightInches ?? 0);
+
+      const scanResult = await scanBody(authToken, {
+        image_base64: asset.base64!,
+        mime_type: asset.mimeType ?? 'image/jpeg',
+        gender: stats.gender,
+        weight_lbs: stats.weightLbs,
+        height_inches: heightInches > 0 ? heightInches : undefined,
+        age: stats.age,
+      });
+      setBodyScanResult(scanResult);
+
+      // Save to history
+      const entry: BodyScanEntry = {
+        id: Date.now().toString(),
+        date: new Date().toISOString(),
+        bodyFatPct: scanResult.bodyFatPct,
+        bodyFatRange: scanResult.bodyFatRange,
+        muscleMass: scanResult.muscleMass,
+        category: scanResult.category,
+        strengths: scanResult.strengths,
+        improvements: scanResult.improvements,
+        assessment: scanResult.assessment,
+        weightLbs: stats.weightLbs,
+      };
+      const updated = [entry, ...bodyScanHistory].slice(0, 20);
+      setBodyScanHistory(updated);
+      await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(updated));
+    } catch (e: any) {
+      Alert.alert('Scan Failed', e?.message || 'Could not complete the body scan.');
+    } finally {
+      setBodyScanLoading(false);
+    }
+  };
 
   const strengthTrend = buildStrengthTrend(history);
   const overallStrength = strengthTrend.length
     ? Math.round(strengthTrend.reduce((sum, p) => sum + p.score, 0) / strengthTrend.length)
     : 0;
+
+  // ── Fitness Score (0–100) ──────────────────────────────────────────────────
+  const fitnessScore = (() => {
+    if (history.length === 0) return null;
+
+    // 1. Consistency (0–30): workouts in last 14 days vs target
+    const twoWeeksAgo = Date.now() - 14 * 86400000;
+    const recentCount = history.filter(s => +new Date(s.date) >= twoWeeksAgo && s.completed).length;
+    const target14 = (userProfile.daysPerWeek ?? 4) * 2;
+    const consistencyScore = Math.min(30, Math.round((recentCount / Math.max(1, target14)) * 30));
+
+    // 2. Strength Trend (0–25): are lifts going up?
+    let trendScore = 12; // neutral
+    if (strengthTrend.length >= 3) {
+      const firstHalf = strengthTrend.slice(0, Math.floor(strengthTrend.length / 2));
+      const secondHalf = strengthTrend.slice(Math.floor(strengthTrend.length / 2));
+      const avgFirst = firstHalf.reduce((s, p) => s + p.score, 0) / firstHalf.length;
+      const avgSecond = secondHalf.reduce((s, p) => s + p.score, 0) / secondHalf.length;
+      const pctChange = avgFirst > 0 ? ((avgSecond - avgFirst) / avgFirst) * 100 : 0;
+      trendScore = Math.min(25, Math.max(0, Math.round(12 + pctChange * 2)));
+    }
+
+    // 3. Volume (0–20): total sets in recent sessions
+    const recentSessions = history.filter(s => +new Date(s.date) >= twoWeeksAgo && s.completed);
+    const totalSets = recentSessions.reduce((sum, s) => sum + s.exercises.reduce((es, e) => es + e.sets.length, 0), 0);
+    const volumeScore = Math.min(20, Math.round((totalSets / Math.max(1, target14 * 16)) * 20));
+
+    // 4. Variety (0–15): unique exercises in last 14 days
+    const uniqueExercises = new Set(recentSessions.flatMap(s => s.exercises.map(e => e.name.toLowerCase())));
+    const varietyScore = Math.min(15, Math.round((uniqueExercises.size / 12) * 15));
+
+    // 5. Duration adherence (0–10): avg session near target
+    const targetMins = userProfile.workoutDurationMinutes ?? 60;
+    const avgDuration = recentSessions.length > 0
+      ? recentSessions.reduce((s, sess) => s + sess.durationSeconds, 0) / recentSessions.length / 60
+      : 0;
+    const durationRatio = targetMins > 0 ? avgDuration / targetMins : 0;
+    const durationScore = Math.min(10, Math.round(Math.max(0, 10 - Math.abs(1 - durationRatio) * 15)));
+
+    const total = consistencyScore + trendScore + volumeScore + varietyScore + durationScore;
+    return {
+      total: Math.min(100, total),
+      consistency: consistencyScore,
+      trend: trendScore,
+      volume: volumeScore,
+      variety: varietyScore,
+      duration: durationScore,
+      recentCount,
+      uniqueExercises: uniqueExercises.size,
+    };
+  })();
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -144,26 +278,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       </View>
 
       <View style={styles.tabs}>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'prs' && styles.tabActive]}
-          onPress={() => setTab('prs')}>
-          <Text style={[styles.tabText, tab === 'prs' && styles.tabTextActive]}>Records</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'charts' && styles.tabActive]}
-          onPress={() => setTab('charts')}>
-          <Text style={[styles.tabText, tab === 'charts' && styles.tabTextActive]}>Charts</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'history' && styles.tabActive]}
-          onPress={() => setTab('history')}>
-          <Text style={[styles.tabText, tab === 'history' && styles.tabTextActive]}>History</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'summaries' && styles.tabActive]}
-          onPress={() => setTab('summaries')}>
-          <Text style={[styles.tabText, tab === 'summaries' && styles.tabTextActive]}>Summaries</Text>
-        </TouchableOpacity>
+        {([
+          ['prs', 'Records'],
+          ['charts', 'Charts'],
+          ['history', 'History'],
+          ['summaries', 'Summaries'],
+          ['body', 'Body'],
+        ] as const).map(([key, label]) => (
+          <TouchableOpacity
+            key={key}
+            style={[styles.tab, tab === key && styles.tabActive]}
+            onPress={() => setTab(key as typeof tab)}>
+            <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
       {loading ? (
@@ -269,6 +397,61 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'prs' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {/* ── Fitness Score Card ── */}
+          {fitnessScore && (
+            <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
+            <View style={styles.fitnessScoreCard}>
+              <View style={styles.fitnessScoreHeader}>
+                <View>
+                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE</Text>
+                  <Text style={styles.fitnessScoreSubtext}>Based on your last 14 days</Text>
+                </View>
+                <View style={styles.fitnessScoreCircle}>
+                  <Text style={styles.fitnessScoreValue}>{fitnessScore.total}</Text>
+                </View>
+              </View>
+
+              {/* Score rating */}
+              <Text style={styles.fitnessScoreRating}>
+                {fitnessScore.total >= 80 ? '🔥 Elite' : fitnessScore.total >= 60 ? '💪 Strong' : fitnessScore.total >= 40 ? '📈 Building' : fitnessScore.total >= 20 ? '🌱 Starting' : '🏁 Get Moving'}
+              </Text>
+
+              {/* Breakdown bars */}
+              <View style={styles.fitnessBreakdown}>
+                {([
+                  { label: 'Consistency', value: fitnessScore.consistency, max: 30, detail: `${fitnessScore.recentCount} workouts` },
+                  { label: 'Strength Trend', value: fitnessScore.trend, max: 25, detail: fitnessScore.trend >= 15 ? 'Improving' : fitnessScore.trend >= 10 ? 'Stable' : 'Declining' },
+                  { label: 'Volume', value: fitnessScore.volume, max: 20, detail: `Total sets logged` },
+                  { label: 'Variety', value: fitnessScore.variety, max: 15, detail: `${fitnessScore.uniqueExercises} exercises` },
+                  { label: 'Session Length', value: fitnessScore.duration, max: 10, detail: 'vs target' },
+                ] as const).map(item => (
+                  <View key={item.label} style={styles.fitnessBarRow}>
+                    <View style={styles.fitnessBarLabel}>
+                      <Text style={styles.fitnessBarLabelText}>{item.label}</Text>
+                      <Text style={styles.fitnessBarDetail}>{item.detail}</Text>
+                    </View>
+                    <View style={styles.fitnessBarTrack}>
+                      <View style={[styles.fitnessBarFill, { width: `${Math.round((item.value / item.max) * 100)}%` as any }]} />
+                    </View>
+                    <Text style={styles.fitnessBarScore}>{item.value}/{item.max}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {/* Share button */}
+              <TouchableOpacity
+                style={styles.fitnessShareBtn}
+                onPress={handleShareFitnessScore}
+                disabled={shareLoading}>
+                {shareLoading
+                  ? <ActivityIndicator size="small" color={tc.primary} />
+                  : <Text style={styles.fitnessShareBtnText}>Share Score</Text>
+                }
+              </TouchableOpacity>
+            </View>
+            </ViewShot>
+          )}
+
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
             <View style={styles.insightsCard}>
               <Text style={styles.insightsTitle}>Coach Insights</Text>
@@ -446,7 +629,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
         </ScrollView>
-      ) : (
+      ) : tab === 'summaries' ? (
         /* ── Summaries + Goal History tab ─────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
 
@@ -562,7 +745,117 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })}
         </ScrollView>
-      )}
+      ) : tab === 'body' ? (
+        /* ── Body Scan Tab ─────────────────────────────────────────── */
+        <ScrollView contentContainerStyle={styles.content}>
+          {/* Scan buttons */}
+          <View style={styles.bodyScanPrompt}>
+            <Text style={{ fontSize: 36, textAlign: 'center' }}>📸</Text>
+            <Text style={styles.bodyScanPromptTitle}>AI Body Scan</Text>
+            <Text style={styles.bodyScanPromptText}>
+              Take a front-facing photo to estimate body fat percentage, muscle mass, and get personalized feedback.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+              <TouchableOpacity
+                style={[styles.bodyScanBtn, { flex: 1 }]}
+                onPress={() => handleBodyScan('camera')}
+                disabled={bodyScanLoading}>
+                <Text style={styles.bodyScanBtnText}>📷 Camera</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }]}
+                onPress={() => handleBodyScan('library')}
+                disabled={bodyScanLoading}>
+                <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>🖼 Library</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
+              For best results: front-facing, good lighting, minimal clothing. This is an AI estimate only.
+            </Text>
+          </View>
+
+          {/* Loading */}
+          {bodyScanLoading && (
+            <View style={{ alignItems: 'center', paddingVertical: 30, gap: 10 }}>
+              <ActivityIndicator size="large" color={tc.primary} />
+              <Text style={{ fontSize: 13, color: tc.textSecondary }}>Analyzing your physique…</Text>
+            </View>
+          )}
+
+          {/* Latest result */}
+          {bodyScanResult && !bodyScanLoading && (
+            <View style={styles.bodyScanResultCard}>
+              <View style={styles.bodyScanResultHeader}>
+                <View>
+                  <Text style={styles.bodyScanResultCategory}>{bodyScanResult.category}</Text>
+                  <Text style={styles.bodyScanResultMuscle}>
+                    Muscle mass: {bodyScanResult.muscleMass.replace('_', ' ')}
+                  </Text>
+                </View>
+                <View style={styles.bodyScanBfCircle}>
+                  <Text style={styles.bodyScanBfValue}>{bodyScanResult.bodyFatPct}%</Text>
+                  <Text style={styles.bodyScanBfLabel}>Body Fat</Text>
+                </View>
+              </View>
+              <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 6 }}>
+                Estimated range: {bodyScanResult.bodyFatRange}
+              </Text>
+
+              <Text style={styles.bodyScanAssessment}>{bodyScanResult.assessment}</Text>
+
+              {bodyScanResult.strengths.length > 0 && (
+                <View style={styles.bodyScanSection}>
+                  <Text style={styles.bodyScanSectionTitle}>Strengths</Text>
+                  {bodyScanResult.strengths.map((s, i) => (
+                    <Text key={i} style={styles.bodyScanItem}>✓ {s}</Text>
+                  ))}
+                </View>
+              )}
+
+              {bodyScanResult.improvements.length > 0 && (
+                <View style={styles.bodyScanSection}>
+                  <Text style={[styles.bodyScanSectionTitle, { color: tc.warning ?? tc.primary }]}>Areas to Improve</Text>
+                  {bodyScanResult.improvements.map((s, i) => (
+                    <Text key={i} style={styles.bodyScanItem}>→ {s}</Text>
+                  ))}
+                </View>
+              )}
+
+              <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 8 }}>
+                {bodyScanResult.disclaimer}
+              </Text>
+            </View>
+          )}
+
+          {/* History */}
+          {bodyScanHistory.length > 0 && (
+            <>
+              <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Scan History</Text>
+              {bodyScanHistory.map((entry) => {
+                const d = new Date(entry.date);
+                return (
+                  <View key={entry.id} style={styles.bodyScanHistoryCard}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <View>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{entry.category}</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                          {MONTH_NAMES[d.getMonth()]} {d.getDate()}, {d.getFullYear()}
+                          {entry.weightLbs ? `  ·  ${entry.weightLbs} lbs` : ''}
+                        </Text>
+                      </View>
+                      <View style={{ alignItems: 'center' }}>
+                        <Text style={{ fontSize: 20, fontWeight: '800', color: tc.primary }}>{entry.bodyFatPct}%</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted, textTransform: 'uppercase' }}>Body Fat</Text>
+                      </View>
+                    </View>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 6, lineHeight: 17 }}>{entry.assessment}</Text>
+                  </View>
+                );
+              })}
+            </>
+          )}
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
@@ -578,13 +871,14 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   title:   { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
 
   tabs: {
-    flexDirection: 'row', margin: 16, marginBottom: 0,
+    flexDirection: 'row', gap: 3,
     backgroundColor: colors.surface, borderRadius: radius.md,
-    padding: 4, borderWidth: 1, borderColor: colors.border,
+    padding: 3, borderWidth: 1, borderColor: colors.border,
+    marginHorizontal: 16, marginTop: 8, marginBottom: 4,
   },
-  tab:           { flex: 1, paddingVertical: 10, borderRadius: radius.sm, alignItems: 'center' },
+  tab:           { flex: 1, paddingVertical: 9, borderRadius: radius.sm, alignItems: 'center' },
   tabActive:     { backgroundColor: colors.primary },
-  tabText:       { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  tabText:       { fontSize: 11, fontWeight: '600', color: colors.textSecondary },
   tabTextActive: { color: colors.background },
 
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -725,4 +1019,206 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   chartStat: { alignItems: 'center', gap: 2 },
   chartStatValue: { fontSize: 15, fontWeight: '800', color: colors.textPrimary },
   chartStatLabel: { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
+
+  // ── Fitness Score Card ──
+  fitnessScoreCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 16,
+    gap: 12,
+  },
+  fitnessScoreHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  fitnessScoreLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+  },
+  fitnessScoreSubtext: {
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  fitnessScoreCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.primary + '18',
+    borderWidth: 3,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fitnessScoreValue: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: colors.primary,
+  },
+  fitnessScoreRating: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  fitnessBreakdown: { gap: 10 },
+  fitnessBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  fitnessBarLabel: { width: 100 },
+  fitnessBarLabelText: { fontSize: 12, fontWeight: '600', color: colors.textPrimary },
+  fitnessBarDetail: { fontSize: 10, color: colors.textMuted },
+  fitnessBarTrack: {
+    flex: 1,
+    height: 8,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  fitnessBarFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 4,
+  },
+  fitnessBarScore: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    width: 32,
+    textAlign: 'right',
+  },
+
+  fitnessShareBtn: {
+    marginTop: 12,
+    alignSelf: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '12',
+  },
+  fitnessShareBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+
+  // ── Body Scan ──
+  bodyScanPrompt: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 20,
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 16,
+  },
+  bodyScanPromptTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  bodyScanPromptText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  bodyScanBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  bodyScanBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  bodyScanResultCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    gap: 8,
+  },
+  bodyScanResultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  bodyScanResultCategory: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  bodyScanResultMuscle: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+    textTransform: 'capitalize',
+  },
+  bodyScanBfCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.primary + '15',
+    borderWidth: 3,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bodyScanBfValue: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: colors.primary,
+  },
+  bodyScanBfLabel: {
+    fontSize: 9,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    fontWeight: '600',
+    marginTop: -2,
+  },
+  bodyScanAssessment: {
+    fontSize: 14,
+    color: colors.textPrimary,
+    lineHeight: 20,
+  },
+  bodyScanSection: {
+    gap: 4,
+  },
+  bodyScanSectionTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  bodyScanItem: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    lineHeight: 18,
+    paddingLeft: 4,
+  },
+  bodyScanHistoryCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 8,
+  },
 }); }

@@ -3,7 +3,8 @@ export type AppThemeName =
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
-  | 'parchment'| 'meadow';
+  | 'parchment'| 'meadow'
+  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender';
 
 export interface ThemeColors {
   background: string;
@@ -642,6 +643,158 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#E4EEFF', strong: '#3858C8', text: '#102080' },  // blue
       planner: { soft: '#FFF0E4', strong: '#E07830', text: '#6A2E08' },
       account: { soft: '#F0FAF2', strong: '#2A8048', text: '#0A3818' },
+    },
+  },
+
+  // ── NEW THEMES ───────────────────────────────────────────────────────────────
+
+  void: {
+    // True OLED black — pure #000 background, ice-white text, minimal blue accent.
+    name: 'void',
+    label: 'Void',
+    description: 'Pure OLED black with ice-white text and minimal blue — maximum contrast, zero distraction.',
+    colors: {
+      background:    '#000000',
+      surface:       '#0A0A0A',
+      surfaceRaised: '#141414',
+      border:        '#222222',
+      primary:       '#4C9EFF',
+      primaryDark:   '#2A74CC',
+      primaryLight:  '#88C4FF',
+      accent:        '#FF6B6B',
+      textPrimary:   '#FFFFFF',
+      textSecondary: '#B0B0B0',
+      textMuted:     '#666666',
+      error:         '#FF4444',
+      warning:       '#FFB020',
+      success:       '#44CC66',
+    },
+    sections: {
+      workout: { soft: '#0A1428', strong: '#4C9EFF', text: '#A0CCFF' },
+      meals:   { soft: '#0A1E10', strong: '#44CC66', text: '#88EEAA' },
+      ai:      { soft: '#140A1E', strong: '#9060E8', text: '#C8A0FF' },
+      planner: { soft: '#1A1400', strong: '#FFB020', text: '#FFD880' },
+      account: { soft: '#1A0A0A', strong: '#FF6B6B', text: '#FFB0B0' },
+    },
+  },
+
+  dusk: {
+    // Soft twilight — muted navy-purple with warm peach accent. Gentle dark theme.
+    name: 'dusk',
+    label: 'Twilight Dusk',
+    description: 'Soft muted navy with warm peach and lavender — a gentle, calming dark theme.',
+    colors: {
+      background:    '#0E0E1A',
+      surface:       '#161628',
+      surfaceRaised: '#1E1E38',
+      border:        '#2E2E50',
+      primary:       '#E8A878',  // warm peach
+      primaryDark:   '#C08050',
+      primaryLight:  '#F8D0B0',
+      accent:        '#A088D8',  // soft lavender
+      textPrimary:   '#EAE6F0',
+      textSecondary: '#A8A0C0',
+      textMuted:     '#686080',
+      error:         '#E85050',
+      warning:       '#D8A040',
+      success:       '#48B878',
+    },
+    sections: {
+      workout: { soft: '#1A1230', strong: '#A088D8', text: '#D0C0F0' },  // LAVENDER
+      meals:   { soft: '#201810', strong: '#E8A878', text: '#F8D0B0' },  // PEACH
+      ai:      { soft: '#0E1428', strong: '#5878C8', text: '#A0B8F0' },  // slate-blue
+      planner: { soft: '#1C1830', strong: '#C090E0', text: '#E8C8FF' },
+      account: { soft: '#201018', strong: '#D06888', text: '#F0A8C8' },
+    },
+  },
+
+  steel: {
+    // Modern cool grey — neutral professional palette. No hue bias.
+    name: 'steel',
+    label: 'Steel Modern',
+    description: 'Neutral grey surfaces with blue-steel accents — clean, modern, professional.',
+    colors: {
+      background:    '#F2F4F7',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#E8ECF0',
+      border:        '#CDD4DC',
+      primary:       '#3A5BC8',  // strong blue
+      primaryDark:   '#283E98',
+      primaryLight:  '#7090E8',
+      accent:        '#E06840',  // warm orange pop
+      textPrimary:   '#1A1E28',
+      textSecondary: '#4A5468',
+      textMuted:     '#7A8498',
+      error:         '#D03030',
+      warning:       '#C07800',
+      success:       '#1E8A48',
+    },
+    sections: {
+      workout: { soft: '#D8E4FF', strong: '#3A5BC8', text: '#1A2E78' },
+      meals:   { soft: '#D4F0DC', strong: '#1E8A48', text: '#0A4820' },
+      ai:      { soft: '#EAE0F8', strong: '#6848B8', text: '#301878' },
+      planner: { soft: '#FFF0E0', strong: '#E06840', text: '#702810' },
+      account: { soft: '#E4EEF8', strong: '#4878B8', text: '#1A3868' },
+    },
+  },
+
+  sand: {
+    // Warm neutral light — desert sand tones with terracotta and sage.
+    name: 'sand',
+    label: 'Desert Sand',
+    description: 'Warm sandy beige with terracotta primary and sage green — earthy, warm, inviting.',
+    colors: {
+      background:    '#F8F2EA',
+      surface:       '#FFFCF8',
+      surfaceRaised: '#F0E6D8',
+      border:        '#D8C8B0',
+      primary:       '#C06030',  // terracotta
+      primaryDark:   '#984018',
+      primaryLight:  '#E09060',
+      accent:        '#608050',  // sage green
+      textPrimary:   '#2A2018',
+      textSecondary: '#6A5440',
+      textMuted:     '#A08868',
+      error:         '#C03030',
+      warning:       '#B87800',
+      success:       '#408840',
+    },
+    sections: {
+      workout: { soft: '#F0E0D0', strong: '#C06030', text: '#702808' },   // TERRACOTTA
+      meals:   { soft: '#DCE8D4', strong: '#608050', text: '#2A4020' },   // SAGE
+      ai:      { soft: '#E8E0F0', strong: '#7858A8', text: '#382068' },   // dusty violet
+      planner: { soft: '#F8ECD4', strong: '#C08830', text: '#684010' },
+      account: { soft: '#F0E4D4', strong: '#A06838', text: '#583010' },
+    },
+  },
+
+  lavender: {
+    // Soft pastel dark — dark with muted lavender, mint, and rose. Cozy and calming.
+    name: 'lavender',
+    label: 'Lavender Dream',
+    description: 'Soft dark purple with muted lavender, mint, and rose — cozy, pastel, dreamy.',
+    colors: {
+      background:    '#121018',
+      surface:       '#1A1624',
+      surfaceRaised: '#242032',
+      border:        '#382E4C',
+      primary:       '#B898E0',  // soft lavender
+      primaryDark:   '#8868B8',
+      primaryLight:  '#D8C0F8',
+      accent:        '#78D8B0',  // soft mint
+      textPrimary:   '#EEE8F8',
+      textSecondary: '#B0A0C8',
+      textMuted:     '#706488',
+      error:         '#E86070',
+      warning:       '#D8A848',
+      success:       '#58C888',
+    },
+    sections: {
+      workout: { soft: '#1A1430', strong: '#B898E0', text: '#D8C0F8' },  // LAVENDER
+      meals:   { soft: '#0C2420', strong: '#78D8B0', text: '#B0F0D8' },  // MINT
+      ai:      { soft: '#201028', strong: '#D878A8', text: '#F0A8D0' },  // soft ROSE
+      planner: { soft: '#201828', strong: '#A880D0', text: '#D0B0F0' },
+      account: { soft: '#1C1018', strong: '#E07090', text: '#F8B0C8' },
     },
   },
 

@@ -1,17 +1,19 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image,
+  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
-import { analyzeFoodPhoto, scanFoodsPhoto } from '../services/api';
+import { analyzeFoodPhoto, scanFoodsPhoto, getExercises } from '../services/api';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
+import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
+import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 
 
 interface EditProfileScreenProps {
@@ -19,7 +21,7 @@ interface EditProfileScreenProps {
   profile: UserProfile;
   onSave: (updated: UserProfile) => void;
   onCancel: () => void;
-  mode?: 'plan' | 'equipment' | 'foods' | 'theme';
+  mode?: 'goal' | 'workout' | 'mealplan' | 'theme';
 }
 
 interface PhotoMealDraft {
@@ -209,7 +211,7 @@ function createAfmStyles(c: ReturnType<typeof getTheme>['colors']) { return Styl
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'plan' }: EditProfileScreenProps) {
+export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal' }: EditProfileScreenProps) {
   const tc = getTheme(profile.themePreference).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -218,8 +220,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
   const [selectedTargetFocus, setSelectedTargetFocus] = useState<string>(profile.goalSelection?.targetFocus ?? profile.focusedMuscleGroup ?? '');
-  const [showAdvancedGoals, setShowAdvancedGoals] = useState(false);
-  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  // Auto-show advanced goals if current goal is not a launch goal
+  const currentGoalIsAdvanced = !LAUNCH_GOALS.some(g => g.id === (profile.goalSelection?.primaryGoal ?? profile.goal));
+  const currentGoalCategory = currentGoalIsAdvanced ? goalCategory(profile.goalSelection?.primaryGoal ?? profile.goal) : null;
+  const [showAdvancedGoals, setShowAdvancedGoals] = useState(currentGoalIsAdvanced);
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(currentGoalCategory ?? null);
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
@@ -240,7 +245,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [daysPerWeek, setDaysPerWeek] = useState(profile.daysPerWeek);
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
   const [equipment, setEquipment]     = useState<string[]>(profile.equipment as string[]);
-  const [foods, setFoods]             = useState<string[]>(profile.foodsAvailable);
+  const [foods, setFoods]             = useState<string[]>([
+    ...profile.foodsAvailable,
+    ...(profile.supplementsAvailable ?? []).map(s => '__supp__' + s),
+  ]);
   const [customFoods, setCustomFoods] = useState<CustomFoodItem[]>(profile.customFoods ?? []);
   const [savedMeals, setSavedMeals]   = useState<SavedMealTemplate[]>(profile.savedMeals ?? []);
   const [mealRoutine, setMealRoutine] = useState(profile.mealRoutine ?? '');
@@ -286,9 +294,51 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [routineNotes, setRoutineNotes] = useState('');
   const [routinePhotoUri, setRoutinePhotoUri] = useState<string | null>(null);
 
+  // Tab state for combined modes
+  const [workoutTab, setWorkoutTab] = useState<'equipment' | 'exercises'>('equipment');
+  const [mealplanTab, setMealplanTab] = useState<'foods' | 'supplements' | 'macros'>('foods');
+
+  // Exercise library
+  const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
+  const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
+  const [exerciseSearch, setExerciseSearch] = useState('');
+  const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
+  const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
+  const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
+  const [exerciseSubTab, setExerciseSubTab] = useState<'exercises' | 'muscles'>('exercises');
+  const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
+
   useEffect(() => {
     loadMealRoutines().then(setMealRoutinesState);
   }, []);
+
+  // Load exercise library when exercises tab is opened
+  useEffect(() => {
+    if (mode === 'workout' && workoutTab === 'exercises' && exerciseLibrary.length === 0 && !exerciseLibraryLoading) {
+      setExerciseLibraryLoading(true);
+      getExercises().then(rows => setExerciseLibrary(rows ?? [])).catch(() => setExerciseLibrary([])).finally(() => setExerciseLibraryLoading(false));
+    }
+  }, [mode, workoutTab]);
+
+  const exerciseMuscleOptions = Array.from(
+    new Set(exerciseLibrary.map(i => i.primary_muscle).filter(Boolean) as string[])
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+
+  const exerciseEquipmentOptions = Array.from(
+    new Set(exerciseLibrary.map(i => i.equipment).filter(Boolean) as string[])
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+
+  const filteredExerciseLibrary = exerciseLibrary.filter(item => {
+    const search = exerciseSearch.trim().toLowerCase();
+    const matchesSearch = !search || [
+      item.name, item.description ?? '', humanizeToken(item.primary_muscle),
+      humanizeToken(item.equipment), ...(item.secondary_muscles ?? []).map(humanizeToken),
+    ].some(v => v.toLowerCase().includes(search));
+    const matchesMuscle = exerciseMuscleFilter === 'all' || item.primary_muscle === exerciseMuscleFilter;
+    const matchesEquipment = exerciseEquipmentFilter === 'all' || item.equipment === exerciseEquipmentFilter;
+    return matchesSearch && matchesMuscle && matchesEquipment;
+  });
 
   const toggleEquipment = (name: string) =>
     setEquipment(prev => prev.includes(name) ? prev.filter(e => e !== name) : [...prev, name]);
@@ -531,6 +581,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     const eventCategories = new Set(['strength', 'cardio_endurance', 'athletic_performance']);
     const targetEventVal = eventCategories.has(cat) && targetEvent.trim() ? targetEvent.trim() : undefined;
 
+    // Extract supplement selections (tagged with __supp__ prefix in foods array)
+    const suppPrefix = '__supp__';
+    const actualFoods = foods.filter(f => !f.startsWith(suppPrefix));
+    const selectedSupps = foods.filter(f => f.startsWith(suppPrefix)).map(f => f.slice(suppPrefix.length));
+    const mergedSupps = Array.from(new Set([...(profile.supplementsAvailable ?? []), ...selectedSupps]));
+    // If in mealplan mode, remove unselected supps
+    const finalSupps = mode === 'mealplan'
+      ? mergedSupps.filter(s => selectedSupps.includes(s) || !(profile.supplementsAvailable ?? []).includes(s))
+      : profile.supplementsAvailable;
+
     onSave({
       ...profile,
       goal: selectedGoal,
@@ -545,16 +605,17 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
       equipment,
-      foodsAvailable: foods,
+      foodsAvailable: actualFoods,
       customFoods,
       savedMeals,
+      supplementsAvailable: finalSupps,
       mealRoutine: mealRoutine.trim() || undefined,
       injuryEntries: injuryEntries.length > 0 ? injuryEntries : undefined,
       physicalStats: {
         ...profile.physicalStats,
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
       },
-      customMacros: useCustomMacros ? {
+      customMacros: (useCustomMacros || mode === 'mealplan') && (customCalories || customProtein || customCarbs || customFat) ? {
         ...(customCalories ? { calories: parseInt(customCalories, 10) } : {}),
         ...(customProtein  ? { protein: parseInt(customProtein, 10) }   : {}),
         ...(customCarbs    ? { carbs: parseInt(customCarbs, 10) }       : {}),
@@ -603,17 +664,17 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     return `${food.name} ${food.unit ?? ''}`.toLowerCase().includes(foodSearchLower);
   });
 
-  const screenTitle = mode === 'equipment'
-    ? 'Edit Equipment'
-    : mode === 'foods'
-      ? 'Edit Food Options'
+  const screenTitle = mode === 'workout'
+    ? 'Edit Workout'
+    : mode === 'mealplan'
+      ? 'Edit Meal Plan'
       : mode === 'theme'
         ? 'Themes'
-        : 'Edit Plan';
-  const saveLabel = mode === 'equipment'
-    ? 'Save Equipment'
-    : mode === 'foods'
-      ? 'Save Foods'
+        : 'Edit Goal';
+  const saveLabel = mode === 'workout'
+    ? 'Save & Update Workout'
+    : mode === 'mealplan'
+      ? 'Save & Update Nutrition'
       : mode === 'theme'
         ? 'Save Theme'
         : 'Save & Update Plan';
@@ -632,12 +693,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
 
-        {mode === 'plan' && (
+        {mode === 'goal' && (
         <>
         {/* ── Goal ── */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Goal</Text>
-          <View style={styles.goalGrid}>
+          <View style={[styles.goalGrid, { marginBottom: 6 }]}>
             {LAUNCH_GOALS.map(g => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
               const active = selectedGoal === g.id;
@@ -653,14 +714,28 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               );
             })}
           </View>
+        </View>
 
-          {/* Expandable categories for non-launch goals */}
+        {/* ── Advanced goals (separate section for breathing room) ── */}
+        <View style={[styles.section, { marginBottom: 20 }]}>
           <TouchableOpacity
-            style={{ marginTop: 14, alignItems: 'center', paddingVertical: 8 }}
+            style={{
+              alignItems: 'center',
+              paddingVertical: 12,
+              paddingHorizontal: 20,
+              backgroundColor: tc.primary + '15',
+              borderRadius: 12,
+              borderWidth: 1.5,
+              borderColor: tc.primary + '40',
+              flexDirection: 'row',
+              justifyContent: 'center',
+              gap: 8,
+            }}
             onPress={() => setShowAdvancedGoals(prev => !prev)}
             activeOpacity={0.7}>
-            <Text style={{ color: tc.primary, fontWeight: '600', fontSize: 13 }}>
-              {showAdvancedGoals ? 'Hide advanced goals' : 'More goals...'}
+            <Text style={{ fontSize: 16 }}>{showAdvancedGoals ? '▾' : '▸'}</Text>
+            <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 15 }}>
+              {showAdvancedGoals ? 'Hide Advanced Goals' : 'Explore All Goals'}
             </Text>
           </TouchableOpacity>
 
@@ -819,132 +894,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           );
         })()}
 
-        {/* ── Custom macro goals ── */}
-        <View style={styles.section}>
-          <TouchableOpacity
-            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
-            onPress={() => setUseCustomMacros(prev => !prev)}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.sectionLabel}>Custom Macro Goals</Text>
-              <Text style={[styles.sectionHint, { marginTop: 2 }]}>
-                {useCustomMacros ? 'Override AI-calculated targets' : 'Let AI calculate from your profile'}
-              </Text>
-            </View>
-            <View style={[styles.toggleTrack, useCustomMacros && styles.toggleTrackActive]}>
-              <View style={[styles.toggleThumb, useCustomMacros && styles.toggleThumbActive]} />
-            </View>
-          </TouchableOpacity>
-
-          {useCustomMacros && (
-            <View style={{ marginTop: 14, gap: 10 }}>
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.macroFieldLabel}>Calories</Text>
-                  <TextInput
-                    style={styles.macroFieldInput}
-                    value={customCalories}
-                    onChangeText={setCustomCalories}
-                    placeholder="e.g. 2400"
-                    placeholderTextColor={tc.textMuted}
-                    keyboardType="number-pad"
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.macroFieldLabel}>Protein (g)</Text>
-                  <TextInput
-                    style={styles.macroFieldInput}
-                    value={customProtein}
-                    onChangeText={setCustomProtein}
-                    placeholder="e.g. 180"
-                    placeholderTextColor={tc.textMuted}
-                    keyboardType="number-pad"
-                  />
-                </View>
-              </View>
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.macroFieldLabel}>Carbs (g)</Text>
-                  <TextInput
-                    style={styles.macroFieldInput}
-                    value={customCarbs}
-                    onChangeText={setCustomCarbs}
-                    placeholder="e.g. 250"
-                    placeholderTextColor={tc.textMuted}
-                    keyboardType="number-pad"
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.macroFieldLabel}>Fat (g)</Text>
-                  <TextInput
-                    style={styles.macroFieldInput}
-                    value={customFat}
-                    onChangeText={setCustomFat}
-                    placeholder="e.g. 70"
-                    placeholderTextColor={tc.textMuted}
-                    keyboardType="number-pad"
-                  />
-                </View>
-              </View>
-              <Text style={[styles.sectionHint, { fontSize: 11, marginTop: 2 }]}>
-                Leave any field blank to let AI calculate it. Only filled values override.
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* ── Training days ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Training Days / Week</Text>
-          <View style={styles.daysRow}>
-            <TouchableOpacity
-              style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
-              onPress={() => setDaysPerWeek(d => Math.max(1, d - 1))}
-              disabled={daysPerWeek <= 1}>
-              <Text style={styles.daysBtnText}>−</Text>
-            </TouchableOpacity>
-            <Text style={styles.daysValue}>{daysPerWeek}</Text>
-            <TouchableOpacity
-              style={[styles.daysBtn, daysPerWeek >= 7 && styles.daysBtnDisabled]}
-              onPress={() => setDaysPerWeek(d => Math.min(7, d + 1))}
-              disabled={daysPerWeek >= 7}>
-              <Text style={styles.daysBtnText}>+</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* ── Workout duration ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Session Length</Text>
-          <View style={styles.durationRow}>
-            {DURATION_OPTIONS.map(opt => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[styles.durationBtn, duration === opt.value && styles.durationBtnActive]}
-                onPress={() => setDuration(opt.value)}>
-                <Text style={[styles.durationLabel, duration === opt.value && styles.durationLabelActive]}>{opt.label}</Text>
-                <Text style={[styles.durationDesc,  duration === opt.value && styles.durationDescActive]}>{opt.desc}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* ── Meal Routine ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>My Meal Routine</Text>
-          <Text style={styles.sectionHint}>
-            Describe any fixed eating habits. Your AI nutritionist will build around these.
-          </Text>
-          <TextInput
-            style={[styles.mealRoutineInput]}
-            value={mealRoutine}
-            onChangeText={setMealRoutine}
-            placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays.'}
-            placeholderTextColor={tc.textMuted}
-            multiline
-            numberOfLines={4}
-          />
-        </View>
-
         {/* ── Injuries & Limitations ── */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Injuries & Limitations</Text>
@@ -1059,6 +1008,421 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </KeyboardAvoidingView>
         </Modal>
 
+        {/* ── WORKOUT MODE (Equipment + Exercises tabs) ── */}
+        {mode === 'workout' && (
+        <>
+        <View style={styles.tabBar}>
+          {([
+            { key: 'equipment' as const, label: 'Equipment & Schedule' },
+            { key: 'exercises' as const, label: 'Exercise Library' },
+          ]).map(({ key, label }) => (
+            <TouchableOpacity key={key} style={[styles.tab, workoutTab === key && styles.tabActive]} onPress={() => setWorkoutTab(key)}>
+              <Text style={[styles.tabText, workoutTab === key && styles.tabTextActive]}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {workoutTab === 'equipment' && (
+        <View style={styles.section}>
+          <View style={styles.sectionTopRow}>
+            <Text style={styles.sectionLabel}>
+              Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
+            </Text>
+            <TouchableOpacity
+              style={styles.sectionAddBtn}
+              onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
+              <Text style={styles.sectionAddBtnText}>+ Add</Text>
+            </TouchableOpacity>
+          </View>
+          {meta.loading ? <ActivityIndicator color={tc.primary} /> : (
+            <>
+              {meta.equipmentCategories.map(category => (
+                <View key={category.label} style={styles.chipGroup}>
+                  <Text style={styles.chipGroupLabel}>{category.icon}  {category.label}</Text>
+                  <View style={styles.chips}>
+                    {category.items.map(item => {
+                      const selected = equipment.includes(item.name);
+                      return (
+                        <TouchableOpacity
+                          key={item.name}
+                          style={[styles.chip, selected && styles.chipActive]}
+                          onPress={() => toggleEquipment(item.name)}>
+                          <Text style={[styles.chipText, selected && styles.chipTextActive]}>{item.name}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+              ))}
+              {customEquipItems.length > 0 && (
+                <View style={styles.chipGroup}>
+                  <Text style={styles.chipGroupLabel}>⚙️  Custom</Text>
+                  <View style={styles.chips}>
+                    {customEquipItems.map(name => (
+                      <TouchableOpacity
+                        key={name}
+                        style={[styles.chip, styles.chipActive]}
+                        onPress={() => setEquipment(prev => prev.filter(e => e !== name))}>
+                        <Text style={[styles.chipText, styles.chipTextActive]}>{name}  ✕</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </>
+          )}
+          {/* Training days & session length */}
+          <View style={[styles.section, { marginTop: 24, marginBottom: 0 }]}>
+            <Text style={styles.sectionLabel}>Training Days / Week</Text>
+            <View style={styles.daysRow}>
+              <TouchableOpacity
+                style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
+                onPress={() => setDaysPerWeek(d => Math.max(1, d - 1))}
+                disabled={daysPerWeek <= 1}>
+                <Text style={styles.daysBtnText}>−</Text>
+              </TouchableOpacity>
+              <Text style={styles.daysValue}>{daysPerWeek}</Text>
+              <TouchableOpacity
+                style={[styles.daysBtn, daysPerWeek >= 7 && styles.daysBtnDisabled]}
+                onPress={() => setDaysPerWeek(d => Math.min(7, d + 1))}
+                disabled={daysPerWeek >= 7}>
+                <Text style={styles.daysBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Session Length</Text>
+            <View style={styles.durationRow}>
+              {DURATION_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.durationBtn, duration === opt.value && styles.durationBtnActive]}
+                  onPress={() => setDuration(opt.value)}>
+                  <Text style={[styles.durationLabel, duration === opt.value && styles.durationLabelActive]}>{opt.label}</Text>
+                  <Text style={[styles.durationDesc,  duration === opt.value && styles.durationDescActive]}>{opt.desc}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+        )}
+
+        {workoutTab === 'exercises' && (
+        <View style={styles.section}>
+          {/* Sub-tabs: Exercises / Muscles */}
+          <View style={styles.subTabBar}>
+            <TouchableOpacity
+              style={[styles.subTab, exerciseSubTab === 'exercises' && styles.subTabActive]}
+              onPress={() => setExerciseSubTab('exercises')}>
+              <Text style={[styles.subTabText, exerciseSubTab === 'exercises' && styles.subTabTextActive]}>Exercises</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.subTab, exerciseSubTab === 'muscles' && styles.subTabActive]}
+              onPress={() => setExerciseSubTab('muscles')}>
+              <Text style={[styles.subTabText, exerciseSubTab === 'muscles' && styles.subTabTextActive]}>Muscles</Text>
+            </TouchableOpacity>
+          </View>
+
+          {exerciseSubTab === 'exercises' ? (
+            selectedExercise ? (
+              /* ── Full exercise detail view ── */
+              <View style={{ gap: 14 }}>
+                {/* Back bar */}
+                <TouchableOpacity
+                  onPress={() => setSelectedExercise(null)}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: tc.primary + '12', paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.lg, borderWidth: 1, borderColor: tc.primary + '30' }}
+                  activeOpacity={0.7}>
+                  <Text style={{ fontSize: 18, color: tc.primary }}>←</Text>
+                  <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '700', flex: 1 }}>Back to exercises</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>Tap to close</Text>
+                </TouchableOpacity>
+
+                {(() => {
+                  const guide = buildExerciseGuide(selectedExercise);
+                  return (
+                    <>
+                      {/* Top card */}
+                      <View style={[styles.exerciseDetail, { gap: 10 }]}>
+                        <Text style={styles.exerciseDetailName}>{selectedExercise.name}</Text>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                          {selectedExercise.primary_muscle && (
+                            <View style={[styles.exerciseTag, { backgroundColor: tc.primary + '18' }]}>
+                              <Text style={[styles.exerciseTagText, { color: tc.primary }]}>{humanizeToken(selectedExercise.primary_muscle)}</Text>
+                            </View>
+                          )}
+                          {(selectedExercise.secondary_muscles ?? []).length > 0 && (
+                            <View style={[styles.exerciseTag, { backgroundColor: tc.textMuted + '18' }]}>
+                              <Text style={[styles.exerciseTagText, { color: tc.textSecondary }]}>Also: {(selectedExercise.secondary_muscles ?? []).map(humanizeToken).join(', ')}</Text>
+                            </View>
+                          )}
+                          {selectedExercise.equipment && (
+                            <View style={[styles.exerciseTag, { backgroundColor: tc.textMuted + '18' }]}>
+                              <Text style={[styles.exerciseTagText, { color: tc.textSecondary }]}>{humanizeToken(selectedExercise.equipment)}</Text>
+                            </View>
+                          )}
+                          {selectedExercise.is_compound && (
+                            <View style={[styles.exerciseTag, { backgroundColor: '#FFB30018' }]}>
+                              <Text style={[styles.exerciseTagText, { color: '#FFB300' }]}>Compound</Text>
+                            </View>
+                          )}
+                        </View>
+                        <TouchableOpacity
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.md, alignSelf: 'flex-start', marginTop: 4 }}
+                          onPress={() => {
+                            Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${selectedExercise.name} proper form`)}`);
+                          }}
+                          activeOpacity={0.8}>
+                          <Text style={{ fontSize: 14, color: '#fff', fontWeight: '700' }}>▶  Watch Form Video</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={styles.guideSectionTitle}>How To Perform It</Text>
+                        <Text style={styles.guideSectionBody}>{guide.howTo}</Text>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={styles.guideSectionTitle}>Setup</Text>
+                        <Text style={styles.guideSectionBody}>{guide.setup}</Text>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={styles.guideSectionTitle}>Movement Cue</Text>
+                        <Text style={styles.guideSectionBody}>{guide.movement}</Text>
+                      </View>
+
+                      {/* Phase breakdown */}
+                      <View style={[styles.phaseBlock, { borderColor: tc.border }]}>
+                        <Text style={styles.phaseBlockTitle}>Muscle Phase Breakdown</Text>
+                        <View style={styles.phaseRow}>
+                          <View style={[styles.phaseBadge, { backgroundColor: tc.primary + '22' }]}>
+                            <Text style={[styles.phaseBadgeLabel, { color: tc.primary }]}>↑ LIFTING</Text>
+                          </View>
+                          <Text style={styles.phaseText}>{guide.concentric}</Text>
+                        </View>
+                        <View style={[styles.phaseDivider, { backgroundColor: tc.border }]} />
+                        <View style={styles.phaseRow}>
+                          <View style={[styles.phaseBadge, { backgroundColor: (tc.error ?? '#FF4444') + '22' }]}>
+                            <Text style={[styles.phaseBadgeLabel, { color: tc.error ?? '#FF4444' }]}>↓ LOWERING</Text>
+                          </View>
+                          <Text style={styles.phaseText}>{guide.eccentric}</Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={styles.guideSectionTitle}>What It Hits & Why</Text>
+                        <Text style={styles.guideSectionBody}>{guide.hits}</Text>
+                        <Text style={[styles.guideSectionBody, { marginTop: 6 }]}>{guide.why}</Text>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={styles.guideSectionTitle}>How It Should Feel</Text>
+                        <Text style={styles.guideSectionBody}>{guide.feel}</Text>
+                      </View>
+
+                      <View style={styles.guideSection}>
+                        <Text style={[styles.guideSectionTitle, { color: tc.error ?? '#FF4444' }]}>Common Mistake</Text>
+                        <Text style={styles.guideSectionBody}>{guide.mistake}</Text>
+                      </View>
+                    </>
+                  );
+                })()}
+              </View>
+            ) : (
+              /* ── Exercise list with filters ── */
+              <>
+                {/* Search */}
+                <TextInput
+                  style={styles.searchInput}
+                  value={exerciseSearch}
+                  onChangeText={setExerciseSearch}
+                  placeholder="Search exercises..."
+                  placeholderTextColor={tc.textMuted}
+                />
+
+                {/* Filters — single row with labeled dropdowns */}
+                <View style={{ gap: 6, marginBottom: 10 }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.6 }}>Muscle Group</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingBottom: 6 }}>
+                    <TouchableOpacity
+                      style={[styles.filterChip, exerciseMuscleFilter === 'all' && styles.filterChipActive]}
+                      onPress={() => setExerciseMuscleFilter('all')}>
+                      <Text style={[styles.filterChipText, exerciseMuscleFilter === 'all' && styles.filterChipTextActive]}>All</Text>
+                    </TouchableOpacity>
+                    {exerciseMuscleOptions.map(m => (
+                      <TouchableOpacity
+                        key={m}
+                        style={[styles.filterChip, exerciseMuscleFilter === m && styles.filterChipActive]}
+                        onPress={() => setExerciseMuscleFilter(exerciseMuscleFilter === m ? 'all' : m)}>
+                        <Text style={[styles.filterChipText, exerciseMuscleFilter === m && styles.filterChipTextActive]}>{humanizeToken(m)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.6 }}>Equipment</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingBottom: 6 }}>
+                    <TouchableOpacity
+                      style={[styles.filterChip, exerciseEquipmentFilter === 'all' && styles.filterChipActive]}
+                      onPress={() => setExerciseEquipmentFilter('all')}>
+                      <Text style={[styles.filterChipText, exerciseEquipmentFilter === 'all' && styles.filterChipTextActive]}>All</Text>
+                    </TouchableOpacity>
+                    {exerciseEquipmentOptions.map(e => (
+                      <TouchableOpacity
+                        key={e}
+                        style={[styles.filterChip, exerciseEquipmentFilter === e && styles.filterChipActive]}
+                        onPress={() => setExerciseEquipmentFilter(exerciseEquipmentFilter === e ? 'all' : e)}>
+                        <Text style={[styles.filterChipText, exerciseEquipmentFilter === e && styles.filterChipTextActive]}>{humanizeToken(e)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+
+                {exerciseLibraryLoading ? (
+                  <ActivityIndicator color={tc.primary} style={{ marginTop: 20 }} />
+                ) : filteredExerciseLibrary.length === 0 ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 30, gap: 6 }}>
+                    <Text style={{ fontSize: 28 }}>🔍</Text>
+                    <Text style={{ fontSize: 13, color: tc.textMuted }}>No exercises match your filters</Text>
+                  </View>
+                ) : (
+                  <>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 8 }}>
+                      {filteredExerciseLibrary.length} exercise{filteredExerciseLibrary.length !== 1 ? 's' : ''}
+                    </Text>
+                    {filteredExerciseLibrary.slice(0, 50).map((ex, i) => (
+                      <TouchableOpacity
+                        key={ex.id ?? i}
+                        style={styles.exerciseRow}
+                        onPress={() => setSelectedExercise(ex)}
+                        activeOpacity={0.7}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.exerciseRowName}>{ex.name}</Text>
+                          <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 3 }}>
+                            {ex.primary_muscle && (
+                              <View style={[styles.exerciseTag, { backgroundColor: tc.primary + '18' }]}>
+                                <Text style={[styles.exerciseTagText, { color: tc.primary }]}>{humanizeToken(ex.primary_muscle)}</Text>
+                              </View>
+                            )}
+                            {ex.equipment && (
+                              <View style={[styles.exerciseTag, { backgroundColor: tc.textMuted + '18' }]}>
+                                <Text style={[styles.exerciseTagText, { color: tc.textSecondary }]}>{humanizeToken(ex.equipment)}</Text>
+                              </View>
+                            )}
+                            {ex.is_compound && (
+                              <View style={[styles.exerciseTag, { backgroundColor: '#FFB30018' }]}>
+                                <Text style={[styles.exerciseTagText, { color: '#FFB300' }]}>Compound</Text>
+                              </View>
+                            )}
+                          </View>
+                        </View>
+                        <Text style={{ fontSize: 14, color: tc.textMuted }}>→</Text>
+                      </TouchableOpacity>
+                    ))}
+                    {filteredExerciseLibrary.length > 50 && (
+                      <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', paddingVertical: 10 }}>
+                        Showing 50 of {filteredExerciseLibrary.length} — narrow your search to see more
+                      </Text>
+                    )}
+                  </>
+                )}
+              </>
+            )
+          ) : (
+            /* ── Muscles sub-tab ── */
+            <>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+                {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map(region => {
+                  const active = muscleRegionFilter === region;
+                  return (
+                    <TouchableOpacity
+                      key={region}
+                      style={[styles.filterChip, active && styles.filterChipActive]}
+                      onPress={() => setMuscleRegionFilter(region)}>
+                      <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
+                        {region === 'all' ? 'All' : region}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              {selectedMuscle ? (
+                /* Muscle detail view */
+                <View style={{ gap: 12 }}>
+                  <TouchableOpacity onPress={() => setSelectedMuscle(null)} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '600' }}>← Back</Text>
+                  </TouchableOpacity>
+                  <View style={{ gap: 4 }}>
+                    <Text style={{ fontSize: 24 }}>{selectedMuscle.emoji}</Text>
+                    <Text style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary }}>{selectedMuscle.commonName}</Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic' }}>{selectedMuscle.name} · {selectedMuscle.bodyRegion}</Text>
+                  </View>
+                  <Text style={{ fontSize: 14, color: tc.textSecondary, lineHeight: 20 }}>{selectedMuscle.shortDescription}</Text>
+
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Location</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.location}</Text>
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Function</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.primaryFunction}</Text>
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Mind-Muscle Connection</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.mindMuscleConnection}</Text>
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Best Exercises</Text>
+                    {selectedMuscle.bestExercises.map((ex, i) => (
+                      <Text key={i} style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19, marginTop: 2 }}>• {ex}</Text>
+                    ))}
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Growth Tip</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.growthTip}</Text>
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Common Mistakes</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.commonMistakes}</Text>
+                  </View>
+                  <View style={styles.muscleSection}>
+                    <Text style={styles.muscleSectionTitle}>Recovery</Text>
+                    <Text style={styles.muscleSectionBody}>{selectedMuscle.recoveryNote}</Text>
+                  </View>
+                </View>
+              ) : (
+                /* Muscle list */
+                <>
+                  {MUSCLE_LIBRARY
+                    .filter(m => muscleRegionFilter === 'all' || m.bodyRegion.toLowerCase().includes(muscleRegionFilter.toLowerCase()))
+                    .map(muscle => (
+                      <TouchableOpacity
+                        key={muscle.id}
+                        style={styles.muscleCard}
+                        onPress={() => setSelectedMuscle(muscle)}
+                        activeOpacity={0.7}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                          <View style={[styles.muscleEmoji, { backgroundColor: muscle.tagColor + '22' }]}>
+                            <Text style={{ fontSize: 20 }}>{muscle.emoji}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.muscleCardName}>{muscle.commonName}</Text>
+                            <Text style={styles.muscleCardRegion}>{muscle.bodyRegion}</Text>
+                          </View>
+                          <Text style={{ fontSize: 14, color: tc.textMuted }}>→</Text>
+                        </View>
+                        <Text style={styles.muscleCardDesc} numberOfLines={2}>{muscle.shortDescription}</Text>
+                      </TouchableOpacity>
+                    ))}
+                </>
+              )}
+            </>
+          )}
+        </View>
+        )}
+        </>
+        )}
+
         {mode === 'theme' && (
         <View style={styles.section}>
           <View style={styles.themeList}>
@@ -1100,69 +1464,27 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </View>
         )}
 
-        {mode === 'equipment' && (
-        <View style={styles.section}>
-          <View style={styles.sectionTopRow}>
-            <Text style={styles.sectionLabel}>
-              Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
-            </Text>
-            <TouchableOpacity
-              style={styles.sectionAddBtn}
-              onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
-              <Text style={styles.sectionAddBtnText}>+ Add</Text>
+        {/* ── MEALPLAN MODE (Foods + Supplements + Macros tabs) ── */}
+        {mode === 'mealplan' && (
+        <>
+        <View style={styles.tabBar}>
+          {([
+            { key: 'foods' as const, label: 'Foods' },
+            { key: 'supplements' as const, label: 'Supplements' },
+            { key: 'macros' as const, label: 'Macros' },
+          ]).map(({ key, label }) => (
+            <TouchableOpacity key={key} style={[styles.tab, mealplanTab === key && styles.tabActive]} onPress={() => setMealplanTab(key)}>
+              <Text style={[styles.tabText, mealplanTab === key && styles.tabTextActive]}>{label}</Text>
             </TouchableOpacity>
-          </View>
-          {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
-            <>
-              {meta.equipmentCategories.map(category => (
-                <View key={category.label} style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>{category.icon}  {category.label}</Text>
-                  <View style={styles.chips}>
-                    {category.items.map(item => {
-                      const selected = equipment.includes(item.name);
-                      return (
-                        <TouchableOpacity
-                          key={item.name}
-                          style={[styles.chip, selected && styles.chipActive]}
-                          onPress={() => toggleEquipment(item.name)}>
-                          <Text style={[styles.chipText, selected && styles.chipTextActive]}>{item.name}</Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-              ))}
-              {customEquipItems.length > 0 && (
-                <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>⚙️  Custom</Text>
-                  <View style={styles.chips}>
-                    {customEquipItems.map(name => (
-                      <TouchableOpacity
-                        key={name}
-                        style={[styles.chip, styles.chipActive]}
-                        onPress={() => setEquipment(prev => prev.filter(e => e !== name))}>
-                        <Text style={[styles.chipText, styles.chipTextActive]}>{name}  ✕</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </View>
-              )}
-            </>
-          )}
-          <TouchableOpacity
-            style={styles.addTriggerBtn}
-            onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
-            <Text style={styles.addTriggerText}>+ Add equipment</Text>
-          </TouchableOpacity>
+          ))}
         </View>
-        )}
 
-        {mode === 'foods' && (
+        {mealplanTab === 'foods' && (
         <View style={styles.section}>
           <View style={{ marginBottom: 8 }}>
             <View style={styles.sectionTopRow}>
               <Text style={styles.sectionLabel}>
-                Foods in Kitchen{foods.length > 0 ? `  ·  ${foods.length} selected` : ''}
+                Foods in Kitchen{(() => { const count = foods.filter(f => !f.startsWith('__supp__')).length; return count > 0 ? `  ·  ${count} selected` : ''; })()}
               </Text>
             </View>
             <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
@@ -1348,6 +1670,161 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </>
           )}
         </View>
+        )}
+
+        {mealplanTab === 'supplements' && (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>
+            My Supplements{(profile.supplementsAvailable ?? []).length > 0 ? `  ·  ${(profile.supplementsAvailable ?? []).length} selected` : ''}
+          </Text>
+          <Text style={styles.sectionHint}>
+            Select supplements you take. Your AI nutritionist factors these into your plan.
+          </Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+            {[
+              { key: 'all', label: 'All' },
+              { key: 'Performance', label: 'Performance' },
+              { key: 'Protein', label: 'Protein' },
+              { key: 'Recovery', label: 'Recovery' },
+              { key: 'Health', label: 'Health' },
+              { key: 'Sleep & Stress', label: 'Sleep' },
+              { key: 'Weight Management', label: 'Weight' },
+            ].map(cat => (
+              <TouchableOpacity
+                key={cat.key}
+                style={[styles.filterChip, foodCategoryFilter === cat.key && styles.filterChipActive]}
+                onPress={() => setFoodCategoryFilter(cat.key)}>
+                <Text style={[styles.filterChipText, foodCategoryFilter === cat.key && styles.filterChipTextActive]}>{cat.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <View style={styles.chips}>
+            {[
+              { name: 'Creatine Monohydrate', category: 'Performance' },
+              { name: 'Whey Protein', category: 'Protein' },
+              { name: 'Casein Protein', category: 'Protein' },
+              { name: 'Plant Protein Blend', category: 'Protein' },
+              { name: 'Pre-Workout', category: 'Performance' },
+              { name: 'BCAAs', category: 'Recovery' },
+              { name: 'EAAs', category: 'Recovery' },
+              { name: 'Beta-Alanine', category: 'Performance' },
+              { name: 'Citrulline Malate', category: 'Performance' },
+              { name: 'L-Glutamine', category: 'Recovery' },
+              { name: 'Fish Oil / Omega-3', category: 'Health' },
+              { name: 'Vitamin D3', category: 'Health' },
+              { name: 'Multivitamin', category: 'Health' },
+              { name: 'Magnesium', category: 'Health' },
+              { name: 'Zinc', category: 'Health' },
+              { name: 'Ashwagandha', category: 'Sleep & Stress' },
+              { name: 'Melatonin', category: 'Sleep & Stress' },
+              { name: 'Caffeine Pills', category: 'Performance' },
+              { name: 'L-Carnitine', category: 'Weight Management' },
+              { name: 'CLA', category: 'Weight Management' },
+              { name: 'Collagen Peptides', category: 'Recovery' },
+              { name: 'Digestive Enzymes', category: 'Health' },
+              { name: 'Probiotics', category: 'Health' },
+              { name: 'Turmeric / Curcumin', category: 'Health' },
+              { name: 'Iron', category: 'Health' },
+              { name: 'Electrolyte Mix', category: 'Recovery' },
+            ]
+              .filter(s => foodCategoryFilter === 'all' || s.category === foodCategoryFilter)
+              .map(s => {
+                const tag = '__supp__' + s.name;
+                const active = foods.includes(tag);
+                return (
+                  <TouchableOpacity
+                    key={s.name}
+                    style={[styles.chip, active && styles.chipActive]}
+                    onPress={() => setFoods(prev => prev.includes(tag) ? prev.filter(f => f !== tag) : [...prev, tag])}>
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{s.name}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+          </View>
+        </View>
+        )}
+
+        {mealplanTab === 'macros' && (
+        <>
+        <View style={styles.section}>
+          <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Daily Macro Targets</Text>
+          <Text style={styles.sectionHint}>
+            Override AI-calculated targets with your own values. Leave any field blank to let AI calculate it.
+          </Text>
+          <View style={{ marginTop: 14, gap: 10 }}>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.macroFieldLabel}>Calories</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={customCalories}
+                  onChangeText={setCustomCalories}
+                  placeholder="e.g. 2400"
+                  placeholderTextColor={tc.textMuted}
+                  keyboardType="number-pad"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.macroFieldLabel}>Protein (g)</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={customProtein}
+                  onChangeText={setCustomProtein}
+                  placeholder="e.g. 180"
+                  placeholderTextColor={tc.textMuted}
+                  keyboardType="number-pad"
+                />
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.macroFieldLabel}>Carbs (g)</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={customCarbs}
+                  onChangeText={setCustomCarbs}
+                  placeholder="e.g. 250"
+                  placeholderTextColor={tc.textMuted}
+                  keyboardType="number-pad"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.macroFieldLabel}>Fat (g)</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={customFat}
+                  onChangeText={setCustomFat}
+                  placeholder="e.g. 70"
+                  placeholderTextColor={tc.textMuted}
+                  keyboardType="number-pad"
+                />
+              </View>
+            </View>
+            <Text style={[styles.sectionHint, { fontSize: 11, marginTop: 2 }]}>
+              Leave any field blank to let AI calculate it. Only filled values override.
+            </Text>
+          </View>
+        </View>
+
+        {/* ── Meal Routine ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>My Meal Routine</Text>
+          <Text style={styles.sectionHint}>
+            Describe any fixed eating habits. Your AI nutritionist will build around these.
+          </Text>
+          <TextInput
+            style={[styles.mealRoutineInput]}
+            value={mealRoutine}
+            onChangeText={setMealRoutine}
+            placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays.'}
+            placeholderTextColor={tc.textMuted}
+            multiline
+            numberOfLines={4}
+          />
+        </View>
+        </>
+        )}
+        </>
         )}
 
         <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
@@ -1584,20 +2061,26 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingTop: 56, paddingBottom: 14,
+    paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12,
     borderBottomWidth: 1, borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  title:      { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
-  cancelText: { fontSize: 15, color: colors.textSecondary },
-  saveText:   { fontSize: 15, fontWeight: '700', color: colors.primary },
+  title:      { fontSize: 17, fontWeight: '800', color: colors.textPrimary, letterSpacing: -0.3 },
+  cancelText: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
+  saveText:   { fontSize: 14, fontWeight: '700', color: colors.primary },
 
   content:      { padding: 16, paddingBottom: 48 },
-  section:         { marginBottom: 28 },
-  sectionTopRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
-  sectionLabel:    { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.8 },
-  sectionAddBtn:   { backgroundColor: colors.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 },
-  sectionAddBtnText: { fontSize: 12, fontWeight: '700', color: colors.background },
-  sectionHint:     { fontSize: 12, color: colors.textMuted, marginBottom: 10 },
+  tabBar:       { flexDirection: 'row', marginBottom: 20, borderRadius: radius.lg, backgroundColor: colors.surface, padding: 3, gap: 2, borderWidth: 1, borderColor: colors.border },
+  tab:          { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: radius.lg - 3 },
+  tabActive:    { backgroundColor: colors.primary },
+  tabText:      { fontSize: 12, fontWeight: '600', color: colors.textMuted },
+  tabTextActive:{ fontSize: 12, fontWeight: '700', color: '#fff' },
+  section:         { marginBottom: 24 },
+  sectionTopRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  sectionLabel:    { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 6 },
+  sectionAddBtn:   { backgroundColor: colors.primary + '15', borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.primary + '30' },
+  sectionAddBtnText: { fontSize: 12, fontWeight: '700', color: colors.primary },
+  sectionHint:     { fontSize: 12, color: colors.textMuted, marginBottom: 10, lineHeight: 17 },
   mealRoutineInput: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -1633,14 +2116,14 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   modalConfirmText: { fontSize: 15, fontWeight: '700' },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  goalCard: { width: '47%', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, paddingVertical: 14, paddingHorizontal: 10, alignItems: 'center', gap: 4 },
-  goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
-  goalIcon:       { fontSize: 22, marginBottom: 2 },
+  goalCard: { width: '47%', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: colors.border, paddingVertical: 16, paddingHorizontal: 10, alignItems: 'center', gap: 6 },
+  goalCardActive: { borderColor: colors.primary, backgroundColor: colors.primary + '0D' },
+  goalIcon:       { fontSize: 24, marginBottom: 2 },
   goalLabel:      { fontSize: 13, color: colors.textSecondary, textAlign: 'center', fontWeight: '600' },
 
   paceList: { gap: 8 },
-  paceCard: { backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, padding: 12, gap: 4 },
-  paceCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  paceCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: colors.border, padding: 14, gap: 4 },
+  paceCardActive: { borderColor: colors.primary, backgroundColor: colors.primary + '0D' },
   paceTop:        { flexDirection: 'row', alignItems: 'center', gap: 10 },
   paceIcon:       { fontSize: 20 },
   paceLabel:      { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
@@ -1664,8 +2147,8 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   daysValue:       { fontSize: 32, fontWeight: '700', color: colors.primary, minWidth: 40, textAlign: 'center' },
 
   durationRow:        { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  durationBtn:        { paddingVertical: 10, paddingHorizontal: 12, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
-  durationBtnActive:  { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  durationBtn:        { paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.lg, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
+  durationBtnActive:  { borderColor: colors.primary, backgroundColor: colors.primary + '0D' },
   durationLabel:      { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
   durationLabelActive:{ color: colors.primary },
   durationDesc:       { fontSize: 10, color: colors.textMuted, marginTop: 2 },
@@ -1723,7 +2206,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  filterChipActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  filterChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
   filterChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
   filterChipTextActive: { color: colors.primary },
   emptySearchText: {
@@ -1737,10 +2220,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 12,
   },
   chips:          { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip:           { paddingVertical: 7, paddingHorizontal: 12, borderRadius: radius.full, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface },
-  chipActive:     { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  chip:           { paddingVertical: 8, paddingHorizontal: 13, borderRadius: radius.full, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface },
+  chipActive:     { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
   chipText:       { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
-  chipTextActive: { color: colors.primary, fontWeight: '600' },
+  chipTextActive: { color: colors.primary, fontWeight: '700' },
 
   addTriggerBtn:  { alignSelf: 'flex-start', marginTop: 4, paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.full, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface },
   addTriggerText: { fontSize: 13, color: colors.primary, fontWeight: '600' },
@@ -1848,8 +2331,8 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   scannedFoodCheck: { fontSize: 20, color: colors.textMuted, width: 24, textAlign: 'center' },
   scannedFoodCheckSelected: { color: colors.primary },
 
-  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 17, alignItems: 'center', marginTop: 12, shadowColor: colors.primary, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6, elevation: 4 },
-  saveBtnText: { fontSize: 17, fontWeight: '700', color: '#FFFFFF', letterSpacing: 0.3 },
+  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', marginTop: 16, marginBottom: 8, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8, elevation: 4 },
+  saveBtnText: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.2 },
 
   // Toggle switch
   toggleTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.border, padding: 2, justifyContent: 'center' },
@@ -1859,4 +2342,55 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   // Macro field inputs
   macroFieldLabel: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase' as const, letterSpacing: 0.5, marginBottom: 4 },
   macroFieldInput: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 11, fontSize: 16, fontWeight: '600' as const, color: colors.textPrimary, backgroundColor: colors.background, textAlign: 'center' as const },
+
+  // Sub-tabs (exercises/muscles within workout tab)
+  subTabBar: { flexDirection: 'row', gap: 0, marginBottom: 14, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' as const },
+  subTab: { flex: 1, paddingVertical: 9, alignItems: 'center' as const, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  subTabActive: { borderBottomColor: colors.primary, backgroundColor: colors.surfaceRaised },
+  subTabText: { fontSize: 13, fontWeight: '600' as const, color: colors.textMuted },
+  subTabTextActive: { color: colors.primary, fontWeight: '700' as const },
+
+  // Exercise list
+  exerciseRow: {
+    flexDirection: 'row' as const, alignItems: 'center' as const, gap: 10,
+    backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+    padding: 12, marginBottom: 6,
+  },
+  exerciseRowName: { fontSize: 14, fontWeight: '700' as const, color: colors.textPrimary },
+  exerciseTag: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full },
+  exerciseTagText: { fontSize: 10, fontWeight: '700' as const, textTransform: 'uppercase' as const, letterSpacing: 0.4 },
+  exerciseDetail: {
+    backgroundColor: colors.surfaceRaised, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.primary + '40',
+    padding: 16, marginTop: 10, gap: 6,
+  },
+  exerciseDetailName: { fontSize: 17, fontWeight: '800' as const, color: colors.textPrimary },
+  exerciseDetailDesc: { fontSize: 13, color: colors.textSecondary, lineHeight: 19 },
+
+  // Exercise guide detail
+  guideSection: { gap: 4 },
+  guideSectionTitle: { fontSize: 12, fontWeight: '700' as const, color: colors.textPrimary, textTransform: 'uppercase' as const, letterSpacing: 0.6 },
+  guideSectionBody: { fontSize: 13, color: colors.textSecondary, lineHeight: 20 },
+  phaseBlock: {
+    backgroundColor: colors.surfaceRaised, borderRadius: radius.lg, borderWidth: 1,
+    padding: 14, gap: 12,
+  },
+  phaseBlockTitle: { fontSize: 13, fontWeight: '800' as const, color: colors.textPrimary, marginBottom: 2 },
+  phaseRow: { gap: 6 },
+  phaseBadge: { alignSelf: 'flex-start' as const, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
+  phaseBadgeLabel: { fontSize: 10, fontWeight: '800' as const, letterSpacing: 0.8 },
+  phaseText: { fontSize: 13, color: colors.textSecondary, lineHeight: 19 },
+  phaseDivider: { height: 1, marginVertical: 2 },
+
+  // Muscle cards
+  muscleCard: {
+    backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+    padding: 12, marginBottom: 8, gap: 8,
+  },
+  muscleEmoji: { width: 40, height: 40, borderRadius: radius.md, alignItems: 'center' as const, justifyContent: 'center' as const },
+  muscleCardName: { fontSize: 15, fontWeight: '700' as const, color: colors.textPrimary },
+  muscleCardRegion: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  muscleCardDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
+  muscleSection: { gap: 4 },
+  muscleSectionTitle: { fontSize: 12, fontWeight: '700' as const, color: colors.primary, textTransform: 'uppercase' as const, letterSpacing: 0.6 },
+  muscleSectionBody: { fontSize: 13, color: colors.textSecondary, lineHeight: 19 },
 }); }

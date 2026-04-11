@@ -59,7 +59,13 @@
       "Bash(python3:*)",
       "Bash(npx sharp-cli:*)",
       "Bash(node -e ':*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(xargs grep:*)",
+      "Bash(xargs basename:*)",
+      "Bash(npm list:*)",
+      "Bash(npx kill-port:*)"
     ]
   }
 }

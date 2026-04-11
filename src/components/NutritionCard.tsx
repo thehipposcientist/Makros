@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView } from 'react-native';
 import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 
@@ -28,6 +28,7 @@ export default function NutritionCard({
   onRestoreMeal,
   onToggleRoutine,
 }: NutritionCardProps) {
+  const [showMicroModal, setShowMicroModal] = useState(false);
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const section = theme.sections.meals;
@@ -97,23 +98,93 @@ export default function NutritionCard({
           <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
+        {/* Nutrition details button + modal — always visible */}
+        <TouchableOpacity
+          style={styles.microBtn}
+          onPress={() => setShowMicroModal(true)}
+          activeOpacity={0.7}>
+          <Text style={styles.microBtnIcon}>📊</Text>
+          <Text style={styles.microBtnText}>Nutrition Details</Text>
+          <Text style={styles.microBtnArrow}>›</Text>
+        </TouchableOpacity>
 
-        {/* Micronutrient summary */}
-        {hasMicros && (
-          <View style={styles.microSection}>
-            <Text style={styles.microTitle}>Daily Micronutrients</Text>
-            <View style={styles.microGrid}>
-              <MicroChip label="Fiber" value={`${dailyMicros.fiber}g`} target="25g" pct={dailyMicros.fiber / 25} colors={colors} styles={styles} />
-              <MicroChip label="Sugar" value={`${dailyMicros.sugar}g`} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
-              <MicroChip label="Sodium" value={`${dailyMicros.sodium}mg`} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
-              <MicroChip label="Iron" value={`${dailyMicros.iron}%`} target="100% DV" pct={dailyMicros.iron / 100} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 50} />
-              <MicroChip label="Calcium" value={`${dailyMicros.calcium}%`} target="100% DV" pct={dailyMicros.calcium / 100} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 50} />
-              <MicroChip label="Vit C" value={`${dailyMicros.vitaminC}%`} target="100% DV" pct={dailyMicros.vitaminC / 100} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 50} />
-              <MicroChip label="Vit D" value={`${dailyMicros.vitaminD}%`} target="100% DV" pct={dailyMicros.vitaminD / 100} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 50} />
-              <MicroChip label="Potassium" value={`${dailyMicros.potassium}mg`} target="2600mg" pct={dailyMicros.potassium / 2600} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 1300} />
+        <Modal
+          visible={showMicroModal}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowMicroModal(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Daily Nutrition Breakdown</Text>
+                <TouchableOpacity onPress={() => setShowMicroModal(false)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                  <Text style={styles.modalClose}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+                {/* Macro summary at top */}
+                <View style={styles.modalMacroRow}>
+                  <View style={styles.modalMacroItem}>
+                    <Text style={[styles.modalMacroVal, { color: section.strong }]}>{actual.calories}</Text>
+                    <Text style={styles.modalMacroLabel}>cal / {targets.calories}</Text>
+                  </View>
+                  <View style={styles.modalMacroItem}>
+                    <Text style={[styles.modalMacroVal, { color: colors.primary }]}>{actual.protein}g</Text>
+                    <Text style={styles.modalMacroLabel}>protein / {targets.protein}g</Text>
+                  </View>
+                  <View style={styles.modalMacroItem}>
+                    <Text style={[styles.modalMacroVal, { color: '#F59E0B' }]}>{actual.carbs}g</Text>
+                    <Text style={styles.modalMacroLabel}>carbs / {targets.carbs}g</Text>
+                  </View>
+                  <View style={styles.modalMacroItem}>
+                    <Text style={[styles.modalMacroVal, { color: '#A78BFA' }]}>{actual.fat}g</Text>
+                    <Text style={styles.modalMacroLabel}>fat / {targets.fat}g</Text>
+                  </View>
+                </View>
+
+                {/* Micronutrient grid */}
+                <Text style={styles.modalSectionTitle}>Micronutrients</Text>
+                <View style={styles.microGridLg}>
+                  <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${dailyMicros.fiber}g` : '—'} target="25g" pct={dailyMicros.fiber / 25} colors={colors} styles={styles} />
+                  <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${dailyMicros.sugar}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
+                  <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${dailyMicros.sodium}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
+                  <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${dailyMicros.cholesterol}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} />
+                </View>
+
+                <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Vitamins & Minerals</Text>
+                <View style={styles.microGridLg}>
+                  <MicroChipLg label="Vitamin A" value={dailyMicros.vitaminA > 0 ? `${dailyMicros.vitaminA}%` : '—'} target="100% DV" pct={dailyMicros.vitaminA / 100} colors={colors} styles={styles} low={dailyMicros.vitaminA > 0 && dailyMicros.vitaminA < 50} />
+                  <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${dailyMicros.vitaminC}%` : '—'} target="100% DV" pct={dailyMicros.vitaminC / 100} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 50} />
+                  <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${dailyMicros.vitaminD}%` : '—'} target="100% DV" pct={dailyMicros.vitaminD / 100} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 50} />
+                  <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${dailyMicros.iron}%` : '—'} target="100% DV" pct={dailyMicros.iron / 100} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 50} />
+                  <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${dailyMicros.calcium}%` : '—'} target="100% DV" pct={dailyMicros.calcium / 100} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 50} />
+                  <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${dailyMicros.potassium}mg` : '—'} target="2600mg" pct={dailyMicros.potassium / 2600} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 1300} />
+                </View>
+
+                {!hasMicros && (
+                  <Text style={styles.microNoData}>Micronutrient data will appear once the AI generates a plan with detailed nutrition info.</Text>
+                )}
+
+                {/* Legend */}
+                <View style={styles.modalLegend}>
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: colors.primary }]} />
+                    <Text style={styles.legendText}>On track</Text>
+                  </View>
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: '#F59E0B' }]} />
+                    <Text style={styles.legendText}>Low — eat more</Text>
+                  </View>
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: colors.error }]} />
+                    <Text style={styles.legendText}>Over limit</Text>
+                  </View>
+                </View>
+              </ScrollView>
             </View>
           </View>
-        )}
+        </Modal>
 
         {/* Meal rows */}
         <View style={styles.meals}>
@@ -295,6 +366,9 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
             <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone]}>
               {food}
             </Text>
+            {meal.amounts?.[i] && (
+              <Text style={styles.mealFoodAmount}>{meal.amounts[i]}</Text>
+            )}
           </View>
         ))}
         {meal.instructions && (
@@ -318,23 +392,25 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
   );
 }
 
-function MicroChip({ label, value, target, pct, colors, styles, warn, low }: {
+function MicroChipLg({ label, value, target, pct, colors, styles, warn, low }: {
   label: string; value: string; target: string; pct: number;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   warn?: boolean; low?: boolean;
 }) {
   const barPct = Math.min(pct, 1);
-  const barColor = warn ? colors.error : low ? '#F59E0B' : colors.primary;
+  const noData = value === '—';
+  const barColor = noData ? colors.border : warn ? colors.error : low ? '#F59E0B' : colors.primary;
   return (
-    <View style={styles.microChip}>
-      <View style={styles.microChipTop}>
-        <Text style={[styles.microChipLabel, (warn || low) && { color: barColor }]}>{label}</Text>
-        <Text style={[styles.microChipValue, (warn || low) && { color: barColor }]}>{value}</Text>
+    <View style={styles.microChipLg}>
+      <View style={styles.microChipLgTop}>
+        <Text style={[styles.microChipLgLabel, (warn || low) && { color: barColor }]}>{label}</Text>
+        <Text style={[styles.microChipLgValue, noData ? { color: colors.textMuted } : (warn || low) && { color: barColor }]}>{value}</Text>
       </View>
-      <View style={styles.microChipBarTrack}>
-        <View style={[styles.microChipBarFill, { width: `${Math.round(barPct * 100)}%` as any, backgroundColor: barColor }]} />
+      <View style={styles.microChipLgBarTrack}>
+        <View style={[styles.microChipLgBarFill, { width: `${Math.round(barPct * 100)}%` as any, backgroundColor: barColor }]} />
       </View>
+      <Text style={[styles.microChipLgTarget, (warn || low) && { color: barColor }]}>{target}</Text>
     </View>
   );
 }
@@ -521,46 +597,121 @@ const createStyles = (
   pillValue: { fontSize: 13, fontWeight: '700' },
   pillLabel: { fontSize: 9, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
 
-  // ── Micronutrient section ─────────────────────────────────────────────────────
-  microSection: {
+  // ── Micro details button ──────────────────────────────────────────────────────
+  microBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: section.soft,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: section.strong + '30',
-    padding: 10,
+    borderColor: section.strong + '40',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     marginBottom: 14,
+    gap: 8,
   },
-  microTitle: {
-    fontSize: 10,
+  microBtnIcon: { fontSize: 14 },
+  microBtnText: { flex: 1, fontSize: 13, fontWeight: '700', color: section.strong },
+  microBtnArrow: { fontSize: 18, fontWeight: '600', color: section.strong },
+
+  // ── Micro modal ──────────────────────────────────────────────────────────────
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: 36,
+    maxHeight: '88%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '800', color: colors.textPrimary },
+  modalClose: { fontSize: 18, fontWeight: '700', color: colors.textMuted, padding: 4 },
+  modalScroll: { paddingHorizontal: 18, paddingTop: 14 },
+  modalMacroRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 18,
+  },
+  modalMacroItem: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: section.soft,
+    borderRadius: radius.md,
+    paddingVertical: 10,
+    gap: 2,
+  },
+  modalMacroVal: { fontSize: 16, fontWeight: '800' },
+  modalMacroLabel: { fontSize: 9, fontWeight: '600', color: colors.textMuted },
+  modalSectionTitle: {
+    fontSize: 11,
     fontWeight: '700',
     color: colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    marginBottom: 8,
+    marginBottom: 10,
   },
-  microGrid: {
+  modalLegend: {
+    flexDirection: 'row',
+    gap: 16,
+    marginTop: 18,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontSize: 11, color: colors.textMuted, fontWeight: '500' },
+
+  // ── Large micro chips (modal) ─────────────────────────────────────────────
+  microGridLg: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 10,
   },
-  microChip: {
-    width: '23%' as any,
-    gap: 2,
+  microChipLg: {
+    width: '47%' as any,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+    gap: 4,
   },
-  microChipTop: {
+  microChipLgTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'baseline',
   },
-  microChipLabel: { fontSize: 9, fontWeight: '600', color: colors.textMuted },
-  microChipValue: { fontSize: 10, fontWeight: '700', color: colors.textPrimary },
-  microChipBarTrack: {
-    height: 3,
+  microChipLgLabel: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  microChipLgValue: { fontSize: 15, fontWeight: '800', color: colors.textPrimary },
+  microChipLgBarTrack: {
+    height: 5,
     backgroundColor: colors.border,
-    borderRadius: 2,
+    borderRadius: 3,
     overflow: 'hidden',
   },
-  microChipBarFill: { height: 3, borderRadius: 2 },
+  microChipLgBarFill: { height: 5, borderRadius: 3 },
+  microChipLgTarget: { fontSize: 10, fontWeight: '500', color: colors.textMuted },
+  microNoData: {
+    fontSize: 12,
+    color: colors.textMuted,
+    textAlign: 'center',
+    marginTop: 12,
+    paddingHorizontal: 20,
+    lineHeight: 18,
+  },
 
   // ── Footer ───────────────────────────────────────────────────────────────────
   footer:     { paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },

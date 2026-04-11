@@ -24,7 +24,5 @@ start "Makros Backend" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && 
 timeout /t 3 /nobreak >nul
 
 echo [2/2] Starting Expo (LAN mode)...
-echo       Phone must be on the same WiFi as this PC.
-echo       If connection fails, run: start-tunnel.bat
 echo.
 npx expo start --clear

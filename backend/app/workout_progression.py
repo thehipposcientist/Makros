@@ -407,7 +407,8 @@ class WorkoutProgressionEngine:
             if target.rir_min <= actual.rir <= target.rir_max:
                 score += 1.0
             elif actual.rir > target.rir_max:
-                score += 1.0
+                # Too easy (more reps in reserve than target) — signal underloaded
+                score += 1.5
             elif actual.rir < target.rir_min - 1:
                 score -= 1.0
         else:
@@ -488,6 +489,11 @@ class WorkoutProgressionEngine:
         prior_working_sets = self.get_working_sets(sets_completed_this_workout[:-1], prescription.planned_sets)
         score, classification = self.score_set_against_target(current_set, current_target)
         readiness_label = self.readiness_label(readiness)
+        # Adjust readiness for chronic recovery level
+        if profile.recovery_level == RecoveryLevel.LOW and readiness_label in ("normal", "high"):
+            readiness_label = "low"  # downgrade one tier
+        elif profile.recovery_level == RecoveryLevel.HIGH and readiness_label == "low":
+            readiness_label = "normal"  # upgrade one tier
         fatigue_drop = self.fatigue_drop_reps(prior_working_sets, current_set)
 
         current_weight = current_set.weight_lbs
@@ -502,8 +508,16 @@ class WorkoutProgressionEngine:
             reason = "Reduced weight because you reported pain or form breakdown."
             coach_note = "Safety override triggered."
         elif classification == "underloaded_or_strong":
-            if readiness_label != "poor" and fatigue_drop < prescription.fatigue_drop_threshold_reps:
-                proposed_weight = current_weight + prescription.increment_lbs
+            # Apply pace: conservative = half increment, aggressive = full + 50%
+            pace_mult = {ProgressionPace.CONSERVATIVE: 0.5, ProgressionPace.MODERATE: 1.0, ProgressionPace.AGGRESSIVE: 1.5}.get(profile.progression_pace, 1.0)
+            increment = prescription.increment_lbs * pace_mult
+
+            # Conservative pace requires at least "normal" readiness; aggressive allows "low"
+            min_readiness = "normal" if profile.progression_pace == ProgressionPace.CONSERVATIVE else "poor"
+            readiness_ok = readiness_label != min_readiness
+
+            if readiness_ok and fatigue_drop < prescription.fatigue_drop_threshold_reps:
+                proposed_weight = current_weight + increment
                 action = RecommendationAction.INCREASE
                 reason = "You were above target with room left, so increase the load."
                 coach_note = "Clearly underloaded or very strong set."
@@ -513,9 +527,13 @@ class WorkoutProgressionEngine:
                 reason = "Set was strong, but fatigue/readiness says hold steady."
                 coach_note = "Strong set but not a good time to push live."
         elif classification == "top_of_range":
+            pace_mult = {ProgressionPace.CONSERVATIVE: 0.5, ProgressionPace.MODERATE: 1.0, ProgressionPace.AGGRESSIVE: 1.5}.get(profile.progression_pace, 1.0)
+            increment = prescription.increment_lbs * pace_mult
+
             if prescription.progression_priority == ProgressionPriority.LOAD_FIRST:
-                if readiness_label != "poor":
-                    proposed_weight = current_weight + prescription.increment_lbs
+                min_readiness = "normal" if profile.progression_pace == ProgressionPace.CONSERVATIVE else "poor"
+                if readiness_label != min_readiness:
+                    proposed_weight = current_weight + increment
                     action = RecommendationAction.INCREASE
                     reason = "You hit the top of the rep range, so increase the load."
                     coach_note = "Load-first progression."
@@ -525,8 +543,11 @@ class WorkoutProgressionEngine:
                     reason = "Top of range, but readiness is low, so hold."
                     coach_note = "Would normally increase, but readiness is poor."
             elif prescription.progression_priority == ProgressionPriority.HYBRID:
-                if current_set.set_number == 2 and readiness_label in ("normal", "high"):
-                    proposed_weight = current_weight + prescription.increment_lbs
+                # Aggressive: increase on set 2 even with "low" readiness; conservative: only on "high"
+                hybrid_ok_readiness = {"conservative": ("high",), "moderate": ("normal", "high"), "aggressive": ("low", "normal", "high")}
+                ok_labels = hybrid_ok_readiness.get(profile.progression_pace.value, ("normal", "high"))
+                if current_set.set_number == 2 and readiness_label in ok_labels:
+                    proposed_weight = current_weight + increment
                     action = RecommendationAction.INCREASE
                     reason = "Top of range on an early working set, so increase slightly."
                     coach_note = "Hybrid progression increased live."
@@ -563,10 +584,17 @@ class WorkoutProgressionEngine:
             coach_note = "Weight was likely too high for today's target."
 
         if action != RecommendationAction.DECREASE and fatigue_drop >= prescription.fatigue_drop_threshold_reps:
-            proposed_weight = current_weight - prescription.increment_lbs
-            action = RecommendationAction.DECREASE
-            reason = f"Reps dropped by {fatigue_drop}, so reduce the next set slightly."
-            coach_note = "Fatigue override triggered."
+            if action == RecommendationAction.INCREASE:
+                # Scale back the increase instead of forcing a decrease
+                proposed_weight = current_weight
+                action = RecommendationAction.HOLD
+                reason = f"Reps dropped by {fatigue_drop} — holding weight instead of increasing."
+                coach_note = "Fatigue override: cancelled increase."
+            else:
+                proposed_weight = current_weight - prescription.increment_lbs
+                action = RecommendationAction.DECREASE
+                reason = f"Reps dropped by {fatigue_drop}, so reduce the next set slightly."
+                coach_note = "Fatigue override triggered."
 
         if workout.phase == PhaseType.DELOAD and action == RecommendationAction.INCREASE:
             proposed_weight = current_weight
