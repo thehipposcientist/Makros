@@ -1,18 +1,7 @@
 // ─── Goal types ───────────────────────────────────────────────────────────────
 
-export type Goal =
-  | 'fat_loss'
-  | 'muscle_gain'
-  | 'body_recomp'
-  | 'strength'
-  | 'endurance'
-  | 'athletic_performance'
-  | 'toning'
-  | 'maintain'
-  | 'flexibility'
-  | 'stress_relief'
-  | 'longevity';
-
+/** @deprecated — use primaryGoal (string) from goalConfig instead */
+export type Goal = string;
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
@@ -24,7 +13,7 @@ export type AppThemeName =
   | 'parchment'| 'meadow';
 
 export interface GoalOption {
-  value: Goal;
+  value: string;
   label: string;
   icon: string;
   description: string;
@@ -50,11 +39,19 @@ export interface PhysicalStats {
 
 export interface GoalDetails {
   pace: GoalPace;
-  targetWeightLbs?: number;  // for fat_loss, toning, muscle_gain
-  targetEvent?: string;      // for strength, endurance, athletic_performance (e.g. "315lb deadlift", "half marathon")
+  targetWeightLbs?: number;  // for fat-loss / muscle-gain goals
+  targetEvent?: string;      // for strength, endurance, athletic (e.g. "315lb deadlift", "half marathon")
   timelineWeeks?: number;    // derived from pace for performance/recomp goals
   startWeightLbs?: number;   // weight at goal start — used for progress meter
   goalStartedAt?: string;    // ISO date when goal was set — used for timeline meter
+}
+
+// Hierarchical goal selection (new model)
+export interface GoalSelection {
+  primaryGoal: string;          // id from PRIMARY_GOALS
+  category: string;             // GoalCategoryId — derived from primaryGoal
+  modifiers: string[];          // up to 2 modifier ids
+  targetFocus?: string;         // optional target focus id
 }
 
 export interface CustomFoodItem {
@@ -99,10 +96,15 @@ export interface UserLogEntry {
 }
 
 export interface UserProfile {
-  goal: Goal;
-  secondaryGoal?: Goal;          // optional second goal (combined goals, max 2)
-  focusedMuscleGroup?: string;   // e.g. 'Chest', 'Legs' — AI prioritises this muscle group
+  // ── Hierarchical goal (new model) ──────────────────────────────────────────
+  goal: Goal;                    // primary goal id (from goalConfig PRIMARY_GOALS)
+  goalSelection?: GoalSelection; // full hierarchical selection (category + modifiers + target focus)
   goalDetails: GoalDetails;
+
+  // ── Legacy (kept for backward compat — ignored when goalSelection exists) ──
+  secondaryGoal?: Goal;          // @deprecated — replaced by modifiers
+  focusedMuscleGroup?: string;   // @deprecated — replaced by goalSelection.targetFocus
+
   themePreference?: AppThemeName;
   physicalStats: PhysicalStats;
   daysPerWeek: number;
@@ -117,6 +119,7 @@ export interface UserProfile {
   injuryEntries?: InjuryEntry[]; // structured injury tracking with statuses
   experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
+  customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
@@ -151,6 +154,27 @@ export interface NutritionTargets {
   fat: number;
 }
 
+/** User-set macro overrides — if present, these replace computed TDEE/macro values. */
+export interface CustomMacros {
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+}
+
+export interface MealMicronutrients {
+  fiber?: number;       // grams
+  sugar?: number;       // grams
+  sodium?: number;      // mg
+  cholesterol?: number; // mg
+  vitaminA?: number;    // % DV
+  vitaminC?: number;    // % DV
+  vitaminD?: number;    // % DV
+  calcium?: number;     // % DV
+  iron?: number;        // % DV
+  potassium?: number;   // mg
+}
+
 export interface MealSuggestion {
   meal: string;
   foods: string[];
@@ -159,6 +183,8 @@ export interface MealSuggestion {
   protein: number;
   carbs?: number;
   fat?: number;
+  fiber?: number;       // grams — top-level shortcut for display
+  micronutrients?: MealMicronutrients;
   instructions?: string; // brief recipe/cooking notes
   isRoutine?: boolean;   // user eats this meal every day — AI keeps it fixed
 }
@@ -189,7 +215,7 @@ export interface StoredWorkoutSummary extends WorkoutSummary {
 
 export interface GoalHistoryEntry {
   id: string;
-  goal: Goal;
+  goal: string;               // primary goal id
   pace: GoalPace;
   startedAt: string;          // ISO
   endedAt?: string;           // ISO — undefined means current active goal

@@ -39,23 +39,25 @@ def get_openai_api_key() -> str | None:
     return os.getenv("OPENAI_API_KEY")
 
 # ── Model selectors (all configurable via .env) ───────────────────────────────
+# Chat/questions use gpt-5-mini for quality; everything else uses gpt-4o-mini
+# for cost efficiency.  Override any via .env.
 def model_plan_generation() -> str:
-    return os.getenv("MODEL_PLAN_GENERATION", "gpt-5")
+    return os.getenv("MODEL_PLAN_GENERATION", "gpt-4o-mini")
 
 def model_plan_update() -> str:
-    return os.getenv("MODEL_PLAN_UPDATE", "gpt-5-mini")
+    return os.getenv("MODEL_PLAN_UPDATE", "gpt-4o-mini")
 
 def model_meal_parsing() -> str:
-    return os.getenv("MODEL_MEAL_PARSING", "gpt-5-mini")
+    return os.getenv("MODEL_MEAL_PARSING", "gpt-4o-mini")
 
 def model_chat() -> str:
-    return os.getenv("MODEL_CHAT", "gpt-5-nano")
+    return os.getenv("MODEL_CHAT", "gpt-5-mini")
 
 def model_chat_fallback() -> str:
     return os.getenv("MODEL_CHAT_FALLBACK", "gpt-5-mini")
 
 def model_intent() -> str:
-    return os.getenv("MODEL_INTENT", "gpt-5-nano")
+    return os.getenv("MODEL_INTENT", "gpt-4o-mini")
 
 
 # ─── Request schemas ──────────────────────────────────────────────────────────
@@ -74,13 +76,32 @@ class GoalDetailsIn(BaseModel):
     timelineWeeks: int | None = None
 
 
+class GoalSelectionIn(BaseModel):
+    """Hierarchical goal selection."""
+    primaryGoal: str
+    category: str
+    modifiers: list[str] = []
+    targetFocus: str | None = None
+
+
+class CustomMacrosIn(BaseModel):
+    """User-set macro overrides — any present value replaces the computed TDEE target."""
+    calories: int | None = None
+    protein: int | None = None
+    carbs: int | None = None
+    fat: int | None = None
+
+
 class PlanRequest(BaseModel):
     """Full plan generation — both workout and nutrition."""
     goal: str
+    goalSelection: GoalSelectionIn | None = None
+    # Legacy fields — ignored when goalSelection is present
     secondaryGoal: str | None = None
     focusedMuscleGroup: str | None = None
     goalDetails: GoalDetailsIn
     physicalStats: PhysicalStatsIn
+    customMacros: CustomMacrosIn | None = None
     daysPerWeek: int
     workoutDurationMinutes: int = 60
     equipment: list[str]
@@ -111,6 +132,7 @@ class PlanRequest(BaseModel):
 class WorkoutOnlyRequest(BaseModel):
     """Workout-only plan generation — no food/nutrition fields."""
     goal: str
+    goalSelection: GoalSelectionIn | None = None
     secondaryGoal: str | None = None
     focusedMuscleGroup: str | None = None
     goalDetails: GoalDetailsIn
@@ -130,6 +152,7 @@ class NutritionOnlyRequest(BaseModel):
     goalDetails: GoalDetailsIn
     physicalStats: PhysicalStatsIn
     daysPerWeek: int
+    customMacros: CustomMacrosIn | None = None
 
     foodsAvailable: list[str]
     supplementsAvailable: list[str] = []
@@ -381,6 +404,44 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     pace = req.goalDetails.pace
     goal_rate_summary: str
 
+    # ── Normalise goal id to a nutrition bucket ─────────────────────────────
+    # New hierarchical IDs map to the same calorie/macro logic via category.
+    _DEFICIT_GOALS = {
+        "fat_loss", "toning",                                      # legacy
+        "lose_fat", "get_lean", "cut", "preserve_muscle_cutting",  # new
+    }
+    _SURPLUS_MUSCLE_GOALS = {
+        "muscle_gain",                                                     # legacy
+        "build_muscle", "lean_bulk", "gain_weight", "improve_aesthetics",  # new
+        "build_glutes", "build_upper_body", "build_lower_body",
+        "build_arms", "build_shoulders",
+    }
+    _RECOMP_GOALS = {"body_recomp", "maintain", "maintain_physique"}
+    _STRENGTH_GOALS = {
+        "strength",                                                        # legacy
+        "build_strength", "increase_overall", "improve_1rm", "powerlifting",
+        "improve_squat", "improve_bench", "improve_deadlift", "improve_ohp",
+        "improve_pullups", "improve_grip", "functional_strength",
+        "explosive_strength", "relative_strength",
+    }
+    _ENDURANCE_GOALS = {
+        "endurance",                                                       # legacy
+        "improve_cardio", "improve_conditioning", "aerobic_base",
+        "improve_vo2", "increase_stamina", "running_fitness",
+        "train_5k", "train_10k", "train_half", "train_marathon",
+        "sprint_speed", "interval_perf", "hiking_endurance",
+        "cycling_endurance", "rowing_endurance", "swimming_endurance",
+        "work_capacity",
+    }
+    _ATHLETIC_GOALS = {
+        "athletic_performance",                                            # legacy
+        "improve_athleticism", "improve_speed", "improve_agility",
+        "improve_power", "improve_vertical", "improve_acceleration",
+        "improve_cod", "improve_coordination", "improve_balance",
+        "sport_performance", "offseason_training", "inseason_maintenance",
+        "return_to_sport",
+    }
+
     # ── Try target-weight / timeline path first ──────────────────────────────
     target_lbs = req.goalDetails.targetWeightLbs
     timeline_wk = req.goalDetails.timelineWeeks
@@ -390,13 +451,13 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
         raw_rate = raw_delta_lbs / timeline_wk              # lbs/week
 
         # Clamp per goal direction
-        if goal in {"fat_loss", "toning"}:
+        if goal in _DEFICIT_GOALS:
             clamped_rate = max(-_MAX_LOSS_RATE, min(raw_rate, 0.0))
-        elif goal in {"muscle_gain"}:
+        elif goal in _SURPLUS_MUSCLE_GOALS:
             clamped_rate = max(0.0, min(raw_rate, _MAX_GAIN_RATE))
-        elif goal in {"body_recomp", "maintain"}:
+        elif goal in _RECOMP_GOALS:
             clamped_rate = max(-0.25, min(raw_rate, 0.25))   # near-maintenance band
-        elif goal in {"strength"}:
+        elif goal in _STRENGTH_GOALS:
             clamped_rate = max(0.0, min(raw_rate, _MAX_GAIN_RATE * 0.6))  # mild surplus
         else:
             clamped_rate = max(-0.5, min(raw_rate, 0.5))
@@ -418,29 +479,44 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
 
     else:
         # ── Fallback: pace-based adjustment table ────────────────────────────
+        # Map goal → bucket key for the pace table
+        if goal in _DEFICIT_GOALS:
+            _bucket = "fat_loss"
+        elif goal in _SURPLUS_MUSCLE_GOALS:
+            _bucket = "muscle_gain"
+        elif goal in _RECOMP_GOALS:
+            _bucket = "body_recomp"
+        elif goal in _STRENGTH_GOALS:
+            _bucket = "strength"
+        elif goal in _ENDURANCE_GOALS:
+            _bucket = "endurance"
+        elif goal in _ATHLETIC_GOALS:
+            _bucket = "athletic_performance"
+        else:
+            _bucket = goal  # fallback for any unrecognised id
+
         pace_adjustments: dict[str, dict[str, int]] = {
             "fat_loss":             {"conservative": -250, "moderate": -500, "aggressive": -750},
-            "toning":               {"conservative": -200, "moderate": -350, "aggressive": -500},
             "muscle_gain":          {"conservative":  150, "moderate":  300, "aggressive":  500},
             "body_recomp":          {"conservative": -100, "moderate":    0, "aggressive":  100},
             "strength":             {"conservative":  200, "moderate":  350, "aggressive":  500},
             "endurance":            {"conservative":  100, "moderate":  200, "aggressive":  300},
             "athletic_performance": {"conservative":  150, "moderate":  250, "aggressive":  400},
         }
-        daily_adjustment = pace_adjustments.get(goal, {}).get(pace, 0)
+        daily_adjustment = pace_adjustments.get(_bucket, {}).get(pace, 0)
         pace_label = {"conservative": "slow", "moderate": "moderate", "aggressive": "fast"}.get(pace, pace)
         goal_rate_summary = f"Using {pace_label} pace adjustment ({daily_adjustment:+d} cal/day from TDEE)."
 
     calories = max(_MIN_CALORIES, tdee + daily_adjustment)
 
     # ── Protein (g/lb bodyweight, goal-specific) ─────────────────────────────
-    if goal in {"muscle_gain", "body_recomp", "strength", "toning"}:
+    if goal in _SURPLUS_MUSCLE_GOALS | _RECOMP_GOALS | _STRENGTH_GOALS:
         protein_per_lb = 1.0
-    elif goal == "fat_loss":
+    elif goal in _DEFICIT_GOALS:
         protein_per_lb = 0.9
-    elif goal == "endurance":
+    elif goal in _ENDURANCE_GOALS:
         protein_per_lb = 0.8
-    else:  # maintain, flexibility, stress_relief, athletic_performance, etc.
+    else:  # health, lifestyle, athletic, etc.
         protein_per_lb = 0.75
 
     protein = round(ps.weightLbs * protein_per_lb)
@@ -466,6 +542,19 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
         transfer = min(deficit_cals, transferable_fat_cals)
         fat  = round((fat * 9 - transfer) / 9)
         carbs = round((carb_cals + transfer) / 4)
+
+    # ── Apply custom macro overrides (user-set targets take precedence) ────
+    cm = req.customMacros
+    if cm:
+        if cm.calories is not None:
+            calories = cm.calories
+            goal_rate_summary = f"Using custom calorie target ({calories} cal)."
+        if cm.protein is not None:
+            protein = cm.protein
+        if cm.carbs is not None:
+            carbs = cm.carbs
+        if cm.fat is not None:
+            fat = cm.fat
 
     # ── Normalise mealsPerDay ────────────────────────────────────────────────
     meals = req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
@@ -553,6 +642,8 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
             f'      "protein": {prot},\n'
             f'      "carbs": {carb},\n'
             f'      "fat": {fat_g},\n'
+            f'      "fiber": 0,\n'
+            f'      "micronutrients": {{"fiber": 0, "sugar": 0, "sodium": 0, "cholesterol": 0, "vitaminA": 0, "vitaminC": 0, "vitaminD": 0, "calcium": 0, "iron": 0, "potassium": 0}},\n'
             f'      "estimated_alignment": "e.g. high protein, moderate carb",\n'
             f'      "isRoutine": false\n'
             f'    }}'
@@ -682,19 +773,29 @@ def build_workout_prompt(req: PlanRequest) -> str:
         ),
     }
     primary_rule = goal_workout_rules.get(req.goal, f"Goal is {req.goal} — choose appropriate exercise selection and intensity.")
-    if req.secondaryGoal and req.secondaryGoal != req.goal:
-        secondary_rule = goal_workout_rules.get(req.secondaryGoal, "")
-        goal_rule = (
-            f"PRIMARY GOAL: {primary_rule}\n"
-            f"SECONDARY GOAL (blend into programming where possible): {secondary_rule}"
-        )
+    goal_rule = primary_rule
+
+    # ── Hierarchical goal (new model) — overrides legacy secondaryGoal ─────
+    gs = req.goalSelection
+    if gs:
+        modifier_lines = [f"- Modifier: {m.replace('_', ' ')}" for m in gs.modifiers] if gs.modifiers else []
+        if modifier_lines:
+            goal_rule += "\nGOAL MODIFIERS (apply these refinements to the plan):\n" + "\n".join(modifier_lines)
+        target_focus = gs.targetFocus
     else:
-        goal_rule = primary_rule
+        # Legacy fallback
+        if req.secondaryGoal and req.secondaryGoal != req.goal:
+            secondary_rule = goal_workout_rules.get(req.secondaryGoal, "")
+            goal_rule = (
+                f"PRIMARY GOAL: {primary_rule}\n"
+                f"SECONDARY GOAL (blend into programming where possible): {secondary_rule}"
+            )
+        target_focus = req.focusedMuscleGroup
+
     focused_muscle_line = (
-        f"FOCUSED MUSCLE GROUP: The user wants to emphasise {req.focusedMuscleGroup} — "
-        f"include at least one dedicated {req.focusedMuscleGroup} session per week and "
-        f"prioritise {req.focusedMuscleGroup} volume across the plan."
-        if req.focusedMuscleGroup else ""
+        f"TARGET FOCUS: The user wants to emphasise {target_focus} — "
+        f"include extra volume and at least one dedicated session for {target_focus} per week."
+        if target_focus else ""
     )
 
     # ── Experience / recovery / split context ────────────────────────────────
@@ -751,7 +852,7 @@ def build_workout_prompt(req: PlanRequest) -> str:
 Generate a personalised {req.daysPerWeek}-day weekly workout plan for this user.
 
 USER PROFILE:
-- Primary goal: {req.goal} (pace: {req.goalDetails.pace}){f"  |  Secondary goal: {req.secondaryGoal}" if req.secondaryGoal else ""}
+- Primary goal: {gs.primaryGoal if gs else req.goal} (category: {gs.category if gs else 'auto'}, pace: {req.goalDetails.pace}){f"  |  Modifiers: {', '.join(gs.modifiers)}" if gs and gs.modifiers else ""}{f"  |  Target focus: {gs.targetFocus}" if gs and gs.targetFocus else ""}
 - Age: {ps.age}  Gender: {ps.gender}  Weight: {ps.weightLbs} lbs  Height: {height_str}
 {f"- Target weight: {req.goalDetails.targetWeightLbs} lbs" if req.goalDetails.targetWeightLbs else ""}
 - Training days/week: {req.daysPerWeek}  Session length: {req.workoutDurationMinutes} min
@@ -847,16 +948,13 @@ def build_nutrition_prompt(req: PlanRequest) -> str:
 Generate 3 distinct daily meal templates (A, B, C) for this user. All three must hit the same daily targets using the same available foods, but vary the meals, recipes, and portion combinations to provide variety across the week.
 
 USER PROFILE:
-- Goal: {req.goal} (pace: {req.goalDetails.pace})
+- Goal: {req.goalSelection.primaryGoal if req.goalSelection else req.goal} (pace: {req.goalDetails.pace}){f"  |  Modifiers: {', '.join(req.goalSelection.modifiers)}" if req.goalSelection and req.goalSelection.modifiers else ""}
 - Age: {ps.age}  Gender: {ps.gender}  Weight: {ps.weightLbs} lbs  Height: {height_str}
 - Calorie strategy: {t['goal_rate_summary']}
 {meal_routine_block}
 {user_context_block}
-STRICT FOOD CONSTRAINT — THIS IS NON-NEGOTIABLE:
-The user's ONLY available foods are: {foods_str}
-
-Every single ingredient in every meal MUST come from this list and nowhere else.
-Do NOT add any food that is not in this list — not as a variation, not as a substitution, not as a garnish.
+AVAILABLE FOODS (use ONLY these — no substitutions, no additions):
+{foods_str}
 
 Supplements user already takes: {supps_str if supps_str else "none — recommend best for goal"}
 {diet_context}
@@ -864,18 +962,21 @@ Meals per day: {t['meals']}
 
 DAILY TARGETS (same for all three templates):
 {t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
-Per-meal approximate targets (reference only):
+Per-meal targets (reference):
 {meal_summary}
 
 INSTRUCTIONS:
-- All 3 templates must use only foods from the list above.
-- Each template: recipe name + ingredient list with amounts for each meal.
-- Add "estimated_alignment" field per meal (e.g. "high protein, moderate carb").
-- Make templates meaningfully different — vary recipes, not just amounts.
-- For any meal that comes from the user's fixed routine, set "isRoutine": true.
-- supplementStack: 2-4 evidence-based supplements (include once, at top level).
+- Each template: recipe name + ingredient list with amounts per meal.
+- "estimated_alignment" per meal (e.g. "high protein, moderate carb").
+- Templates must differ meaningfully — vary recipes, not just amounts.
+- Fixed routine meals → "isRoutine": true; AI meals → "isRoutine": false.
+- supplementStack: 2-4 evidence-based supplements at top level.
+- For each meal include "fiber" (grams) and "micronutrients" object with estimated values:
+  fiber (g), sugar (g), sodium (mg), cholesterol (mg), vitaminA (% DV), vitaminC (% DV),
+  vitaminD (% DV), calcium (% DV), iron (% DV), potassium (mg).
+  Estimate based on the actual ingredients and amounts. Use 0 if negligible.
 
-Be concise. Return only the required JSON.
+Return only the required JSON.
 
 Return ONLY valid JSON:
 {{
@@ -1321,7 +1422,7 @@ def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_
     """Synchronous OpenAI call for the workout plan (run in a thread)."""
     last_error: Exception | None = None
     _model = model or model_plan_generation()
-    token_limits = [max_tokens, max_tokens + 1000]  # retry with more tokens if truncated
+    token_limits = [max_tokens, max_tokens + 500]  # retry with more tokens if truncated
     for attempt, tok_limit in enumerate(token_limits, start=1):
         try:
             kwargs = _build_chat_kwargs(
@@ -1431,9 +1532,9 @@ def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | N
             response = _chat_create(client, **kwargs)
             raw = response.choices[0].message.content
             if _looks_truncated(raw):
-                current_max_tokens = current_max_tokens + 500
+                current_max_tokens = current_max_tokens + 400
                 print(f"[AI /plans nutrition] attempt {attempt} TRUNCATED — retrying with max_tokens={current_max_tokens}")
-                last_error = ValueError(f"response truncated at {current_max_tokens - 500} tokens")
+                last_error = ValueError(f"response truncated at {current_max_tokens - 400} tokens")
                 continue
             data = _extract_json(raw)
             # Validate all 3 templates
@@ -1634,8 +1735,8 @@ async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
     try:
         workout_data, nutrition_data = await asyncio.gather(
-            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 2000),
-            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req), req.foodsAvailable, _m, 4000),
+            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 1400),
+            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req), req.foodsAvailable, _m, 3000),
         )
     except (ValueError, Exception) as e:
         detail = str(e)
@@ -1727,6 +1828,7 @@ async def generate_nutrition_plan(
         allergies=req.allergies,
         mealsPerDay=req.mealsPerDay,
         mealRoutine=req.mealRoutine,
+        customMacros=req.customMacros,
         userContext=req.userContext,
     )
 
@@ -1774,7 +1876,7 @@ def ask_trainer_question(
     else:
         context_blob["workoutPlan"] = body.workoutPlan
     if body.userContext:
-        context_blob["recentActivityLog"] = body.userContext
+        context_blob["recentActivityLog"] = body.userContext[:2000]
 
     trimmed_convo = (body.conversation or [])[-14:]
 
@@ -1786,16 +1888,14 @@ def ask_trainer_question(
         )
         system_prompt = (
             "You are an expert registered dietitian and sports nutritionist. "
-            "You have access to the user's full profile, nutrition plan, and activity log. "
-            "Give detailed, personalised nutritional advice. Always reference specific foods, quantities, "
-            "and macros from their actual plan. When updating the nutrition plan, include realistic "
-            "ingredient amounts (e.g. '150g chicken breast', '1 cup cooked oats', '2 tbsp peanut butter'). "
-            "If the user asks to modify meals, swap foods, or change targets, set needs_plan_update=true "
-            "and return the COMPLETE updated nutrition plan (full structure, not partial). "
-            "Never return a partial plan — always include all meal keys even if unchanged. "
-            "CRITICAL: Any meal with isRoutine=true in the current plan MUST be preserved exactly as-is in your updated plan. Do not modify, swap, or remove routine meals. "
-            "IMPORTANT: updated_workout_plan must always be null — you only manage nutrition. "
-            "Return JSON only."
+            "Give detailed, personalised nutritional advice referencing specific foods, quantities, and macros from their plan. "
+            "Use realistic ingredient amounts (e.g. '150g chicken breast', '1 cup cooked oats'). "
+            "If the user asks to modify meals, swap foods, change macro targets, or adjust calories/protein/carbs/fat, "
+            "set needs_plan_update=true and return the COMPLETE updated nutrition plan. "
+            "WHEN UPDATING MACRO TARGETS: update the 'targets' object with the new values, then adjust ALL meals "
+            "so their totals actually hit the new targets. Don't just change targets without changing meals. "
+            "Preserve isRoutine=true meals exactly as-is. "
+            "updated_workout_plan must always be null. Return JSON only."
         )
     else:
         plan_schema = (
@@ -1852,7 +1952,13 @@ def ask_trainer_question(
         + (
             "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
             '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}'
-            if not is_nutritionist else ""
+            if not is_nutritionist else
+            "NUTRITION PLAN FORMAT: updated_nutrition_plan must use this exact structure: "
+            '{"targets": {"calories": N, "protein": N, "carbs": N, "fat": N}, '
+            '"breakfast": {"meal": "...", "foods": ["..."], "calories": N, "protein": N, "carbs": N, "fat": N, "estimated_alignment": "...", "isRoutine": false}, '
+            '"lunch": {...same structure...}, "dinner": {...same structure...}, "snack": {...same structure or omit if no snack...}}. '
+            "CRITICAL: When the user asks to change a macro target (e.g. 'set protein to 200g'), "
+            "you MUST update the targets object AND recalculate all meal portions to match the new totals."
         )
     )
 
@@ -1889,14 +1995,14 @@ def ask_trainer_question(
         _m = model_chat_fallback()
         print(f"[trainer-question] model={_m}")
 
-        # Phase 1: Q&A answer — keep concise so we have room to signal needs_plan_update
-        # Use 1200 tokens: enough for a detailed answer + all flag fields, but plan stays null
-        kwargs = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=1200, timeout_secs=50)
+        # Phase 1: try to get answer + plan in one call (2500 tokens).
+        # Most plan updates fit here, avoiding the expensive Phase 2 round-trip.
+        kwargs = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=2500, timeout_secs=55)
         response = _chat_create(client, **kwargs)
         raw = response.choices[0].message.content
         if _looks_truncated(raw):
-            print(f"[trainer-question] phase-1 truncated — retrying phase-1 at 1800 tokens")
-            kwargs1b = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=1800, timeout_secs=55)
+            print(f"[trainer-question] phase-1 truncated — retrying at 3500 tokens")
+            kwargs1b = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=3500, timeout_secs=65)
             response = _chat_create(client, **kwargs1b)
             raw = response.choices[0].message.content
 
@@ -1908,7 +2014,7 @@ def ask_trainer_question(
         needs_nutrition = is_nutritionist and result.get("needs_plan_update") and not result.get("updated_nutrition_plan")
         if needs_workout or needs_nutrition:
             plan_type = "workout" if needs_workout else "nutrition"
-            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 4000 tokens")
+            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 3500 tokens")
             # Build a focused phase-2 message: carry the answer already given, just ask for the plan
             phase2_answer = result.get("answer", "")
             phase2_injuries = result.get("updated_injuries")
@@ -1930,6 +2036,8 @@ def ask_trainer_question(
                     f"The nutritionist already answered: {json.dumps(phase2_answer)}\n\n"
                     "Now return ONLY a JSON object with the COMPLETE updated_nutrition_plan. "
                     "Include ALL meal keys even if unchanged. Preserve all isRoutine=true meals exactly.\n"
+                    "Structure: {\"targets\": {\"calories\": N, \"protein\": N, \"carbs\": N, \"fat\": N}, "
+                    "\"breakfast\": {\"meal\": \"...\", \"foods\": [\"...\"], \"calories\": N, \"protein\": N, \"carbs\": N, \"fat\": N, \"isRoutine\": bool}, ...}\n"
                     "Return the full JSON response schema with the plan included:\n"
                     '{"answer": ' + json.dumps(phase2_answer) + ', "action_items": [], "needs_plan_update": true, "safety_note": "", '
                     '"updated_workout_plan": null, "updated_nutrition_plan": <FULL PLAN HERE>, '
@@ -1941,7 +2049,7 @@ def ask_trainer_question(
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": phase2_user},
             ]
-            kwargs2 = _build_chat_kwargs(_m, phase2_messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=4000, timeout_secs=65)
+            kwargs2 = _build_chat_kwargs(_m, phase2_messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=3500, timeout_secs=65)
             response2 = _chat_create(client, **kwargs2)
             raw2 = response2.choices[0].message.content
             result2 = _extract_json(raw2)
@@ -2048,10 +2156,13 @@ def analyze_food_photo(
                     "type": "text",
                     "text": (
                         "Analyze this meal photo. Identify likely foods in plain English, "
-                        "estimate total macros, and provide a short meal name. "
+                        "estimate total macros and micronutrients, and provide a short meal name. "
                         'Return exactly this JSON schema: '
                         '{"meal_name": string, "items": [string], "calories": number, '
-                        '"protein": number, "carbs": number, "fat": number}'
+                        '"protein": number, "carbs": number, "fat": number, "fiber": number, '
+                        '"micronutrients": {"fiber": number, "sugar": number, "sodium": number, '
+                        '"cholesterol": number, "vitaminA": number, "vitaminC": number, '
+                        '"vitaminD": number, "calcium": number, "iron": number, "potassium": number}}'
                     ),
                 },
                 {"type": "image_url", "image_url": {"url": image_data_url}},
@@ -2094,7 +2205,7 @@ def scan_foods_photo(
                 f"{context_hint}"
                 "Return exactly this JSON schema — no extra text: "
                 '{"foods": [{"name": string, "serving": string, "calories": number, '
-                '"protein": number, "carbs": number, "fat": number}]}'
+                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}'
             ),
         }
     ]

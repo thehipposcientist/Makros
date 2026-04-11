@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
+import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 
 interface NutritionCardProps {
@@ -56,6 +57,17 @@ export default function NutritionCard({
     fat:      Math.round(allVisible.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
   };
 
+  // Aggregate micronutrients across all visible meals
+  const microKeys: (keyof MealMicronutrients)[] = ['fiber', 'sugar', 'sodium', 'cholesterol', 'vitaminA', 'vitaminC', 'vitaminD', 'calcium', 'iron', 'potassium'];
+  const dailyMicros: Record<string, number> = {};
+  for (const k of microKeys) {
+    dailyMicros[k] = Math.round(allVisible.reduce((sum, m) => {
+      const micro = m.meal.micronutrients;
+      return sum + (micro?.[k] ?? (k === 'fiber' ? (m.meal.fiber ?? 0) : 0));
+    }, 0));
+  }
+  const hasMicros = microKeys.some(k => dailyMicros[k] > 0);
+
   return (
     <View style={styles.card}>
       {/* Icon-based green section header */}
@@ -85,6 +97,23 @@ export default function NutritionCard({
           <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
+
+        {/* Micronutrient summary */}
+        {hasMicros && (
+          <View style={styles.microSection}>
+            <Text style={styles.microTitle}>Daily Micronutrients</Text>
+            <View style={styles.microGrid}>
+              <MicroChip label="Fiber" value={`${dailyMicros.fiber}g`} target="25g" pct={dailyMicros.fiber / 25} colors={colors} styles={styles} />
+              <MicroChip label="Sugar" value={`${dailyMicros.sugar}g`} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
+              <MicroChip label="Sodium" value={`${dailyMicros.sodium}mg`} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
+              <MicroChip label="Iron" value={`${dailyMicros.iron}%`} target="100% DV" pct={dailyMicros.iron / 100} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 50} />
+              <MicroChip label="Calcium" value={`${dailyMicros.calcium}%`} target="100% DV" pct={dailyMicros.calcium / 100} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 50} />
+              <MicroChip label="Vit C" value={`${dailyMicros.vitaminC}%`} target="100% DV" pct={dailyMicros.vitaminC / 100} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 50} />
+              <MicroChip label="Vit D" value={`${dailyMicros.vitaminD}%`} target="100% DV" pct={dailyMicros.vitaminD / 100} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 50} />
+              <MicroChip label="Potassium" value={`${dailyMicros.potassium}mg`} target="2600mg" pct={dailyMicros.potassium / 2600} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 1300} />
+            </View>
+          </View>
+        )}
 
         {/* Meal rows */}
         <View style={styles.meals}>
@@ -281,6 +310,30 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
         <MacroPill label="protein" value={Math.round(meal.protein)}    color={colors.primary}  styles={styles} />
         <MacroPill label="carbs"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
         <MacroPill label="fat"     value={Math.round(meal.fat   ?? 0)} color="#A78BFA"         styles={styles} />
+        {(meal.fiber ?? meal.micronutrients?.fiber ?? 0) > 0 && (
+          <MacroPill label="fiber" value={Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0)} color="#10B981" styles={styles} />
+        )}
+      </View>
+    </View>
+  );
+}
+
+function MicroChip({ label, value, target, pct, colors, styles, warn, low }: {
+  label: string; value: string; target: string; pct: number;
+  colors: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+  warn?: boolean; low?: boolean;
+}) {
+  const barPct = Math.min(pct, 1);
+  const barColor = warn ? colors.error : low ? '#F59E0B' : colors.primary;
+  return (
+    <View style={styles.microChip}>
+      <View style={styles.microChipTop}>
+        <Text style={[styles.microChipLabel, (warn || low) && { color: barColor }]}>{label}</Text>
+        <Text style={[styles.microChipValue, (warn || low) && { color: barColor }]}>{value}</Text>
+      </View>
+      <View style={styles.microChipBarTrack}>
+        <View style={[styles.microChipBarFill, { width: `${Math.round(barPct * 100)}%` as any, backgroundColor: barColor }]} />
       </View>
     </View>
   );
@@ -346,10 +399,10 @@ const createStyles = (
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: section.strong + '55',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
   },
-  addSnackBtnText: { fontSize: 12, color: section.text, fontWeight: '700' },
+  addSnackBtnText: { fontSize: 12, color: section.strong, fontWeight: '700' },
 
   // ── Body ─────────────────────────────────────────────────────────────────────
   body: { padding: 14 },
@@ -467,6 +520,47 @@ const createStyles = (
   },
   pillValue: { fontSize: 13, fontWeight: '700' },
   pillLabel: { fontSize: 9, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
+
+  // ── Micronutrient section ─────────────────────────────────────────────────────
+  microSection: {
+    backgroundColor: section.soft,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: section.strong + '30',
+    padding: 10,
+    marginBottom: 14,
+  },
+  microTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  microGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  microChip: {
+    width: '23%' as any,
+    gap: 2,
+  },
+  microChipTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+  },
+  microChipLabel: { fontSize: 9, fontWeight: '600', color: colors.textMuted },
+  microChipValue: { fontSize: 10, fontWeight: '700', color: colors.textPrimary },
+  microChipBarTrack: {
+    height: 3,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  microChipBarFill: { height: 3, borderRadius: 2 },
 
   // ── Footer ───────────────────────────────────────────────────────────────────
   footer:     { paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },

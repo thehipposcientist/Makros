@@ -55,7 +55,11 @@
       "Bash(venv\\\\Scripts\\\\python.exe:*)",
       "Bash(venv/Scripts/python.exe:*)",
       "Bash(taskkill /F /IM python3.exe)",
-      "Bash(taskkill /F /IM python.exe /T)"
+      "Bash(taskkill /F /IM python.exe /T)",
+      "Bash(python3:*)",
+      "Bash(npx sharp-cli:*)",
+      "Bash(node -e ':*)",
+      "Bash(node:*)"
     ]
   }
 }

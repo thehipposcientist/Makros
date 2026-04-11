@@ -16,22 +16,24 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
 import {
-  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails,
+  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto } from '../services/api';
+import {
+  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, GOAL_MODIFIERS,
+  modifiersForGoal, targetFocusesForGoal, goalCategory,
+  GoalCategoryId, PrimaryGoalDef, GoalModifierDef, TargetFocusDef,
+} from '../constants/goalConfig';
 
 const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalDetails' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'context';
+type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'context';
 
-function getSteps(goal: Goal, lifestyleGoals: Set<string>): StepKey[] {
-  if (lifestyleGoals.has(goal)) {
-    return ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
-  }
-  return ['goal', 'goalDetails', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
+function getSteps(): StepKey[] {
+  return ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
 }
 
 // ─── Supplement categories ────────────────────────────────────────────────────
@@ -75,9 +77,7 @@ const SUPPLEMENT_CATEGORIES = [
   },
 ];
 
-// ─── Muscle group options ─────────────────────────────────────────────────────
-
-const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Full Body'] as const;
+// Muscle groups moved to goalConfig target focuses
 
 // ─── Equipment templates ──────────────────────────────────────────────────────
 
@@ -162,18 +162,19 @@ interface OnboardingScreenProps {
 export default function OnboardingScreen({ authToken, onComplete }: OnboardingScreenProps) {
   const meta = useMetaData();
 
-  const weightGoals   = new Set(meta.goalConfig.weight_goals);
-  const timelineGoals = new Set(meta.goalConfig.timeline_goals);
-  const lifestyleGoals= new Set(meta.goalConfig.lifestyle_goals);
+  // meta.goalConfig still available for legacy pace lookups
 
   // Step tracking
   const [currentStep, setCurrentStep] = useState(0);
 
-  // Step 1 — Goal (up to 2 combined goals; first = primary)
-  const [goals, setGoals] = useState<Goal[]>(['fat_loss']);
-  const [focusedMuscleGroup, setFocusedMuscleGroup] = useState('');
+  // Step 1 — Goal selection (hierarchical)
+  const [selectedGoal, setSelectedGoal] = useState('build_muscle');
+  const [showAllGoals, setShowAllGoals] = useState(false);
+  const [expandedCategory, setExpandedCategory] = useState<GoalCategoryId | null>(null);
 
-  // Step 2 — Goal details
+  // Step 2 — Goal refinement (modifiers + target focus + pace)
+  const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
+  const [selectedTargetFocus, setSelectedTargetFocus] = useState('');
   const [pace, setPace] = useState<GoalPace>('moderate');
   const [targetWeight, setTargetWeight] = useState('');
   const [targetEvent, setTargetEvent] = useState('');
@@ -213,20 +214,23 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [experienceLevel, setExperienceLevel] = useState<'beginner' | 'intermediate' | 'advanced' | ''>('');
   const [lastWorkoutContext, setLastWorkoutContext] = useState('');
 
-  const steps = getSteps(goals[0], lifestyleGoals);
+  const steps = getSteps();
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
 
-  const toggleGoal = (value: Goal) => {
-    setGoals(prev => {
-      if (prev.includes(value)) {
-        if (prev.length === 1) return prev; // can't deselect last goal
-        return prev.filter(g => g !== value);
-      }
-      if (prev.length >= 2) {
-        return [prev[0], value]; // replace secondary
-      }
-      return [...prev, value];
+  const selectGoal = (goalId: string) => {
+    if (goalId !== selectedGoal) {
+      setSelectedGoal(goalId);
+      setSelectedModifiers([]); // reset modifiers when goal changes
+      setSelectedTargetFocus('');
+    }
+  };
+
+  const toggleModifier = (modId: string) => {
+    setSelectedModifiers(prev => {
+      if (prev.includes(modId)) return prev.filter(m => m !== modId);
+      if (prev.length >= 2) return [prev[0], modId]; // replace second
+      return [...prev, modId];
     });
   };
 
@@ -242,8 +246,8 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const validate = (): string | null => {
     switch (currentStepKey) {
-      case 'goalDetails':
-        if (weightGoals.has(goals[0]) && targetWeight) {
+      case 'goalRefine':
+        if (targetWeight) {
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
         }
@@ -278,7 +282,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     if (error) { Alert.alert('Hold on', error); return; }
 
     if (currentStep < totalSteps - 1) {
-      if (currentStepKey === 'goal') setPace('moderate');
       setCurrentStep(s => s + 1);
     } else {
       handleComplete();
@@ -290,15 +293,19 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   };
 
   const handleComplete = () => {
-    const primaryGoal = goals[0];
-    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
+    const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
+
+    const goalSel: GoalSelection = {
+      primaryGoal: selectedGoal,
+      category: cat,
+      modifiers: selectedModifiers,
+      targetFocus: selectedTargetFocus || undefined,
+    };
+
     const goalDetails: GoalDetails = {
       pace,
-      targetWeightLbs: weightGoals.has(primaryGoal) && targetWeight ? parseFloat(targetWeight) : undefined,
-      targetEvent:     eventGoals.has(primaryGoal) && targetEvent.trim() ? targetEvent.trim() : undefined,
-      timelineWeeks:   timelineGoals.has(primaryGoal)
-        ? (meta.goalConfig.timeline_weeks[primaryGoal]?.[pace] ?? undefined)
-        : undefined,
+      targetWeightLbs: targetWeight ? parseFloat(targetWeight) : undefined,
+      targetEvent: targetEvent.trim() || undefined,
     };
 
     const physicalStats: PhysicalStats = {
@@ -310,9 +317,8 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     };
 
     onComplete({
-      goal:               primaryGoal,
-      secondaryGoal:      goals[1],
-      focusedMuscleGroup: focusedMuscleGroup || undefined,
+      goal:               selectedGoal,
+      goalSelection:      goalSel,
       goalDetails,
       physicalStats,
       daysPerWeek:            parseInt(daysPerWeek),
@@ -437,65 +443,161 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   // ─── Step renderers ─────────────────────────────────────────────────────────
 
-  const renderGoalStep = () => (
-    <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>What's Your Goal?</Text>
-      <Text style={styles.stepDescription}>
-        Select up to 2 goals · {goals.length} selected
-      </Text>
-      {meta.loading ? (
-        <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
-      ) : (
+  const renderGoalStep = () => {
+    const selectedDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
+    const goalsByCategory = (catId: GoalCategoryId) => PRIMARY_GOALS.filter(g => g.category === catId && !g.launch);
+
+    return (
+      <View style={styles.stepContainer}>
+        <Text style={styles.stepTitle}>What's Your Goal?</Text>
+        <Text style={styles.stepDescription}>Pick one primary goal for your plan.</Text>
+
+        {/* Launch goals — the 8 most common */}
         <View style={styles.goalGrid}>
-          {meta.goals.map(opt => {
-            const active = goals.includes(opt.value as Goal);
-            const isPrimary = goals[0] === opt.value;
+          {LAUNCH_GOALS.map(g => {
+            const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
+            const active = selectedGoal === g.id;
             return (
               <TouchableOpacity
-                key={opt.value}
+                key={g.id}
                 style={[styles.goalCard, active && styles.goalCardActive]}
-                onPress={() => toggleGoal(opt.value as Goal)}
+                onPress={() => selectGoal(g.id)}
                 activeOpacity={0.75}
               >
-                <Text style={styles.goalIcon}>{opt.icon}</Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
-                  <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{opt.label}</Text>
-                  {active && (
-                    <View style={[styles.goalBadge, !isPrimary && styles.goalBadgeSecondary]}>
-                      <Text style={styles.goalBadgeText}>{isPrimary ? 'Primary' : '+2nd'}</Text>
-                    </View>
-                  )}
-                </View>
-                <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{opt.description}</Text>
+                <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
+                <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
+                <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{g.description}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
-      )}
-    </View>
-  );
 
-  const renderGoalDetailsStep = () => {
-    const primaryGoal = goals[0];
-    const paceOpts = pacesForGoal(primaryGoal, meta.paces);
-    const showTargetWeight = weightGoals.has(primaryGoal);
-    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-    const showTargetEvent = eventGoals.has(primaryGoal);
-    const showMuscleGroup = ['strength', 'muscle_gain', 'body_recomp'].includes(primaryGoal);
-    const goalLabel = meta.goals.find(g => g.value === primaryGoal)?.label ?? '';
+        {/* Expand to see all goals by category */}
+        <TouchableOpacity
+          style={{ marginTop: 16, alignItems: 'center', paddingVertical: 10 }}
+          onPress={() => setShowAllGoals(prev => !prev)}
+        >
+          <Text style={{ color: colors.primary, fontWeight: '600', fontSize: 14 }}>
+            {showAllGoals ? 'Hide advanced goals' : 'Show more goals'}
+          </Text>
+        </TouchableOpacity>
 
+        {showAllGoals && GOAL_CATEGORIES.map(cat => {
+          const catGoals = goalsByCategory(cat.id);
+          if (catGoals.length === 0) return null;
+          const isExpanded = expandedCategory === cat.id;
+          return (
+            <View key={cat.id} style={{ marginTop: 8 }}>
+              <TouchableOpacity
+                onPress={() => setExpandedCategory(isExpanded ? null : cat.id)}
+                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}
+              >
+                <Text style={{ fontSize: 16, marginRight: 8 }}>{cat.icon}</Text>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: colors.textPrimary, flex: 1 }}>{cat.label}</Text>
+                <Text style={{ fontSize: 12, color: colors.textMuted }}>{isExpanded ? '▲' : '▼'}</Text>
+              </TouchableOpacity>
+              {isExpanded && (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingLeft: 4, marginBottom: 8 }}>
+                  {catGoals.map(g => {
+                    const active = selectedGoal === g.id;
+                    return (
+                      <TouchableOpacity
+                        key={g.id}
+                        style={[styles.foodChip, active && styles.foodChipActive]}
+                        onPress={() => selectGoal(g.id)}>
+                        <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{g.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+            </View>
+          );
+        })}
+
+        {selectedDef && (
+          <View style={{ marginTop: 16, backgroundColor: colors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.primary + '44' }}>
+            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>{selectedDef.label}</Text>
+            <Text style={{ fontSize: 13, color: colors.textSecondary, marginTop: 2 }}>{selectedDef.description}</Text>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  const renderGoalRefineStep = () => {
+    const goalDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
+    const goalLabel = goalDef?.label ?? selectedGoal;
+    const cat = goalCategory(selectedGoal);
+    const availableModifiers = modifiersForGoal(selectedGoal);
+    const availableFocuses = targetFocusesForGoal(selectedGoal);
+    const paceOpts = pacesForGoal(selectedGoal, meta.paces);
+
+    // Show target weight for fat loss / muscle gain goals
+    const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
+    const showTargetWeight = weightGoalIds.has(selectedGoal);
+
+    // Show target event for strength / endurance / athletic goals
+    const eventCategories = new Set<string>(['strength', 'cardio_endurance', 'athletic_performance']);
+    const showTargetEvent = cat ? eventCategories.has(cat) : false;
     const eventPlaceholder =
-      primaryGoal === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
-      primaryGoal === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
-      primaryGoal === 'athletic_performance' ? 'e.g. sub-40s 100m, dunk a basketball' :
+      cat === 'strength'              ? 'e.g. 315lb deadlift, 225lb bench' :
+      cat === 'cardio_endurance'      ? 'e.g. half marathon, 5K in 25 min' :
+      cat === 'athletic_performance'  ? 'e.g. sub-40s 100m, dunk a basketball' :
       'Describe your target';
 
     return (
       <View style={styles.stepContainer}>
-        <Text style={styles.stepTitle}>Set Your Target</Text>
+        <Text style={styles.stepTitle}>Refine Your Plan</Text>
         <Text style={styles.stepDescription}>
-          How do you want to approach {goalLabel.toLowerCase()}?
+          Customise how you approach {goalLabel.toLowerCase()}.
         </Text>
+
+        {/* Modifiers — up to 2 */}
+        {availableModifiers.length > 0 && (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>
+              Modifiers <Text style={styles.optional}>(pick up to 2)</Text>
+            </Text>
+            <View style={styles.foodChips}>
+              {availableModifiers.map(mod => {
+                const active = selectedModifiers.includes(mod.id);
+                return (
+                  <TouchableOpacity
+                    key={mod.id}
+                    style={[styles.foodChip, active && styles.foodChipActive]}
+                    onPress={() => toggleModifier(mod.id)}>
+                    <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{mod.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.hint}>These refine how your plan is generated — not required.</Text>
+          </View>
+        )}
+
+        {/* Target focus */}
+        {availableFocuses.length > 0 && (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>
+              Target focus <Text style={styles.optional}>(optional)</Text>
+            </Text>
+            <View style={styles.foodChips}>
+              {availableFocuses.map(tf => {
+                const active = selectedTargetFocus === tf.id;
+                return (
+                  <TouchableOpacity
+                    key={tf.id}
+                    style={[styles.foodChip, active && styles.foodChipActive]}
+                    onPress={() => setSelectedTargetFocus(prev => prev === tf.id ? '' : tf.id)}>
+                    <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{tf.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.hint}>AI will emphasise this area in your plan.</Text>
+          </View>
+        )}
 
         {showTargetWeight && (
           <View style={styles.fieldGroup}>
@@ -533,44 +635,43 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           </View>
         )}
 
+        {/* Pace */}
         <Text style={styles.fieldLabel}>How fast?</Text>
-        <View style={styles.paceCards}>
-          {paceOpts.map(opt => {
-            const active = pace === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={[styles.paceCard, active && styles.paceCardActive]}
-                onPress={() => setPace(opt.value as GoalPace)}
-                activeOpacity={0.75}
-              >
-                <Text style={styles.paceIcon}>{opt.icon}</Text>
-                <Text style={[styles.paceLabel, active && styles.paceLabelActive]}>{opt.label}</Text>
-                <Text style={[styles.paceRate, active && styles.paceRateActive]}>{opt.rate}</Text>
-                <Text style={[styles.paceDesc, active && styles.paceDescActive]}>{opt.description}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        {showMuscleGroup && (
-          <View style={[styles.fieldGroup, { marginTop: 20 }]}>
-            <Text style={styles.fieldLabel}>
-              Focus muscle group <Text style={styles.optional}>(optional)</Text>
-            </Text>
-            <View style={styles.foodChips}>
-              {MUSCLE_GROUPS.map(mg => (
+        {paceOpts.length > 0 ? (
+          <View style={styles.paceCards}>
+            {paceOpts.map(opt => {
+              const active = pace === opt.value;
+              return (
                 <TouchableOpacity
-                  key={mg}
-                  style={[styles.foodChip, focusedMuscleGroup === mg && styles.foodChipActive]}
-                  onPress={() => setFocusedMuscleGroup(prev => prev === mg ? '' : mg)}>
-                  <Text style={[styles.foodChipText, focusedMuscleGroup === mg && styles.foodChipTextActive]}>
-                    {mg}
-                  </Text>
+                  key={opt.value}
+                  style={[styles.paceCard, active && styles.paceCardActive]}
+                  onPress={() => setPace(opt.value as GoalPace)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={styles.paceIcon}>{opt.icon}</Text>
+                  <Text style={[styles.paceLabel, active && styles.paceLabelActive]}>{opt.label}</Text>
+                  <Text style={[styles.paceRate, active && styles.paceRateActive]}>{opt.rate}</Text>
+                  <Text style={[styles.paceDesc, active && styles.paceDescActive]}>{opt.description}</Text>
                 </TouchableOpacity>
-              ))}
-            </View>
-            <Text style={styles.hint}>AI will emphasise this in your training split</Text>
+              );
+            })}
+          </View>
+        ) : (
+          <View style={styles.paceCards}>
+            {(['conservative', 'moderate', 'aggressive'] as GoalPace[]).map(p => {
+              const active = pace === p;
+              const labels: Record<string, string> = { conservative: 'Steady', moderate: 'Moderate', aggressive: 'Aggressive' };
+              return (
+                <TouchableOpacity
+                  key={p}
+                  style={[styles.paceCard, active && styles.paceCardActive]}
+                  onPress={() => setPace(p)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={[styles.paceLabel, active && styles.paceLabelActive]}>{labels[p]}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
         )}
       </View>
@@ -1086,7 +1187,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderStep = () => {
     switch (currentStepKey) {
       case 'goal':          return renderGoalStep();
-      case 'goalDetails':   return renderGoalDetailsStep();
+      case 'goalRefine':    return renderGoalRefineStep();
       case 'physicalStats': return renderPhysicalStatsStep();
       case 'trainingDays':  return renderTrainingDaysStep();
       case 'equipment':     return renderEquipmentStep();
@@ -1123,8 +1224,10 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           >
             <Text style={styles.backButtonText}>Back</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-            <Text style={styles.nextButtonText}>
+          <TouchableOpacity
+            style={[styles.nextButton, currentStep === totalSteps - 1 && styles.nextButtonFinal]}
+            onPress={handleNext}>
+            <Text style={[styles.nextButtonText, currentStep === totalSteps - 1 && styles.nextButtonTextFinal]}>
               {currentStep === totalSteps - 1 ? 'Get Started' : 'Next'}
             </Text>
           </TouchableOpacity>
@@ -1144,7 +1247,7 @@ const styles = StyleSheet.create({
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 
   progressBar: { flexDirection: 'row', gap: 6, marginBottom: 32 },
-  progressSegment: { flex: 1, height: 3, borderRadius: 2, backgroundColor: colors.border },
+  progressSegment: { flex: 1, height: 4, borderRadius: 2, backgroundColor: colors.border },
   progressSegmentActive: { backgroundColor: colors.primary },
 
   stepContainer: { marginBottom: 24 },
@@ -1264,5 +1367,7 @@ const styles = StyleSheet.create({
   buttonDisabled: { opacity: 0.4 },
   backButtonText: { fontSize: 16, fontWeight: '600', color: colors.textSecondary },
   nextButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center' },
+  nextButtonFinal: { flex: 2, paddingVertical: 18, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 5 },
   nextButtonText: { fontSize: 16, fontWeight: '600', color: colors.background },
+  nextButtonTextFinal: { fontSize: 18, fontWeight: '700', letterSpacing: 0.4 },
 });

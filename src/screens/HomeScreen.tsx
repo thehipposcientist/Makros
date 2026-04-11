@@ -13,6 +13,7 @@ import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveSkipToHistory, loadWorkoutSummaries,
   savePlanChange,
 } from '../utils/workoutHistory';
+import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
@@ -429,17 +430,26 @@ const TRAINING_DAY_SETS: Record<number, number[]> = {
   7: [0, 1, 2, 3, 4, 5, 6],
 };
 
-function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number): ScheduleItem[] {
+function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number, skippedDates?: Set<string>): ScheduleItem[] {
   if (!workoutPlan?.days?.length) return [];
   const trainingSet = new Set(TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]);
   const today = new Date();
   const todayDow = today.getDay();
   const daysFromMon = todayDow === 0 ? 6 : todayDow - 1;
+
+  // Count training days earlier this week that were NOT skipped
   let weekOffset = 0;
   for (let i = 0; i < daysFromMon; i++) {
     const dow = (i + 1) % 7;
-    if (trainingSet.has(dow)) weekOffset++;
+    if (trainingSet.has(dow)) {
+      const pastDate = new Date(today);
+      pastDate.setDate(today.getDate() - (daysFromMon - i));
+      if (!skippedDates?.has(dateKey(pastDate))) {
+        weekOffset++;
+      }
+    }
   }
+
   const schedule: ScheduleItem[] = [];
   let workoutIdx = weekOffset;
   for (let i = 0; i < 7; i++) {
@@ -448,7 +458,11 @@ function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number): Schedul
     const dow = date.getDay();
     if (trainingSet.has(dow)) {
       schedule.push({ date, workout: workoutPlan.days[workoutIdx % workoutPlan.days.length], isRest: false });
-      workoutIdx++;
+      // Only advance the workout index if this day isn't skipped —
+      // skipping pushes the workout to the next training day
+      if (!skippedDates?.has(dateKey(date))) {
+        workoutIdx++;
+      }
     } else {
       schedule.push({ date, workout: null, isRest: true });
     }
@@ -1278,6 +1292,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       const slimProfile = {
         goal: userProfile.goal,
+        goalSelection: userProfile.goalSelection,
         goalDetails: userProfile.goalDetails,
         physicalStats: userProfile.physicalStats,
         daysPerWeek: userProfile.daysPerWeek,
@@ -1552,11 +1567,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
-  const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label ?? userProfile.goal;
-  const schedule  = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek) : [];
+  const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
+    ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
+    ?? userProfile.goal;
+  const schedule  = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates) : [];
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'rose'].includes(userProfile.themePreference ?? 'midnight');  // blossom is now dark
+  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow'].includes(userProfile.themePreference ?? 'midnight');  // blossom is now dark
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background

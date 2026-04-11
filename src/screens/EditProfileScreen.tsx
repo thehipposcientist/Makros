@@ -4,10 +4,13 @@ import {
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, Goal, GoalPace, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
+import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto } from '../services/api';
+import {
+  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
+} from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 
 
@@ -38,7 +41,7 @@ interface ScannedFoodItem {
   selected: boolean;
 }
 
-const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Full Body'] as const;
+// MUSCLE_GROUPS removed — replaced by targetFocusesForGoal() from goalConfig
 
 const DURATION_OPTIONS = [
   { value: 30, label: '30 min', desc: 'Express' },
@@ -211,16 +214,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const styles = createStyles(tc);
   const meta = useMetaData();
 
-  const weightGoals   = new Set(meta.goalConfig.weight_goals);
-  const timelineGoals = new Set(meta.goalConfig.timeline_goals);
-
-  // Goal (up to 2 combined goals; first = primary)
-  const [goals, setGoals] = useState<Goal[]>([
-    profile.goal,
-    ...(profile.secondaryGoal ? [profile.secondaryGoal] : []),
-  ]);
-  const [focusedMuscleGroup, setFocusedMuscleGroup] = useState<string>(profile.focusedMuscleGroup ?? '');
-  const [pace, setPace]   = useState<GoalPace>(profile.goalDetails.pace);
+  // Goal (hierarchical)
+  const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
+  const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
+  const [selectedTargetFocus, setSelectedTargetFocus] = useState<string>(profile.goalSelection?.targetFocus ?? profile.focusedMuscleGroup ?? '');
+  const [showAdvancedGoals, setShowAdvancedGoals] = useState(false);
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
   );
@@ -250,6 +250,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>('all');
+
+  // Custom macro overrides
+  const [useCustomMacros, setUseCustomMacros] = useState(!!profile.customMacros);
+  const [customCalories, setCustomCalories] = useState(profile.customMacros?.calories ? String(profile.customMacros.calories) : '');
+  const [customProtein, setCustomProtein]   = useState(profile.customMacros?.protein ? String(profile.customMacros.protein) : '');
+  const [customCarbs, setCustomCarbs]       = useState(profile.customMacros?.carbs ? String(profile.customMacros.carbs) : '');
+  const [customFat, setCustomFat]           = useState(profile.customMacros?.fat ? String(profile.customMacros.fat) : '');
 
   // Modals
   const [addFoodVisible,    setAddFoodVisible]    = useState(false);
@@ -511,27 +518,29 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
 
   const handleSave = () => {
-    const primaryGoal    = goals[0];
-    const isWeightGoal   = weightGoals.has(primaryGoal);
-    const isTimelineGoal = timelineGoals.has(primaryGoal);
-    const timelineWeeks  = isTimelineGoal ? (meta.goalConfig.timeline_weeks[primaryGoal]?.[pace] ?? undefined) : undefined;
-    const targetWeightLbs = isWeightGoal && targetWeight ? parseFloat(targetWeight) : undefined;
-    const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-    const targetEventVal = eventGoals.has(primaryGoal) && targetEvent.trim() ? targetEvent.trim() : undefined;
+    const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
+    const goalSel: GoalSelection = {
+      primaryGoal: selectedGoal,
+      category: cat,
+      modifiers: selectedModifiers,
+      targetFocus: selectedTargetFocus || undefined,
+    };
+
+    const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
+    const targetWeightLbs = weightGoalIds.has(selectedGoal) && targetWeight ? parseFloat(targetWeight) : undefined;
+    const eventCategories = new Set(['strength', 'cardio_endurance', 'athletic_performance']);
+    const targetEventVal = eventCategories.has(cat) && targetEvent.trim() ? targetEvent.trim() : undefined;
 
     onSave({
       ...profile,
-      goal: primaryGoal,
-      secondaryGoal: goals[1],
-      focusedMuscleGroup: focusedMuscleGroup || undefined,
+      goal: selectedGoal,
+      goalSelection: goalSel,
       themePreference,
-      // Preserve goal start metadata so editing current weight does not reset "initial" weight.
       goalDetails: {
         ...profile.goalDetails,
         pace,
         targetWeightLbs,
         targetEvent: targetEventVal,
-        timelineWeeks,
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
@@ -545,24 +554,31 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         ...profile.physicalStats,
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
       },
+      customMacros: useCustomMacros ? {
+        ...(customCalories ? { calories: parseInt(customCalories, 10) } : {}),
+        ...(customProtein  ? { protein: parseInt(customProtein, 10) }   : {}),
+        ...(customCarbs    ? { carbs: parseInt(customCarbs, 10) }       : {}),
+        ...(customFat      ? { fat: parseInt(customFat, 10) }           : {}),
+      } : undefined,
     });
   };
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const toggleGoal = (value: Goal) => {
-    setGoals(prev => {
-      if (prev.includes(value)) {
-        if (prev.length === 1) return prev;
-        return prev.filter(g => g !== value);
-      }
-      if (prev.length >= 2) return [prev[0], value];
-      return [...prev, value];
-    });
+  const toggleModifier = (id: string) => {
+    setSelectedModifiers(prev =>
+      prev.includes(id) ? prev.filter(m => m !== id) : prev.length >= 2 ? prev : [...prev, id],
+    );
   };
 
-  const isWeightGoal   = weightGoals.has(goals[0]);
-  const paceOptions    = pacesForGoal(goals[0], meta.paces);
+  const cat = goalCategory(selectedGoal);
+  const availableModifiers = modifiersForGoal(selectedGoal);
+  const availableFocuses = targetFocusesForGoal(selectedGoal);
+  const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
+  const isWeightGoal   = weightGoalIds.has(selectedGoal);
+  const eventCategories = new Set<string>(['strength', 'cardio_endurance', 'athletic_performance']);
+  const showTargetEvent = cat ? eventCategories.has(cat) : false;
+  const paceOptions    = pacesForGoal(selectedGoal, meta.paces);
   const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.map(i => i.name)));
   const customEquipItems   = equipment.filter(e => !standardEquipNames.has(e));
   const standardFoodNames  = new Set(meta.allFoods.map(f => f.name));
@@ -620,48 +636,101 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         <>
         {/* ── Goal ── */}
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Goal <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>({goals.length}/2 selected)</Text></Text>
-          {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
-            <View style={styles.goalGrid}>
-              {meta.goals.map(opt => {
-                const selected = goals.includes(opt.value as Goal);
-                const isPrimary = goals[0] === opt.value;
+          <Text style={styles.sectionLabel}>Goal</Text>
+          <View style={styles.goalGrid}>
+            {LAUNCH_GOALS.map(g => {
+              const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
+              const active = selectedGoal === g.id;
+              return (
+                <TouchableOpacity
+                  key={g.id}
+                  style={[styles.goalCard, active && styles.goalCardActive]}
+                  onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setSelectedTargetFocus(''); setPace('moderate'); }}
+                  activeOpacity={0.75}>
+                  <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
+                  <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Expandable categories for non-launch goals */}
+          <TouchableOpacity
+            style={{ marginTop: 14, alignItems: 'center', paddingVertical: 8 }}
+            onPress={() => setShowAdvancedGoals(prev => !prev)}
+            activeOpacity={0.7}>
+            <Text style={{ color: tc.primary, fontWeight: '600', fontSize: 13 }}>
+              {showAdvancedGoals ? 'Hide advanced goals' : 'More goals...'}
+            </Text>
+          </TouchableOpacity>
+
+          {showAdvancedGoals && GOAL_CATEGORIES.map(catItem => {
+            const catGoals = PRIMARY_GOALS.filter(g => g.category === catItem.id && !g.launch);
+            if (catGoals.length === 0) return null;
+            const hasActiveGoal = catGoals.some(g => g.id === selectedGoal);
+            return (
+              <View key={catItem.id} style={{ marginTop: 10 }}>
+                <TouchableOpacity
+                  onPress={() => setExpandedCategory(prev => prev === catItem.id ? null : catItem.id)}
+                  style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6 }}
+                  activeOpacity={0.7}>
+                  <Text style={{ fontSize: 15, marginRight: 8 }}>{catItem.icon}</Text>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: hasActiveGoal ? tc.primary : tc.textSecondary, flex: 1 }}>{catItem.label}</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>{expandedCategory === catItem.id ? '▲' : '▼'}</Text>
+                </TouchableOpacity>
+                {expandedCategory === catItem.id && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingLeft: 4, marginBottom: 6 }}>
+                    {catGoals.map(g => {
+                      const active = selectedGoal === g.id;
+                      return (
+                        <TouchableOpacity
+                          key={g.id}
+                          style={[styles.chip, active && styles.chipActive]}
+                          onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setSelectedTargetFocus(''); setPace('moderate'); }}>
+                          <Text style={[styles.chipText, active && styles.chipTextActive]}>{g.label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+
+        {/* ── Modifiers ── */}
+        {availableModifiers.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Modifiers <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(up to 2)</Text></Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {availableModifiers.map(mod => {
+                const active = selectedModifiers.includes(mod.id);
                 return (
                   <TouchableOpacity
-                    key={opt.value}
-                    style={[styles.goalCard, selected && styles.goalCardActive]}
-                    onPress={() => { toggleGoal(opt.value as Goal); if (!goals.includes(opt.value as Goal)) setPace('moderate'); }}>
-                    <Text style={styles.goalIcon}>{opt.icon}</Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', gap: 4 }}>
-                      <Text style={[styles.goalLabel, selected && styles.goalLabelActive]} numberOfLines={1}>
-                        {opt.label}
-                      </Text>
-                      {selected && (
-                        <View style={[styles.goalBadge, !isPrimary && styles.goalBadgeSecondary]}>
-                          <Text style={styles.goalBadgeText}>{isPrimary ? 'Primary' : '+2nd'}</Text>
-                        </View>
-                      )}
-                    </View>
+                    key={mod.id}
+                    style={[styles.chip, active && styles.chipActive]}
+                    onPress={() => toggleModifier(mod.id)}>
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{mod.label}</Text>
                   </TouchableOpacity>
                 );
               })}
             </View>
-          )}
-        </View>
+          </View>
+        )}
 
-        {/* ── Focused muscle group ── */}
-        {['strength', 'muscle_gain', 'body_recomp'].includes(goals[0]) && (
+        {/* ── Target Focus ── */}
+        {availableFocuses.length > 0 && (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Focus Muscle Group <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(optional)</Text></Text>
+            <Text style={styles.sectionLabel}>Target Focus <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(optional)</Text></Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {MUSCLE_GROUPS.map(mg => {
-                const active = focusedMuscleGroup === mg;
+              {availableFocuses.map(tf => {
+                const active = selectedTargetFocus === tf.id;
                 return (
                   <TouchableOpacity
-                    key={mg}
+                    key={tf.id}
                     style={[styles.chip, active && styles.chipActive]}
-                    onPress={() => setFocusedMuscleGroup(prev => prev === mg ? '' : mg)}>
-                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{mg}</Text>
+                    onPress={() => setSelectedTargetFocus(prev => prev === tf.id ? '' : tf.id)}>
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{tf.label}</Text>
                   </TouchableOpacity>
                 );
               })}
@@ -725,17 +794,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         )}
 
         {/* ── Target event (strength / endurance / athletic goals) ── */}
-        {(() => {
-          const eventGoals = new Set(['strength', 'endurance', 'athletic_performance']);
-          if (!eventGoals.has(goals[0])) return null;
+        {showTargetEvent && (() => {
           const label =
-            goals[0] === 'strength'             ? 'Strength Target (optional)' :
-            goals[0] === 'endurance'            ? 'Endurance Target (optional)' :
-                                                  'Performance Target (optional)';
+            cat === 'strength'              ? 'Strength Target (optional)' :
+            cat === 'cardio_endurance'      ? 'Endurance Target (optional)' :
+                                              'Performance Target (optional)';
           const placeholder =
-            goals[0] === 'strength'             ? 'e.g. 315lb deadlift, 225lb bench' :
-            goals[0] === 'endurance'            ? 'e.g. half marathon, 5K in 25 min' :
-                                                  'e.g. sub-40s 100m, dunk a basketball';
+            cat === 'strength'              ? 'e.g. 315lb deadlift, 225lb bench' :
+            cat === 'cardio_endurance'      ? 'e.g. half marathon, 5K in 25 min' :
+                                              'e.g. sub-40s 100m, dunk a basketball';
           return (
             <View style={styles.section}>
               <Text style={styles.sectionLabel}>{label}</Text>
@@ -751,6 +818,79 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           );
         })()}
+
+        {/* ── Custom macro goals ── */}
+        <View style={styles.section}>
+          <TouchableOpacity
+            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+            onPress={() => setUseCustomMacros(prev => !prev)}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.sectionLabel}>Custom Macro Goals</Text>
+              <Text style={[styles.sectionHint, { marginTop: 2 }]}>
+                {useCustomMacros ? 'Override AI-calculated targets' : 'Let AI calculate from your profile'}
+              </Text>
+            </View>
+            <View style={[styles.toggleTrack, useCustomMacros && styles.toggleTrackActive]}>
+              <View style={[styles.toggleThumb, useCustomMacros && styles.toggleThumbActive]} />
+            </View>
+          </TouchableOpacity>
+
+          {useCustomMacros && (
+            <View style={{ marginTop: 14, gap: 10 }}>
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.macroFieldLabel}>Calories</Text>
+                  <TextInput
+                    style={styles.macroFieldInput}
+                    value={customCalories}
+                    onChangeText={setCustomCalories}
+                    placeholder="e.g. 2400"
+                    placeholderTextColor={tc.textMuted}
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.macroFieldLabel}>Protein (g)</Text>
+                  <TextInput
+                    style={styles.macroFieldInput}
+                    value={customProtein}
+                    onChangeText={setCustomProtein}
+                    placeholder="e.g. 180"
+                    placeholderTextColor={tc.textMuted}
+                    keyboardType="number-pad"
+                  />
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.macroFieldLabel}>Carbs (g)</Text>
+                  <TextInput
+                    style={styles.macroFieldInput}
+                    value={customCarbs}
+                    onChangeText={setCustomCarbs}
+                    placeholder="e.g. 250"
+                    placeholderTextColor={tc.textMuted}
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.macroFieldLabel}>Fat (g)</Text>
+                  <TextInput
+                    style={styles.macroFieldInput}
+                    value={customFat}
+                    onChangeText={setCustomFat}
+                    placeholder="e.g. 70"
+                    placeholderTextColor={tc.textMuted}
+                    keyboardType="number-pad"
+                  />
+                </View>
+              </View>
+              <Text style={[styles.sectionHint, { fontSize: 11, marginTop: 2 }]}>
+                Leave any field blank to let AI calculate it. Only filled values override.
+              </Text>
+            </View>
+          )}
+        </View>
 
         {/* ── Training days ── */}
         <View style={styles.section}>
@@ -1492,15 +1632,11 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   modalConfirmBtn: { borderRadius: radius.md, paddingVertical: 14, alignItems: 'center' },
   modalConfirmText: { fontSize: 15, fontWeight: '700' },
 
-  goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  goalCard: { width: '31%', backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, paddingVertical: 12, paddingHorizontal: 8, alignItems: 'center', gap: 6 },
+  goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  goalCard: { width: '47%', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, paddingVertical: 14, paddingHorizontal: 10, alignItems: 'center', gap: 4 },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
-  goalIcon:       { fontSize: 22 },
-  goalLabel:      { fontSize: 11, color: colors.textSecondary, textAlign: 'center', fontWeight: '500' },
-  goalLabelActive:{ color: colors.primary, fontWeight: '700' },
-  goalBadge:         { backgroundColor: colors.primary, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1 },
-  goalBadgeSecondary:{ backgroundColor: colors.border },
-  goalBadgeText:     { fontSize: 8, fontWeight: '700', color: '#fff' },
+  goalIcon:       { fontSize: 22, marginBottom: 2 },
+  goalLabel:      { fontSize: 13, color: colors.textSecondary, textAlign: 'center', fontWeight: '600' },
 
   paceList: { gap: 8 },
   paceCard: { backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, padding: 12, gap: 4 },
@@ -1712,6 +1848,15 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   scannedFoodCheck: { fontSize: 20, color: colors.textMuted, width: 24, textAlign: 'center' },
   scannedFoodCheckSelected: { color: colors.primary },
 
-  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
-  saveBtnText: { fontSize: 16, fontWeight: '700', color: colors.background },
+  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 17, alignItems: 'center', marginTop: 12, shadowColor: colors.primary, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6, elevation: 4 },
+  saveBtnText: { fontSize: 17, fontWeight: '700', color: '#FFFFFF', letterSpacing: 0.3 },
+
+  // Toggle switch
+  toggleTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.border, padding: 2, justifyContent: 'center' },
+  toggleTrackActive: { backgroundColor: colors.primary },
+  toggleThumb: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#FFFFFF' },
+  toggleThumbActive: { alignSelf: 'flex-end' as const },
+  // Macro field inputs
+  macroFieldLabel: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase' as const, letterSpacing: 0.5, marginBottom: 4 },
+  macroFieldInput: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 11, fontSize: 16, fontWeight: '600' as const, color: colors.textPrimary, backgroundColor: colors.background, textAlign: 'center' as const },
 }); }

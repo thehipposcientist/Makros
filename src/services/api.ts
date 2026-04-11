@@ -14,35 +14,60 @@ function getBaseUrl(): string {
   return 'https://your-production-api.com';
 }
 
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
 async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000): Promise<T> {
-  const url = `${getBaseUrl()}${path}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-    });
-    clearTimeout(timer);
-    const data = await res.json();
-    if (!res.ok) {
-      const detail = Array.isArray(data.detail)
-        ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
-        : (typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`);
-      throw new Error(detail);
+  const maxRetries = 2;
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Exponential backoff: 1s, 2s
+      await new Promise(r => setTimeout(r, 1000 * attempt));
     }
-    return data as T;
-  } catch (e: any) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') {
-      throw new Error(`Request timed out. Backend: ${getBaseUrl()} — is it reachable?`);
+
+    const url = `${getBaseUrl()}${path}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+      });
+      clearTimeout(timer);
+
+      // Retry on transient server errors
+      if (RETRYABLE_STATUS.has(res.status) && attempt < maxRetries) {
+        console.log(`[api] ${path} returned ${res.status}, retrying (${attempt + 1}/${maxRetries})`);
+        lastError = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json();
+      if (!res.ok) {
+        const detail = Array.isArray(data.detail)
+          ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
+          : (typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`);
+        throw new Error(detail);
+      }
+      return data as T;
+    } catch (e: any) {
+      clearTimeout(timer);
+      if (e.name === 'AbortError') {
+        lastError = new Error(`Request timed out. Backend: ${getBaseUrl()} — is it reachable?`);
+        if (attempt < maxRetries) continue;
+        throw lastError;
+      }
+      if (e.message === 'Network request failed') {
+        lastError = new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
+        if (attempt < maxRetries) continue;
+        throw lastError;
+      }
+      throw e;
     }
-    if (e.message === 'Network request failed') {
-      throw new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
-    }
-    throw e;
   }
+  throw lastError ?? new Error('Request failed');
 }
 
 export async function register(email: string, username: string, password: string) {
@@ -136,6 +161,7 @@ export async function getAIPlans(
   const injuriesOrLimitations = buildInjuries(profile);
   const payload = {
     goal:                   profile.goal,
+    goalSelection:          profile.goalSelection ?? undefined,
     secondaryGoal:          profile.secondaryGoal,
     focusedMuscleGroup:     profile.focusedMuscleGroup,
     goalDetails:            profile.goalDetails,
@@ -148,6 +174,7 @@ export async function getAIPlans(
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations,
     mealRoutine:            profile.mealRoutine,
+    customMacros:           profile.customMacros ?? undefined,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
@@ -223,6 +250,7 @@ export async function getAINutritionPlan(
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            (profile as any).allergies ?? [],
     mealRoutine:          profile.mealRoutine,
+    customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
