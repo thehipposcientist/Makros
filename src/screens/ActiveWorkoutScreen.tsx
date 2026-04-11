@@ -9,7 +9,9 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory } from '../utils/workoutHistory';
+import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
+import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion } from '../services/api';
 import { getTheme, radius } from '../constants/theme';
@@ -898,6 +900,36 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       /* show basic summary without AI */
     } finally {
       setSummaryLoading(false);
+    }
+
+    // ── Apple Health: read metrics after workout (non-blocking) ──────────
+    try {
+      const healthEnabled = await isAppleHealthEnabled();
+      if (healthEnabled && isHealthKitAvailable()) {
+        const healthSummary = await readHealthSummary();
+        if (healthSummary) {
+          await saveHealthSummary(healthSummary);
+          // Calculate score using in-app workout history
+          const history = await loadWorkoutHistory();
+          const twoWeeksAgo = Date.now() - 14 * 86400000;
+          const appWorkouts14d = history.filter(s => +new Date(s.date) >= twoWeeksAgo && s.completed).length;
+          // Load daysPerWeek from profile
+          let daysPerWeek = 4;
+          try {
+            const profileRaw = await AsyncStorage.getItem('userProfile');
+            if (profileRaw) daysPerWeek = JSON.parse(profileRaw).daysPerWeek ?? 4;
+          } catch {}
+          const scoreResult = calculateHealthScore({
+            appWorkouts14d,
+            targetDaysPerWeek: daysPerWeek,
+            health: healthSummary,
+          });
+          await saveHealthScore(scoreResult);
+          console.log('[handleFinish] health score:', scoreResult.fitnessScore, 'recovery:', scoreResult.recoveryMarker);
+        }
+      }
+    } catch (healthErr) {
+      console.warn('[handleFinish] Apple Health read failed (non-critical):', healthErr);
     }
   };
 

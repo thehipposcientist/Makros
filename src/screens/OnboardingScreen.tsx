@@ -20,6 +20,8 @@ import {
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto } from '../services/api';
+import { isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
+import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, GOAL_MODIFIERS,
   modifiersForGoal, targetFocusesForGoal, goalCategory,
@@ -30,10 +32,14 @@ const logo = require('../../assets/images/Fitness brand logo with apple symbol d
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'context';
+type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
 
 function getSteps(): StepKey[] {
-  return ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine', 'context'];
+  const base: StepKey[] = ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine'];
+  // Only show Apple Health step on iOS
+  if (Platform.OS === 'ios') base.push('appleHealth');
+  base.push('context');
+  return base;
 }
 
 // ─── Supplement categories ────────────────────────────────────────────────────
@@ -208,6 +214,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   // Step 7 — Meal routine
   const [mealRoutine, setMealRoutine] = useState('');
+
+  // Step — Apple Health (iOS only)
+  const [appleHealthEnabled, setAppleHealthEnabled] = useState(false);
 
   // Step 8 — Background context
   const [injuries, setInjuries] = useState('');
@@ -1198,6 +1207,51 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     </View>
   );
 
+  const renderAppleHealthStep = () => (
+    <View>
+      <Text style={styles.stepTitle}>Do you use an Apple Watch?</Text>
+      <Text style={styles.hint}>Connect Apple Health to get recovery insights, a health-enhanced fitness score, and readiness tracking based on your heart rate, sleep, and activity data.</Text>
+
+      <View style={{ gap: 12, marginTop: 16 }}>
+        <TouchableOpacity
+          style={[styles.chipWide, appleHealthEnabled && styles.chipWideSelected]}
+          onPress={async () => {
+            if (!isHealthKitAvailable()) {
+              Alert.alert('Not Available', 'Apple Health is not available on this device.');
+              return;
+            }
+            const granted = await requestHealthPermissions();
+            if (granted) {
+              setAppleHealthEnabled(true);
+              await persistHealthEnabled(true);
+            } else {
+              Alert.alert('Permission Needed', 'Please enable Health access in Settings > Privacy > Health > Makros.');
+            }
+          }}>
+          <Text style={styles.chipIcon}>⌚</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Yes, connect Apple Health</Text>
+            <Text style={styles.chipWideDesc}>Reads heart rate, steps, sleep, and workouts</Text>
+          </View>
+          {appleHealthEnabled && <Text style={{ fontSize: 18 }}>✓</Text>}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.chipWide, !appleHealthEnabled && styles.chipWideSelected]}
+          onPress={async () => {
+            setAppleHealthEnabled(false);
+            await persistHealthEnabled(false);
+          }}>
+          <Text style={styles.chipIcon}>📱</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.chipWideLabel, !appleHealthEnabled && styles.chipWideLabelSelected]}>No, skip for now</Text>
+            <Text style={styles.chipWideDesc}>You can enable this later in Account settings</Text>
+          </View>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
   const renderStep = () => {
     switch (currentStepKey) {
       case 'goal':          return renderGoalStep();
@@ -1208,6 +1262,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       case 'foods':         return renderFoodsStep();
       case 'supplements':   return renderSupplementsStep();
       case 'mealRoutine':   return renderMealRoutineStep();
+      case 'appleHealth':   return renderAppleHealthStep();
       case 'context':       return renderContextStep();
     }
   };
@@ -1384,4 +1439,36 @@ const styles = StyleSheet.create({
   nextButtonFinal: { flex: 2, paddingVertical: 18, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 5 },
   nextButtonText: { fontSize: 16, fontWeight: '600', color: colors.background },
   nextButtonTextFinal: { fontSize: 18, fontWeight: '700', letterSpacing: 0.4 },
+
+  // Apple Health step
+  chipWide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 16,
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  chipWideSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '15',
+  },
+  chipWideLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  chipWideLabelSelected: {
+    color: colors.primary,
+  },
+  chipWideDesc: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  chipIcon: {
+    fontSize: 28,
+  },
 });

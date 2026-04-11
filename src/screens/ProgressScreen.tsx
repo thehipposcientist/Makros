@@ -7,8 +7,9 @@ import * as ImagePicker from 'expo-image-picker';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges } from '../utils/workoutHistory';
+import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore } from '../utils/workoutHistory';
+import { RECOVERY_LABELS } from '../utils/healthScore';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
@@ -25,6 +26,9 @@ interface ProgressScreenProps {
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const SHARE_LOGO_LIGHT = require('../../assets/images/main_logo_header-removebg-preview.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 
 interface StrengthPoint {
   key: string;
@@ -107,6 +111,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanLoading, setBodyScanLoading] = useState(false);
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
+  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -131,6 +137,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     AsyncStorage.getItem('bodyScanHistory').then(raw => {
       if (raw) try { setBodyScanHistory(JSON.parse(raw)); } catch {}
     });
+    // Load Apple Health data
+    loadHealthSummary().then(setHealthSummary);
+    loadHealthScore().then(setHealthScore);
   }, []);
 
   const handleShareFitnessScore = async () => {
@@ -401,6 +410,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {fitnessScore && (
             <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.fitnessScoreCard}>
+              {/* Logo for share/export */}
+              <Image
+                source={tc.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
+                style={styles.shareCardLogo}
+                resizeMode="contain"
+              />
               <View style={styles.fitnessScoreHeader}>
                 <View>
                   <Text style={styles.fitnessScoreLabel}>FITNESS SCORE</Text>
@@ -437,6 +452,60 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 ))}
               </View>
+
+              {/* Recovery Marker (Apple Health) */}
+              {healthScore && (
+                <View style={styles.recoverySection}>
+                  <View style={styles.recoveryHeader}>
+                    <Text style={styles.recoverySectionTitle}>Recovery Status</Text>
+                    <Text style={styles.recoveryBadge}>
+                      {RECOVERY_LABELS[healthScore.recoveryMarker].emoji} {RECOVERY_LABELS[healthScore.recoveryMarker].label}
+                    </Text>
+                  </View>
+                  <Text style={styles.recoveryAdvice}>{RECOVERY_LABELS[healthScore.recoveryMarker].advice}</Text>
+
+                  {/* Health-enhanced score */}
+                  <View style={styles.healthMetricsRow}>
+                    <Text style={styles.healthScoreLabel}>Health Score</Text>
+                    <Text style={styles.healthScoreValue}>{healthScore.fitnessScore}/100</Text>
+                  </View>
+
+                  {/* Quick metrics from Apple Health */}
+                  {healthSummary && (
+                    <View style={styles.healthMetricsGrid}>
+                      {healthSummary.restingHeartRate != null && (
+                        <View style={styles.healthMetric}>
+                          <Text style={styles.healthMetricValue}>{healthSummary.restingHeartRate}</Text>
+                          <Text style={styles.healthMetricLabel}>Resting HR</Text>
+                        </View>
+                      )}
+                      {healthSummary.avgSteps7d != null && (
+                        <View style={styles.healthMetric}>
+                          <Text style={styles.healthMetricValue}>{Math.round(healthSummary.avgSteps7d / 1000)}k</Text>
+                          <Text style={styles.healthMetricLabel}>Avg Steps</Text>
+                        </View>
+                      )}
+                      {healthSummary.avgSleepHours7d != null && (
+                        <View style={styles.healthMetric}>
+                          <Text style={styles.healthMetricValue}>{healthSummary.avgSleepHours7d}h</Text>
+                          <Text style={styles.healthMetricLabel}>Avg Sleep</Text>
+                        </View>
+                      )}
+                      {healthSummary.workouts7d != null && (
+                        <View style={styles.healthMetric}>
+                          <Text style={styles.healthMetricValue}>{healthSummary.workouts7d}</Text>
+                          <Text style={styles.healthMetricLabel}>Workouts 7d</Text>
+                        </View>
+                      )}
+                    </View>
+                  )}
+                  {healthSummary && (
+                    <Text style={styles.healthFetchedAt}>
+                      Updated {new Date(healthSummary.fetchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                    </Text>
+                  )}
+                </View>
+              )}
 
               {/* Share button */}
               <TouchableOpacity
@@ -1030,6 +1099,13 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 16,
     gap: 12,
   },
+  shareCardLogo: {
+    width: 100,
+    height: 28,
+    alignSelf: 'center',
+    marginBottom: 4,
+    opacity: 0.85,
+  },
   fitnessScoreHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1111,6 +1187,82 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     fontSize: 13,
     fontWeight: '700',
     color: colors.primary,
+  },
+
+  // ── Recovery / Apple Health ──
+  recoverySection: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    gap: 8,
+  },
+  recoveryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  recoverySectionTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  recoveryBadge: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  recoveryAdvice: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 18,
+  },
+  healthMetricsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  healthScoreLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  healthScoreValue: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.primary,
+  },
+  healthMetricsGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 8,
+    paddingVertical: 8,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+  },
+  healthMetric: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  healthMetricValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  healthMetricLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+  },
+  healthFetchedAt: {
+    fontSize: 10,
+    color: colors.textMuted,
+    textAlign: 'right',
+    marginTop: 2,
   },
 
   // ── Body Scan ──

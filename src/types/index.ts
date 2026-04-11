@@ -325,6 +325,38 @@ export interface BodyScanEntry {
   weightLbs?: number;
 }
 
+// ─── Apple Health / fitness scoring ───────────────────────────────────────────
+
+export type RecoveryMarker = 'green' | 'yellow' | 'red';
+
+export interface HealthSummary {
+  restingHeartRate: number | null;    // bpm
+  avgSteps7d: number | null;
+  workouts7d: number | null;          // Apple Health workout count
+  avgSleepHours7d: number | null;
+  lastNightSleepHours: number | null;
+  activeEnergy7d: number | null;      // kcal, optional
+  fetchedAt: string;                  // ISO timestamp
+}
+
+export interface HealthScoreResult {
+  fitnessScore: number;               // 0-100
+  recoveryMarker: RecoveryMarker;
+  scoreInputs: {
+    workoutPoints: number;            // 0-40
+    stepsPoints: number;              // 0-15
+    consistencyPoints: number;        // 0-15
+    heartRatePoints: number;          // 0-10
+    sleepPoints: number;              // 0-15
+    activeEnergyPoints: number;       // 0-5
+  };
+  recoveryInputs: {
+    sleepVsAverage: number | null;    // hours above/below 7d avg
+    rhrStatus: 'normal' | 'elevated' | 'unknown';
+    recentLoad: 'light' | 'moderate' | 'heavy';
+  };
+}
+
 // ─── Navigation types ─────────────────────────────────────────────────────────
 
 export type RootStackParamList = {

@@ -10,9 +10,24 @@
     ],
     "plugins": [
       "expo-notifications",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "react-native-health",
+        {
+          "isClinicalDataEnabled": false
+        }
+      ]
     ],
-    "ios": {},
+    "ios": {
+      "infoPlist": {
+        "NSHealthShareUsageDescription": "Makros reads your resting heart rate, steps, workouts, sleep, and active energy from Apple Health to calculate your fitness score and recovery status.",
+        "NSHealthUpdateUsageDescription": "Makros saves your completed workouts to Apple Health so they appear in your health timeline."
+      },
+      "entitlements": {
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.healthkit.background-delivery": false
+      }
+    },
     "scheme": "makros",
     "experiments": {
       "typedRoutes": true

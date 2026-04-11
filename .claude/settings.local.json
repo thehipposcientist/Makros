@@ -65,7 +65,9 @@
       "Bash(xargs grep:*)",
       "Bash(xargs basename:*)",
       "Bash(npm list:*)",
-      "Bash(npx kill-port:*)"
+      "Bash(npx kill-port:*)",
+      "Bash(ls -la /e/WorkoutPal/*.json /e/WorkoutPal/*.js)",
+      "Bash(npm view:*)"
     ]
   }
 }

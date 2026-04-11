@@ -260,3 +260,42 @@ export async function getPersonalRecords(): Promise<PR[]> {
     a.exerciseName.localeCompare(b.exerciseName)
   );
 }
+
+// ── Apple Health data persistence ────────────────────────────────────────────
+
+const HEALTH_SUMMARY_KEY = 'healthSummary';
+const HEALTH_SCORE_KEY = 'healthScoreResult';
+const APPLE_HEALTH_ENABLED_KEY = 'appleHealthEnabled';
+
+export async function saveHealthSummary(summary: import('../types').HealthSummary): Promise<void> {
+  await AsyncStorage.setItem(HEALTH_SUMMARY_KEY, JSON.stringify(summary));
+}
+
+export async function loadHealthSummary(): Promise<import('../types').HealthSummary | null> {
+  try {
+    const raw = await AsyncStorage.getItem(HEALTH_SUMMARY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+export async function saveHealthScore(result: import('../types').HealthScoreResult): Promise<void> {
+  await AsyncStorage.setItem(HEALTH_SCORE_KEY, JSON.stringify(result));
+}
+
+export async function loadHealthScore(): Promise<import('../types').HealthScoreResult | null> {
+  try {
+    const raw = await AsyncStorage.getItem(HEALTH_SCORE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+export async function isAppleHealthEnabled(): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(APPLE_HEALTH_ENABLED_KEY);
+    return raw === 'true';
+  } catch { return false; }
+}
+
+export async function setAppleHealthEnabled(enabled: boolean): Promise<void> {
+  await AsyncStorage.setItem(APPLE_HEALTH_ENABLED_KEY, enabled ? 'true' : 'false');
+}

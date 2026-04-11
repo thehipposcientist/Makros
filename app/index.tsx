@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts } from '../src/services/api';
@@ -11,7 +11,8 @@ import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import { colors, getTheme, radius } from '../src/constants/theme';
-import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey } from '../src/utils/workoutHistory';
+import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
+import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -528,12 +529,15 @@ function AccountInfoModal({
   const am = createAmStyles(tc);
   const [accountData, setAccountData] = useState<{ email: string; username: string } | null>(null);
   const [loading, setLoading]         = useState(true);
+  const [healthEnabled, setHealthEnabled] = useState(false);
+  const showHealthToggle = Platform.OS === 'ios';
 
   useEffect(() => {
     getMe(token)
       .then((data: any) => setAccountData({ email: data.email, username: data.username }))
       .catch(() => setAccountData(null))
       .finally(() => setLoading(false));
+    isAppleHealthEnabled().then(setHealthEnabled);
   }, [token]);
 
   const Row = ({ label, value }: { label: string; value: string }) => (
@@ -565,6 +569,42 @@ function AccountInfoModal({
               <Row label="Goal"   value={profile.goal.replace(/_/g, ' ')} />
               <Row label="Weight" value={`${profile.physicalStats.weightLbs} lbs`} />
               <Row label="Age"    value={String(profile.physicalStats.age)} />
+            </View>
+          )}
+
+          {showHealthToggle && (
+            <View style={am.healthToggleRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={am.healthToggleLabel}>Apple Health</Text>
+                <Text style={am.healthToggleDesc}>Sync heart rate, steps, sleep, and workouts to enhance your fitness score and recovery tracking.</Text>
+              </View>
+              <Switch
+                value={healthEnabled}
+                onValueChange={async (val) => {
+                  if (val) {
+                    if (!isHealthKitAvailable()) {
+                      // Native module not loaded — need a custom dev build
+                      Alert.alert(
+                        'Dev Build Required',
+                        'Apple Health requires a custom Expo dev build. It is not available in Expo Go. Enable this setting once you have a dev build installed.',
+                      );
+                      // Still save the preference so it activates once they build
+                      setHealthEnabled(true);
+                      await setAppleHealthEnabled(true);
+                      return;
+                    }
+                    const granted = await requestHealthPermissions();
+                    if (!granted) {
+                      Alert.alert('Permission Required', 'Please enable Health access in Settings > Privacy > Health > Makros.');
+                      return;
+                    }
+                  }
+                  setHealthEnabled(val);
+                  await setAppleHealthEnabled(val);
+                }}
+                trackColor={{ false: tc.border, true: tc.primary + '66' }}
+                thumbColor={healthEnabled ? tc.primary : tc.textMuted}
+              />
             </View>
           )}
 
@@ -608,6 +648,14 @@ function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return Style
   rowValue: { fontSize: 14, color: c.textPrimary,   fontWeight: '600', textTransform: 'capitalize' },
 
   errorText: { fontSize: 13, color: c.error, padding: 16 },
+
+  healthToggleRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: c.surfaceRaised, borderRadius: radius.md,
+    padding: 16, borderWidth: 1, borderColor: c.border,
+  },
+  healthToggleLabel: { fontSize: 14, fontWeight: '700', color: c.textPrimary, marginBottom: 3 },
+  healthToggleDesc: { fontSize: 11, color: c.textSecondary, lineHeight: 16 },
 
   signOutBtn: {
     backgroundColor: c.error + '22', borderRadius: radius.md,
