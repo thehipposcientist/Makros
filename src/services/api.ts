@@ -27,13 +27,10 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
     clearTimeout(timer);
     const data = await res.json();
     if (!res.ok) {
-      if (res.status === 502 || res.status === 503 || res.status === 504) {
-        throw new Error(`The AI server is temporarily unavailable (${res.status}). Please try again in a moment.`);
-      }
       const detail = Array.isArray(data.detail)
         ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
-        : (data.detail ?? 'Request failed');
-      throw new Error(`${res.status} ${detail}`);
+        : (typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`);
+      throw new Error(detail);
     }
     return data as T;
   } catch (e: any) {
@@ -150,12 +147,13 @@ export async function getAIPlans(
     supplementsAvailable:   profile.supplementsAvailable ?? [],
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations,
+    mealRoutine:            profile.mealRoutine,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
   console.log('[getAIPlans] SEND → /ai/plans', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek,
-    equipment: payload.equipment.length, foods: payload.foodsAvailable.length,
+    equipment: payload.equipment?.length ?? 0, foods: payload.foodsAvailable?.length ?? 0,
   });
 
   const result = await request<any>('/ai/plans', {
@@ -224,6 +222,7 @@ export async function getAINutritionPlan(
     supplementsAvailable: profile.supplementsAvailable ?? [],
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            (profile as any).allergies ?? [],
+    mealRoutine:          profile.mealRoutine,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
@@ -454,6 +453,8 @@ export async function askTrainerQuestion(
   safety_note: string;
   updated_workout_plan?: any | null;
   updated_nutrition_plan?: any | null;
+  updated_injuries?: any[] | null;
+  injury_clarification_needed?: boolean;
 }> {
   console.log('[askTrainerQuestion] SEND →', {
     mode: payload.mode,
@@ -461,10 +462,8 @@ export async function askTrainerQuestion(
     hasImage: !!payload.image_base64,
     conversationLength: payload.conversation?.length ?? 0,
     hasUserContext: !!payload.userContext,
-    userContextPreview: payload.userContext?.slice(0, 100),
     profileKeys: Object.keys(payload.profile ?? {}),
-    workoutDayCount: payload.workoutPlan?.workoutDays?.length ?? (payload.workoutPlan?.days?.length ?? 0),
-    todayMealsCount: payload.currentPlanContext?.todayMeals?.length ?? 0,
+    workoutDayCount: payload.workoutPlan?.days?.length ?? 0,
   });
 
   const resp = await request<{
@@ -474,11 +473,13 @@ export async function askTrainerQuestion(
     safety_note: string;
     updated_workout_plan?: any | null;
     updated_nutrition_plan?: any | null;
+    updated_injuries?: any[] | null;
+    injury_clarification_needed?: boolean;
   }>('/ai/trainer-question', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 60000);
+  }, 90000);
 
   console.log('[askTrainerQuestion] RECV ←', {
     answerPreview: resp.answer?.slice(0, 150),
@@ -486,8 +487,8 @@ export async function askTrainerQuestion(
     hasUpdatedWorkout: !!resp.updated_workout_plan,
     hasUpdatedNutrition: !!resp.updated_nutrition_plan,
     updatedWorkoutKeys: resp.updated_workout_plan ? Object.keys(resp.updated_workout_plan) : null,
-    updatedNutritionKeys: resp.updated_nutrition_plan ? Object.keys(resp.updated_nutrition_plan) : null,
-    actionItemCount: resp.action_items?.length ?? 0,
+    hasInjuries: !!(resp.updated_injuries?.length),
+    injuryCount: resp.updated_injuries?.length ?? 0,
   });
 
   return resp;

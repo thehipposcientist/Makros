@@ -64,13 +64,16 @@ export default function Index() {
   useEffect(() => { initApp(); }, []);
 
   const initApp = async () => {
-    const CACHE_VERSION = '3';
+    const CACHE_VERSION = '5';
     const storedVersion = await AsyncStorage.getItem('cacheVersion');
     if (storedVersion !== CACHE_VERSION) {
       await AsyncStorage.multiRemove([
+        'userProfile', 'aiWorkoutPlan',
+        'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+        'trainerNote', 'nutritionistNote', 'supplementStack',
         'workoutHistory', 'skippedWorkouts',
-        'mealChecks', 'mealEdits',
-        'metaData_v1',
+        'mealChecks', 'mealEdits', 'userLog',
+        'weekStartDate', 'metaData_v1',
       ]);
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }
@@ -102,8 +105,18 @@ export default function Index() {
   const handleAuthenticated = async (token: string, isNewUser: boolean) => {
     setAuthToken(token);
     if (isNewUser) {
-      await AsyncStorage.removeItem('userProfile');
+      // Wipe everything — brand new account should start with zero local state
+      await AsyncStorage.multiRemove([
+        'userProfile', 'aiWorkoutPlan',
+        'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+        'trainerNote', 'nutritionistNote', 'supplementStack',
+        'mealEdits', 'mealChecks', 'workoutHistory', 'userLog',
+        'skippedWorkouts', 'weekStartDate', 'metaData_v1',
+      ]);
       setUserProfile(null);
+      setTrainerNote(null);
+      setNutritionistNote(null);
+      setSupplementStack([]);
     } else {
       await loadProfile(token);
     }
@@ -112,8 +125,46 @@ export default function Index() {
   const handleProfileComplete = async (profile: UserProfile) => {
     const stamped = stampGoalStart(profile, null);
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
-    setUserProfile(stamped);
-    if (authToken) syncOnboarding(authToken, stamped).catch(() => null);
+    setUserProfile(stamped);   // transition to HomeScreen — loading overlays will show
+
+    if (!authToken) return;
+    syncOnboarding(authToken, stamped).catch(() => null);
+
+    // Generate initial plan with both loading states active
+    setIsWorkoutUpdating(true);
+    setIsNutritionUpdating(true);
+
+    getAIPlans(authToken, stamped)
+      .then(async (aiPlans) => {
+        if (aiPlans?.workout_plan) {
+          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+          const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
+          if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
+        }
+        // Store 3 rotating nutrition templates
+        if (aiPlans?.nutrition_plan_a) {
+          await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
+          await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a)); // legacy compat
+        }
+        if (aiPlans?.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
+        if (aiPlans?.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
+        if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
+        if (aiPlans?.supplementStack?.length) {
+          await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
+          setSupplementStack(aiPlans.supplementStack);
+        }
+        // Track when this week's plan started
+        await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
+        await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
+        setPlanRefreshKey(k => k + 1);
+      })
+      .catch((err) => {
+        Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
+      })
+      .finally(() => {
+        setIsWorkoutUpdating(false);
+        setIsNutritionUpdating(false);
+      });
   };
 
   const handleSignOut = async () => {
@@ -207,14 +258,18 @@ export default function Index() {
               if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
             }
 
-            if (updatesNutrition && aiPlans.nutrition_plan) {
-              const nnNote = aiPlans.nutritionistNote || aiPlans.nutrition_plan?.nutritionistNote || null;
-              await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan));
+            if (updatesNutrition && aiPlans.nutrition_plan_a) {
+              const nnNote = aiPlans.nutritionistNote || null;
+              await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
+              await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a)); // legacy compat
+              if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
+              if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
               if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
-              if (aiPlans.nutrition_plan?.supplementStack?.length) {
-                await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.nutrition_plan.supplementStack));
-                setSupplementStack(aiPlans.nutrition_plan.supplementStack);
+              if (aiPlans.supplementStack?.length) {
+                await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
+                setSupplementStack(aiPlans.supplementStack);
               }
+              await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
               const today = new Date();
               const tok = authToken;
               for (let i = 0; i < 3; i++) {

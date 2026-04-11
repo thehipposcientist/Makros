@@ -6,6 +6,7 @@ import math
 import os
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+import openai
 from openai import OpenAI
 
 from app.auth import get_current_user
@@ -31,14 +32,30 @@ from app.workout_progression import (
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
-
-
-def get_openai_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+print("[AI ROUTER IMPORTED] CODE_VERSION=TEMP_STRIPPED_V4")
 
 
 def get_openai_api_key() -> str | None:
     return os.getenv("OPENAI_API_KEY")
+
+# ── Model selectors (all configurable via .env) ───────────────────────────────
+def model_plan_generation() -> str:
+    return os.getenv("MODEL_PLAN_GENERATION", "gpt-5")
+
+def model_plan_update() -> str:
+    return os.getenv("MODEL_PLAN_UPDATE", "gpt-5-mini")
+
+def model_meal_parsing() -> str:
+    return os.getenv("MODEL_MEAL_PARSING", "gpt-5-mini")
+
+def model_chat() -> str:
+    return os.getenv("MODEL_CHAT", "gpt-5-nano")
+
+def model_chat_fallback() -> str:
+    return os.getenv("MODEL_CHAT_FALLBACK", "gpt-5-mini")
+
+def model_intent() -> str:
+    return os.getenv("MODEL_INTENT", "gpt-5-nano")
 
 
 # ─── Request schemas ──────────────────────────────────────────────────────────
@@ -87,6 +104,7 @@ class PlanRequest(BaseModel):
     prepTimeMinutes: int | None = None
     budgetLevel: str | None = None
     supplementsAvailable: list[str] = []
+    mealRoutine: str | None = None   # fixed meals/habits the user already follows
     userContext: str | None = None
 
 
@@ -118,6 +136,7 @@ class NutritionOnlyRequest(BaseModel):
     dietaryPreference: str | None = None
     allergies: list[str] = []
     mealsPerDay: int = 3
+    mealRoutine: str | None = None
     userContext: str | None = None
 
 
@@ -534,7 +553,8 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
             f'      "protein": {prot},\n'
             f'      "carbs": {carb},\n'
             f'      "fat": {fat_g},\n'
-            f'      "estimated_alignment": "e.g. high protein, moderate carb"\n'
+            f'      "estimated_alignment": "e.g. high protein, moderate carb",\n'
+            f'      "isRoutine": false\n'
             f'    }}'
         )
 
@@ -747,7 +767,10 @@ FORBIDDEN (user does NOT own): {forbidden_str}
 {preferred_str}
 {disliked_str}
 {injury_str}
-{f"Recent history:{chr(10)}{req.userContext}" if req.userContext else ""}
+{f"""TODAY'S CONTEXT — READ THIS CAREFULLY AND APPLY IT:
+{req.userContext}
+
+CRITICAL: Day 1 of this plan is TODAY. If the user trained any muscle group today or yesterday (as described above), that muscle group MUST NOT appear as the primary focus of Day 1. Schedule Day 1 around muscles that have had adequate rest. Rearrange the split so recovered muscles come first.""" if req.userContext else ""}
 
 GOAL RULE (follow strictly): {goal_rule}
 {focused_muscle_line}
@@ -758,7 +781,7 @@ INSTRUCTIONS:
 - Sessions should fill ~{req.workoutDurationMinutes} minutes (roughly 8 min per exercise slot).
 - ONLY use exercises requiring equipment from the available list.
 - If an exercise library is provided, use ONLY exercises from that list.
-- If recent workout history is provided, check which muscles were trained in the last 1-2 days and give them adequate recovery — do not schedule the same primary muscle group within 48 hours.
+- Apply the TODAY'S CONTEXT above — Day 1 must respect recent muscle training and any other user preferences stated.
 
 Return ONLY valid JSON matching this schema exactly:
 {{
@@ -805,49 +828,71 @@ def build_nutrition_prompt(req: PlanRequest) -> str:
     _, meal_schema = _meal_schema_and_targets(t)
     meal_summary, _ = _meal_schema_and_targets(t)
 
+    meal_routine_block = (
+        f"\nUSER'S FIXED MEAL ROUTINE (non-negotiable — you MUST build around this):\n{req.mealRoutine}\n"
+        "Keep any meals the user already eats fixed exactly as described. "
+        "Fill remaining meals with the available foods to hit the daily targets.\n"
+        "IMPORTANT: For every meal that comes from the user's fixed routine above, set \"isRoutine\": true in the meal object. "
+        "For AI-generated meals, set \"isRoutine\": false."
+        if req.mealRoutine else ""
+    )
+
+    user_context_block = (
+        f"\nUSER CONTEXT — READ AND APPLY THIS:\n{req.userContext}\n"
+        "Factor in any foods, habits, schedule constraints, or preferences mentioned above when building all 3 templates."
+        if req.userContext else ""
+    )
+
     return f"""You are a registered dietitian.
-Generate a personalised daily nutrition plan for this user.
+Generate 3 distinct daily meal templates (A, B, C) for this user. All three must hit the same daily targets using the same available foods, but vary the meals, recipes, and portion combinations to provide variety across the week.
 
 USER PROFILE:
 - Goal: {req.goal} (pace: {req.goalDetails.pace})
 - Age: {ps.age}  Gender: {ps.gender}  Weight: {ps.weightLbs} lbs  Height: {height_str}
 - Calorie strategy: {t['goal_rate_summary']}
-
+{meal_routine_block}
+{user_context_block}
 STRICT FOOD CONSTRAINT — THIS IS NON-NEGOTIABLE:
 The user's ONLY available foods are: {foods_str}
 
 Every single ingredient in every meal MUST come from this list and nowhere else.
 Do NOT add any food that is not in this list — not as a variation, not as a substitution, not as a garnish.
-If a food is not on the list above, it does not exist for this user. Do not use it.
 
 Supplements user already takes: {supps_str if supps_str else "none — recommend best for goal"}
 {diet_context}
 Meals per day: {t['meals']}
 
-DAILY TARGETS (include these exactly in "targets"):
+DAILY TARGETS (same for all three templates):
 {t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
 Per-meal approximate targets (reference only):
 {meal_summary}
 
 INSTRUCTIONS:
-- Every ingredient must be from the available foods list above — no exceptions.
-- For each meal: recipe name and ingredient list with amounts.
-- Add "estimated_alignment" field (e.g. "high protein, moderate carb").
-- supplementStack: 2-4 evidence-based supplements. Prioritise from user's existing list, add critical missing ones.
+- All 3 templates must use only foods from the list above.
+- Each template: recipe name + ingredient list with amounts for each meal.
+- Add "estimated_alignment" field per meal (e.g. "high protein, moderate carb").
+- Make templates meaningfully different — vary recipes, not just amounts.
+- For any meal that comes from the user's fixed routine, set "isRoutine": true.
+- supplementStack: 2-4 evidence-based supplements (include once, at top level).
 
-Return ONLY valid JSON matching this schema exactly:
+Be concise. Return only the required JSON.
+
+Return ONLY valid JSON:
 {{
-  "nutritionistNote": "60-80 word explanation of calorie target, macro split, and food choices for this user.",
-  "nutrition_plan": {{
-    "targets": {{
-      "calories": {t['calories']},
-      "protein": {t['protein']},
-      "carbs": {t['carbs']},
-      "fat": {t['fat']}
-    }},
-    "supplementStack": [
-      {{"name": "string", "dose": "string", "timing": "string", "purpose": "string"}}
-    ],
+  "nutritionistNote": "60-80 word explanation of calorie target, macro split, and rotation approach.",
+  "supplementStack": [
+    {{"name": "string", "dose": "string", "timing": "string", "purpose": "string"}}
+  ],
+  "nutrition_plan_a": {{
+    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
+{meal_schema}
+  }},
+  "nutrition_plan_b": {{
+    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
+{meal_schema}
+  }},
+  "nutrition_plan_c": {{
+    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
 {meal_schema}
   }}
 }}"""
@@ -894,41 +939,460 @@ def _validate_plans(plans: dict, req: PlanRequest) -> None:
 
 # ─── Parallel AI call helpers ────────────────────────────────────────────────
 
-def _call_workout_ai(client: OpenAI, prompt: str) -> dict:
+def _log_openai_error(tag: str, attempt: int, model: str, e: Exception) -> str:
+    """Log full upstream OpenAI error detail and return a diagnostic string."""
+    err_type = type(e).__name__
+    if isinstance(e, openai.APIStatusError):
+        status = e.status_code
+        # Dump every possible field — body can be dict, str, or None
+        raw_body   = getattr(e, 'body', 'NO_BODY_ATTR')
+        raw_str    = str(e)
+        raw_repr   = repr(e)
+        raw_message = getattr(e, 'message', None)
+        raw_response = getattr(e, 'response', None)
+
+        # Try nested error dict (standard OpenAI format)
+        if isinstance(raw_body, dict):
+            err_code = raw_body.get('error', {}).get('code')
+            err_msg  = raw_body.get('error', {}).get('message') or raw_message or raw_str
+        else:
+            err_code = None
+            err_msg  = raw_message or raw_str
+
+        print(
+            f"[{tag}] attempt {attempt} OPENAI {status} ERROR"
+            f"\n  model      : {model}"
+            f"\n  error_type : {err_type}"
+            f"\n  error_code : {err_code}"
+            f"\n  message    : {err_msg}"
+            f"\n  body       : {raw_body}"
+            f"\n  str(e)     : {raw_str}"
+            f"\n  repr(e)    : {raw_repr}"
+        )
+        if status == 401:
+            print(f"  → DIAGNOSIS A/B: bad API key or key has no access to this model")
+        elif status == 403:
+            print(f"  → DIAGNOSIS B: API key / project lacks access to model '{model}'")
+        elif status == 404:
+            print(f"  → DIAGNOSIS A: model '{model}' not found — check exact name")
+        elif status == 400:
+            print(f"  → DIAGNOSIS C/D: bad request — unsupported param or payload for this model")
+        elif status == 429:
+            print(f"  → DIAGNOSIS D: rate limit or quota exceeded")
+        return f"OpenAI {status} ({err_type}) model={model}: {err_msg}"
+    elif isinstance(e, openai.APIConnectionError):
+        print(f"[{tag}] attempt {attempt} CONNECTION ERROR model={model}: {e}")
+        return f"OpenAI connection error model={model}: {e}"
+    elif isinstance(e, openai.APITimeoutError):
+        print(f"[{tag}] attempt {attempt} TIMEOUT model={model}: {e}")
+        return f"OpenAI timeout model={model}: {e}"
+    else:
+        print(f"[{tag}] attempt {attempt} UNEXPECTED {err_type} model={model}: {e}")
+        return f"{err_type} model={model}: {e}"
+
+
+def _is_gpt5(model: str) -> bool:
+    """True for any gpt-5 family model. Uses prefix only — no o-series."""
+    return model.startswith("gpt-5")
+
+
+def _chat_create(client: OpenAI, **kwargs) -> object:
+    """
+    Drop-in wrapper for client.chat.completions.create() that normalises params
+    per model family.
+
+    gpt-5 family:
+      - strip temperature (only default accepted)
+      - strip response_format=json_object (use json_schema instead)
+      - rename max_tokens -> max_completion_tokens
+    All other models: params passed through unchanged.
+    """
+    model = kwargs.get("model", "")
+    print(f"[_chat_create] CODE_VERSION=TEMP_HARDCODED_V5 model={model!r} keys={list(kwargs.keys())}")
+    if _is_gpt5(model):
+        kwargs["temperature"] = 1
+        rf = kwargs.get("response_format", {})
+        if isinstance(rf, dict) and rf.get("type") == "json_object":
+            kwargs.pop("response_format", None)
+        if "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+    return client.chat.completions.create(**kwargs)
+
+
+def _build_chat_kwargs(
+    model: str,
+    messages: list[dict],
+    json_schema: dict | None = None,
+    max_tokens: int | None = None,
+    timeout_secs: int = 120,
+) -> dict:
+    """
+    Build kwargs for _chat_create adapted to model family.
+
+    gpt-4o family  → response_format=json_object
+    gpt-5 family   → response_format=json_schema (strict flag from schema def)
+                     Falls back to prompt-enforced JSON if no schema provided.
+    """
+    kwargs: dict = dict(model=model, messages=messages, timeout=timeout_secs)
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if _is_gpt5(model):
+        kwargs["temperature"] = 1
+        if json_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": json_schema.get("name", "response"),
+                    "strict": json_schema.get("strict", True),
+                    "schema": json_schema["schema"],
+                },
+            }
+        # else: no response_format — model follows prompt instructions
+    else:
+        kwargs["response_format"] = {"type": "json_object"}
+    return kwargs
+
+
+def _looks_truncated(content: str) -> bool:
+    """Heuristic: response is likely cut off if it doesn't end with a closing brace/bracket."""
+    stripped = content.strip().rstrip("`").strip()
+    return bool(stripped) and stripped[-1] not in ("}", "]")
+
+
+def _extract_json(content: str) -> dict:
+    """Extract JSON from model output, stripping any markdown fences."""
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        inner = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        text = inner.strip()
+    return json.loads(text)
+
+
+# ─── JSON schemas for structured output ───────────────────────────────────────
+# strict=True  → all properties required, additionalProperties=false (gpt-5 enforced)
+# strict=False → advisory schema; used when output shape is variable
+
+SCHEMA_WORKOUT = {
+    "name": "workout_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "trainerNote": {"type": "string"},
+            "workout_plan": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "totalDays": {"type": "integer"},
+                    "days": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "day": {"type": "string"},
+                                "focus": {"type": "string"},
+                                "exercises": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "sets": {"type": "integer"},
+                                            "reps": {"type": "string"},
+                                            "restSeconds": {"type": "integer"},
+                                            "equipment": {"type": "string"},
+                                        },
+                                        "required": ["name", "sets", "reps", "restSeconds", "equipment"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
+                            "required": ["day", "focus", "exercises"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["name", "totalDays", "days"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["trainerNote", "workout_plan"],
+        "additionalProperties": False,
+    },
+}
+
+# Nutrition: strict=False because meal keys vary (breakfast/lunch/dinner/snack/snack_1/snack_2)
+_NUTRITION_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "targets": {
+            "type": "object",
+            "properties": {
+                "calories": {"type": "integer"},
+                "protein": {"type": "integer"},
+                "carbs": {"type": "integer"},
+                "fat": {"type": "integer"},
+            },
+            "required": ["calories", "protein", "carbs", "fat"],
+        },
+    },
+    "required": ["targets"],
+}
+
+SCHEMA_NUTRITION = {
+    "name": "nutrition_response",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "nutritionistNote": {"type": "string"},
+            "supplementStack": {"type": "array", "items": {"type": "object"}},
+            "nutrition_plan_a": _NUTRITION_PLAN_SCHEMA,
+            "nutrition_plan_b": _NUTRITION_PLAN_SCHEMA,
+            "nutrition_plan_c": _NUTRITION_PLAN_SCHEMA,
+        },
+        "required": ["nutritionistNote", "nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"],
+    },
+}
+
+# Trainer Q&A: strict=False because updated plan fields are optional/null
+SCHEMA_TRAINER_QUESTION = {
+    "name": "trainer_question_response",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "action_items": {"type": "array", "items": {"type": "string"}},
+            "needs_plan_update": {"type": "boolean"},
+            "safety_note": {"type": "string"},
+            "updated_workout_plan": {},
+            "updated_nutrition_plan": {},
+            "updated_injuries": {
+                "type": ["array", "null"],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "description": {"type": "string"},
+                        "bodyPart": {"type": "string"},
+                        "status": {"type": "string"},
+                        "notes": {"type": "string"},
+                    },
+                },
+            },
+            "injury_clarification_needed": {"type": "boolean"},
+        },
+        "required": ["answer", "action_items", "needs_plan_update", "safety_note"],
+    },
+}
+
+SCHEMA_WORKOUT_QUESTION = {
+    "name": "workout_question_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "quick_cues": {"type": "array", "items": {"type": "string"}},
+            "adjustment": {"type": "string"},
+            "safety_note": {"type": "string"},
+        },
+        "required": ["answer", "quick_cues", "adjustment", "safety_note"],
+        "additionalProperties": False,
+    },
+}
+
+SCHEMA_WORKOUT_SUMMARY = {
+    "name": "workout_summary_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "motivationMessage": {"type": "string"},
+            "recommendations": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["motivationMessage", "recommendations"],
+        "additionalProperties": False,
+    },
+}
+
+SCHEMA_FOOD_PHOTO = {
+    "name": "food_photo_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "meal_name": {"type": "string"},
+            "items": {"type": "array", "items": {"type": "string"}},
+            "calories": {"type": "number"},
+            "protein": {"type": "number"},
+            "carbs": {"type": "number"},
+            "fat": {"type": "number"},
+        },
+        "required": ["meal_name", "items", "calories", "protein", "carbs", "fat"],
+        "additionalProperties": False,
+    },
+}
+
+SCHEMA_SCAN_FOODS = {
+    "name": "scan_foods_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "foods": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "serving": {"type": "string"},
+                        "calories": {"type": "number"},
+                        "protein": {"type": "number"},
+                        "carbs": {"type": "number"},
+                        "fat": {"type": "number"},
+                    },
+                    "required": ["name", "serving", "calories", "protein", "carbs", "fat"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["foods"],
+        "additionalProperties": False,
+    },
+}
+
+# Supplement: strict=False — two shapes: found=true (full) vs found=false (minimal)
+SCHEMA_SUPPLEMENT_INFO = {
+    "name": "supplement_info_response",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "found": {"type": "boolean"},
+            "name": {"type": "string"},
+            "category": {"type": "string"},
+            "tagline": {"type": "string"},
+            "whatItDoes": {"type": "string"},
+            "evidence": {"type": "string"},
+            "dose": {"type": "string"},
+            "timing": {"type": "string"},
+            "goodFor": {"type": "array", "items": {"type": "string"}},
+            "cautions": {"type": "string"},
+        },
+        "required": ["found", "name"],
+    },
+}
+
+SCHEMA_SCAN_EQUIPMENT = {
+    "name": "scan_equipment_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "equipment": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["equipment"],
+        "additionalProperties": False,
+    },
+}
+
+SCHEMA_FORM_PHOTO = {
+    "name": "form_photo_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "quick_cues": {"type": "array", "items": {"type": "string"}},
+            "likely_target": {"type": "string"},
+            "red_flags": {"type": "array", "items": {"type": "string"}},
+            "safety_note": {"type": "string"},
+        },
+        "required": ["answer", "quick_cues", "likely_target", "red_flags", "safety_note"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_tokens: int = 2000) -> dict:
     """Synchronous OpenAI call for the workout plan (run in a thread)."""
     last_error: Exception | None = None
-    for attempt in range(1, 3):
+    _model = model or model_plan_generation()
+    token_limits = [max_tokens, max_tokens + 1000]  # retry with more tokens if truncated
+    for attempt, tok_limit in enumerate(token_limits, start=1):
         try:
-            response = client.chat.completions.create(
-                model=get_openai_model(),
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": "You are an expert fitness coach. Always respond with valid JSON only — no markdown, no extra text."},
+            kwargs = _build_chat_kwargs(
+                _model,
+                [
+                    {"role": "system", "content": "You are an expert fitness coach. Be concise. Return only the required JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.7,
-                timeout=100,
+                json_schema=SCHEMA_WORKOUT,
+                max_tokens=tok_limit,
+                timeout_secs=120,
             )
-            data = json.loads(response.choices[0].message.content)
+            response = _chat_create(client, **kwargs)
+            raw = response.choices[0].message.content
+            if _looks_truncated(raw):
+                print(f"[AI /plans workout] attempt {attempt} TRUNCATED (tok_limit={tok_limit}) — retrying with more tokens")
+                last_error = ValueError(f"response truncated at {tok_limit} tokens")
+                continue
+            data = _extract_json(raw)
             if not data.get("workout_plan") or not data["workout_plan"].get("days"):
                 raise ValueError("workout_plan missing or has no days")
-            print(f"[AI /plans workout] attempt {attempt} OK — {len(data['workout_plan']['days'])} days, trainerNote: {bool(data.get('trainerNote'))}")
+            print(f"[AI /plans workout] attempt {attempt} OK — {len(data['workout_plan']['days'])} days")
             return data
         except json.JSONDecodeError as e:
             last_error = ValueError(f"invalid JSON attempt {attempt}: {e}")
+            print(f"[AI /plans workout] attempt {attempt} JSON decode error: {e}")
         except ValueError as e:
             last_error = e
-            print(f"[AI /plans workout] attempt {attempt} failed: {e}")
+            print(f"[AI /plans workout] attempt {attempt} value error: {e}")
+        except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
+            diag = _log_openai_error("AI /plans workout", attempt, _model, e)
+            raise ValueError(diag) from e
         except Exception as e:
+            print(f"[AI /plans workout] attempt {attempt} unexpected {type(e).__name__}: {e}")
             raise
-    raise ValueError(f"Workout generation failed after 2 attempts: {last_error}")
+    raise ValueError(f"Workout AI failed after {len(token_limits)} attempts: {last_error}")
+
+
+def _food_covered(item: str, allowed_lower: list[str]) -> bool:
+    """
+    Return True if this food item is covered by at least one entry in allowed_lower.
+    Handles quantity prefixes ("1 egg" vs "eggs"), plural/singular, and multi-word foods.
+    """
+    item_lower = item.lower()
+    for a in allowed_lower:
+        # Direct substring match
+        if a in item_lower:
+            return True
+        # Check each significant word in the allowed food against the item
+        for word in a.split():
+            if len(word) <= 3:
+                continue
+            if word in item_lower:
+                return True
+            # Singular ↔ plural: strip trailing 's' from either side
+            stem = word.rstrip("s")
+            if len(stem) > 3 and stem in item_lower:
+                return True
+            # Check if item word matches allowed stem
+            for item_word in item_lower.split():
+                if len(item_word) <= 3:
+                    continue
+                if item_word == word or item_word == stem or item_word.rstrip("s") == stem:
+                    return True
+    return False
 
 
 def _check_food_violations(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
     """
     Return a list of food strings that appear in the plan but are NOT covered
-    by the allowed_foods list.  A food item is 'covered' if at least one allowed
-    food name is a case-insensitive substring of the ingredient string.
+    by the allowed_foods list.
     """
     if not allowed_foods:
         return []
@@ -940,62 +1404,91 @@ def _check_food_violations(nutrition_plan: dict, allowed_foods: list[str]) -> li
         if not meal or not isinstance(meal, dict):
             continue
         for food_item in meal.get("foods", []):
-            item_lower = str(food_item).lower()
-            # Strip quantities like "150g ", "2 tbsp " before checking
-            # covered = at least one allowed food is a substring of the item
-            if not any(a in item_lower for a in allowed_lower):
+            if not _food_covered(str(food_item), allowed_lower):
                 violations.append(food_item)
     return violations
 
 
-def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | None = None) -> dict:
+def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | None = None, model: str | None = None, max_tokens: int = 1500) -> dict:
     """Synchronous OpenAI call for the nutrition plan (run in a thread)."""
     last_error: Exception | None = None
-    violation_note = ""
-    for attempt in range(1, 4):  # up to 3 attempts
+    _model = model or model_plan_generation()
+    max_attempts = 3
+    current_max_tokens = max_tokens
+    for attempt in range(1, max_attempts + 1):
         try:
-            full_prompt = prompt + violation_note
-            response = client.chat.completions.create(
-                model=get_openai_model(),
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": "You are a registered dietitian. Always respond with valid JSON only — no markdown, no extra text."},
+            full_prompt = prompt
+            kwargs = _build_chat_kwargs(
+                _model,
+                [
+                    {"role": "system", "content": "You are a registered dietitian. Be concise. Return only the required JSON."},
                     {"role": "user", "content": full_prompt},
                 ],
-                temperature=0.7,
-                timeout=100,
+                json_schema=SCHEMA_NUTRITION,
+                max_tokens=current_max_tokens,
+                timeout_secs=120,
             )
-            data = json.loads(response.choices[0].message.content)
-            np_ = data.get("nutrition_plan", {})
-            if not np_.get("targets"):
-                raise ValueError("nutrition_plan missing targets")
+            response = _chat_create(client, **kwargs)
+            raw = response.choices[0].message.content
+            if _looks_truncated(raw):
+                current_max_tokens = current_max_tokens + 500
+                print(f"[AI /plans nutrition] attempt {attempt} TRUNCATED — retrying with max_tokens={current_max_tokens}")
+                last_error = ValueError(f"response truncated at {current_max_tokens - 500} tokens")
+                continue
+            data = _extract_json(raw)
+            # Validate all 3 templates
             meal_keys_set = {"breakfast", "lunch", "dinner", "snack"}
-            if not any(k in np_ for k in meal_keys_set):
-                raise ValueError("nutrition_plan has no meal entries")
+            for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
+                np_ = data.get(key, {})
+                if not np_.get("targets"):
+                    raise ValueError(f"{key} missing targets")
+                if not any(k in np_ for k in meal_keys_set):
+                    raise ValueError(f"{key} has no meal entries")
 
-            # Food constraint check — reject and retry if forbidden foods used
-            if allowed_foods:
-                violations = _check_food_violations(np_, allowed_foods)
-                if violations:
-                    unique_v = list(dict.fromkeys(violations))[:10]
-                    violation_note = (
-                        f"\n\nPREVIOUS ATTEMPT VIOLATION — the following ingredients are NOT in the user's food list "
-                        f"and must be replaced immediately: {', '.join(unique_v)}.\n"
-                        f"Use ONLY foods from the list provided. Every single ingredient must be from that list. "
-                        f"Do not include any other foods under any circumstances."
-                    )
-                    raise ValueError(f"Forbidden foods used: {unique_v}")
+            # Food constraint is enforced via the prompt — no hard rejection here
 
             print(f"[AI /plans nutrition] attempt {attempt} OK — nutritionistNote: {bool(data.get('nutritionistNote'))}")
             return data
         except json.JSONDecodeError as e:
             last_error = ValueError(f"invalid JSON attempt {attempt}: {e}")
+            print(f"[AI /plans nutrition] attempt {attempt} JSON decode error: {e}")
         except ValueError as e:
             last_error = e
-            print(f"[AI /plans nutrition] attempt {attempt} failed: {e}")
+            print(f"[AI /plans nutrition] attempt {attempt} value error: {e}")
+        except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
+            diag = _log_openai_error("AI /plans nutrition", attempt, _model, e)
+            raise ValueError(diag) from e
         except Exception as e:
+            print(f"[AI /plans nutrition] attempt {attempt} unexpected {type(e).__name__}: {e}")
             raise
-    raise ValueError(f"Nutrition generation failed after {attempt} attempts: {last_error}")
+    raise ValueError(f"Nutrition AI failed after {max_attempts} attempts: {last_error}")
+
+
+# ─── Plan validation ─────────────────────────────────────────────────────────
+
+def _validate_plans(result: dict, req: PlanRequest) -> None:
+    """Raise ValueError if the assembled plan result is structurally invalid."""
+    wp = result.get("workout_plan")
+    if not wp or not isinstance(wp, dict):
+        raise ValueError("workout_plan missing from result")
+    days = wp.get("days", [])
+    if not days:
+        raise ValueError("workout_plan has no days")
+    if len(days) != req.daysPerWeek:
+        print(f"[_validate_plans] WARN: expected {req.daysPerWeek} days, got {len(days)}")
+    for d in days:
+        if not d.get("exercises"):
+            raise ValueError(f"Day '{d.get('day', '?')}' has no exercises")
+
+    meal_keys_set = ("breakfast", "lunch", "dinner", "snack")
+    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
+        np_ = result.get(key)
+        if not np_ or not isinstance(np_, dict):
+            raise ValueError(f"{key} missing from result")
+        if not np_.get("targets"):
+            raise ValueError(f"{key} missing targets")
+        if not any(k in np_ for k in meal_keys_set):
+            raise ValueError(f"{key} has no meal entries")
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -1089,8 +1582,45 @@ def recommend_weight(
         raise HTTPException(status_code=502, detail=f"Recommendation failed: {str(e)}")
 
 
+@router.get("/smoke-test")
+async def smoke_test(model: str = "gpt-5"):
+    """
+    Diagnostic endpoint — tests bare chat completions with no structured output.
+    GET /ai/smoke-test?model=gpt-5
+    Returns {"ok": true, "reply": "..."} or {"ok": false, "error": "..."}
+    No auth required so it can be hit with curl quickly.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {"ok": False, "error": "OPENAI_API_KEY not configured"}
+    client = OpenAI(api_key=api_key)
+    print(f"[smoke-test] model={model}")
+    try:
+        response = await asyncio.to_thread(
+            lambda: _chat_create(client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say hello in exactly 5 words."},
+                ],
+                timeout=30,
+            )
+        )
+        reply = response.choices[0].message.content
+        print(f"[smoke-test] OK — reply: {reply!r}")
+        return {"ok": True, "model": model, "reply": reply}
+    except openai.APIStatusError as e:
+        body = getattr(e, 'body', None)
+        msg = str(e)
+        print(f"[smoke-test] FAIL {e.status_code} — body={body}  str={msg}")
+        return {"ok": False, "model": model, "http_status": e.status_code, "error": msg, "body": body}
+    except Exception as e:
+        print(f"[smoke-test] FAIL {type(e).__name__}: {e}")
+        return {"ok": False, "model": model, "error": f"{type(e).__name__}: {e}"}
+
+
 @router.post("/plans")
-async def generate_plans(
+async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     req: PlanRequest,
     current_user: User = Depends(get_current_user),
 ):
@@ -1100,23 +1630,32 @@ async def generate_plans(
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
-    print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}")
+    _m = model_plan_generation()
+    print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
     try:
         workout_data, nutrition_data = await asyncio.gather(
-            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req)),
-            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req), req.foodsAvailable),
+            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 2000),
+            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req), req.foodsAvailable, _m, 4000),
         )
-    except ValueError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+    except (ValueError, Exception) as e:
+        detail = str(e)
+        print(f"[AI /plans] FAILED — {detail}")
+        raise HTTPException(status_code=502, detail=detail)
 
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
+        "supplementStack":  nutrition_data.get("supplementStack", []),
         "workout_plan":     workout_data["workout_plan"],
-        "nutrition_plan":   nutrition_data["nutrition_plan"],
+        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
+        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
+        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
     }
+    try:
+        _validate_plans(result, req)
+    except ValueError as e:
+        print(f"[AI /plans] validation failed — {e}")
+        raise HTTPException(status_code=502, detail=f"Plan validation failed: {e}")
     print(f"[AI /plans] done — workout days={len(result['workout_plan'].get('days', []))}")
     return result
 
@@ -1148,9 +1687,10 @@ async def generate_workout_plan(
     )
 
     client = OpenAI(api_key=api_key)
-    print(f"[AI /plans/workout] generating — goal={req.goal}, days={req.daysPerWeek}, equipment={len(req.equipment)}")
+    _m = model_plan_update()
+    print(f"[AI /plans/workout] updating — goal={req.goal}, days={req.daysPerWeek}, equipment={len(req.equipment)}, model={_m}")
     try:
-        workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req))
+        workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 800)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -1186,13 +1726,15 @@ async def generate_nutrition_plan(
         dietaryPreference=req.dietaryPreference,
         allergies=req.allergies,
         mealsPerDay=req.mealsPerDay,
+        mealRoutine=req.mealRoutine,
         userContext=req.userContext,
     )
 
     client = OpenAI(api_key=api_key)
-    print(f"[AI /plans/nutrition] generating — goal={req.goal}, foods={len(req.foodsAvailable)}")
+    _m = model_plan_update()
+    print(f"[AI /plans/nutrition] updating — goal={req.goal}, foods={len(req.foodsAvailable)}, model={_m}")
     try:
-        nutrition_data = await asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(plan_req), req.foodsAvailable)
+        nutrition_data = await asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(plan_req), req.foodsAvailable, _m, 3500)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -1200,7 +1742,10 @@ async def generate_nutrition_plan(
 
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
-        "nutrition_plan":   nutrition_data["nutrition_plan"],
+        "supplementStack":  nutrition_data.get("supplementStack", []),
+        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
+        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
+        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
     }
     print(f"[AI /plans/nutrition] done — nutritionistNote={bool(result['nutritionistNote'])}")
     return result
@@ -1248,6 +1793,7 @@ def ask_trainer_question(
             "If the user asks to modify meals, swap foods, or change targets, set needs_plan_update=true "
             "and return the COMPLETE updated nutrition plan (full structure, not partial). "
             "Never return a partial plan — always include all meal keys even if unchanged. "
+            "CRITICAL: Any meal with isRoutine=true in the current plan MUST be preserved exactly as-is in your updated plan. Do not modify, swap, or remove routine meals. "
             "IMPORTANT: updated_workout_plan must always be null — you only manage nutrition. "
             "Return JSON only."
         )
@@ -1261,15 +1807,31 @@ def ask_trainer_question(
             "You have access to the user's full profile, workout plan, progress history, and activity log. "
             "Give detailed, personalised training advice. Always reference specific exercises, sets, "
             "reps, and weights from their actual plan. "
-            "Always check the profile's 'injuries' field first — if injuries are present, "
+            "Always check the profile's 'injuries' and 'injuryEntries' fields first — if injuries are present, "
             "remove or substitute any exercises that stress those areas. "
             "If the user asks for plan changes, exercise swaps, or injury modifications, "
             "set needs_plan_update=true and return the COMPLETE updated workout plan "
             "(all days, all exercises — not just the changed ones). "
+            "The workout plan uses this exact structure: { name, totalDays, days: [{ day, focus, exercises: [{ name, sets, reps, restSeconds, equipment }] }] }. "
+            "Return the full plan in this exact format — do NOT use 'workoutDays' key, use 'days'. "
+            "INJURY HANDLING: If the user mentions pain, discomfort, or injury, "
+            "and you don't already have enough info (body part, type of pain, when it occurs), "
+            "ask ONE clarifying question in your answer and set injury_clarification_needed=true. "
+            "Once you have enough info, set updated_injuries with the new/updated entries "
+            "(each with id=new UUID or existing id, description, bodyPart, status='active'|'recovering'|'resolved', notes). "
+            "When updating injuries, also update the workout plan to avoid the injured area. "
             "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
             "IMPORTANT: updated_nutrition_plan must always be null — you only manage training. "
             "Return JSON only."
         )
+
+    injury_schema = (
+        '  "updated_injuries": [{"id": "uuid", "description": "...", "bodyPart": "...", "status": "active|recovering|resolved", "notes": "..."}] or null,\n'
+        '  "injury_clarification_needed": true|false\n'
+        if not is_nutritionist else
+        '  "updated_injuries": null,\n'
+        '  "injury_clarification_needed": false\n'
+    )
 
     user_text = (
         f"Recent conversation (most recent last):\n"
@@ -1282,10 +1844,16 @@ def ask_trainer_question(
         '  "action_items": ["specific actionable step 1", "..."],\n'
         '  "needs_plan_update": true|false,\n'
         '  "safety_note": "string or empty string",\n'
-        + plan_schema +
+        + plan_schema
+        + injury_schema +
         '}\n\n'
         "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
-        "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly."
+        "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly.\n"
+        + (
+            "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
+            '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}'
+            if not is_nutritionist else ""
+        )
     )
 
     # Build user message — use vision format if image is attached
@@ -1311,31 +1879,84 @@ def ask_trainer_question(
     print(f"[trainer-question] convo_turns={len(trimmed_convo)} has_image={bool(body.image_base64)} has_userContext={bool(body.userContext)}")
     print(f"[trainer-question] context keys: {list(context_blob.keys())}")
 
+    messages = [
+        {"role": "system", "content": system_prompt},
+        user_message,
+    ]
+
     client = OpenAI(api_key=api_key)
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            messages=[
+        _m = model_chat_fallback()
+        print(f"[trainer-question] model={_m}")
+
+        # Phase 1: Q&A answer — keep concise so we have room to signal needs_plan_update
+        # Use 1200 tokens: enough for a detailed answer + all flag fields, but plan stays null
+        kwargs = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=1200, timeout_secs=50)
+        response = _chat_create(client, **kwargs)
+        raw = response.choices[0].message.content
+        if _looks_truncated(raw):
+            print(f"[trainer-question] phase-1 truncated — retrying phase-1 at 1800 tokens")
+            kwargs1b = _build_chat_kwargs(_m, messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=1800, timeout_secs=55)
+            response = _chat_create(client, **kwargs1b)
+            raw = response.choices[0].message.content
+
+        result = _extract_json(raw)
+        print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
+
+        # Phase 2: if a plan update was signalled but no plan included, do a dedicated plan-generation call
+        needs_workout = not is_nutritionist and result.get("needs_plan_update") and not result.get("updated_workout_plan")
+        needs_nutrition = is_nutritionist and result.get("needs_plan_update") and not result.get("updated_nutrition_plan")
+        if needs_workout or needs_nutrition:
+            plan_type = "workout" if needs_workout else "nutrition"
+            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 4000 tokens")
+            # Build a focused phase-2 message: carry the answer already given, just ask for the plan
+            phase2_answer = result.get("answer", "")
+            phase2_injuries = result.get("updated_injuries")
+            phase2_injury_note = result.get("injury_clarification_needed", False)
+            if needs_workout:
+                phase2_user = (
+                    f"The coach already answered: {json.dumps(phase2_answer)}\n\n"
+                    "Now return ONLY a JSON object with the COMPLETE updated_workout_plan. "
+                    "Include ALL days and ALL exercises — even unchanged ones. "
+                    "Use this exact structure: "
+                    '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}\n'
+                    "Return the full JSON response schema with the plan included:\n"
+                    '{"answer": ' + json.dumps(phase2_answer) + ', "action_items": [], "needs_plan_update": true, "safety_note": "", '
+                    '"updated_workout_plan": <FULL PLAN HERE>, "updated_nutrition_plan": null, '
+                    '"updated_injuries": ' + json.dumps(phase2_injuries) + ', "injury_clarification_needed": ' + json.dumps(phase2_injury_note) + '}'
+                )
+            else:
+                phase2_user = (
+                    f"The nutritionist already answered: {json.dumps(phase2_answer)}\n\n"
+                    "Now return ONLY a JSON object with the COMPLETE updated_nutrition_plan. "
+                    "Include ALL meal keys even if unchanged. Preserve all isRoutine=true meals exactly.\n"
+                    "Return the full JSON response schema with the plan included:\n"
+                    '{"answer": ' + json.dumps(phase2_answer) + ', "action_items": [], "needs_plan_update": true, "safety_note": "", '
+                    '"updated_workout_plan": null, "updated_nutrition_plan": <FULL PLAN HERE>, '
+                    '"updated_injuries": null, "injury_clarification_needed": false}'
+                )
+            phase2_messages = [
                 {"role": "system", "content": system_prompt},
                 user_message,
-            ],
-            temperature=0.4,
-            max_tokens=4000,  # enough for a full updated plan
-        )
-        raw = response.choices[0].message.content
-        result = json.loads(raw)
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": phase2_user},
+            ]
+            kwargs2 = _build_chat_kwargs(_m, phase2_messages, json_schema=SCHEMA_TRAINER_QUESTION, max_tokens=4000, timeout_secs=65)
+            response2 = _chat_create(client, **kwargs2)
+            raw2 = response2.choices[0].message.content
+            result2 = _extract_json(raw2)
+            # Merge: keep phase-1 answer/action_items/safety_note, take plan from phase-2
+            if needs_workout and result2.get("updated_workout_plan"):
+                result["updated_workout_plan"] = result2["updated_workout_plan"]
+                print(f"[trainer-question] phase-2: workout plan keys={list(result2['updated_workout_plan'].keys()) if isinstance(result2['updated_workout_plan'], dict) else 'non-dict'}")
+            elif needs_nutrition and result2.get("updated_nutrition_plan"):
+                result["updated_nutrition_plan"] = result2["updated_nutrition_plan"]
+            # Pick up any injury updates from phase-2 if phase-1 didn't have them
+            if not result.get("updated_injuries") and result2.get("updated_injuries"):
+                result["updated_injuries"] = result2["updated_injuries"]
 
-        # Debug: log what we're returning
-        print(f"[trainer-question] needs_plan_update={result.get('needs_plan_update')} has_workout_update={bool(result.get('updated_workout_plan'))} has_nutrition_update={bool(result.get('updated_nutrition_plan'))}")
+        print(f"[trainer-question] final: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
         print(f"[trainer-question] answer preview: {repr(result.get('answer', '')[:200])}")
-        if result.get('updated_workout_plan'):
-            wp = result['updated_workout_plan']
-            print(f"[trainer-question] updated_workout_plan keys: {list(wp.keys()) if isinstance(wp, dict) else 'NOT A DICT'}")
-        if result.get('updated_nutrition_plan'):
-            np_ = result['updated_nutrition_plan']
-            print(f"[trainer-question] updated_nutrition_plan keys: {list(np_.keys()) if isinstance(np_, dict) else 'NOT A DICT'}")
-
         return result
     except json.JSONDecodeError as e:
         print(f"[trainer-question] JSON decode error: {e}")
@@ -1366,37 +1987,31 @@ def ask_workout_question(
         "loggedSets": body.loggedSets or [],
     }
 
+    _wq_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an in-workout coach. Scope is limited to form cues, muscle targeting cues, "
+                "load/rep adjustment, pain/injury caution, and immediate substitutions. "
+                "If the user asks unrelated nutrition/lifestyle topics, reply briefly and suggest "
+                "using Ask Trainer from Home for broader planning. Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Workout question:\n{q}\n\n"
+                f"Context JSON:\n{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+                'Return this JSON schema exactly: '
+                '{"answer": string, "quick_cues": [string], "adjustment": string, "safety_note": string}'
+            ),
+        },
+    ]
     client = OpenAI(api_key=api_key)
     try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an in-workout coach. Scope is limited to form cues, muscle targeting cues, "
-                        "load/rep adjustment, pain/injury caution, and immediate substitutions. "
-                        "If the user asks unrelated nutrition/lifestyle topics, reply briefly and suggest "
-                        "using Ask Trainer from Home for broader planning. Return JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Workout question:\n"
-                        f"{q}\n\n"
-                        "Context JSON:\n"
-                        f"{json.dumps(context_blob, ensure_ascii=True)}\n\n"
-                        "Return this JSON schema exactly:\n"
-                        '{"answer": string, "quick_cues": [string], "adjustment": string, "safety_note": string}'
-                    ),
-                },
-            ],
-            temperature=0.3,
-            max_tokens=350,
-        )
-        return json.loads(response.choices[0].message.content)
+        kwargs = _build_chat_kwargs(model_chat(), _wq_messages, json_schema=SCHEMA_WORKOUT_QUESTION, max_tokens=300, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1418,39 +2033,35 @@ def analyze_food_photo(
     image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
     client = OpenAI(api_key=api_key)
 
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
+    _fp_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition coach analyzing meal photos. Estimate likely meal contents and macros. "
+                "Use practical ranges but return a single best estimate. Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a nutrition coach analyzing meal photos. Estimate likely meal contents and macros. "
-                        "Use practical ranges but return a single best estimate. Return valid JSON only."
+                    "type": "text",
+                    "text": (
+                        "Analyze this meal photo. Identify likely foods in plain English, "
+                        "estimate total macros, and provide a short meal name. "
+                        'Return exactly this JSON schema: '
+                        '{"meal_name": string, "items": [string], "calories": number, '
+                        '"protein": number, "carbs": number, "fat": number}'
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Analyze this meal photo. Identify likely foods in plain English, "
-                                "estimate total macros, and provide a short meal name. "
-                                'Return exactly this JSON schema: '
-                                '{"meal_name": string, "items": [string], "calories": number, '
-                                '"protein": number, "carbs": number, "fat": number}'
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
             ],
-            temperature=0.2,
-            max_tokens=300,
-        )
-        return json.loads(response.choices[0].message.content)
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=200, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1491,27 +2102,21 @@ def scan_foods_photo(
         image_data_url = f"data:{img.mime_type};base64,{img.image_base64}"
         user_content.append({"type": "image_url", "image_url": {"url": image_data_url}})
 
+    _sf_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition expert. Identify every distinct food item visible in the image(s). "
+                "For each item, estimate its name, a typical serving size, and macros per that serving. "
+                "Return valid JSON only."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
     try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a nutrition expert. Identify every distinct food item visible in the image(s). "
-                        "For each item, estimate its name, a typical serving size, and macros per that serving. "
-                        "Return valid JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": user_content,
-                },
-            ],
-            temperature=0.2,
-        )
-        return json.loads(response.choices[0].message.content)
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=500, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1530,42 +2135,38 @@ def get_supplement_info(
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="Supplement name is required")
 
+    _si_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a sports nutrition expert with deep knowledge of supplements, "
+                "their mechanisms, evidence base, and safe use. Always respond with valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Look up this supplement: "{body.name.strip()}"\n\n'
+                "If it is a real, recognized supplement or ingredient, return a JSON object with:\n"
+                '- "found": true\n'
+                '- "name": canonical common name\n'
+                '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
+                '- "tagline": one short sentence\n'
+                '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
+                '- "evidence": one of "strong", "moderate", or "limited"\n'
+                '- "dose": typical effective dose with unit (e.g. "5g daily")\n'
+                '- "timing": when to take it\n'
+                '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
+                '- "cautions": 1-2 sentences on side effects or who should avoid it\n\n'
+                'If not a real supplement, return {"found": false, "name": "' + body.name.strip() + '"}'
+            ),
+        },
+    ]
     client = OpenAI(api_key=api_key)
     try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a sports nutrition expert with deep knowledge of supplements, "
-                        "their mechanisms, evidence base, and safe use. "
-                        "Always respond with valid JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f'Look up this supplement: "{body.name.strip()}"\n\n'
-                        "If it is a real, recognized supplement or ingredient, return a JSON object with:\n"
-                        '- "found": true\n'
-                        '- "name": canonical common name\n'
-                        '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
-                        '- "tagline": one short sentence describing what it is\n'
-                        '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
-                        '- "evidence": one of "strong", "moderate", or "limited" based on the research base\n'
-                        '- "dose": typical effective dose with unit (e.g. "5g daily")\n'
-                        '- "timing": when to take it (e.g. "Post-workout or anytime")\n'
-                        '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
-                        '- "cautions": 1-2 sentences on side effects, interactions, or who should avoid it\n\n'
-                        'If not a real supplement or completely unrecognized, return {"found": false, "name": "' + body.name.strip() + '"}'
-                    ),
-                },
-            ],
-            temperature=0.3,
-        )
-        return json.loads(response.choices[0].message.content)
+        kwargs = _build_chat_kwargs(model_chat(), _si_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1585,47 +2186,36 @@ def get_supplement_from_photo(
     client = OpenAI(api_key=api_key)
     image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
 
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
+    _sp_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a sports nutrition expert. Identify supplements from photos of labels, "
+                "packaging, or pills, then provide evidence-based information. "
+                "Always respond with valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a sports nutrition expert. Identify supplements from photos of labels, "
-                        "packaging, or pills, then provide evidence-based information. "
-                        "Always respond with valid JSON only."
+                    "type": "text",
+                    "text": (
+                        "Identify the supplement shown in this image. "
+                        'If you can identify it, return {"found": true, "name": ..., "category": ..., '
+                        '"tagline": ..., "whatItDoes": ..., "evidence": ..., "dose": ..., "timing": ..., '
+                        '"goodFor": [...], "cautions": ...}. '
+                        'If you cannot identify it, return {"found": false, "name": ""}.'
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Identify the supplement shown in this image. "
-                                "If you can identify it, return a JSON object with:\n"
-                                '- "found": true\n'
-                                '- "name": canonical common name of the active ingredient/supplement\n'
-                                '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
-                                '- "tagline": one short sentence describing what it is\n'
-                                '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
-                                '- "evidence": one of "strong", "moderate", or "limited"\n'
-                                '- "dose": typical effective dose with unit\n'
-                                '- "timing": when to take it\n'
-                                '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
-                                '- "cautions": 1-2 sentences on side effects or who should avoid it\n\n'
-                                'If you cannot identify a supplement, return {"found": false, "name": ""}'
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
             ],
-            temperature=0.3,
-        )
-        return json.loads(response.choices[0].message.content)
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _sp_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1663,39 +2253,34 @@ def scan_equipment_photo(
         "Plyo box", "Sled",
     ]
 
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
+    _eq_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a fitness equipment expert. Identify gym equipment visible in the image. "
+                "Only return equipment names that exactly match items in the provided list. "
+                "Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a fitness equipment expert. Identify gym equipment visible in the image. "
-                        "Only return equipment names that exactly match items in the provided list. "
-                        "Return valid JSON only."
+                    "type": "text",
+                    "text": (
+                        f"Identify all gym equipment visible in this image. "
+                        f"Only include items whose names exactly match something in this list: {known_equipment}. "
+                        'Return exactly this JSON: {"equipment": [<array of matching equipment name strings>]}'
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Identify all gym equipment visible in this image. "
-                                f"Only include items whose names exactly match something in this list: {known_equipment}. "
-                                "Return exactly this JSON — no extra text: "
-                                '{"equipment": [<array of matching equipment name strings>]}'
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
             ],
-            temperature=0.1,
-            max_tokens=400,
-        )
-        return json.loads(response.choices[0].message.content)
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=150, timeout_secs=20)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -1768,20 +2353,13 @@ def generate_workout_summary(
             "Write a short, energetic post-workout message and 3 concrete recovery/nutrition tips.\n"
             'Return JSON: {"motivationMessage": string, "recommendations": [string, string, string]}'
         )
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an upbeat fitness coach. Give brief, practical post-workout feedback. Return JSON only.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=250,
-        )
-        ai = json.loads(response.choices[0].message.content)
+        _ws_messages = [
+            {"role": "system", "content": "You are an upbeat fitness coach. Give brief, practical post-workout feedback. Return JSON only."},
+            {"role": "user", "content": prompt},
+        ]
+        kwargs = _build_chat_kwargs(model_chat(), _ws_messages, json_schema=SCHEMA_WORKOUT_SUMMARY, max_tokens=300, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        ai = _extract_json(response.choices[0].message.content)
         return {
             "caloriesBurned": calories_burned,
             "motivationMessage": ai.get("motivationMessage", "Great work today!"),
@@ -1816,40 +2394,36 @@ def analyze_form_photo(
     image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
     client = OpenAI(api_key=api_key)
 
-    try:
-        response = client.chat.completions.create(
-            model=get_openai_model(),
-            response_format={"type": "json_object"},
-            messages=[
+    _form_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a workout form coach analyzing a single exercise photo. "
+                "Provide practical setup/posture cues, likely muscle targeting notes, and obvious red flags. "
+                "Do not pretend to diagnose injury from one image. Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a workout form coach analyzing a single exercise photo. "
-                        "Provide practical setup/posture cues, likely muscle targeting notes, and obvious red flags. "
-                        "Do not pretend to diagnose injury from one image. Return JSON only."
+                    "type": "text",
+                    "text": (
+                        f"Exercise: {body.exercise_name or 'unknown'}\n"
+                        f"User concern: {body.question or 'General form check'}\n\n"
+                        "Analyze this form photo. Return exactly this JSON schema: "
+                        '{"answer": string, "quick_cues": [string], "likely_target": string, '
+                        '"red_flags": [string], "safety_note": string}'
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Exercise: {body.exercise_name or 'unknown'}\n"
-                                f"User concern: {body.question or 'General form check'}\n\n"
-                                "Analyze this form photo. Return exactly this JSON schema: "
-                                '{"answer": string, "quick_cues": [string], "likely_target": string, '
-                                '"red_flags": [string], "safety_note": string}'
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
             ],
-            temperature=0.2,
-            max_tokens=350,
-        )
-        return json.loads(response.choices[0].message.content)
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_chat(), _form_messages, json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:

@@ -199,6 +199,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
   const [foodScanLoading, setFoodScanLoading] = useState(false);
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
+  const [customFoodInput, setCustomFoodInput] = useState('');
 
   // Step 7 — Supplements
   const [supplementsAvailable, setSupplementsAvailable] = useState<string[]>([]);
@@ -735,7 +736,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       {/* Photo scan */}
       <View style={styles.scanSection}>
         <Text style={styles.scanSectionTitle}>Scan your gym or home setup</Text>
-        <Text style={styles.scanSectionSub}>Take photos and AI will identify your equipment automatically</Text>
+        <Text style={styles.scanSectionSub}>AI will identify your equipment automatically — select multiple photos at once from your library</Text>
         <View style={styles.scanRow}>
           <TouchableOpacity
             style={[styles.scanBtnPrimary, equipScanLoading && { opacity: 0.5 }]}
@@ -831,7 +832,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       {/* Photo scan — top, prominent */}
       <View style={styles.scanSection}>
         <Text style={styles.scanSectionTitle}>Scan your fridge or pantry</Text>
-        <Text style={styles.scanSectionSub}>Take a photo and AI will identify your foods automatically</Text>
+        <Text style={styles.scanSectionSub}>AI will identify your foods automatically — select multiple photos at once from your library</Text>
         <View style={styles.scanRow}>
           <TouchableOpacity
             style={[styles.scanBtnPrimary, foodScanLoading && { opacity: 0.5 }]}
@@ -875,6 +876,49 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
             </View>
           </View>
         ))
+      )}
+
+      {/* Custom food input */}
+      <Text style={styles.sectionHeading}>Add a custom food</Text>
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+        <TextInput
+          style={[styles.textArea, { flex: 1, height: 44, textAlignVertical: 'center', paddingTop: 0 }]}
+          placeholder="e.g. dragon fruit, sourdough bread..."
+          placeholderTextColor={colors.textMuted}
+          value={customFoodInput}
+          onChangeText={setCustomFoodInput}
+          onSubmitEditing={() => {
+            const name = customFoodInput.trim();
+            if (name && !foodsAvailable.includes(name)) {
+              setFoodsAvailable(prev => [...prev, name]);
+            }
+            setCustomFoodInput('');
+          }}
+          returnKeyType="done"
+        />
+        <TouchableOpacity
+          style={{ backgroundColor: colors.primary, borderRadius: 10, paddingHorizontal: 16, justifyContent: 'center' }}
+          onPress={() => {
+            const name = customFoodInput.trim();
+            if (name && !foodsAvailable.includes(name)) {
+              setFoodsAvailable(prev => [...prev, name]);
+            }
+            setCustomFoodInput('');
+          }}>
+          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Add</Text>
+        </TouchableOpacity>
+      </View>
+      {foodsAvailable.filter(f => !meta.allFoods.some((mf: any) => mf.name === f)).length > 0 && (
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+          {foodsAvailable.filter(f => !meta.allFoods.some((mf: any) => mf.name === f)).map(f => (
+            <TouchableOpacity
+              key={f}
+              style={[styles.foodChip, styles.foodChipActive]}
+              onPress={() => setFoodsAvailable(prev => prev.filter(x => x !== f))}>
+              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>{f} ✕</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       )}
 
       <Text style={styles.hint}>Skip to use default meal suggestions</Text>
@@ -1095,8 +1139,8 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 24, paddingBottom: 48 },
-  header: { marginTop: 16, marginBottom: 16 },
-  logo: { width: 160, height: 52 },
+  header: { marginTop: 20, marginBottom: 20 },
+  logo: { width: 260, height: 88 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 
   progressBar: { flexDirection: 'row', gap: 6, marginBottom: 32 },
@@ -1168,18 +1212,18 @@ const styles = StyleSheet.create({
   scanSection: { marginBottom: 20, padding: 16, backgroundColor: colors.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   scanSectionTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
   scanSectionSub: { fontSize: 13, color: colors.textSecondary, marginBottom: 14 },
-  scanRow: { flexDirection: 'row', gap: 10, alignItems: 'stretch' },
+  scanRow: { flexDirection: 'column', gap: 10 },
   scanBtn: {
-    flex: 1, paddingVertical: 12, borderRadius: radius.md,
+    paddingVertical: 14, borderRadius: radius.md,
     borderWidth: 1.5, borderColor: colors.primary,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.primary + '14',
   },
-  scanBtnText: { fontSize: 14, fontWeight: '600', color: colors.primary },
-  scanBtnPrimary: { flex: 1, paddingVertical: 14, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
-  scanBtnPrimaryText: { fontSize: 15, fontWeight: '700', color: '#fff' },
-  scanBtnSecondary: { flex: 1, paddingVertical: 13, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.primary, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary + '12' },
-  scanBtnSecondaryText: { fontSize: 15, fontWeight: '600', color: colors.primary },
+  scanBtnText: { fontSize: 15, fontWeight: '600', color: colors.primary, textAlign: 'center' },
+  scanBtnPrimary: { paddingVertical: 15, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  scanBtnPrimaryText: { fontSize: 16, fontWeight: '700', color: '#fff', textAlign: 'center' },
+  scanBtnSecondary: { paddingVertical: 14, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.primary, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary + '12' },
+  scanBtnSecondaryText: { fontSize: 16, fontWeight: '600', color: colors.primary, textAlign: 'center' },
 
   // Food / equipment chips
   foodCategory:      { marginBottom: 18 },

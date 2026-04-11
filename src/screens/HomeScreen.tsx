@@ -5,7 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, SupplementItem } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, SupplementItem, InjuryEntry } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
@@ -855,6 +855,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const nutritionistNote = nutritionistNoteProp;
   const [showNutritionistNote, setShowNutritionistNote] = useState(false);
   const [showTrainerNote, setShowTrainerNote] = useState(false);
+  const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+  const [checkinAdherence, setCheckinAdherence] = useState(3); // 1-5
+  const [checkinEnergy, setCheckinEnergy] = useState(3);       // 1-5
+  const [checkinNotes, setCheckinNotes] = useState('');
+  const [checkinInjuryStatuses, setCheckinInjuryStatuses] = useState<Record<string, InjuryEntry['status']>>({});
 
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
@@ -875,6 +880,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
+    // Check if a weekly review is due
+    AsyncStorage.getItem('weekStartDate').then(async raw => {
+      if (!raw) return;
+      const daysSince = (Date.now() - new Date(raw).getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSince >= 7) {
+        // Pre-populate injury statuses from current profile
+        const profileRaw = await AsyncStorage.getItem('userProfile');
+        if (profileRaw) {
+          const p: UserProfile = JSON.parse(profileRaw);
+          const initial: Record<string, InjuryEntry['status']> = {};
+          for (const inj of (p.injuryEntries ?? [])) {
+            initial[inj.id] = inj.status;
+          }
+          setCheckinInjuryStatuses(initial);
+        }
+        setShowWeeklyCheckin(true);
+      }
+    });
   }, [userProfile, authToken, meta.allFoods.length, planRefreshKey]);
 
   useEffect(() => {
@@ -956,9 +979,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
     setWorkoutPlan(baseWorkout);
 
-    // AI nutrition plan is used as the base template (overrides local generation)
-    const aiNutritionRaw = await AsyncStorage.getItem('aiNutritionPlan');
-    const aiNutritionTemplate: DailyNutritionPlan | null = aiNutritionRaw ? JSON.parse(aiNutritionRaw) : null;
+    // Load 3 rotating nutrition templates (A/B/C)
+    const [rawA, rawB, rawC] = await Promise.all([
+      AsyncStorage.getItem('aiNutritionPlanA'),
+      AsyncStorage.getItem('aiNutritionPlanB'),
+      AsyncStorage.getItem('aiNutritionPlanC'),
+    ]);
+    const templateA: DailyNutritionPlan | null = rawA ? JSON.parse(rawA) : null;
+    const templateB: DailyNutritionPlan | null = rawB ? JSON.parse(rawB) : null;
+    const templateC: DailyNutritionPlan | null = rawC ? JSON.parse(rawC) : null;
+    const rotatingTemplates = [templateA, templateB, templateC].filter(Boolean) as DailyNutritionPlan[];
 
     const mealDays = getNextMealDays(7);
 
@@ -970,7 +1000,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     };
 
     const localEntries = await Promise.all(
-      mealDays.map(async d => {
+      mealDays.map(async (d, i) => {
         // 1. Try backend day-state — only trust it if macros are present
         if (authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
@@ -982,12 +1012,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const saved = await getSavedNutritionPlan(d.key);
         if (saved && hasMealMacros(saved)) return [d.key, saved] as const;
 
-        // 3. Use AI-generated template (has macros after backend fix)
-        if (aiNutritionTemplate && hasMealMacros(aiNutritionTemplate)) {
-          return [d.key, aiNutritionTemplate] as const;
+        // 3. Rotate through AI templates A→B→C (i % 3)
+        if (rotatingTemplates.length > 0) {
+          const template = rotatingTemplates[i % rotatingTemplates.length];
+          if (hasMealMacros(template)) return [d.key, template] as const;
         }
 
-        // 4. Local generator — always has macros
+        // 4. Local generator fallback
         return [d.key, generateDailyNutritionForDate(profile, meta.allFoods, d.key)] as const;
       })
     );
@@ -1254,6 +1285,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         equipment: userProfile.equipment,
         mealRoutine: userProfile.mealRoutine,
         injuries: userProfile.injuries,
+        injuryEntries: userProfile.injuryEntries ?? [],
         experienceLevel: userProfile.experienceLevel,
       };
 
@@ -1261,13 +1293,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         question: q,
         mode: coachMode,
         profile: slimProfile,
-        workoutPlan: currentPlanContext,  // backend field name
+        // Pass full workout plan so AI returns the correct structure (with 'days' key, not 'workoutDays')
+        workoutPlan: coachMode === 'trainer' ? (workoutPlan ?? undefined) : undefined,
         nutritionPlan: todayPlan ?? undefined,
         progress: {
           goal: progress.goal,
           todayDone: progress.todayDone,
           sessionsLast30d: progress.sessionsLast30d,
           totalSessions: progress.totalSessions,
+          todayMeals: currentPlanContext.todayMeals,
+          mealRoutine: currentPlanContext.mealRoutine,
         },
         conversation: nextChat.slice(-8),
         image_base64: imageToSend?.base64 ?? undefined,
@@ -1305,14 +1340,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // Merge partial update into existing plan — AI may only return changed meals
             const existingPlan = nutritionPlansByDate[today] ?? null;
             const partial = resp.updated_nutrition_plan as Partial<DailyNutritionPlan>;
-            const mergedPlan: DailyNutritionPlan = existingPlan
-              ? {
-                  ...existingPlan,
-                  ...partial,
-                  // Never let the AI overwrite targets with undefined
-                  targets: partial.targets ?? existingPlan.targets,
-                }
+            // Build merged plan — AI update takes precedence except for routine meals
+            const baseMerge: DailyNutritionPlan = existingPlan
+              ? { ...existingPlan, ...partial, targets: partial.targets ?? existingPlan.targets }
               : resp.updated_nutrition_plan as DailyNutritionPlan;
+            // Re-stamp isRoutine from the existing plan so AI can't accidentally clear them
+            const mealKeys = ['breakfast', 'lunch', 'dinner', 'snack'] as const;
+            const mergedPlan: DailyNutritionPlan = { ...baseMerge };
+            if (existingPlan) {
+              for (const k of mealKeys) {
+                const existing = existingPlan[k] as any;
+                const updated  = baseMerge[k] as any;
+                if (existing?.isRoutine && updated) {
+                  (mergedPlan as any)[k] = { ...updated, isRoutine: true };
+                } else if (existing?.isRoutine && !updated) {
+                  // AI removed a routine meal — restore it
+                  (mergedPlan as any)[k] = existing;
+                }
+              }
+            }
             appliedNutrition = mergedPlan;
             setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
             await saveNutritionPlan(today, mergedPlan);
@@ -1327,7 +1373,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
           setUpdateSummary(changeSummary);
-          setActiveChat(prev => [...prev, { role: 'assistant', content: 'I applied those updates to your plan.' }]);
+          const planLabel = coachMode === 'trainer' ? 'workout' : 'meal';
+          setActiveChat(prev => [...prev, { role: 'assistant', content: `✅ Done! Your ${planLabel} plan has been updated. Close this chat to see the changes on your home screen.` }]);
           // Save to plan change history so user can review it in Progress
           await savePlanChange({
             id: Date.now().toString(),
@@ -1338,6 +1385,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           });
         } finally {
           setIsChatPlanUpdating(false);
+        }
+      }
+
+      // Handle injury updates (trainer mode only)
+      if (coachMode === 'trainer' && resp.updated_injuries && Array.isArray(resp.updated_injuries) && resp.updated_injuries.length > 0) {
+        try {
+          const profileRaw = await AsyncStorage.getItem('userProfile');
+          if (profileRaw) {
+            const storedProfile: UserProfile = JSON.parse(profileRaw);
+            const existingEntries: InjuryEntry[] = storedProfile.injuryEntries ?? [];
+            const incoming: InjuryEntry[] = resp.updated_injuries.map((inj: any) => ({
+              id: inj.id || Date.now().toString() + Math.random().toString(36).slice(2),
+              description: inj.description ?? '',
+              bodyPart: inj.bodyPart ?? '',
+              reportedAt: new Date().toISOString(),
+              status: inj.status ?? 'active',
+              notes: inj.notes,
+            }));
+            // Merge: replace entry if same id exists, otherwise append
+            const merged = [...existingEntries];
+            for (const entry of incoming) {
+              const idx = merged.findIndex(e => e.id === entry.id);
+              if (idx >= 0) merged[idx] = entry;
+              else merged.push(entry);
+            }
+            const updatedProfile = { ...storedProfile, injuryEntries: merged };
+            await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
+            console.log('[handleAskTrainer] updated injuryEntries saved:', merged.length, 'entries');
+          }
+        } catch (injErr) {
+          console.error('[handleAskTrainer] failed to save injury update:', injErr);
         }
       }
     } catch (e: any) {
@@ -2131,6 +2209,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted, marginTop: 4 }]}>Thinking…</Text>
                 </View>
               )}
+              {isChatPlanUpdating && (
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55', alignSelf: 'flex-start', maxWidth: '95%', flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
+                  <ActivityIndicator size="small" color={themeColors.primary} />
+                  <Text style={[styles.trainerBubbleText, { color: themeColors.primary }]}>
+                    Updating your {coachMode === 'trainer' ? 'workout' : 'meal'} plan…
+                  </Text>
+                </View>
+              )}
             </ScrollView>
 
             {attachedImage && (
@@ -2246,6 +2332,132 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             </View>
           </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* Weekly Check-in Modal */}
+      <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: themeColors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: themeColors.border, maxHeight: '90%' }}>
+          <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+            <Text style={{ fontSize: 20, fontWeight: '700', color: themeColors.textPrimary, marginBottom: 4 }}>Weekly Review</Text>
+            <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginBottom: 20 }}>
+              Your first week is done. Rate how it went so your plan can adapt.
+            </Text>
+
+            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Workout adherence</Text>
+            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }}>How many planned workouts did you complete?</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
+              {[1,2,3,4,5].map(v => (
+                <TouchableOpacity key={v} onPress={() => setCheckinAdherence(v)}
+                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: checkinAdherence === v ? themeColors.primary : themeColors.surfaceRaised, borderWidth: 1, borderColor: checkinAdherence === v ? themeColors.primary : themeColors.border }}>
+                  <Text style={{ fontWeight: '700', color: checkinAdherence === v ? '#fff' : themeColors.textSecondary }}>{v}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: -16, marginBottom: 20 }}>
+              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>None</Text>
+              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>All of them</Text>
+            </View>
+
+            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Energy & recovery</Text>
+            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }}>How did your body feel this week overall?</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
+              {['Burned out','Tired','OK','Good','Great'].map((label, i) => (
+                <TouchableOpacity key={i} onPress={() => setCheckinEnergy(i + 1)}
+                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: checkinEnergy === i + 1 ? themeColors.primary : themeColors.surfaceRaised, borderWidth: 1, borderColor: checkinEnergy === i + 1 ? themeColors.primary : themeColors.border }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: checkinEnergy === i + 1 ? '#fff' : themeColors.textSecondary, textAlign: 'center' }}>{label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Injury log review */}
+            {(userProfile?.injuryEntries ?? []).filter(i => i.status !== 'resolved').length > 0 && (
+              <View style={{ marginBottom: 20 }}>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 4 }}>Injury log</Text>
+                <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 10 }}>Update the status of any injuries flagged this week.</Text>
+                {(userProfile?.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(inj => {
+                  const currentStatus = checkinInjuryStatuses[inj.id] ?? inj.status;
+                  const statusColors: Record<string, string> = { active: '#ef4444', recovering: '#f59e0b', resolved: '#22c55e' };
+                  return (
+                    <View key={inj.id} style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: themeColors.border }}>
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 2 }}>{inj.bodyPart}</Text>
+                      <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }} numberOfLines={2}>{inj.description}</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6 }}>Logged {new Date(inj.reportedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</Text>
+                      <View style={{ flexDirection: 'row', gap: 6 }}>
+                        {(['active', 'recovering', 'resolved'] as InjuryEntry['status'][]).map(s => (
+                          <TouchableOpacity key={s} onPress={() => setCheckinInjuryStatuses(prev => ({ ...prev, [inj.id]: s }))}
+                            style={{ flex: 1, paddingVertical: 6, borderRadius: 8, alignItems: 'center',
+                              backgroundColor: currentStatus === s ? statusColors[s] : themeColors.surface,
+                              borderWidth: 1, borderColor: currentStatus === s ? statusColors[s] : themeColors.border }}>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: currentStatus === s ? '#fff' : themeColors.textMuted, textTransform: 'capitalize' }}>{s}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+
+            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Anything to flag? (optional)</Text>
+            <TextInput
+              value={checkinNotes}
+              onChangeText={setCheckinNotes}
+              placeholder="Injuries, schedule changes, too easy/hard..."
+              placeholderTextColor={themeColors.textMuted}
+              multiline
+              style={{ borderWidth: 1, borderColor: themeColors.border, borderRadius: 10, padding: 12, color: themeColors.textPrimary, backgroundColor: themeColors.surfaceRaised, minHeight: 64, marginBottom: 20, fontSize: 13 }}
+            />
+
+            <TouchableOpacity
+              style={{ backgroundColor: themeColors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+              onPress={async () => {
+                setShowWeeklyCheckin(false);
+                await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
+                // Save any injury status changes made during check-in
+                if (Object.keys(checkinInjuryStatuses).length > 0) {
+                  try {
+                    const profileRaw = await AsyncStorage.getItem('userProfile');
+                    if (profileRaw) {
+                      const p: UserProfile = JSON.parse(profileRaw);
+                      const updated = (p.injuryEntries ?? []).map(inj =>
+                        checkinInjuryStatuses[inj.id] !== undefined
+                          ? { ...inj, status: checkinInjuryStatuses[inj.id] }
+                          : inj
+                      );
+                      await AsyncStorage.setItem('userProfile', JSON.stringify({ ...p, injuryEntries: updated }));
+                    }
+                  } catch {}
+                }
+                // If poor adherence or burned out — suggest refreshing plan
+                const needsRefresh = checkinAdherence <= 2 || checkinEnergy <= 2;
+                if (needsRefresh) {
+                  Alert.alert(
+                    'Adjust your plan?',
+                    checkinEnergy <= 2
+                      ? 'Sounds like you need a lighter week. Want to generate a deload plan?'
+                      : 'Missed a few sessions — want to simplify next week\'s plan?',
+                    [
+                      { text: 'Keep current plan', style: 'cancel' },
+                      { text: 'Yes, refresh plan', onPress: () => onEditProfile() },
+                    ]
+                  );
+                }
+                setCheckinAdherence(3);
+                setCheckinEnergy(3);
+                setCheckinNotes('');
+                setCheckinInjuryStatuses({});
+              }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Continue to next week</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); onEditProfile(); }}
+              style={{ alignItems: 'center', paddingVertical: 10 }}>
+              <Text style={{ color: themeColors.primary, fontWeight: '600', fontSize: 14 }}>Refresh my plan now</Text>
+            </TouchableOpacity>
+          </ScrollView>
+          </View>
         </View>
       </Modal>
 

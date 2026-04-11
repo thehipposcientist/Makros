@@ -42,7 +42,20 @@
       "Bash(taskkill //F //IM python.exe)",
       "Bash(taskkill //F //IM uvicorn.exe)",
       "Bash(venv/Scripts/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
-      "Bash(venv/Scripts/python:*)"
+      "Bash(venv/Scripts/python:*)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(powershell:*)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebSearch",
+      "Bash(find E:/WorkoutPal/backend/app -name \"__pycache__\" -type d -exec rm -rf {} +)",
+      "Bash(find E:/WorkoutPal/backend/app -name \"*.pyc\" -delete)",
+      "Bash(rd /s /q E:\\\\WorkoutPal\\\\backend\\\\app\\\\__pycache__)",
+      "Bash(rd /s /q E:\\\\WorkoutPal\\\\backend\\\\app\\\\routers\\\\__pycache__)",
+      "Bash(del E:\\\\WorkoutPal\\\\backend\\\\workoutpal.db)",
+      "Bash(venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(venv/Scripts/python.exe:*)",
+      "Bash(taskkill /F /IM python3.exe)",
+      "Bash(taskkill /F /IM python.exe /T)"
     ]
   }
 }

@@ -45,6 +45,9 @@ export default function NutritionCard({
   const hiddenMeals  = allMeals.filter(m => m.meal && removed.has(m.key))  as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
   const extraMealItems = (extraMealsList ?? []).map((meal, idx) => ({ key: `extra_${idx}`, emoji: '🍴', meal }));
 
+  const routineMeals    = visibleMeals.filter(m => m.meal.isRoutine);
+  const nonRoutineMeals = visibleMeals.filter(m => !m.meal.isRoutine);
+
   const allVisible = [...visibleMeals, ...extraMealItems];
   const actual = {
     calories: Math.round(allVisible.reduce((sum, m) => sum + m.meal.calories, 0)),
@@ -85,7 +88,37 @@ export default function NutritionCard({
 
         {/* Meal rows */}
         <View style={styles.meals}>
-          {visibleMeals.map(({ key, emoji, meal }) => (
+          {/* Pinned routine meals */}
+          {routineMeals.length > 0 && (
+            <>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4, marginTop: 2 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: section.strong, letterSpacing: 0.5 }}>📌  EVERYDAY</Text>
+              </View>
+              {routineMeals.map(({ key, emoji, meal }) => (
+                <MealRow
+                  key={key}
+                  emoji={emoji}
+                  mealType={key}
+                  meal={meal}
+                  checked={!!checkedMeals[key]}
+                  onToggle={onToggleMeal}
+                  onEdit={onEditMeal}
+                  onRemove={onRemoveMeal}
+                  onToggleRoutine={onToggleRoutine}
+                  colors={colors}
+                  styles={styles}
+                  mealAccent={section}
+                />
+              ))}
+              {nonRoutineMeals.length > 0 && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4, marginTop: 8 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 }}>TODAY'S PLAN</Text>
+                </View>
+              )}
+            </>
+          )}
+          {/* Non-routine meals */}
+          {nonRoutineMeals.map(({ key, emoji, meal }) => (
             <MealRow
               key={key}
               emoji={emoji}

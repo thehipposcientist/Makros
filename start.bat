@@ -19,7 +19,7 @@ echo.
 
 echo [1/2] Starting backend (port 8000)...
 echo Note: If you update .env variables, restart the backend window manually
-start "Makros Backend" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+start "Makros Backend" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 timeout /t 3 /nobreak >nul
 
