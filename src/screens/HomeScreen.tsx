@@ -5,12 +5,12 @@ import * as ImagePicker from 'expo-image-picker';
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, SupplementItem, InjuryEntry } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveSkipToHistory, loadWorkoutSummaries,
+  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
   savePlanChange,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
@@ -41,6 +41,7 @@ interface HomeScreenProps {
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
+  onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
 }
 
 interface ScheduleItem {
@@ -795,7 +796,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onWeeklyRefresh }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   const theme = getTheme(userProfile?.themePreference);
@@ -1451,6 +1452,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
         } catch (injErr) {
           console.error('[handleAskTrainer] failed to save injury update:', injErr);
+        }
+      }
+
+      // Handle workout logging (trainer mode only)
+      if (coachMode === 'trainer' && resp.logged_workouts && Array.isArray(resp.logged_workouts) && resp.logged_workouts.length > 0) {
+        try {
+          const today = todayKey();
+          for (const w of resp.logged_workouts) {
+            const session: WorkoutSession = {
+              id: `chat-${w.date}-${Date.now()}`,
+              date: new Date(w.date + 'T12:00:00').toISOString(),
+              focus: w.focus || 'General',
+              durationSeconds: w.durationSeconds || 3600,
+              exercises: (w.exercises ?? []).map((ex: any) => ({
+                name: ex.name,
+                targetSets: ex.sets?.length ?? 0,
+                targetReps: '',
+                targetRestSeconds: 60,
+                equipment: '',
+                sets: (ex.sets ?? []).map((s: any) => ({
+                  weightLbs: s.weightLbs ?? 0,
+                  reps: s.reps ?? 0,
+                })),
+              })),
+              completed: true,
+            };
+            await saveWorkoutSession(session);
+            // If the logged workout is today, mark today as done
+            if (w.date === today) {
+              setTodayDone(true);
+            }
+          }
+          console.log(`[handleAskTrainer] logged ${resp.logged_workouts.length} workout session(s) from chat`);
+        } catch (logErr) {
+          console.error('[handleAskTrainer] failed to save workout log:', logErr);
         }
       }
     } catch (e: any) {
@@ -2382,7 +2418,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
             <Text style={{ fontSize: 20, fontWeight: '700', color: themeColors.textPrimary, marginBottom: 4 }}>Weekly Review</Text>
             <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginBottom: 20 }}>
-              Your first week is done. Rate how it went so your plan can adapt.
+              Rate how this week went. The AI will use your feedback to generate next week's plan.
             </Text>
 
             <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Workout adherence</Text>
@@ -2470,48 +2506,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     }
                   } catch {}
                 }
-                // Check for pending profile changes stored during the week
-                let hasPendingChanges = false;
+                // Gather pending profile changes
+                let pendingChanges: any[] = [];
                 try {
                   const pendingRaw = await AsyncStorage.getItem('pendingProfileChanges');
-                  const pending = pendingRaw ? JSON.parse(pendingRaw) : [];
-                  hasPendingChanges = pending.length > 0;
+                  pendingChanges = pendingRaw ? JSON.parse(pendingRaw) : [];
                 } catch {}
 
-                // If poor adherence, burned out, or pending changes — suggest refreshing plan
-                const needsRefresh = checkinAdherence <= 2 || checkinEnergy <= 2 || hasPendingChanges;
-                if (needsRefresh) {
-                  const reason = hasPendingChanges
-                    ? 'You made changes to your preferences this week. Refresh your plan to apply them?'
-                    : checkinEnergy <= 2
-                    ? 'Sounds like you need a lighter week. Want to generate a deload plan?'
-                    : 'Missed a few sessions — want to simplify next week\'s plan?';
-                  Alert.alert(
-                    'Adjust your plan?',
-                    reason,
-                    [
-                      { text: 'Keep current plan', style: 'cancel', onPress: async () => {
-                        // Clear pending changes even if user declines — they chose to keep current
-                        await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
-                      }},
-                      { text: 'Yes, refresh plan', onPress: async () => {
-                        await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
-                        onEditGoal();
-                      }},
-                    ]
-                  );
+                // Send the weekly review to AI for next week's plan
+                if (onWeeklyRefresh) {
+                  onWeeklyRefresh({
+                    adherence: checkinAdherence,
+                    energy: checkinEnergy,
+                    notes: checkinNotes || undefined,
+                    pendingChanges: pendingChanges.length > 0 ? pendingChanges : undefined,
+                  });
                 }
+
                 setCheckinAdherence(3);
                 setCheckinEnergy(3);
                 setCheckinNotes('');
                 setCheckinInjuryStatuses({});
               }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Continue to next week</Text>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Generate next week's plan</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); onEditGoal(); }}
+            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); setCheckinAdherence(3); setCheckinEnergy(3); setCheckinNotes(''); setCheckinInjuryStatuses({}); }}
               style={{ alignItems: 'center', paddingVertical: 10 }}>
-              <Text style={{ color: themeColors.primary, fontWeight: '600', fontSize: 14 }}>Refresh my plan now</Text>
+              <Text style={{ color: themeColors.textMuted, fontWeight: '600', fontSize: 14 }}>Skip — keep current plan</Text>
             </TouchableOpacity>
           </ScrollView>
           </View>

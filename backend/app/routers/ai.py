@@ -755,6 +755,41 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
     return summary, schema
 
 
+def _build_weekly_review_section(req: PlanRequest) -> str:
+    """Format weekly review data into a prompt section the AI can use."""
+    wr = req.weeklyReview
+    if not wr:
+        return ""
+    adherence = wr.get("adherence", 3)
+    energy = wr.get("energy", 3)
+    notes = wr.get("notes", "")
+    pending = wr.get("pendingChanges", [])
+    adherence_labels = {1: "completed almost none", 2: "missed most sessions", 3: "did about half", 4: "completed most", 5: "completed all"}
+    energy_labels = {1: "burned out / overtrained", 2: "tired and sluggish", 3: "okay / average", 4: "good energy", 5: "great / fully recovered"}
+    lines = [
+        "WEEKLY CHECK-IN (use this to adapt the next week's plan):",
+        f"- Workout adherence: {adherence}/5 — {adherence_labels.get(adherence, 'unknown')}",
+        f"- Energy / recovery: {energy}/5 — {energy_labels.get(energy, 'unknown')}",
+    ]
+    if notes:
+        lines.append(f"- User notes: {notes}")
+    if pending:
+        changes = "; ".join(p.get("summary", "") for p in pending if p.get("summary"))
+        if changes:
+            lines.append(f"- Profile changes made this week: {changes}")
+    lines.append("")
+    lines.append(
+        "ADAPTATION RULES based on the check-in above:\n"
+        "- If adherence ≤ 2: simplify the plan — fewer exercises per session, or fewer training days.\n"
+        "- If energy ≤ 2: reduce volume/intensity — this is a deload week. Lighter weights, fewer sets.\n"
+        "- If adherence and energy are both ≥ 4: consider progressing — add volume, intensity, or a new exercise variation.\n"
+        "- If profile changes mention new equipment or foods: incorporate them into the plan.\n"
+        "- If user notes mention pain/injury: avoid those muscle groups or movements.\n"
+        "- Always explain in the trainerNote why you made specific adaptations based on this check-in."
+    )
+    return "\n".join(lines)
+
+
 def build_workout_prompt(req: PlanRequest) -> str:
     """Prompt for workout plan only — runs in parallel with nutrition prompt."""
     ps  = req.physicalStats
@@ -939,6 +974,7 @@ FORBIDDEN (user does NOT own): {forbidden_str}
 
 CRITICAL: Day 1 of this plan is TODAY. If the user trained any muscle group today or yesterday (as described above), that muscle group MUST NOT appear as the primary focus of Day 1. Schedule Day 1 around muscles that have had adequate rest. Rearrange the split so recovered muscles come first.""" if req.userContext else ""}
 
+{_build_weekly_review_section(req)}
 GOAL RULE (follow strictly): {goal_rule}
 {focused_muscle_line}
 
@@ -1023,6 +1059,7 @@ USER PROFILE:
 - Calorie strategy: {t['goal_rate_summary']}
 {meal_routine_block}
 {user_context_block}
+{_build_weekly_review_section(req)}
 AVAILABLE FOODS (use ONLY these — no substitutions, no additions):
 {foods_str}
 
@@ -1388,6 +1425,30 @@ SCHEMA_TRAINER_QUESTION = {
                 },
             },
             "injury_clarification_needed": {"type": "boolean"},
+            "logged_workouts": {
+                "type": ["array", "null"],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string"},
+                        "focus": {"type": "string"},
+                        "durationSeconds": {"type": "number"},
+                        "exercises": {"type": "array", "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "sets": {"type": "array", "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "weightLbs": {"type": "number"},
+                                        "reps": {"type": "number"},
+                                    },
+                                }},
+                            },
+                        }},
+                    },
+                },
+            },
         },
         "required": ["answer", "action_items", "needs_plan_update", "safety_note"],
     },
@@ -1966,6 +2027,74 @@ async def generate_nutrition_plan(
     return result
 
 
+class ParseWorkoutsRequest(BaseModel):
+    """Parse natural language workout descriptions into structured sessions."""
+    text: str                   # e.g. "I did legs yesterday and recovery today"
+    currentDate: str | None = None   # ISO date, defaults to today on server
+
+
+@router.post("/parse-workouts")
+def parse_recent_workouts(
+    body: ParseWorkoutsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Parse natural language like 'legs yesterday, recovery today' into WorkoutSession objects."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    client = OpenAI(api_key=api_key)
+    today = body.currentDate or __import__("datetime").date.today().isoformat()
+
+    prompt = f"""Parse the user's description of recent workouts into structured session data.
+Today's date is {today}.
+
+User said: "{body.text}"
+
+Return a JSON array of workout sessions. For each workout mentioned:
+- "date": ISO date string (YYYY-MM-DD). "today" = {today}, "yesterday" = the day before, etc.
+- "focus": short description of the workout focus (e.g. "Legs", "Upper Body", "Recovery", "Cardio")
+- "completed": true (they did it)
+- "durationSeconds": estimated duration in seconds (default 3600 if not mentioned)
+- "exercises": array of exercises if mentioned, each with:
+  - "name": exercise name
+  - "sets": array of completed sets, each with "weightLbs" (number) and "reps" (number)
+
+If the user just says a body part or type (e.g. "legs yesterday"), create the session with an empty exercises array — just log the date and focus.
+If they mention specific exercises/weights (e.g. "benched 185 for 3x8"), include those.
+If they say "rest day" or "off day", do NOT create a session for that day.
+
+Return ONLY a valid JSON array — no markdown, no explanation:
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "focus": "string",
+    "completed": true,
+    "durationSeconds": 3600,
+    "exercises": []
+  }}
+]
+
+If nothing parseable, return an empty array: []"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_plan_generation(),
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=800,
+        )
+        raw = resp.choices[0].message.content or "[]"
+        data = json.loads(raw)
+        # Handle both {"sessions": [...]} and direct array
+        sessions = data if isinstance(data, list) else data.get("sessions", data.get("workouts", []))
+        print(f"[parse-workouts] parsed {len(sessions)} sessions from: {body.text[:80]}")
+        return {"sessions": sessions}
+    except Exception as e:
+        print(f"[parse-workouts] error: {e}")
+        return {"sessions": []}
+
+
 @router.post("/trainer-question")
 def ask_trainer_question(
     body: TrainerQuestionRequest,
@@ -2061,9 +2190,21 @@ def ask_trainer_question(
             "When updating injuries, also update the workout plan to avoid the injured area. "
             "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
             "IMPORTANT: updated_nutrition_plan must always be null — you only manage training. "
+            "WORKOUT LOGGING: If the user tells you they completed a workout, trained a muscle group, "
+            "did cardio, or any physical activity (today or recently), set logged_workouts with session data. "
+            "Each entry needs: date (YYYY-MM-DD), focus (e.g. 'Legs', 'Upper Body', 'Cardio'), "
+            "durationSeconds (estimate if not stated, default 3600), and exercises array "
+            "(each with name and sets [{weightLbs, reps}] if mentioned). "
+            "If they just say 'I did legs today' with no details, log it with an empty exercises array. "
+            "Do NOT log workouts if the user is just asking about future plans or hypotheticals. "
             "Return JSON only."
         )
 
+    workout_log_schema = (
+        '  "logged_workouts": [{"date": "YYYY-MM-DD", "focus": "...", "durationSeconds": 3600, "exercises": [{"name": "...", "sets": [{"weightLbs": 0, "reps": 0}]}]}] or null,\n'
+        if not is_nutritionist else
+        '  "logged_workouts": null,\n'
+    )
     injury_schema = (
         '  "updated_injuries": [{"id": "uuid", "description": "...", "bodyPart": "...", "status": "active|recovering|resolved", "notes": "..."}] or null,\n'
         '  "injury_clarification_needed": true|false\n'
@@ -2072,7 +2213,9 @@ def ask_trainer_question(
         '  "injury_clarification_needed": false\n'
     )
 
+    today_date = __import__("datetime").date.today().isoformat()
     user_text = (
+        f"Today's date is {today_date}.\n\n"
         f"Recent conversation (most recent last):\n"
         f"{json.dumps(trimmed_convo, ensure_ascii=True)}\n\n"
         f"User question:\n{q}\n\n"
@@ -2084,6 +2227,7 @@ def ask_trainer_question(
         '  "needs_plan_update": true|false,\n'
         '  "safety_note": "string or empty string",\n'
         + plan_schema
+        + workout_log_schema
         + injury_schema +
         '}\n\n'
         "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
@@ -2197,7 +2341,7 @@ def ask_trainer_question(
             raw = response.choices[0].message.content or raw
 
         result = _extract_json(raw)
-        print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
+        print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
 
         # Phase 2: if a plan update was signalled but no plan included, do a dedicated plan-generation call
         needs_workout = not is_nutritionist and result.get("needs_plan_update") and not result.get("updated_workout_plan")

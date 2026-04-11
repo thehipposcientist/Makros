@@ -496,6 +496,18 @@ export async function getMealSwap(token: string, meal_type: string, foods: strin
   });
 }
 
+/** Parse natural language workout descriptions into structured sessions. */
+export async function parseRecentWorkouts(
+  token: string,
+  text: string,
+): Promise<{ sessions: Array<{ date: string; focus: string; completed: boolean; durationSeconds: number; exercises: any[] }> }> {
+  return request<any>('/ai/parse-workouts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text, currentDate: new Date().toISOString().slice(0, 10) }),
+  }, 30000);
+}
+
 export async function askTrainerQuestion(
   token: string,
   payload: {
@@ -524,6 +536,7 @@ export async function askTrainerQuestion(
   updated_nutrition_plan?: any | null;
   updated_injuries?: any[] | null;
   injury_clarification_needed?: boolean;
+  logged_workouts?: Array<{ date: string; focus: string; durationSeconds: number; exercises: any[] }> | null;
 }> {
   console.log('[askTrainerQuestion] SEND →', {
     mode: payload.mode,

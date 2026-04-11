@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -11,7 +11,7 @@ import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import { colors, getTheme, radius } from '../src/constants/theme';
-import { recordGoalChange, loadWorkoutHistory, todayKey } from '../src/utils/workoutHistory';
+import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey } from '../src/utils/workoutHistory';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -157,6 +157,40 @@ export default function Index() {
         await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
         await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
         setPlanRefreshKey(k => k + 1);
+
+        // Parse onboarding workout context into logged sessions
+        if (stamped.lastWorkoutContext && authToken) {
+          try {
+            const parsed = await parseRecentWorkouts(authToken, stamped.lastWorkoutContext);
+            for (const s of (parsed.sessions ?? [])) {
+              const session: WorkoutSession = {
+                id: `onboarding-${s.date}-${Date.now()}`,
+                date: new Date(s.date + 'T12:00:00').toISOString(),
+                focus: s.focus || 'General',
+                durationSeconds: s.durationSeconds || 3600,
+                exercises: (s.exercises ?? []).map((ex: any) => ({
+                  name: ex.name,
+                  targetSets: ex.sets?.length ?? 0,
+                  targetReps: '',
+                  targetRestSeconds: 60,
+                  equipment: '',
+                  sets: (ex.sets ?? []).map((set: any) => ({
+                    weightLbs: set.weightLbs ?? 0,
+                    reps: set.reps ?? 0,
+                  })),
+                })),
+                completed: true,
+              };
+              await saveWorkoutSession(session);
+            }
+            if (parsed.sessions?.length) {
+              console.log(`[onboarding] logged ${parsed.sessions.length} workout sessions from context`);
+              setPlanRefreshKey(k => k + 1); // refresh to show today as done
+            }
+          } catch (e) {
+            console.warn('[onboarding] failed to parse workout context:', e);
+          }
+        }
       })
       .catch((err) => {
         Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
@@ -404,6 +438,69 @@ export default function Index() {
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
+        onWeeklyRefresh={async (review) => {
+          if (!authToken || !userProfile) return;
+          await appendUserLog({
+            type: 'weekly_checkin',
+            summary: `Week review: adherence ${review.adherence}/5, energy ${review.energy}/5${review.notes ? `, notes: ${review.notes}` : ''}`,
+          });
+
+          // Build workout history context for AI
+          const recentSessions = (await loadWorkoutHistory())
+            .filter(s => !s.skipped && s.completed)
+            .slice(0, 5);
+          const sessionLines = recentSessions.length
+            ? 'Last 5 completed workouts:\n' +
+              recentSessions.map(s => {
+                const muscleGroups = (s.exercises ?? []).map(e => e.name).slice(0, 5).join(', ');
+                return `  [${s.date.slice(0, 10)}] ${s.focus}${muscleGroups ? `: ${muscleGroups}` : ''}`;
+              }).join('\n')
+            : '';
+
+          const userLogRaw = await AsyncStorage.getItem('userLog');
+          const userLog: UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+
+          // Clear pending profile changes since they're being sent to AI now
+          await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
+
+          setIsWorkoutUpdating(true);
+          setIsNutritionUpdating(true);
+
+          getAIPlans(authToken, userProfile, {
+            userLog,
+            extraContext: sessionLines || undefined,
+            weeklyReview: review,
+          })
+            .then(async (aiPlans) => {
+              if (aiPlans.workout_plan) {
+                const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
+                await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+                if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
+              }
+              if (aiPlans.nutrition_plan_a) {
+                const nnNote = aiPlans.nutritionistNote || null;
+                await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
+                await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
+                if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
+                if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
+                if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
+                if (aiPlans.supplementStack?.length) {
+                  await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
+                  setSupplementStack(aiPlans.supplementStack);
+                }
+              }
+              await appendUserLog({ type: 'plan_generated', summary: `Weekly review plan refresh — adherence ${review.adherence}/5, energy ${review.energy}/5` });
+              setPlanRefreshKey(k => k + 1);
+            })
+            .catch((err) => {
+              console.error('[weeklyRefresh] failed:', err?.message ?? err);
+              Alert.alert('Plan refresh failed', 'Could not generate a new plan. Your current plan is unchanged.');
+            })
+            .finally(() => {
+              setIsWorkoutUpdating(false);
+              setIsNutritionUpdating(false);
+            });
+        }}
       />
       {showAccount && authToken && (
         <AccountInfoModal
