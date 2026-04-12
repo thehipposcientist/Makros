@@ -5,6 +5,7 @@ from datetime import datetime, date, timezone
 from app.enums import (
     GoalType, GoalPace, Gender, MealType,
     EquipmentType, MuscleGroup, WorkoutSource, MealSource, FoodCategory,
+    FoodSource,
 )
 
 
@@ -126,25 +127,104 @@ class Exercise(SQLModel, table=True):
     is_mobility: bool = Field(default=False)
 
 
-# ─── Food library (seeded reference data) ─────────────────────────────────────
+# ─── Food library ─────────────────────────────────────────────────────────────
+#
+# Design: Food is the canonical identity row.  Nutrition lives in FoodNutrition
+# (1-to-1 today, extensible to versioned rows later).  FoodServing holds every
+# way you can measure that food.  FoodAlias enables fuzzy search.
+# UserRecentFood tracks per-user recency for search ranking.
+#
+# Migration path:  The old `foods` table had inline macros + a single `unit`.
+# The new schema keeps `foods` as the identity table (same PK, same tablename)
+# but moves nutrition to `food_nutrition` and servings to `food_servings`.
+# Old columns (calories, protein, …) are kept temporarily so existing
+# MealItem.food_id FK and seed_foods() still work.  A data-migration step
+# copies them to the new tables, after which the old columns can be dropped.
 
 class Food(SQLModel, table=True):
     __tablename__ = "foods"
     id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(unique=True, index=True)
+    name: str = Field(index=True)                      # display name — NOT globally unique anymore
+    normalized_name: str = Field(default="", index=True)  # lowercase, stripped, for dedup/search
     category: FoodCategory = Field(sa_column=Column(SAEnum(FoodCategory), nullable=False))
-    unit: str              # e.g. "100g", "1 cup", "1 medium"
-    calories: float
-    protein: float         # grams
-    carbs: float           # grams
-    fat: float             # grams
+    source: FoodSource = Field(
+        sa_column=Column(SAEnum(FoodSource), nullable=False, server_default="seed"),
+    )
+    owner_user_id: int | None = Field(default=None, foreign_key="user.id", index=True)
+    external_id: str | None = Field(default=None, index=True)   # USDA fdc_id, Open Food Facts id, etc.
+    barcode: str | None = Field(default=None, index=True)
+    brand: str | None = Field(default=None)
+    is_verified: bool = Field(default=False)           # True for seed + reviewed USDA entries
+    is_active: bool = Field(default=True)              # soft-delete / hide AI junk
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # ── Legacy columns (kept for backwards compat during migration) ──────────
+    # These will be copied to FoodNutrition + FoodServing, then dropped.
+    unit: str = Field(default="100g")
+    calories: float = Field(default=0)
+    protein: float = Field(default=0)
+    carbs: float = Field(default=0)
+    fat: float = Field(default=0)
     is_custom: bool = Field(default=False)
-    # Extended nutrition — optional, all None-safe for existing rows
-    serving_grams: float | None = Field(default=None)  # canonical serving size in grams
-    fiber: float | None = Field(default=None)           # grams
-    sugar: float | None = Field(default=None)           # grams
-    sodium_mg: float | None = Field(default=None)       # milligrams
-    brand: str | None = Field(default=None)             # brand or source label
+    serving_grams: float | None = Field(default=None)
+    fiber: float | None = Field(default=None)
+    sugar: float | None = Field(default=None)
+    sodium_mg: float | None = Field(default=None)
+
+
+class FoodNutrition(SQLModel, table=True):
+    """Canonical nutrition per 100 g (or per stated reference).  One row per food."""
+    __tablename__ = "food_nutrition"
+    id: int | None = Field(default=None, primary_key=True)
+    food_id: int = Field(foreign_key="foods.id", unique=True, index=True)
+    # All values per 100 g unless reference_unit says otherwise
+    reference_unit: str = Field(default="100g")        # "100g", "1 serving", etc.
+    reference_grams: float = Field(default=100)        # grams that reference_unit equals
+    calories: float = Field(default=0)
+    protein: float = Field(default=0)
+    carbs: float = Field(default=0)
+    fat: float = Field(default=0)
+    fiber: float | None = Field(default=None)
+    sugar: float | None = Field(default=None)
+    sodium_mg: float | None = Field(default=None)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class FoodServing(SQLModel, table=True):
+    """One or more serving sizes per food.  The first inserted is the 'default'."""
+    __tablename__ = "food_servings"
+    __table_args__ = (UniqueConstraint("food_id", "label", name="uq_food_serving_label"),)
+    id: int | None = Field(default=None, primary_key=True)
+    food_id: int = Field(foreign_key="foods.id", index=True)
+    label: str                                         # "1 large", "100g", "1 cup cooked"
+    grams: float                                       # how many grams this serving equals
+    is_default: bool = Field(default=False)            # UI pre-selects this one
+    # Convenience: pre-calculated macros for this serving (derived from FoodNutrition)
+    calories: float = Field(default=0)
+    protein: float = Field(default=0)
+    carbs: float = Field(default=0)
+    fat: float = Field(default=0)
+
+
+class FoodAlias(SQLModel, table=True):
+    """Search aliases — maps alternate names / common misspellings to a food."""
+    __tablename__ = "food_aliases"
+    __table_args__ = (UniqueConstraint("alias_normalized", name="uq_food_alias_name"),)
+    id: int | None = Field(default=None, primary_key=True)
+    food_id: int = Field(foreign_key="foods.id", index=True)
+    alias: str                                         # display form
+    alias_normalized: str = Field(index=True)           # lowercased for search
+
+
+class UserRecentFood(SQLModel, table=True):
+    """Tracks the last time a user logged a particular food — for search ranking."""
+    __tablename__ = "user_recent_foods"
+    __table_args__ = (UniqueConstraint("user_id", "food_id", name="uq_user_recent_food"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    food_id: int = Field(foreign_key="foods.id", index=True)
+    times_used: int = Field(default=1)
+    last_used_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Equipment library (seeded reference data) ────────────────────────────────
@@ -265,9 +345,11 @@ class MealItem(SQLModel, table=True):
     meal_id: int = Field(foreign_key="meals.id", index=True)
     food_name: str              # always present — supports custom foods not in the library
     food_id: int | None = Field(default=None, foreign_key="foods.id")  # optional link to food library
+    serving_id: int | None = Field(default=None, foreign_key="food_servings.id")  # which serving size was used
     quantity: float
     unit: str
     serving_grams: float | None = Field(default=None)  # actual grams consumed
+    # Snapshotted macros — NEVER recalculated from live food data
     calories: float
     protein_g: float
     carbs_g: float
@@ -373,6 +455,7 @@ class SetLog(SQLModel):
 class MealItemCreate(SQLModel):
     food_name: str
     food_id: int | None = None         # optional link to food library row
+    serving_id: int | None = None      # optional link to specific serving size
     quantity: float
     unit: str
     serving_grams: float | None = None
@@ -388,3 +471,47 @@ class MealCreate(SQLModel):
     source: MealSource = MealSource.LOGGED
     notes: str | None = None
     items: list[MealItemCreate]
+
+
+# ─── Food schemas ────────────────────────────────────────────────────────────
+
+class FoodServingRead(SQLModel):
+    id: int
+    label: str
+    grams: float
+    is_default: bool
+    calories: float
+    protein: float
+    carbs: float
+    fat: float
+
+class FoodRead(SQLModel):
+    """Composite read model returned by food search."""
+    id: int
+    name: str
+    category: str
+    source: str
+    brand: str | None = None
+    is_verified: bool = False
+    # Canonical nutrition (from FoodNutrition)
+    calories: float = 0
+    protein: float = 0
+    carbs: float = 0
+    fat: float = 0
+    fiber: float | None = None
+    reference_unit: str = "100g"
+    # Available servings
+    servings: list[FoodServingRead] = []
+
+class FoodCreate(SQLModel):
+    """Create a user-custom or AI food."""
+    name: str
+    category: FoodCategory = FoodCategory.PROTEINS
+    brand: str | None = None
+    # Nutrition per stated unit
+    unit: str = "100g"
+    serving_grams: float = 100
+    calories: float = 0
+    protein: float = 0
+    carbs: float = 0
+    fat: float = 0

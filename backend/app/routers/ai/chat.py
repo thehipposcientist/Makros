@@ -14,7 +14,7 @@ from .router import router
 from .models import TrainerQuestionRequest, WorkoutCoachQuestionRequest
 from .utils import (
     get_openai_api_key, model_chat, model_chat_fallback,
-    _is_gpt5, _build_chat_kwargs, _chat_create, _extract_json,
+    _is_gpt5, _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     _log_openai_error,
     SCHEMA_TRAINER_QUESTION, SCHEMA_WORKOUT_QUESTION,
 )

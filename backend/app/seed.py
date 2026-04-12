@@ -1,5 +1,12 @@
-from sqlmodel import Session, select
-from app.models import Exercise, Food, Equipment, GoalOption, PaceOption
+import re
+from sqlmodel import Session, select, col
+from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, Equipment, GoalOption, PaceOption
+from app.enums import FoodSource
+
+
+def _normalize(name: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for dedup/search."""
+    return re.sub(r"[^a-z0-9 ]", "", name.lower()).strip()
 
 # ─── Exercise library seed data ───────────────────────────────────────────────
 # Format: (name, primary_muscle, secondary_muscles, equipment, is_compound, description)
@@ -239,160 +246,206 @@ def seed_exercises(session: Session) -> None:
 # category must match FoodCategory enum:
 #   proteins | plant_proteins | grains_carbs | vegetables | fruits | dairy | fats_oils
 
-FOODS = [
-    # ── Animal proteins ───────────────────────────────────────────────────────
-    ("Chicken breast",            "proteins",       "100g",       165, 31,  0,    3.6),
-    ("Chicken thighs",            "proteins",       "100g",       209, 26,  0,    11),
-    ("Ground beef (lean)",        "proteins",       "100g",       215, 26,  0,    13),
-    ("Ground beef (extra lean)",  "proteins",       "100g",       176, 26,  0,    7),
-    ("Steak (sirloin)",           "proteins",       "100g",       207, 26,  0,    11),
-    ("Turkey breast",             "proteins",       "100g",       135, 30,  0,    1),
-    ("Deli turkey",               "proteins",       "2 oz",        60, 12,  1,    0.5),
-    ("Rotisserie chicken",        "proteins",       "100g",       185, 27,  0,    8),
-    ("Chicken sausage",           "proteins",       "1 link",     140, 15,  3,    7),
-    ("Pork loin",                 "proteins",       "100g",       182, 26,  0,    8),
-    ("Ham",                       "proteins",       "100g",       145, 21,  1.5,  5.5),
-    ("Salmon",                    "proteins",       "100g",       208, 20,  0,    13),
-    ("Tuna",                      "proteins",       "100g",       116, 26,  0,    1),
-    ("Tuna packet",               "proteins",       "1 packet",    90, 20,  0,    1),
-    ("Shrimp",                    "proteins",       "100g",        99, 24,  0,    0.3),
-    ("Cod",                       "proteins",       "100g",        82, 18,  0,    0.7),
-    ("Tilapia",                   "proteins",       "100g",        96, 20,  0,    1.7),
-    ("Sardines",                  "proteins",       "100g",       208, 25,  0,    11),
-    ("Egg whites",                "proteins",       "100g",        52, 11,  1,    0.2),
-    ("Eggs",                      "proteins",       "1 large",     72,  6,  0.4,  5),
-    ("Protein powder",            "proteins",       "1 scoop",    120, 25,  3,    1.5),
-    ("Protein bar",               "proteins",       "1 bar",      200, 20, 21,    7),
+def _validate_macros(name: str, n: dict) -> None:
+    """Warn if calories don't roughly match protein*4 + carbs*4 + fat*9."""
+    expected = n.get("protein", 0) * 4 + n.get("carbs", 0) * 4 + n.get("fat", 0) * 9
+    actual = n.get("calories", 0)
+    if actual == 0 and expected == 0:
+        return
+    if expected == 0:
+        return  # e.g. creatine has 0 macros
+    diff_pct = abs(actual - expected) / expected * 100
+    if diff_pct > 15:
+        print(f"[seed] WARNING: {name} — calories={actual} but P*4+C*4+F*9={expected:.0f} (off by {diff_pct:.0f}%)")
 
-    # ── Dairy ────────────────────────────────────────────────────────────────
-    ("Greek yogurt",              "dairy",          "170g",       100, 17,  6,    0.7),
-    ("Cottage cheese",            "dairy",          "1/2 cup",    110, 13,  5,    2.5),
-    ("String cheese",             "dairy",          "1 stick",     80,  7,  1,    6),
-    ("Low-fat cheese",            "dairy",          "1 oz",        49,  7,  1,    2),
-    ("Cheddar cheese",            "dairy",          "1 oz",       113,  7,  0,    9),
-    ("Mozzarella",                "dairy",          "1 oz",        80,  7,  1,    6),
-    ("Parmesan",                  "dairy",          "1 tbsp",      21,  2,  0.2,  1.4),
-    ("Butter",                    "dairy",          "1 tbsp",     102,  0,  0,    12),
-    ("Milk (whole)",              "dairy",          "1 cup",      149,  8, 12,    8),
-    ("Milk (skim)",               "dairy",          "1 cup",       83,  8, 12,    0),
-    ("2% milk",                   "dairy",          "1 cup",      122,  8, 12,    5),
-    ("Almond milk (unsweetened)", "dairy",          "1 cup",       30,  1,  1,    2.5),
-    ("Soy milk (unsweetened)",    "dairy",          "1 cup",       80,  7,  4,    4),
 
-    # ── Plant proteins ────────────────────────────────────────────────────────
-    ("Tofu",                      "plant_proteins", "100g",        76,  8,  2,    4.8),
-    ("Tempeh",                    "plant_proteins", "100g",       193, 19,  9,    11),
-    ("Lentils",                   "plant_proteins", "1 cup",      230, 18, 40,    0.8),
-    ("Black beans",               "plant_proteins", "1 cup",      227, 15, 41,    0.9),
-    ("Pinto beans",               "plant_proteins", "1 cup",      245, 15, 45,    1.1),
-    ("Kidney beans",              "plant_proteins", "1 cup",      225, 15, 40,    0.9),
-    ("Chickpeas",                 "plant_proteins", "1 cup",      269, 15, 45,    4),
-    ("Edamame",                   "plant_proteins", "1 cup",      189, 17, 16,    8),
-    ("Hummus",                    "plant_proteins", "2 tbsp",      70,  2,  4,    5),
-
-    # ── Grains & carbs ────────────────────────────────────────────────────────
-    ("White rice",                "grains_carbs",   "1 cup",      206,  4, 45,    0.4),
-    ("Brown rice",                "grains_carbs",   "1 cup",      216,  5, 45,    1.8),
-    ("Jasmine rice",              "grains_carbs",   "1 cup",      205,  4, 45,    0.4),
-    ("Basmati rice",              "grains_carbs",   "1 cup",      190,  4, 39,    0.6),
-    ("Rice packet (microwave)",   "grains_carbs",   "1 packet",   220,  4, 45,    2),
-    ("Oats",                      "grains_carbs",   "1/2 cup",    150,  5, 27,    3),
-    ("Cream of rice",             "grains_carbs",   "1/4 cup dry",170,  3, 38,    0.5),
-    ("Pasta",                     "grains_carbs",   "1 cup",      220,  8, 43,    1.3),
-    ("Whole wheat pasta",         "grains_carbs",   "1 cup",      174,  7, 37,    0.8),
-    ("Quinoa",                    "grains_carbs",   "1 cup",      222,  8, 39,    4),
-    ("Bread (white)",             "grains_carbs",   "1 slice",     79,  3, 15,    1),
-    ("Bread (whole wheat)",       "grains_carbs",   "1 slice",     81,  4, 14,    1.1),
-    ("Bagel",                     "grains_carbs",   "1 medium",   270, 11, 53,    1.5),
-    ("English muffin",            "grains_carbs",   "1 muffin",   134,  5, 26,    1),
-    ("Flour tortilla",            "grains_carbs",   "1 medium",   140,  4, 24,    3.5),
-    ("Whole wheat tortilla",      "grains_carbs",   "1 medium",   120,  4, 20,    2.5),
-    ("Corn tortilla",             "grains_carbs",   "2 small",     90,  2, 18,    1),
-    ("Sweet potato",              "grains_carbs",   "1 medium",   103,  2, 24,    0.1),
-    ("Potato",                    "grains_carbs",   "1 medium",   161,  4, 37,    0.2),
-    ("Rice cakes",                "grains_carbs",   "2 cakes",     70,  1, 14,    0.5),
-    ("Popcorn (air-popped)",      "grains_carbs",   "3 cups",     110,  3, 22,    1.5),
-    ("Granola",                   "grains_carbs",   "1/2 cup",    220,  5, 32,    8),
-    ("Cereal",                    "grains_carbs",   "1 cup",      120,  2, 26,    1),
-    ("Honey",                     "grains_carbs",   "1 tbsp",      64,  0, 17,    0),
-
-    # ── Vegetables ────────────────────────────────────────────────────────────
-    ("Broccoli",                  "vegetables",     "1 cup",       55,  4, 11,    0.6),
-    ("Spinach",                   "vegetables",     "1 cup",        7,  1,  1,    0.1),
-    ("Kale",                      "vegetables",     "1 cup",       33,  3,  6,    0.5),
-    ("Asparagus",                 "vegetables",     "1 cup",       27,  3,  5,    0.2),
-    ("Bell peppers",              "vegetables",     "1 cup",       31,  1,  7,    0.3),
-    ("Zucchini",                  "vegetables",     "1 cup",       21,  2,  4,    0.4),
-    ("Carrots",                   "vegetables",     "1 cup",       52,  1, 12,    0.3),
-    ("Cucumber",                  "vegetables",     "1 cup",       16,  1,  4,    0.1),
-    ("Tomatoes",                  "vegetables",     "1 cup",       32,  2,  7,    0.4),
-    ("Mushrooms",                 "vegetables",     "1 cup",       15,  2,  2,    0.2),
-    ("Onions",                    "vegetables",     "1/2 cup",     32,  1,  7,    0.1),
-    ("Garlic",                    "vegetables",     "1 clove",      4,  0,  1,    0),
-    ("Cauliflower",               "vegetables",     "1 cup",       27,  2,  5,    0.3),
-    ("Green beans",               "vegetables",     "1 cup",       31,  2,  7,    0.1),
-    ("Brussels sprouts",          "vegetables",     "1 cup",       56,  4, 11,    0.8),
-    ("Lettuce",                   "vegetables",     "2 cups",      10,  1,  2,    0.1),
-    ("Bagged salad mix",          "vegetables",     "2 cups",      15,  1,  3,    0.2),
-    ("Frozen mixed vegetables",   "vegetables",     "1 cup",       55,  3, 10,    0.5),
-    ("Salsa",                     "vegetables",     "2 tbsp",      10,  0,  2,    0),
-    ("Marinara sauce",            "vegetables",     "1/2 cup",     70,  2, 10,    2.5),
-
-    # ── Fruits ────────────────────────────────────────────────────────────────
-    ("Banana",                    "fruits",         "1 medium",   105,  1, 27,    0.4),
-    ("Apple",                     "fruits",         "1 medium",    95,  0, 25,    0.3),
-    ("Blueberries",               "fruits",         "1 cup",       84,  1, 21,    0.5),
-    ("Strawberries",              "fruits",         "1 cup",       49,  1, 12,    0.5),
-    ("Mango",                     "fruits",         "1 cup",       99,  1, 25,    0.6),
-    ("Orange",                    "fruits",         "1 medium",    62,  1, 15,    0.2),
-    ("Grapes",                    "fruits",         "1 cup",      104,  1, 27,    0.2),
-    ("Avocado",                   "fruits",         "1/2 fruit",  120,  2,  6,    11),
-    ("Pineapple",                 "fruits",         "1 cup",       82,  1, 22,    0.2),
-    ("Watermelon",                "fruits",         "1 cup",       46,  1, 12,    0.2),
-    ("Peach",                     "fruits",         "1 medium",    59,  1, 14,    0.4),
-    ("Pear",                      "fruits",         "1 medium",   101,  1, 27,    0.2),
-    ("Kiwi",                      "fruits",         "1 medium",    42,  1, 10,    0.4),
-    ("Raspberries",               "fruits",         "1 cup",       64,  1, 15,    0.8),
-    ("Cherries",                  "fruits",         "1 cup",       87,  1, 22,    0.3),
-
-    # ── Fats & oils ───────────────────────────────────────────────────────────
-    ("Olive oil",                 "fats_oils",      "1 tbsp",     119,  0,  0,    14),
-    ("Avocado oil",               "fats_oils",      "1 tbsp",     124,  0,  0,    14),
-    ("Almonds",                   "fats_oils",      "1 oz",       164,  6,  6,    14),
-    ("Peanut butter",             "fats_oils",      "2 tbsp",     188,  8,  7,    16),
-    ("Almond butter",             "fats_oils",      "2 tbsp",     196,  7,  6,    18),
-    ("Walnuts",                   "fats_oils",      "1 oz",       185,  4,  4,    19),
-    ("Cashews",                   "fats_oils",      "1 oz",       157,  5,  9,    12),
-    ("Pistachios",                "fats_oils",      "1 oz",       159,  6,  8,    13),
-    ("Chia seeds",                "fats_oils",      "1 tbsp",      58,  2,  5,    3.7),
-    ("Flax seeds",                "fats_oils",      "1 tbsp",      55,  2,  3,    4.3),
-    ("Coconut oil",               "fats_oils",      "1 tbsp",     117,  0,  0,    14),
-    ("Dark chocolate",            "fats_oils",      "1 oz",       170,  2, 13,    12),
-    ("Trail mix",                 "fats_oils",      "1/4 cup",    170,  5, 15,    11),
-    ("Sunflower seeds",           "fats_oils",      "1 oz",       166,  5,  7,    14),
-]
+def _compute_serving_macros(nutrition: dict, serving_grams: float, ref_grams: float) -> dict:
+    """Scale per-100g nutrition to a given serving size."""
+    if ref_grams <= 0:
+        ratio = 1.0
+    else:
+        ratio = serving_grams / ref_grams
+    return {
+        "calories": round(nutrition["calories"] * ratio, 1),
+        "protein": round(nutrition["protein"] * ratio, 1),
+        "carbs": round(nutrition["carbs"] * ratio, 1),
+        "fat": round(nutrition["fat"] * ratio, 1),
+    }
 
 
 def seed_foods(session: Session) -> None:
-    """Upsert food library by name — inserts new foods, skips existing."""
-    existing_names = set(r.name for r in session.exec(select(Food)).all())
+    """
+    Idempotent food seeder — upserts Food + FoodNutrition + FoodServings + FoodAliases.
+
+    - New foods: created with all related rows.
+    - Existing foods (by normalized_name, source=seed): nutrition updated,
+      servings replaced, aliases synced.
+    """
+    from app.seed_foods_data import SEED_FOODS
+
+    # Index existing seed foods by normalized_name
+    existing_foods: dict[str, Food] = {}
+    for f in session.exec(select(Food).where(Food.source == FoodSource.SEED)).all():
+        existing_foods[f.normalized_name] = f
+    # Also check non-seed foods to avoid name collisions
+    all_norms = {f.normalized_name for f in session.exec(select(Food)).all()}
+
     added = 0
-    for name, category, unit, calories, protein, carbs, fat in FOODS:
-        if name not in existing_names:
-            session.add(Food(
-                name=name,
-                category=category,
-                unit=unit,
-                calories=calories,
-                protein=protein,
-                carbs=carbs,
-                fat=fat,
-                is_custom=False,
+    updated = 0
+
+    for entry in SEED_FOODS:
+        name = entry["name"]
+        norm = _normalize(name)
+        n = entry["nutrition"]
+        category = entry["category"]
+        servings_data = entry.get("servings", [{"label": "100g", "grams": 100, "is_default": True}])
+        aliases_data = entry.get("aliases", [])
+
+        _validate_macros(name, n)
+
+        # Reference grams is 100 (all nutrition is per 100g)
+        ref_grams = 100.0
+
+        if norm in existing_foods:
+            # ── Update existing seed food ────────────────────────────────
+            food = existing_foods[norm]
+            food.name = name
+            food.category = category
+            food.is_verified = True
+            food.is_active = True
+            # Legacy columns
+            food.calories = n["calories"]
+            food.protein = n["protein"]
+            food.carbs = n["carbs"]
+            food.fat = n["fat"]
+            session.add(food)
+
+            # Upsert FoodNutrition
+            fn = session.exec(
+                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
+            ).first()
+            if fn:
+                fn.reference_unit = "100g"
+                fn.reference_grams = ref_grams
+                fn.calories = n["calories"]
+                fn.protein = n["protein"]
+                fn.carbs = n["carbs"]
+                fn.fat = n["fat"]
+                fn.fiber = n.get("fiber")
+                fn.sugar = n.get("sugar")
+                fn.sodium_mg = n.get("sodium_mg")
+                session.add(fn)
+            else:
+                session.add(FoodNutrition(
+                    food_id=food.id,
+                    reference_unit="100g",
+                    reference_grams=ref_grams,
+                    calories=n["calories"], protein=n["protein"],
+                    carbs=n["carbs"], fat=n["fat"],
+                    fiber=n.get("fiber"), sugar=n.get("sugar"),
+                    sodium_mg=n.get("sodium_mg"),
+                ))
+
+            # Replace servings — delete old, insert new
+            old_servings = session.exec(
+                select(FoodServing).where(FoodServing.food_id == food.id)
+            ).all()
+            for s in old_servings:
+                session.delete(s)
+            session.flush()
+
+            has_default = any(s.get("is_default") for s in servings_data)
+            for i, s in enumerate(servings_data):
+                macros = _compute_serving_macros(n, s["grams"], ref_grams)
+                is_def = s.get("is_default", False) or (not has_default and i == 0)
+                session.add(FoodServing(
+                    food_id=food.id, label=s["label"], grams=s["grams"],
+                    is_default=is_def, **macros,
+                ))
+
+            # Sync aliases — delete old seed aliases, insert new
+            old_aliases = session.exec(
+                select(FoodAlias).where(FoodAlias.food_id == food.id)
+            ).all()
+            for a in old_aliases:
+                session.delete(a)
+            session.flush()
+
+            for alias in aliases_data:
+                alias_norm = _normalize(alias)
+                if alias_norm and alias_norm != norm:
+                    session.add(FoodAlias(
+                        food_id=food.id, alias=alias, alias_normalized=alias_norm,
+                    ))
+
+            updated += 1
+            continue
+
+        # ── Create new food ──────────────────────────────────────────────
+        # Skip if a non-seed food already has this normalized name
+        if norm in all_norms:
+            continue
+
+        # Find default serving for legacy columns
+        default_serving = next(
+            (s for s in servings_data if s.get("is_default")),
+            servings_data[0],
+        )
+
+        food = Food(
+            name=name,
+            normalized_name=norm,
+            category=category,
+            source=FoodSource.SEED,
+            is_verified=True,
+            is_custom=False,
+            # Legacy columns
+            unit=default_serving["label"],
+            calories=n["calories"],
+            protein=n["protein"],
+            carbs=n["carbs"],
+            fat=n["fat"],
+            fiber=n.get("fiber"),
+            serving_grams=default_serving["grams"],
+        )
+        session.add(food)
+        session.flush()  # get food.id
+
+        # FoodNutrition (per 100g)
+        session.add(FoodNutrition(
+            food_id=food.id,
+            reference_unit="100g",
+            reference_grams=ref_grams,
+            calories=n["calories"], protein=n["protein"],
+            carbs=n["carbs"], fat=n["fat"],
+            fiber=n.get("fiber"), sugar=n.get("sugar"),
+            sodium_mg=n.get("sodium_mg"),
+        ))
+
+        # FoodServings with pre-calculated macros
+        has_default = any(s.get("is_default") for s in servings_data)
+        for i, s in enumerate(servings_data):
+            macros = _compute_serving_macros(n, s["grams"], ref_grams)
+            is_def = s.get("is_default", False) or (not has_default and i == 0)
+            session.add(FoodServing(
+                food_id=food.id, label=s["label"], grams=s["grams"],
+                is_default=is_def, **macros,
             ))
-            added += 1
+
+        # FoodAliases
+        for alias in aliases_data:
+            alias_norm = _normalize(alias)
+            if alias_norm and alias_norm != norm:
+                session.add(FoodAlias(
+                    food_id=food.id, alias=alias, alias_normalized=alias_norm,
+                ))
+
+        all_norms.add(norm)
+        added += 1
+
     session.commit()
-    if added:
-        print(f"[seed] inserted {added} new foods")
+    if added or updated:
+        print(f"[seed] foods: {added} new, {updated} updated")
 
 
 # ─── Equipment library seed data ──────────────────────────────────────────────

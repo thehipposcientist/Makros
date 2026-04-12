@@ -131,24 +131,93 @@ def _food_covered(item: str, allowed_lower: list[str]) -> bool:
     return False
 
 
-def _check_food_violations(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
-    """
-    Return a list of food strings that appear in the plan but are NOT covered
-    by the allowed_foods list.
-    """
+def _collect_unknown_foods(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
+    """Return food strings in the plan that are NOT in the user's allowed foods."""
     if not allowed_foods:
         return []
     allowed_lower = [f.lower() for f in allowed_foods]
     meal_keys = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
-    violations: list[str] = []
+    unknown: list[str] = []
+    seen: set[str] = set()
     for key in meal_keys:
         meal = nutrition_plan.get(key)
         if not meal or not isinstance(meal, dict):
             continue
         for food_item in meal.get("foods", []):
-            if not _food_covered(str(food_item), allowed_lower):
-                violations.append(food_item)
-    return violations
+            name = str(food_item)
+            if name.lower() not in seen and not _food_covered(name, allowed_lower):
+                unknown.append(name)
+                seen.add(name.lower())
+    return unknown
+
+
+def _build_custom_foods(
+    result: dict,
+    allowed_foods: list[str],
+    enriched: dict | None,
+) -> list[dict]:
+    """
+    Find foods in the generated plan that aren't in the user's food list,
+    look up their macros from the enrichment data, and return them as
+    custom food entries the frontend can add to the user's library.
+    """
+    # Collect unknown foods across all 3 nutrition templates
+    all_unknown: set[str] = set()
+    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
+        np_ = result.get(key, {})
+        unknowns = _collect_unknown_foods(np_, allowed_foods)
+        all_unknown.update(u.lower() for u in unknowns)
+
+    if not all_unknown:
+        return []
+
+    # Build a lookup from enriched data
+    enriched_lookup: dict[str, dict] = {}
+    if enriched:
+        for f in enriched.get("foods", []):
+            enriched_lookup[f.get("name", "").lower()] = f
+        for rm in enriched.get("routine_meals", []):
+            for fi in rm.get("foods", []):
+                enriched_lookup[fi.get("name", "").lower()] = fi
+
+    # Also scrape macros directly from the generated plan meals
+    plan_food_macros: dict[str, dict] = {}
+    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
+        np_ = result.get(key, {})
+        for meal_key in ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2"):
+            meal = np_.get(meal_key)
+            if not meal or not isinstance(meal, dict):
+                continue
+            foods_list = meal.get("foods", [])
+            # If the meal has per-food macro breakdowns (some schemas do)
+            per_food = meal.get("per_food_macros", [])
+            if per_food and len(per_food) == len(foods_list):
+                for name, macros in zip(foods_list, per_food):
+                    if isinstance(macros, dict):
+                        plan_food_macros[str(name).lower()] = macros
+
+    custom_foods: list[dict] = []
+    for name_lower in all_unknown:
+        # Try enriched data first, then plan-extracted macros
+        info = enriched_lookup.get(name_lower) or plan_food_macros.get(name_lower)
+        if info:
+            custom_foods.append({
+                "name": info.get("name", name_lower.title()),
+                "unit": info.get("serving") or info.get("quantity") or "1 serving",
+                "calories": info.get("calories", 0),
+                "protein": info.get("protein", 0),
+                "carbs": info.get("carbs", 0),
+                "fat": info.get("fat", 0),
+            })
+        else:
+            # No macro data available — include with zeros so frontend knows about it
+            custom_foods.append({
+                "name": name_lower.title(),
+                "unit": "1 serving",
+                "calories": 0, "protein": 0, "carbs": 0, "fat": 0,
+            })
+
+    return custom_foods
 
 
 def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | None = None, model: str | None = None, max_tokens: int = 1500) -> dict:
@@ -245,15 +314,16 @@ async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     _m = model_plan_generation()
     print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
 
-    # Enrich foods with macros first (fast model, runs in parallel with workout)
-    enriched = await asyncio.to_thread(
-        enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
+    # Phase 1: enrich foods + generate workout in parallel (enrichment is fast ~1-2s)
+    enriched, workout_data = await asyncio.gather(
+        asyncio.to_thread(enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine),
+        asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 1400),
     )
 
+    # Phase 2: nutrition uses enriched food data
     try:
-        workout_data, nutrition_data = await asyncio.gather(
-            asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 1400),
-            asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(req, enriched), req.foodsAvailable, _m, 3000),
+        nutrition_data = await asyncio.to_thread(
+            _call_nutrition_ai, client, build_nutrition_prompt(req, enriched), req.foodsAvailable, _m, 3000
         )
     except (ValueError, Exception) as e:
         detail = str(e)
@@ -274,6 +344,13 @@ async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     except ValueError as e:
         print(f"[AI /plans] validation failed — {e}")
         raise HTTPException(status_code=502, detail=f"Plan validation failed: {e}")
+
+    # Collect foods in the plan that aren't in the user's food list and enrich them
+    custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
+    if custom_foods:
+        result["custom_foods"] = custom_foods
+        print(f"[AI /plans] {len(custom_foods)} custom foods enriched from plan")
+
     print(f"[AI /plans] done — workout days={len(result['workout_plan'].get('days', []))}")
     return result
 
@@ -371,6 +448,12 @@ async def generate_nutrition_plan(
         "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
         "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
     }
+
+    custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
+    if custom_foods:
+        result["custom_foods"] = custom_foods
+        print(f"[AI /plans/nutrition] {len(custom_foods)} custom foods enriched")
+
     print(f"[AI /plans/nutrition] done — nutritionistNote={bool(result['nutritionistNote'])}")
     return result
 

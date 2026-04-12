@@ -77,3 +77,11 @@ class FoodCategory(str, Enum):
     FRUITS          = "fruits"
     DAIRY           = "dairy"
     FATS_OILS       = "fats_oils"
+
+
+class FoodSource(str, Enum):
+    SEED    = "seed"       # curated seed data shipped with the app
+    USDA    = "usda"       # imported from USDA FoodData Central
+    BARCODE = "barcode"    # scanned via barcode / Open Food Facts
+    USER    = "user"       # created by a specific user
+    AI      = "ai"         # auto-created by AI as fallback

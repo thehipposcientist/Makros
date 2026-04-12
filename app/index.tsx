@@ -62,6 +62,32 @@ export default function Index() {
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
 
+  /** Merge AI-returned custom foods into the user profile's customFoods list */
+  const _mergeCustomFoods = async (foods: Array<{ name: string; unit?: string; calories: number; protein: number; carbs: number; fat: number }>) => {
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (!raw) return;
+      const prof = JSON.parse(raw);
+      const existing: Array<{ name: string }> = prof.customFoods ?? [];
+      const existingNames = new Set(existing.map(f => f.name.toLowerCase()));
+      const newFoods = foods.filter(f => f.calories > 0 && !existingNames.has(f.name.toLowerCase()));
+      if (!newFoods.length) return;
+      prof.customFoods = [
+        ...existing,
+        ...newFoods.map(f => ({
+          name: f.name,
+          unit: f.unit ?? '1 serving',
+          calories: Math.round(f.calories),
+          protein: Math.round(f.protein),
+          carbs: Math.round(f.carbs),
+          fat: Math.round(f.fat),
+        })),
+      ];
+      await AsyncStorage.setItem('userProfile', JSON.stringify(prof));
+      console.log(`[_mergeCustomFoods] added ${newFoods.length} custom foods`);
+    } catch {}
+  };
+
   useEffect(() => { initApp(); }, []);
 
   const initApp = async () => {
@@ -128,6 +154,7 @@ export default function Index() {
             await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
             setSupplementStack(aiPlans.supplementStack);
           }
+          if (aiPlans?.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
           await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
           setPlanRefreshKey(k => k + 1);
         })
@@ -189,6 +216,10 @@ export default function Index() {
         if (aiPlans?.supplementStack?.length) {
           await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
           setSupplementStack(aiPlans.supplementStack);
+        }
+        // Save any custom foods the AI used that weren't in the user's food list
+        if (aiPlans?.custom_foods?.length) {
+          await _mergeCustomFoods(aiPlans.custom_foods);
         }
         // Track when this week's plan started
         await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
@@ -371,6 +402,7 @@ export default function Index() {
               }
             }
 
+            if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
             const what = (regenWorkout && regenNutrition) ? 'full plan' : regenWorkout ? 'workout plan' : 'nutrition plan';
             await appendUserLog({ type: 'plan_generated', summary: `${what} updated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
             setPlanRefreshKey(k => k + 1);
@@ -532,6 +564,7 @@ export default function Index() {
                   setSupplementStack(aiPlans.supplementStack);
                 }
               }
+              if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
               await appendUserLog({ type: 'plan_generated', summary: `Weekly review plan refresh — adherence ${review.adherence}/5, energy ${review.energy}/5` });
               setPlanRefreshKey(k => k + 1);
             })

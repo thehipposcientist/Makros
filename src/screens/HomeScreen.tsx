@@ -848,6 +848,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [workoutUpdateSummary, setWorkoutUpdateSummary] = useState<string | null>(null);
   const [nutritionUpdateSummary, setNutritionUpdateSummary] = useState<string | null>(null);
 
+  // Plan generation progress
+  const [planProgress, setPlanProgress] = useState(0);
+  const [planStep, setPlanStep] = useState('');
+  useEffect(() => {
+    if (!(isWorkoutUpdating || isNutritionUpdating)) {
+      setPlanProgress(0);
+      setPlanStep('');
+      return;
+    }
+    setPlanProgress(0);
+    const steps = [
+      { at: 0, label: 'Analyzing your foods and macros...' },
+      { at: 8, label: 'Building workout plan...' },
+      { at: 20, label: 'Building meal templates...' },
+      { at: 45, label: 'Optimizing nutrition targets...' },
+      { at: 65, label: 'Finalizing your plan...' },
+      { at: 85, label: 'Almost done...' },
+    ];
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      elapsed += 1;
+      // Asymptotic progress: approaches 95% over ~90s
+      const progress = Math.min(95, 100 * (1 - Math.exp(-elapsed / 35)));
+      setPlanProgress(progress);
+      const currentStep = [...steps].reverse().find(s => elapsed >= s.at);
+      if (currentStep) setPlanStep(currentStep.label);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isWorkoutUpdating, isNutritionUpdating]);
+
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
@@ -1712,7 +1742,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
           <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
-            AI is generating a personalized workout and meal plan based on your settings…
+            {planStep || 'Starting AI generation...'}
+          </Text>
+          <View style={{ width: '80%', height: 6, borderRadius: 3, backgroundColor: themeColors.border, marginTop: 16, overflow: 'hidden' }}>
+            <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 3, backgroundColor: themeColors.primary }} />
+          </View>
+          <Text style={{ color: themeColors.textMuted, fontSize: 12, marginTop: 8 }}>
+            ~{Math.max(0, Math.round(60 - planProgress * 0.6))}s remaining
           </Text>
         </View>
       ) : null}
@@ -1752,7 +1788,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
               <ActivityIndicator size="large" color={workoutPalette.strong} />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your workout plan</Text>
-              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>Generating a new schedule based on your updated equipment…</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>{planStep || 'Generating a new schedule based on your updated equipment...'}</Text>
+              <View style={{ width: '70%', height: 4, borderRadius: 2, backgroundColor: themeColors.border, marginTop: 12, overflow: 'hidden' }}>
+                <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 2, backgroundColor: workoutPalette.strong }} />
+              </View>
             </View>
           ) : (
           <>
@@ -1823,7 +1862,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
               <ActivityIndicator size="large" color={mealPalette.strong} />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your meal plan</Text>
-              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>Generating a new meal plan based on your updated foods…</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>{planStep || 'Generating a new meal plan based on your updated foods...'}</Text>
+              <View style={{ width: '70%', height: 4, borderRadius: 2, backgroundColor: themeColors.border, marginTop: 12, overflow: 'hidden' }}>
+                <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 2, backgroundColor: mealPalette.strong }} />
+              </View>
             </View>
           ) : (
           <>
