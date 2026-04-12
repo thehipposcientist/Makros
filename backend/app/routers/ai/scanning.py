@@ -11,7 +11,7 @@ from app.models import User
 
 from .router import router
 from .models import (
-    FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest,
+    FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
     SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
 )
 from .utils import (
@@ -179,6 +179,98 @@ def food_nutrition_search(
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food search failed: {str(e)}")
+
+
+@router.post("/exercise-search")
+def exercise_ai_search(
+    body: ExerciseSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Search for exercises via natural-language using AI. Mirrors the food
+    search flow — user types "lower chest dumbbell" or "knee-friendly quad
+    builder" and gets back structured exercise suggestions the app can add
+    to a workout.
+
+    The AI respects the user's available equipment and injuries so results
+    are directly usable without filtering on the client.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    equipment_line = (
+        f"User's available equipment: {', '.join(body.equipment)}"
+        if body.equipment else "User's equipment: unknown — prefer common / bodyweight options"
+    )
+    muscle_line = f"Target muscle group: {body.muscle_group}" if body.muscle_group else ""
+    injury_line = (
+        f"Injuries to avoid: {', '.join(body.injuries)}. Do NOT suggest exercises that stress these areas."
+        if body.injuries else ""
+    )
+    # Dedupe against the user's existing library — don't waste an AI slot
+    # returning something they already have. We cap the list sent to the
+    # prompt at ~40 names to keep token usage reasonable; the client also
+    # filters belt-and-suspenders.
+    exclude_line = ""
+    if body.exclude:
+        capped = body.exclude[:40]
+        exclude_line = (
+            "EXCLUDE these exercises — the user already has them in their library. "
+            f"Do NOT return any of these names (case-insensitive): {', '.join(capped)}."
+        )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a strength and conditioning coach helping a user find exercises. "
+                "Return 3–6 concrete exercise options that match the query AND the user's "
+                "equipment and injury constraints. Each must be a real, well-known exercise "
+                "— not an invented one. Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Exercise query: "{body.query}"\n'
+                f"{equipment_line}\n"
+                f"{muscle_line}\n"
+                f"{injury_line}\n"
+                f"{exclude_line}\n\n"
+                "Return JSON with this exact schema:\n"
+                '{"results": [{\n'
+                '  "name": "exercise name",\n'
+                '  "primary_muscle": "chest|back|shoulders|biceps|triceps|quads|hamstrings|glutes|calves|core|full_body",\n'
+                '  "equipment": "barbell|dumbbell|machine|cable|bodyweight|kettlebell|band|other",\n'
+                '  "sets": 3,\n'
+                '  "reps": "8-12",\n'
+                '  "rest_seconds": 90,\n'
+                '  "why": "1 sentence on why this exercise fits the query + user constraints",\n'
+                '  "form_cues": ["cue 1", "cue 2", "cue 3"]\n'
+                '}]}\n\n'
+                "Return 3–6 results ordered most→least relevant. "
+                "If the query is vague (e.g. 'quads'), return a mix of compound and isolation movements. "
+                "If the query is specific (e.g. 'unilateral glute bridge'), return that exact exercise plus 2–3 close variations."
+            ),
+        },
+    ]
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model_meal_parsing(),
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=800,
+            timeout=20,
+        )
+        data = json.loads(resp.choices[0].message.content or '{"results": []}')
+        results = data if isinstance(data, list) else data.get("results", [])
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Exercise search failed: {str(e)}")
 
 
 @router.post("/supplement-info")

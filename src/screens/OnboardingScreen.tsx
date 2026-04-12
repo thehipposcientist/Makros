@@ -98,26 +98,126 @@ const FOOD_PRESETS: FoodPreset[] = [
   {
     id: 'high_protein',
     label: 'High Protein',
-    description: 'Lean meats & eggs',
-    items: ['Chicken Breast', 'Ground Turkey', 'Eggs', 'Greek Yogurt', 'Salmon', 'Tuna', 'Cottage Cheese', 'Whey Protein'],
+    description: 'Lean meats, dairy, protein powder',
+    items: [
+      'Chicken Breast', 'Chicken Thighs', 'Ground Turkey', 'Turkey Bacon',
+      'Lean Ground Beef', 'Sirloin Steak', 'Pork Tenderloin',
+      'Salmon', 'Tuna', 'Cod', 'Tilapia', 'Shrimp',
+      'Eggs', 'Egg Whites',
+      'Greek Yogurt', 'Cottage Cheese', 'Skim Milk',
+      'Whey Protein', 'Casein Protein',
+      'Rice', 'Sweet Potato', 'Oats',
+      'Broccoli', 'Spinach', 'Bell Peppers',
+      'Olive Oil', 'Almonds',
+    ],
   },
   {
     id: 'balanced',
-    label: 'Balanced Diet',
-    description: 'Variety of everything',
-    items: ['Chicken Breast', 'Salmon', 'Eggs', 'Brown Rice', 'Sweet Potato', 'Broccoli', 'Banana', 'Oats', 'Olive Oil', 'Greek Yogurt', 'Avocado'],
+    label: 'Balanced',
+    description: 'Mediterranean-style variety',
+    items: [
+      'Chicken Breast', 'Salmon', 'Eggs', 'Lean Ground Beef', 'Greek Yogurt',
+      'Brown Rice', 'Quinoa', 'Sweet Potato', 'Whole Wheat Pasta', 'Oats', 'Whole Grain Bread',
+      'Broccoli', 'Spinach', 'Carrots', 'Bell Peppers', 'Tomatoes', 'Cucumber', 'Lettuce',
+      'Banana', 'Apple', 'Berries', 'Orange',
+      'Olive Oil', 'Avocado', 'Almonds', 'Walnuts', 'Peanut Butter',
+      'Black Beans', 'Chickpeas', 'Lentils',
+    ],
   },
   {
     id: 'plant_based',
     label: 'Plant-Based',
-    description: 'Vegan / vegetarian',
-    items: ['Tofu', 'Tempeh', 'Lentils', 'Black Beans', 'Chickpeas', 'Quinoa', 'Brown Rice', 'Oats', 'Peanut Butter', 'Avocado', 'Broccoli', 'Spinach', 'Banana'],
+    description: 'Vegan / vegetarian high-protein',
+    items: [
+      'Tofu', 'Tempeh', 'Seitan', 'Edamame',
+      'Lentils', 'Black Beans', 'Chickpeas', 'Kidney Beans', 'Split Peas',
+      'Quinoa', 'Brown Rice', 'Oats', 'Whole Grain Bread', 'Whole Wheat Pasta',
+      'Peanut Butter', 'Almond Butter', 'Almonds', 'Cashews', 'Walnuts', 'Pumpkin Seeds', 'Chia Seeds', 'Hemp Seeds',
+      'Avocado', 'Olive Oil', 'Tahini',
+      'Broccoli', 'Spinach', 'Kale', 'Bell Peppers', 'Mushrooms', 'Sweet Potato', 'Carrots',
+      'Banana', 'Apple', 'Berries',
+      'Plant Protein Powder', 'Soy Milk', 'Nutritional Yeast',
+    ],
   },
   {
     id: 'keto',
     label: 'Low Carb / Keto',
-    description: 'High fat, low carb',
-    items: ['Chicken Breast', 'Salmon', 'Eggs', 'Ground Beef', 'Avocado', 'Olive Oil', 'Butter', 'Cheddar Cheese', 'Bacon', 'Spinach', 'Broccoli'],
+    description: 'High fat, very low carb',
+    items: [
+      'Chicken Breast', 'Chicken Thighs', 'Ground Beef', 'Ribeye Steak', 'Bacon', 'Pork Sausage',
+      'Salmon', 'Sardines', 'Mackerel', 'Shrimp',
+      'Eggs',
+      'Butter', 'Ghee', 'Olive Oil', 'Coconut Oil', 'Avocado Oil', 'MCT Oil',
+      'Avocado', 'Olives',
+      'Heavy Cream', 'Cheddar Cheese', 'Mozzarella', 'Cream Cheese', 'Parmesan',
+      'Almonds', 'Macadamia Nuts', 'Pecans', 'Peanut Butter (no sugar)',
+      'Spinach', 'Kale', 'Broccoli', 'Cauliflower', 'Zucchini', 'Asparagus', 'Green Beans',
+      'Berries (small amount)', 'Unsweetened Almond Milk',
+    ],
+  },
+  {
+    id: 'bulk',
+    label: 'Lean Bulk',
+    description: 'Calorie-dense for gaining mass',
+    items: [
+      'Chicken Breast', 'Chicken Thighs', 'Ground Beef (80/20)', 'Ribeye Steak',
+      'Salmon', 'Tuna', 'Eggs',
+      'Whole Milk', 'Greek Yogurt', 'Cottage Cheese', 'Cheddar Cheese',
+      'White Rice', 'Brown Rice', 'Sweet Potato', 'Oats', 'Bagels', 'Whole Wheat Pasta', 'Sourdough Bread',
+      'Banana', 'Apple', 'Grapes', 'Raisins', 'Dates', 'Honey',
+      'Peanut Butter', 'Almond Butter', 'Olive Oil', 'Coconut Oil',
+      'Avocado', 'Almonds', 'Cashews', 'Walnuts', 'Trail Mix',
+      'Whey Protein', 'Mass Gainer',
+      'Broccoli', 'Spinach', 'Carrots',
+    ],
+  },
+  {
+    id: 'cut',
+    label: 'Cut / Fat Loss',
+    description: 'High volume, low calorie density',
+    items: [
+      'Chicken Breast', 'Turkey Breast', 'White Fish', 'Shrimp',
+      'Egg Whites', 'Eggs',
+      'Nonfat Greek Yogurt', 'Cottage Cheese (low fat)', 'Skim Milk',
+      'Oats', 'Brown Rice', 'Sweet Potato', 'Rice Cakes', 'Whole Wheat Bread',
+      'Broccoli', 'Spinach', 'Kale', 'Cauliflower', 'Zucchini', 'Bell Peppers', 'Cucumber', 'Celery', 'Lettuce', 'Tomatoes', 'Mushrooms', 'Asparagus',
+      'Berries', 'Apple', 'Orange', 'Watermelon',
+      'Diet Soda', 'Sparkling Water', 'Black Coffee', 'Green Tea',
+      'Whey Protein (isolate)', 'Casein Protein',
+      'Olive Oil (small amount)', 'Almonds (portioned)',
+    ],
+  },
+  {
+    id: 'mediterranean',
+    label: 'Mediterranean',
+    description: 'Fish, olive oil, veggies, grains',
+    items: [
+      'Salmon', 'Sardines', 'Tuna', 'Mackerel', 'Shrimp', 'Cod',
+      'Chicken Breast', 'Eggs', 'Feta Cheese', 'Greek Yogurt',
+      'Olive Oil', 'Olives', 'Avocado',
+      'Whole Grain Bread', 'Whole Wheat Pasta', 'Couscous', 'Farro', 'Quinoa', 'Brown Rice',
+      'Tomatoes', 'Cucumber', 'Bell Peppers', 'Onion', 'Garlic', 'Spinach', 'Artichoke', 'Eggplant', 'Zucchini',
+      'Lemon', 'Orange', 'Grapes', 'Figs', 'Apple', 'Berries',
+      'Almonds', 'Walnuts', 'Pine Nuts', 'Pistachios',
+      'Hummus', 'Tahini', 'Chickpeas', 'Lentils', 'White Beans',
+    ],
+  },
+  {
+    id: 'carnivore',
+    label: 'Carnivore',
+    description: 'Meat and animal products only',
+    items: [
+      'Ribeye Steak', 'Sirloin Steak', 'Ground Beef (80/20)', 'Ground Beef (grass-fed)',
+      'Chicken Thighs', 'Chicken Breast', 'Chicken Wings',
+      'Pork Chops', 'Pork Belly', 'Bacon', 'Pork Sausage',
+      'Lamb Chops', 'Ground Lamb',
+      'Salmon', 'Sardines', 'Mackerel', 'Cod', 'Tuna', 'Shrimp',
+      'Eggs', 'Egg Yolks',
+      'Butter', 'Ghee', 'Beef Tallow', 'Lard',
+      'Heavy Cream', 'Hard Cheese',
+      'Bone Broth',
+      'Liver', 'Chicken Liver', 'Heart',
+    ],
   },
 ];
 
@@ -363,13 +463,20 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
     if (currentStep < totalSteps - 1) {
       setCurrentStep(s => s + 1);
+      // Scroll to top when advancing — otherwise the next step opens at the
+      // previous step's scroll offset, which is disorienting and often hides
+      // the section header.
+      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: false }));
     } else {
       handleComplete();
     }
   };
 
   const handleBack = () => {
-    if (currentStep > 0) setCurrentStep(s => s - 1);
+    if (currentStep > 0) {
+      setCurrentStep(s => s - 1);
+      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: false }));
+    }
   };
 
   const handleComplete = () => {
@@ -532,6 +639,16 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         <Text style={styles.stepTitle}>What's Your Goal?</Text>
         <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style.</Text>
 
+        {/* Live description of the currently-selected goal. Kept near the
+            top so users see what they're committing to without scrolling. */}
+        {selectedDef && (
+          <View style={{ marginBottom: 16, backgroundColor: colors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.primary + '44' }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.primary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Selected goal</Text>
+            <Text style={{ fontSize: 15, fontWeight: '700', color: colors.textPrimary }}>{selectedDef.label}</Text>
+            <Text style={{ fontSize: 13, color: colors.textSecondary, marginTop: 4, lineHeight: 18 }}>{selectedDef.description}</Text>
+          </View>
+        )}
+
         {/* Launch goals — the 8 most common */}
         <Text style={styles.sectionHeading}>Most popular</Text>
         <View style={styles.goalGrid}>
@@ -609,12 +726,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           );
         })}
 
-        {selectedDef && (
-          <View style={{ marginTop: 16, backgroundColor: colors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.primary + '44' }}>
-            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>{selectedDef.label}</Text>
-            <Text style={{ fontSize: 13, color: colors.textSecondary, marginTop: 2 }}>{selectedDef.description}</Text>
-          </View>
-        )}
+        {/* (Live goal description now shown near the top of the step.) */}
       </View>
     );
   };
@@ -1315,16 +1427,30 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>Experience level</Text>
-        <View style={styles.paceCards}>
-          {EXPERIENCE_OPTIONS.map(opt => (
-            <TouchableOpacity
-              key={opt.value}
-              style={[styles.paceCard, experienceLevel === opt.value && styles.paceCardActive]}
-              onPress={() => setExperienceLevel(opt.value)}>
-              <Text style={[styles.paceLabel, experienceLevel === opt.value && styles.paceLabelActive]}>{opt.label}</Text>
-              <Text style={[styles.paceDesc,  experienceLevel === opt.value && styles.paceDescActive]}>{opt.desc}</Text>
-            </TouchableOpacity>
-          ))}
+        {/* Stacked vertically because the three labels + their descriptions
+            were too cramped side-by-side — "Intermediate" wrapped under
+            itself on narrow screens. One per row fits cleanly. */}
+        <View style={{ gap: 8, marginTop: 8 }}>
+          {EXPERIENCE_OPTIONS.map(opt => {
+            const active = experienceLevel === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  styles.paceCard,
+                  active && styles.paceCardActive,
+                  { alignItems: 'flex-start', paddingVertical: 14, paddingHorizontal: 16 },
+                ]}
+                onPress={() => setExperienceLevel(opt.value)}>
+                <Text style={[styles.paceLabel, active && styles.paceLabelActive, { fontSize: 14, textAlign: 'left', marginBottom: 4 }]}>
+                  {opt.label}
+                </Text>
+                <Text style={[styles.paceDesc, active && styles.paceDescActive, { fontSize: 12, textAlign: 'left', lineHeight: 16 }]}>
+                  {opt.desc}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       </View>
 

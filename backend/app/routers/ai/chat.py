@@ -306,10 +306,13 @@ def ask_trainer_question(
             if not is_nutritionist else
             "NUTRITION PLAN FORMAT: updated_nutrition_plan must use this exact structure: "
             '{"targets": {"calories": N, "protein": N, "carbs": N, "fat": N}, '
-            '"breakfast": {"meal": "...", "foods": ["..."], "calories": N, "protein": N, "carbs": N, "fat": N, "estimated_alignment": "...", "isRoutine": false}, '
+            '"breakfast": {"meal": "...", "items": [{"name": "plain food name", "quantity": N, "unit": "g|oz|lb|ml|fl_oz|cup|tbsp|tsp|piece|slice|scoop|serving", "calories": N, "protein": N, "carbs": N, "fat": N}], "calories": N, "protein": N, "carbs": N, "fat": N, "estimated_alignment": "...", "isRoutine": false}, '
             '"lunch": {...same structure...}, "dinner": {...same structure...}, "snack": {...same structure or omit if no snack...}}. '
-            "CRITICAL: When the user asks to change a macro target (e.g. 'set protein to 200g'), "
-            "you MUST update the targets object AND recalculate all meal portions to match the new totals."
+            "CRITICAL ITEM RULES: Each items[] entry must have `name` (no quantity in the name), separate `quantity` (number), and `unit` (from the enum). "
+            "WRONG: {name: '2 eggs'}.  RIGHT: {name: 'eggs', quantity: 2, unit: 'piece'}. "
+            "Per-item macros must sum to meal-level totals. "
+            "When the user asks to change a macro target (e.g. 'set protein to 200g'), "
+            "update the targets object AND recalculate all meal items to match the new totals."
         )
     )
 

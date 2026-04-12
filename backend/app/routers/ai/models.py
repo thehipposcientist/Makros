@@ -183,6 +183,13 @@ class FormPhotoRequest(BaseModel):
 class FoodNutritionSearchRequest(BaseModel):
     query: str   # free-text: "100g chicken breast" or "1 avocado" or "pizza slice"
 
+class ExerciseSearchRequest(BaseModel):
+    query: str                            # free-text: "lower chest dumbbell", "knee-friendly quad"
+    equipment: list[str] | None = None    # equipment user has available
+    muscle_group: str | None = None       # optional: target specific muscle
+    injuries: list[str] | None = None     # list of injuries to avoid
+    exclude: list[str] | None = None      # exercise names the user already has — do not return these
+
 class SupplementLookupRequest(BaseModel):
     name: str
 

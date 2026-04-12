@@ -186,6 +186,45 @@ class UserFlag(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class UserState(SQLModel, table=True):
+    """Opaque JSON blob holding the full client-side user state — profile,
+    plans, routines, custom exercises/foods, meal edits, histories, etc.
+    The client pushes this on sign-out + key lifecycle events, and pulls it
+    on sign-in. Gives us cross-device sync without needing a dedicated
+    column per field (which would require real migrations every time the
+    client shape evolves). Individual fields can be lifted into their own
+    columns later if we ever want to query them server-side.
+    """
+    __tablename__ = "user_state"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    state_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PlanJob(SQLModel, table=True):
+    """Async plan-generation job. Survives app kills / network drops on the
+    client — the client enqueues a job, disconnects freely, and polls the
+    status endpoint later to pick up the result.
+
+    Status lifecycle: queued → running → completed | failed | cancelled.
+    `result_json` is the full AI response payload (workout_plan + nutrition
+    plans + notes), stored as JSON so the client can restore it verbatim.
+    """
+    __tablename__ = "plan_jobs"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    kind: str = Field(index=True)                      # "full" | "workout" | "nutrition"
+    status: str = Field(default="queued", index=True)  # queued | running | completed | failed | cancelled
+    request_json: dict | None = Field(default=None, sa_column=Column(JSON))   # opts passed to generator
+    result_json: dict | None = Field(default=None, sa_column=Column(JSON))
+    error: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
+
+
 class AIDecision(SQLModel, table=True):
     """Structured record of every AI coaching decision. Replaces prose chat history in payloads."""
     __tablename__ = "ai_decisions"

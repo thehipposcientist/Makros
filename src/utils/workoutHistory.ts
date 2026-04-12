@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry } from '../types';
+import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion } from '../types';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -197,6 +197,95 @@ export async function saveMealRoutines(routines: MealRoutineEntry[]): Promise<vo
   try {
     await AsyncStorage.setItem(MEAL_ROUTINES_KEY, JSON.stringify(routines));
   } catch {}
+}
+
+// ── Routine application (derive-don't-persist) ──────────────────────────────
+//
+// Routines are the source of truth for "this meal repeats every day". We
+// never stamp `isRoutine: true` into the per-day nutrition plans — instead,
+// every code path that writes a DailyNutritionPlan into state should pass it
+// through `applyRoutines()` first. That way:
+//   - AI plan regeneration can't wipe out routines
+//   - Toggling a routine is O(days) of in-memory work, no storage races
+//   - Future days generated on-the-fly get routines for free
+
+/** Build a MealSuggestion from a MealRoutineEntry. Prefers the structured
+ *  `items[]` snapshot when available (new routines) and falls back to the
+ *  legacy foods[]/amounts[] shape for routines saved before items existed. */
+function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSuggestion): MealSuggestion {
+  const hasItems = routine.items && routine.items.length > 0;
+  const foods = hasItems ? routine.items!.map(i => i.name) : routine.foods.map(f => f.name);
+  const amounts = hasItems
+    ? routine.items!.map(i => (i.unit === 'piece' ? String(i.quantity) : `${i.quantity} ${i.unit}`))
+    : routine.foods.map(f => f.quantity ?? '');
+  // If we have structured items, recompute totals from them so routine and
+  // plan stay in sync. Otherwise trust the snapshot or fall through.
+  const totals = hasItems
+    ? routine.items!.reduce(
+        (acc, it) => ({
+          calories: acc.calories + (it.calories ?? 0),
+          protein:  acc.protein  + (it.protein  ?? 0),
+          carbs:    acc.carbs    + (it.carbs    ?? 0),
+          fat:      acc.fat      + (it.fat      ?? 0),
+        }),
+        { calories: 0, protein: 0, carbs: 0, fat: 0 },
+      )
+    : {
+        calories: routine.calories ?? fallback?.calories ?? 0,
+        protein:  routine.protein  ?? fallback?.protein  ?? 0,
+        carbs:    routine.carbs    ?? fallback?.carbs    ?? 0,
+        fat:      routine.fat      ?? fallback?.fat      ?? 0,
+      };
+  return {
+    meal:     routine.name,
+    items:    hasItems ? routine.items : undefined,
+    foods,
+    amounts,
+    calories: totals.calories,
+    protein:  totals.protein,
+    carbs:    totals.carbs,
+    fat:      totals.fat,
+    isRoutine: true,
+    estimated_alignment: fallback?.estimated_alignment ?? '',
+  } as MealSuggestion;
+}
+
+/** Apply routines to a plan. For each mealType that has an active routine,
+ *  replace the plan's slot with the routine's meal. For mealTypes without an
+ *  active routine, clear `isRoutine` so stale flags don't linger.
+ *
+ *  Pure function — returns a new plan object, doesn't mutate input. */
+export function applyRoutines(
+  plan: DailyNutritionPlan,
+  routines: MealRoutineEntry[],
+): DailyNutritionPlan {
+  const byType = new Map<string, MealRoutineEntry>();
+  for (const r of routines) {
+    if (r.mealType) byType.set(r.mealType, r);
+  }
+  const next: DailyNutritionPlan = { ...plan };
+  for (const k of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
+    const routine = byType.get(k);
+    const existing = (plan as any)[k] as MealSuggestion | undefined;
+    if (routine) {
+      (next as any)[k] = mealFromRoutine(routine, existing);
+    } else if (existing) {
+      (next as any)[k] = { ...existing, isRoutine: false };
+    }
+  }
+  return next;
+}
+
+/** Apply routines to a whole map of plans. Returns a new map. */
+export function applyRoutinesToAll(
+  plansByDate: Record<string, DailyNutritionPlan>,
+  routines: MealRoutineEntry[],
+): Record<string, DailyNutritionPlan> {
+  const out: Record<string, DailyNutritionPlan> = {};
+  for (const [k, p] of Object.entries(plansByDate)) {
+    out[k] = applyRoutines(p, routines);
+  }
+  return out;
 }
 
 // ── Plan change history ───────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView } from 'react-native';
 import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
+import { ensureItems, formatItemAmount } from '../utils/mealItems';
 
 interface NutritionCardProps {
   title?: string;
@@ -192,7 +193,7 @@ export default function NutritionCard({
           {routineMeals.length > 0 && (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4, marginTop: 2 }}>
-                <Text style={{ fontSize: 11, fontWeight: '700', color: section.strong, letterSpacing: 0.5 }}>📌  EVERYDAY</Text>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: section.strong, letterSpacing: 0.5 }}>📌  ROUTINE</Text>
               </View>
               {routineMeals.map(({ key, emoji, meal }) => (
                 <MealRow
@@ -322,6 +323,9 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
 }) {
   return (
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
+      {/* Title row: checkbox + meal name. The action buttons live on their
+          own row below so long meal names ("Lean Turkey + Sweet Potato
+          Bowl") don't collide with the Routine / Edit / Remove labels. */}
       <View style={styles.mealHeader}>
         <TouchableOpacity
           style={[styles.checkbox, checked && styles.checkboxDone]}
@@ -329,48 +333,72 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           {checked && <Text style={styles.checkmark}>✓</Text>}
         </TouchableOpacity>
-        <Text style={[styles.mealName, checked && styles.mealNameDone]}>
+        <Text
+          style={[styles.mealName, checked && styles.mealNameDone]}
+          numberOfLines={2}
+          ellipsizeMode="tail">
           {emoji}  {meal.meal}
         </Text>
-        {onToggleRoutine && !mealType.startsWith('extra_') && (
-          <TouchableOpacity
-            onPress={() => onToggleRoutine(mealType)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={styles.routineBtn}>
-            <Text style={[styles.routineBtnText, meal.isRoutine ? { color: mealAccent.strong } : { color: colors.textMuted }]}>
-              {meal.isRoutine ? '📌' : '○'} Everyday
-            </Text>
-          </TouchableOpacity>
-        )}
-        {onEdit && (
-          <TouchableOpacity
-            onPress={() => onEdit(mealType, meal)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={styles.editBtn}>
-            <Text style={styles.editBtnText}>Edit ›</Text>
-          </TouchableOpacity>
-        )}
-        {onRemove && (
-          <TouchableOpacity
-            onPress={() => onRemove(mealType)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={styles.removeMealBtn}>
-            <Text style={styles.removeMealBtnText}>Remove</Text>
-          </TouchableOpacity>
-        )}
       </View>
 
+      {(onToggleRoutine || onEdit || onRemove) && (
+        <View style={styles.mealActionRow}>
+          {onToggleRoutine && !mealType.startsWith('extra_') && (
+            <TouchableOpacity
+              onPress={() => onToggleRoutine(mealType)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={styles.routineBtn}>
+              <Text style={[styles.routineBtnText, meal.isRoutine ? { color: mealAccent.strong } : { color: colors.textMuted }]}>
+                {meal.isRoutine ? '📌 Routine' : '○ Pin as Routine'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          <View style={{ flex: 1 }} />
+          {onEdit && (
+            <TouchableOpacity
+              onPress={() => onEdit(mealType, meal)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={styles.editBtn}>
+              <Text style={styles.editBtnText}>Edit ›</Text>
+            </TouchableOpacity>
+          )}
+          {onRemove && (
+            <TouchableOpacity
+              onPress={() => onRemove(mealType)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={styles.removeMealBtn}>
+              <Text style={styles.removeMealBtnText}>Remove</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
       <View style={styles.mealFoodsDetail}>
-        {meal.foods.map((food, i) => (
-          <View key={i} style={styles.mealFoodRow}>
-            <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone]}>
-              {food}
-            </Text>
-            {meal.amounts?.[i] && (
-              <Text style={styles.mealFoodAmount}>{meal.amounts[i]}</Text>
-            )}
-          </View>
-        ))}
+        {(() => {
+          // Prefer structured items — legacy parallel arrays are fallback.
+          const withItems = ensureItems(meal);
+          const rows = withItems.items && withItems.items.length > 0
+            ? withItems.items.map((it, i) => ({
+                key: `${it.name}-${i}`,
+                name: it.name,
+                amount: formatItemAmount(it),
+              }))
+            : meal.foods.map((f, i) => ({
+                key: `${f}-${i}`,
+                name: f,
+                amount: meal.amounts?.[i] ?? '',
+              }));
+          return rows.map(r => (
+            <View key={r.key} style={styles.mealFoodRow}>
+              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone]}>
+                {r.name}
+              </Text>
+              {r.amount ? (
+                <Text style={styles.mealFoodAmount}>{r.amount}</Text>
+              ) : null}
+            </View>
+          ));
+        })()}
         {meal.instructions && (
           <View style={styles.recipeBox}>
             <Text style={styles.recipeLabel}>How to make it</Text>
@@ -528,7 +556,8 @@ const createStyles = (
   },
   mealItemDone: { opacity: 0.62, borderColor: colors.success },
 
-  mealHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mealHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  mealActionRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 30 },
   checkbox: {
     width: 22, height: 22, borderRadius: 6,
     borderWidth: 2, borderColor: colors.border,

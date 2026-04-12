@@ -13,7 +13,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult } from '../services/api';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
@@ -158,6 +158,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Extra set rows added by user beyond target set count
   const [extraSetCounts, setExtraSetCounts] = useState<Record<number, number>>({});
+  /** Number of unlogged sets the user explicitly removed per exercise.
+   *  Decreases the effective target so the row disappears from the UI
+   *  without affecting any sets they already logged. */
+  const [removedSetCounts, setRemovedSetCounts] = useState<Record<number, number>>({});
 
   // Log-set modal (kept for extra sets beyond targetSets)
   const [logModalVisible, setLogModalVisible] = useState(false);
@@ -275,6 +279,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [exerciseSearch, setExerciseSearch] = useState('');
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
+  const [aiExerciseResults, setAiExerciseResults] = useState<AIExerciseResult[]>([]);
+  const [aiExerciseLoading, setAiExerciseLoading] = useState(false);
 
   // Elapsed workout timer
   useEffect(() => {
@@ -487,7 +493,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setExerciseLibraryLoading(true);
     try {
       const rows = await getExercises();
-      setExerciseLibrary(rows);
+      // Merge AI-saved custom exercises from userProfile so they show up in
+      // the search alongside the seeded backend library.
+      let customs: ExerciseLibraryItem[] = [];
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        if (raw) {
+          const prof = JSON.parse(raw);
+          customs = ((prof.customExercises ?? []) as any[]).map(ce => ({
+            id: ce.id,
+            name: ce.name,
+            primary_muscle: ce.primary_muscle,
+            secondary_muscles: [],
+            equipment: ce.equipment,
+            description: ce.description ?? '',
+            is_custom: true,
+          })) as unknown as ExerciseLibraryItem[];
+        }
+      } catch {}
+      setExerciseLibrary([...customs, ...rows]);
     } catch {
       setExerciseLibrary([]);
     } finally {
@@ -512,6 +536,98 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     });
     setAddExerciseModalVisible(false);
     setExerciseSearch('');
+    setAiExerciseResults([]);
+  }, []);
+
+  /** Run an AI exercise search using the currently-typed query. Respects the
+   *  user's equipment + active injuries so the results are directly usable. */
+  const handleAiExerciseSearch = useCallback(async () => {
+    const q = exerciseSearch.trim();
+    if (!q || !authToken) return;
+    setAiExerciseLoading(true);
+    try {
+      // Pull minimal context from AsyncStorage — ActiveWorkoutScreen doesn't
+      // receive userProfile as a prop so we hydrate just what we need here.
+      let equipment: string[] | undefined;
+      let injuries: string[] | undefined;
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        if (raw) {
+          const prof = JSON.parse(raw);
+          equipment = prof.equipment;
+          const inj = prof.injuryEntries ?? [];
+          injuries = inj
+            .filter((i: any) => i.status !== 'resolved')
+            .map((i: any) => i.bodyPart || i.description);
+        }
+      } catch {}
+      const res = await searchExerciseAI(authToken, {
+        query: q,
+        equipment,
+        injuries,
+        exclude: exerciseLibrary.map(e => e.name).filter(Boolean),
+      });
+      setAiExerciseResults(res.results ?? []);
+      if ((res.results ?? []).length === 0) {
+        Alert.alert('No results', `AI couldn't find a match for "${q}".`);
+      }
+    } catch (e: any) {
+      Alert.alert('Search failed', e?.message ?? 'Could not reach the AI server.');
+    } finally {
+      setAiExerciseLoading(false);
+    }
+  }, [exerciseSearch, authToken]);
+
+  /** Add an AI search result directly to the current workout. Converts the
+   *  AI shape into the same `ExerciseLibraryItem` shape `handleAddExercise`
+   *  expects so the workout code doesn't need to know about AI origin. */
+  const handleAddAiExercise = useCallback((ex: AIExerciseResult) => {
+    handleAddExercise({
+      id: `ai_${Date.now()}` as any,
+      name: ex.name,
+      primary_muscle: ex.primary_muscle as any,
+      secondary_muscles: [] as any,
+      equipment: ex.equipment as any,
+      description: ex.why,
+      is_custom: true,
+    } as unknown as ExerciseLibraryItem);
+  }, [handleAddExercise]);
+
+  /** Persist an AI search result to the user's custom exercise library so
+   *  future local searches find it without another AI call. Mirrors the
+   *  custom-food flow — writes to `userProfile.customExercises` in
+   *  AsyncStorage. Next profile sync pushes it to the backend. */
+  const handleSaveAiExerciseToLibrary = useCallback(async (ex: AIExerciseResult) => {
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (!raw) return;
+      const prof = JSON.parse(raw);
+      const existing: any[] = prof.customExercises ?? [];
+      if (existing.some((c: any) => c.name.toLowerCase() === ex.name.toLowerCase())) {
+        Alert.alert('Already saved', `${ex.name} is already in your library.`);
+        return;
+      }
+      prof.customExercises = [
+        ...existing,
+        {
+          id: `custom_${Date.now()}`,
+          name: ex.name,
+          primary_muscle: ex.primary_muscle,
+          equipment: ex.equipment,
+          sets: ex.sets,
+          reps: ex.reps,
+          rest_seconds: ex.rest_seconds,
+          description: ex.why,
+          form_cues: ex.form_cues,
+          source: 'ai',
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      await AsyncStorage.setItem('userProfile', JSON.stringify(prof));
+      Alert.alert('Saved', `${ex.name} added to your exercise library.`);
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message ?? 'Could not save to library.');
+    }
   }, []);
 
   // Timestamp-based rest timer — avoids drift from re-running setInterval every second
@@ -1175,7 +1291,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {warmupDone && exercises.map((ex, i) => {
           const targetSetCount  = getTargetSetCount(ex.targetSets);
-          const totalSetCount   = targetSetCount + (extraSetCounts[i] ?? 0);
+          // Effective set count: base target + user-added extras, minus
+          // any unlogged sets they've explicitly removed. Clamped so we
+          // never go below the number of already-logged sets.
+          const rawTotal        = targetSetCount + (extraSetCounts[i] ?? 0) - (removedSetCounts[i] ?? 0);
+          const totalSetCount   = Math.max(ex.sets.length, rawTotal);
           const isDone          = ex.sets.length >= totalSetCount;
           const isActive        = activeExIdx === i;
           const isAiLoading     = aiLoadingIdx === i;
@@ -1275,7 +1395,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           <View style={{ width: 40 }} />
                         </View>
 
-                        {Array.from({ length: targetSetCount + (extraSetCounts[i] ?? 0) }, (_, slot) => {
+                        {Array.from({ length: totalSetCount }, (_, slot) => {
                           const logged = ex.sets[slot];
                           const inputKey = `${i}-${slot}`;
                           const input = setInputs[inputKey] ?? { weight: '', reps: '', duration: '' };
@@ -1373,6 +1493,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             );
                           }
 
+                          // Only the LAST unlogged slot is deletable so
+                          // we don't rearrange slot indices mid-list. Users
+                          // can tap delete repeatedly to trim multiple.
+                          const isLastUnlogged = !isLogged && slot === totalSetCount - 1 && totalSetCount > ex.sets.length;
+                          const handleDeleteSlot = () => {
+                            // Prefer removing a user-added "extra" set
+                            // first (reverse of + Add Set). If none,
+                            // reduce the base target via removedSetCounts.
+                            const extras = extraSetCounts[i] ?? 0;
+                            if (extras > 0) {
+                              setExtraSetCounts(prev => ({ ...prev, [i]: Math.max(0, (prev[i] ?? 0) - 1) }));
+                            } else {
+                              setRemovedSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }));
+                            }
+                            // Clean up any stale input for this slot so
+                            // the next row rendered at this index starts
+                            // with a blank weight/reps.
+                            setSetInputs(prev => {
+                              const next = { ...prev };
+                              delete next[inputKey];
+                              return next;
+                            });
+                          };
                           return (
                             <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
@@ -1390,7 +1533,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 placeholderTextColor={themeColors.textMuted}
                                 editable={!isLogged}
                                 selectTextOnFocus
-                                returnKeyType="next"
                               />
                               <TextInput
                                 style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
@@ -1406,8 +1548,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 placeholderTextColor={themeColors.textMuted}
                                 editable={!isLogged}
                                 selectTextOnFocus
-                                returnKeyType="done"
-                                onSubmitEditing={() => Keyboard.dismiss()}
                               />
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               <TouchableOpacity
@@ -1420,6 +1560,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   {isLogged ? '✏' : '○'}
                                 </Text>
                               </TouchableOpacity>
+                              {isLastUnlogged && (
+                                <TouchableOpacity
+                                  style={styles.inlineDeleteBtn}
+                                  onPress={handleDeleteSlot}
+                                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                  accessibilityLabel="Remove this set">
+                                  <Text style={styles.inlineDeleteBtnText}>×</Text>
+                                </TouchableOpacity>
+                              )}
                             </View>
                           );
                         })}
@@ -1936,20 +2085,78 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </TouchableOpacity>
             </View>
 
-            <SearchInput
-              value={exerciseSearch}
-              onChangeText={setExerciseSearch}
-              placeholder="Search exercise library..."
-              placeholderTextColor={themeColors.textMuted}
-              style={styles.addExerciseSearch}
-            />
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <SearchInput
+                containerStyle={{ flex: 1 }}
+                value={exerciseSearch}
+                onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
+                placeholder="Search exercise library..."
+                placeholderTextColor={themeColors.textMuted}
+                style={styles.addExerciseSearch}
+                returnKeyType="search"
+                onSubmitEditing={handleAiExerciseSearch}
+              />
+              {exerciseSearch.trim().length > 1 && (
+                <TouchableOpacity
+                  style={{ backgroundColor: workoutPalette.strong, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
+                  onPress={handleAiExerciseSearch}
+                  disabled={aiExerciseLoading}>
+                  {aiExerciseLoading
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                </TouchableOpacity>
+              )}
+            </View>
 
             {exerciseLibraryLoading ? (
               <ActivityIndicator size="small" color={themeColors.primary} style={{ marginTop: 12 }} />
             ) : (
               <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
+                {/* AI results section — structured exercise suggestions from
+                    the LLM. Each has Add (→ workout) and Save (→ library). */}
+                {aiExerciseResults.length > 0 && (
+                  <View style={{ marginBottom: 14 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>AI Results</Text>
+                    {aiExerciseResults.map((ex, i) => (
+                      <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
+                        <Text style={styles.addExerciseName}>{ex.name}</Text>
+                        <Text style={styles.addExerciseMeta}>
+                          {ex.primary_muscle} · {ex.equipment} · {ex.sets}×{ex.reps}
+                        </Text>
+                        <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
+                        {ex.form_cues?.length > 0 && (
+                          <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>
+                            Cues: {ex.form_cues.join(' · ')}
+                          </Text>
+                        )}
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                          <TouchableOpacity
+                            style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                            onPress={() => handleAddAiExercise(ex)}>
+                            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add to Workout</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                            onPress={() => handleSaveAiExerciseToLibrary(ex)}>
+                            <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>+ Library</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
                 {filteredExerciseLibrary.length === 0 ? (
-                  <Text style={styles.coachEmpty}>No exercises match your search.</Text>
+                  <>
+                    <Text style={styles.coachEmpty}>No exercises match your search.</Text>
+                    {exerciseSearch.trim().length > 1 && aiExerciseResults.length === 0 && !aiExerciseLoading && (
+                      <TouchableOpacity
+                        style={{ marginTop: 10, alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 18, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10 }}
+                        onPress={handleAiExerciseSearch}>
+                        <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 13 }}>Tap to find with AI →</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
                 ) : filteredExerciseLibrary.map((item) => (
                   <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
                     <View style={{ flex: 1 }}>
@@ -2133,6 +2340,16 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     backgroundColor: tc.primary + '20', alignItems: 'center',
   },
   inlineLoggedBadgeText: { fontSize: 14, color: tc.primary, fontWeight: '800' },
+  inlineDeleteBtn: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: tc.surface,
+    borderWidth: 1, borderColor: tc.border,
+    marginLeft: 6,
+  },
+  inlineDeleteBtnText: {
+    fontSize: 16, lineHeight: 18, fontWeight: '700', color: tc.textMuted,
+  },
 
   timerDisplay: { fontSize: 18, fontWeight: '800', fontVariant: ['tabular-nums'] as any, color: tc.textPrimary, minWidth: 52 },
   timerBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, alignItems: 'center' as const, justifyContent: 'center' as const },

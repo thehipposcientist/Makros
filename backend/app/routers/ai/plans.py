@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import openai
 from openai import OpenAI
-from fastapi import HTTPException, Depends
+from fastapi import BackgroundTasks, HTTPException, Depends
+from sqlmodel import Session, select
 
 from app.auth import get_current_user
-from app.models import User
+from app.database import engine, get_session
+from app.models import PlanJob, User
 
 from .router import router
 from .models import PlanRequest, WorkoutOnlyRequest, NutritionOnlyRequest, ParseWorkoutsRequest
@@ -300,35 +303,37 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"{key} has no meal entries")
 
 
-@router.post("/plans")
-async def generate_plans(  # CODE_VERSION=NO_TEMP_2
-    req: PlanRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """Generate both workout and nutrition plans in parallel."""
+async def run_full_plan_generation(req: PlanRequest) -> dict:
+    """Shared plan-generation pipeline. Callable from both the sync /plans
+    endpoint and the async background job worker. No auth, no HTTP — pure
+    data in, data out. Raises ValueError on validation / generation errors.
+
+    Runs enrichment, workout, and nutrition concurrently. The old flow
+    waited for enrichment+workout before starting nutrition, turning a
+    ~30s workout + ~30s nutrition into ~55s total wall time. Running all
+    three in parallel drops it to ~max(workout, nutrition) ≈ 30s. The
+    nutrition prompt is built *without* the enriched food block — the AI
+    estimates macros on its own, which we've been doing successfully in
+    production already. Enriched data still gets used for the
+    `custom_foods` backfill at the end.
+    """
     api_key = get_openai_api_key()
     if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+        raise ValueError("OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
     _m = model_plan_generation()
-    print(f"[AI /plans] generating both — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
+    print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
 
-    # Phase 1: enrich foods + generate workout in parallel (enrichment is fast ~1-2s)
-    enriched, workout_data = await asyncio.gather(
+    # Build both prompts up front — neither needs the other's output.
+    workout_prompt = build_workout_prompt(req)
+    nutrition_prompt = build_nutrition_prompt(req, None)  # no enriched data needed here
+
+    enriched, workout_data, nutrition_data = await asyncio.gather(
         asyncio.to_thread(enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine),
-        asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(req), _m, 1400),
+        asyncio.to_thread(_call_workout_ai, client, workout_prompt, _m, 1800),
+        asyncio.to_thread(_call_nutrition_ai, client, nutrition_prompt, req.foodsAvailable, _m, 3000),
     )
-
-    # Phase 2: nutrition uses enriched food data
-    try:
-        nutrition_data = await asyncio.to_thread(
-            _call_nutrition_ai, client, build_nutrition_prompt(req, enriched), req.foodsAvailable, _m, 3000
-        )
-    except (ValueError, Exception) as e:
-        detail = str(e)
-        print(f"[AI /plans] FAILED — {detail}")
-        raise HTTPException(status_code=502, detail=detail)
 
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
@@ -339,20 +344,45 @@ async def generate_plans(  # CODE_VERSION=NO_TEMP_2
         "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
         "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
     }
-    try:
-        _validate_plans(result, req)
-    except ValueError as e:
-        print(f"[AI /plans] validation failed — {e}")
-        raise HTTPException(status_code=502, detail=f"Plan validation failed: {e}")
+    _validate_plans(result, req)   # raises ValueError
 
-    # Collect foods in the plan that aren't in the user's food list and enrich them
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
-        print(f"[AI /plans] {len(custom_foods)} custom foods enriched from plan")
-
-    print(f"[AI /plans] done — workout days={len(result['workout_plan'].get('days', []))}")
+    print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}")
     return result
+
+
+@router.post("/plans")
+async def generate_plans(  # CODE_VERSION=NO_TEMP_2
+    req: PlanRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Sync plan generation (legacy). New client code should use the job
+    queue at `/ai/plans/enqueue` so long-running work survives app kill."""
+    try:
+        return await run_full_plan_generation(req)
+    except ValueError as e:
+        print(f"[AI /plans] FAILED — {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+async def run_workout_only_generation(plan_req: PlanRequest) -> dict:
+    """Shared workout-only generator — callable from sync endpoint and job worker."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise ValueError("OpenAI API key not configured")
+    client = OpenAI(api_key=api_key)
+    _m = model_plan_update()
+    print(f"[plan-gen workout] goal={plan_req.goal}, days={plan_req.daysPerWeek}")
+    # 1800-token baseline (retry at 2300) — enough for a 6-day plan with the
+    # new verbose trainerNote. 800 was the old cap and was truncating on
+    # bigger plans, which turned into "failed after 2 attempts" errors.
+    workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 1800)
+    return {
+        "trainerNote":  workout_data.get("trainerNote", ""),
+        "workout_plan": workout_data["workout_plan"],
+    }
 
 
 @router.post("/plans/workout")
@@ -360,12 +390,7 @@ async def generate_workout_plan(
     req: WorkoutOnlyRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a workout plan only — called when equipment changes."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-
-    # Build a PlanRequest with only workout-relevant fields populated
+    """Generate a workout plan only — called when equipment changes (sync legacy)."""
     plan_req = PlanRequest(
         goal=req.goal,
         secondaryGoal=req.secondaryGoal,
@@ -380,22 +405,38 @@ async def generate_workout_plan(
         injuriesOrLimitations=req.injuriesOrLimitations,
         userContext=req.userContext,
     )
-
-    client = OpenAI(api_key=api_key)
-    _m = model_plan_update()
-    print(f"[AI /plans/workout] updating — goal={req.goal}, days={req.daysPerWeek}, equipment={len(req.equipment)}, model={_m}")
     try:
-        workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 800)
+        return await run_workout_only_generation(plan_req)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
 
+
+async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
+    """Shared nutrition-only generator — callable from sync endpoint and job worker."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise ValueError("OpenAI API key not configured")
+    client = OpenAI(api_key=api_key)
+    _m = model_plan_update()
+    print(f"[plan-gen nutrition] goal={plan_req.goal}, foods={len(plan_req.foodsAvailable)}")
+    enriched = await asyncio.to_thread(
+        enrich_foods_with_macros, client, plan_req.foodsAvailable, plan_req.mealRoutine
+    )
+    nutrition_data = await asyncio.to_thread(
+        _call_nutrition_ai, client, build_nutrition_prompt(plan_req, enriched), plan_req.foodsAvailable, _m, 3500
+    )
     result = {
-        "trainerNote":  workout_data.get("trainerNote", ""),
-        "workout_plan": workout_data["workout_plan"],
+        "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
+        "supplementStack":  nutrition_data.get("supplementStack", []),
+        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
+        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
+        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
     }
-    print(f"[AI /plans/workout] done — days={len(result['workout_plan'].get('days', []))}, trainerNote={bool(result['trainerNote'])}")
+    custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
+    if custom_foods:
+        result["custom_foods"] = custom_foods
     return result
 
 
@@ -404,12 +445,7 @@ async def generate_nutrition_plan(
     req: NutritionOnlyRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a nutrition plan only — called when foods change."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-
-    # Build a PlanRequest with only nutrition-relevant fields populated
+    """Generate a nutrition plan only — called when foods change (sync legacy)."""
     plan_req = PlanRequest(
         goal=req.goal,
         goalDetails=req.goalDetails,
@@ -425,33 +461,12 @@ async def generate_nutrition_plan(
         customMacros=req.customMacros,
         userContext=req.userContext,
     )
-
-    client = OpenAI(api_key=api_key)
-    _m = model_plan_update()
-    print(f"[AI /plans/nutrition] updating — goal={req.goal}, foods={len(req.foodsAvailable)}, model={_m}")
-
-    enriched = await asyncio.to_thread(
-        enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
-    )
-
     try:
-        nutrition_data = await asyncio.to_thread(_call_nutrition_ai, client, build_nutrition_prompt(plan_req, enriched), req.foodsAvailable, _m, 3500)
+        result = await run_nutrition_only_generation(plan_req)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
-
-    result = {
-        "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
-        "supplementStack":  nutrition_data.get("supplementStack", []),
-        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
-        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
-        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
-    }
-
-    custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
-    if custom_foods:
-        result["custom_foods"] = custom_foods
         print(f"[AI /plans/nutrition] {len(custom_foods)} custom foods enriched")
 
     print(f"[AI /plans/nutrition] done — nutritionistNote={bool(result['nutritionistNote'])}")
@@ -521,3 +536,202 @@ If nothing parseable, return: {{"sessions": []}}"""
         print(f"[parse-workouts] error: {e}")
         return {"sessions": []}
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Async job queue — plan generation that survives client app kills.
+#
+# The client enqueues a job, disconnects freely, then polls the status
+# endpoint when it comes back. The backend owns the lifecycle, so a phone
+# being locked, backgrounded, or even force-closed mid-generation doesn't
+# interrupt the work — it keeps running in a FastAPI BackgroundTask and the
+# result is persisted to `plan_jobs.result_json`.
+#
+# BackgroundTasks run in the same process, so if the backend container
+# restarts, in-flight jobs are lost. On startup we mark any orphaned
+# `running` jobs as `failed` (see `mark_orphaned_jobs_failed` below).
+# For MVP that's fine — users can just retry.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _job_to_dict(job: PlanJob) -> dict:
+    return {
+        "id": job.id,
+        "kind": job.kind,
+        "status": job.status,
+        "error": job.error,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        # result is intentionally omitted from summary endpoints — callers
+        # fetch it via the status endpoint only once per completed job
+        "has_result": job.result_json is not None,
+    }
+
+
+async def _run_plan_job(job_id: int) -> None:
+    """Background worker — runs one plan-gen job to completion.
+
+    Opens its own DB session because BackgroundTasks run outside the
+    request context. Status transitions:
+        queued → running → completed | failed
+    Cancellation (status=cancelled) is checked at the top; if the client
+    cancelled before the worker picked up, we exit without doing work.
+    """
+    with Session(engine) as db:
+        job = db.get(PlanJob, job_id)
+        if not job:
+            print(f"[plan-job {job_id}] not found")
+            return
+        if job.status == "cancelled":
+            print(f"[plan-job {job_id}] cancelled before start")
+            return
+
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        job.updated_at = job.started_at
+        db.add(job)
+        db.commit()
+
+        try:
+            req_dict = job.request_json or {}
+            # Re-hydrate the PlanRequest from stored JSON. PlanRequest is a
+            # pydantic BaseModel so .model_validate accepts a dict.
+            req = PlanRequest.model_validate(req_dict)
+            if job.kind == "workout":
+                result = await run_workout_only_generation(req)
+            elif job.kind == "nutrition":
+                result = await run_nutrition_only_generation(req)
+            else:
+                result = await run_full_plan_generation(req)
+
+            # Re-check cancellation before saving — user might have cancelled
+            # while the OpenAI call was in flight.
+            db.refresh(job)
+            if job.status == "cancelled":
+                print(f"[plan-job {job_id}] cancelled mid-flight, discarding result")
+                return
+            job.status = "completed"
+            job.result_json = result
+            job.completed_at = datetime.now(timezone.utc)
+            job.updated_at = job.completed_at
+            db.add(job)
+            db.commit()
+            print(f"[plan-job {job_id}] completed")
+        except Exception as e:
+            db.refresh(job)
+            if job.status == "cancelled":
+                return
+            job.status = "failed"
+            job.error = str(e)[:500]
+            job.completed_at = datetime.now(timezone.utc)
+            job.updated_at = job.completed_at
+            db.add(job)
+            db.commit()
+            print(f"[plan-job {job_id}] FAILED — {e}")
+
+
+@router.post("/plans/enqueue")
+async def enqueue_plan_job(
+    req: PlanRequest,
+    background_tasks: BackgroundTasks,
+    kind: str = "full",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Enqueue a background plan-generation job. Returns the job id
+    immediately; client polls `/ai/plans/job/{id}` for the result.
+
+    `kind` is one of: full | workout | nutrition. Workout-only and
+    nutrition-only jobs use the same PlanRequest body; the worker picks the
+    appropriate generator. Kept as a query param (not body field) so the
+    request shape stays identical to the legacy sync endpoints.
+    """
+    if kind not in ("full", "workout", "nutrition"):
+        raise HTTPException(status_code=400, detail=f"Invalid kind: {kind}")
+
+    # Cancel any earlier running jobs for this user so we don't stack work —
+    # the client always wants the most recent request.
+    pending = db.exec(
+        select(PlanJob).where(
+            PlanJob.user_id == current_user.id,
+            PlanJob.status.in_(["queued", "running"]),
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for p in pending:
+        p.status = "cancelled"
+        p.updated_at = now
+        db.add(p)
+
+    job = PlanJob(
+        user_id=current_user.id,
+        kind=kind,
+        status="queued",
+        request_json=req.model_dump(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(_run_plan_job, job.id)
+    print(f"[plan-job {job.id}] enqueued kind={kind} for user={current_user.id}")
+    return _job_to_dict(job)
+
+
+@router.get("/plans/job/{job_id}")
+def get_plan_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Poll for job status. On `completed`, the full result payload is
+    included; on other statuses, result is omitted."""
+    job = db.get(PlanJob, job_id)
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    out = _job_to_dict(job)
+    if job.status == "completed":
+        out["result"] = job.result_json
+    return out
+
+
+@router.delete("/plans/job/{job_id}")
+def cancel_plan_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Cancel a queued or running job. If already completed / failed /
+    cancelled, this is a no-op that still returns 200."""
+    job = db.get(PlanJob, job_id)
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in ("queued", "running"):
+        job.status = "cancelled"
+        job.updated_at = datetime.now(timezone.utc)
+        db.add(job)
+        db.commit()
+    return _job_to_dict(job)
+
+
+@router.get("/plans/jobs/latest")
+def get_latest_plan_job(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return the most recent plan job for this user, if any. Client uses
+    this on cold start to resume displaying a loading overlay if a job is
+    still running from a previous session."""
+    job = db.exec(
+        select(PlanJob)
+        .where(PlanJob.user_id == current_user.id)
+        .order_by(PlanJob.created_at.desc())
+    ).first()
+    if not job:
+        return {"job": None}
+    out = _job_to_dict(job)
+    if job.status == "completed":
+        out["result"] = job.result_json
+    return {"job": out}

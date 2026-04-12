@@ -7,7 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
-import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition } from '../services/api';
+import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult } from '../services/api';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
@@ -18,6 +18,10 @@ import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils
 
 
 interface EditProfileScreenProps {
+  // Signal to parent that routines were changed so the live meal plans can
+  // re-apply them without a full regen. Optional — if absent, changes take
+  // effect on the next plan reload.
+  onRoutinesChanged?: () => void;
   authToken: string;
   profile: UserProfile;
   onSave: (updated: UserProfile) => void;
@@ -212,7 +216,7 @@ function createAfmStyles(c: ReturnType<typeof getTheme>['colors']) { return Styl
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal' }: EditProfileScreenProps) {
+export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal', onRoutinesChanged }: EditProfileScreenProps) {
   const tc = getTheme(profile.themePreference).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -251,6 +255,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     ...(profile.supplementsAvailable ?? []).map(s => '__supp__' + s),
   ]);
   const [customFoods, setCustomFoods] = useState<CustomFoodItem[]>(profile.customFoods ?? []);
+  const [customExercises, setCustomExercises] = useState<import('../types').CustomExerciseItem[]>(profile.customExercises ?? []);
   const [savedMeals, setSavedMeals]   = useState<SavedMealTemplate[]>(profile.savedMeals ?? []);
   const [mealRoutine, setMealRoutine] = useState(profile.mealRoutine ?? '');
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
@@ -305,6 +310,54 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseSearch, setExerciseSearch] = useState('');
+  const [aiExerciseResults, setAiExerciseResults] = useState<AIExerciseResult[]>([]);
+  const [aiExerciseLoading, setAiExerciseLoading] = useState(false);
+  const handleAiExerciseSearch = async () => {
+    const q = exerciseSearch.trim();
+    if (!q || !authToken) return;
+    setAiExerciseLoading(true);
+    try {
+      const res = await searchExerciseAI(authToken, {
+        query: q,
+        equipment,
+        injuries: (injuryEntries ?? [])
+          .filter(i => i.status !== 'resolved')
+          .map(i => i.bodyPart || i.description)
+          .filter(Boolean),
+        exclude: exerciseLibrary.map(e => e.name).filter(Boolean),
+      });
+      setAiExerciseResults(res.results ?? []);
+      if ((res.results ?? []).length === 0) {
+        Alert.alert('No results', `AI couldn't find a match for "${q}".`);
+      }
+    } catch (e: any) {
+      Alert.alert('Search failed', e?.message ?? 'Could not reach the AI server.');
+    } finally {
+      setAiExerciseLoading(false);
+    }
+  };
+  const handleSaveAiExerciseFromEdit = async (ex: AIExerciseResult) => {
+    const existing = customExercises ?? [];
+    if (existing.some(c => c.name.toLowerCase() === ex.name.toLowerCase())) {
+      Alert.alert('Already saved', `${ex.name} is already in your library.`);
+      return;
+    }
+    const newItem = {
+      id: `custom_${Date.now()}`,
+      name: ex.name,
+      primary_muscle: ex.primary_muscle,
+      equipment: ex.equipment,
+      sets: ex.sets,
+      reps: ex.reps,
+      rest_seconds: ex.rest_seconds,
+      description: ex.why,
+      form_cues: ex.form_cues,
+      source: 'ai' as const,
+      createdAt: new Date().toISOString(),
+    };
+    setCustomExercises([...existing, newItem]);
+    Alert.alert('Saved', `${ex.name} added to your exercise library.`);
+  };
   const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
@@ -316,13 +369,40 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     loadMealRoutines().then(setMealRoutinesState);
   }, []);
 
-  // Load exercise library when exercises tab is opened
+  // Load exercise library when exercises tab is opened. Merges user's
+  // AI-saved custom exercises on top of the seeded backend library so
+  // both show up in the same searches/filters.
   useEffect(() => {
     if (mode === 'workout' && workoutTab === 'exercises' && exerciseLibrary.length === 0 && !exerciseLibraryLoading) {
       setExerciseLibraryLoading(true);
-      getExercises().then(rows => setExerciseLibrary(rows ?? [])).catch(() => setExerciseLibrary([])).finally(() => setExerciseLibraryLoading(false));
+      getExercises()
+        .then(rows => {
+          const customs = (customExercises ?? []).map(ce => ({
+            id: ce.id as any,
+            name: ce.name,
+            primary_muscle: ce.primary_muscle,
+            secondary_muscles: [] as string[],
+            equipment: ce.equipment,
+            description: ce.description ?? '',
+            is_custom: true,
+          })) as unknown as ExerciseLibraryItem[];
+          setExerciseLibrary([...customs, ...(rows ?? [])]);
+        })
+        .catch(() => {
+          const customs = (customExercises ?? []).map(ce => ({
+            id: ce.id as any,
+            name: ce.name,
+            primary_muscle: ce.primary_muscle,
+            secondary_muscles: [] as string[],
+            equipment: ce.equipment,
+            description: ce.description ?? '',
+            is_custom: true,
+          })) as unknown as ExerciseLibraryItem[];
+          setExerciseLibrary(customs);
+        })
+        .finally(() => setExerciseLibraryLoading(false));
     }
-  }, [mode, workoutTab]);
+  }, [mode, workoutTab, customExercises]);
 
   const exerciseMuscleOptions = Array.from(
     new Set(exerciseLibrary.map(i => i.primary_muscle).filter(Boolean) as string[])
@@ -372,30 +452,138 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     setRoutineModalVisible(true);
   };
 
+  /** Pick a routine photo AND run it through the AI vision scanner so the
+   *  foods + macros get auto-populated. If the user already typed some
+   *  foods, the scan results are merged in (no duplicate names). */
   const handleRoutinePickPhoto = async () => {
+    let pickedUri: string | null = null;
+    let pickedBase64: string | null = null;
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.granted) {
-      const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.8, mediaTypes: ['images'] as any });
-      if (!result.canceled && result.assets?.[0]) { setRoutinePhotoUri(result.assets[0].uri); return; }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        quality: 0.8,
+        mediaTypes: ['images'] as any,
+        base64: true,
+      });
+      if (!result.canceled && result.assets?.[0]) {
+        pickedUri = result.assets[0].uri;
+        pickedBase64 = result.assets[0].base64 ?? null;
+      }
     }
-    const cam = await ImagePicker.requestCameraPermissionsAsync();
-    if (!cam.granted) { Alert.alert('Permission needed', 'Allow camera or photo library access.'); return; }
-    const result = await ImagePicker.launchCameraAsync({ quality: 0.8, mediaTypes: ['images'] as any });
-    if (!result.canceled && result.assets?.[0]) setRoutinePhotoUri(result.assets[0].uri);
+    if (!pickedUri) {
+      const cam = await ImagePicker.requestCameraPermissionsAsync();
+      if (!cam.granted) { Alert.alert('Permission needed', 'Allow camera or photo library access.'); return; }
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+        mediaTypes: ['images'] as any,
+        base64: true,
+      });
+      if (!result.canceled && result.assets?.[0]) {
+        pickedUri = result.assets[0].uri;
+        pickedBase64 = result.assets[0].base64 ?? null;
+      }
+    }
+    if (!pickedUri) return;
+
+    setRoutinePhotoUri(pickedUri);
+
+    // Scan the photo against the AI to derive structured foods + macros.
+    // The user can still edit afterwards, so we optimistically merge rather
+    // than replace their existing list.
+    if (authToken && pickedBase64) {
+      try {
+        const res = await scanFoodsPhoto(authToken, {
+          images: [{ image_base64: pickedBase64, mime_type: 'image/jpeg' }],
+        });
+        if (res.foods?.length) {
+          setRoutineFoods(prev => {
+            const existingNames = new Set(prev.map(f => f.name.toLowerCase()));
+            const additions: MealRoutineFood[] = res.foods
+              .filter(f => !existingNames.has(f.name.toLowerCase()))
+              .map((f, i) => ({
+                id: `${Date.now()}_${i}`,
+                name: f.name,
+                quantity: f.serving ?? undefined,
+              }));
+            return [...prev, ...additions];
+          });
+          Alert.alert(
+            'Photo analyzed',
+            `Added ${res.foods.length} food${res.foods.length === 1 ? '' : 's'} to this routine. You can edit or remove them below.`,
+          );
+        }
+      } catch (e: any) {
+        console.warn('[routine-photo] AI scan failed', e?.message ?? e);
+        // Fail quietly — the photo itself still saved, user can type foods manually.
+      }
+    }
   };
 
-  const handleRoutineAddFood = () => {
+  const handleRoutineAddFood = async () => {
     const name = routineFoodInput.trim();
     if (!name) return;
-    const food: MealRoutineFood = { id: Date.now().toString(), name, quantity: routineFoodQtyInput.trim() || undefined };
-    setRoutineFoods(prev => [...prev, food]);
+    // Clear the input immediately so the user can keep typing the next food.
+    const qty = routineFoodQtyInput.trim() || undefined;
     setRoutineFoodInput('');
     setRoutineFoodQtyInput('');
+
+    const food: MealRoutineFood = { id: Date.now().toString(), name, quantity: qty };
+    setRoutineFoods(prev => [...prev, food]);
+
+    // If this food is new (not in seed library OR existing customFoods),
+    // look up macros via AI and add to customFoods right now so the user
+    // gets immediate feedback instead of waiting until they hit Save.
+    const knownLower = new Set([
+      ...meta.allFoods.map(f => f.name.toLowerCase()),
+      ...customFoods.map(f => f.name.toLowerCase()),
+    ]);
+    if (knownLower.has(name.toLowerCase())) return;
+
+    if (!authToken) {
+      // No backend — add a zero-macro stub so the food exists in the library.
+      setCustomFoods(prev => prev.some(f => f.name.toLowerCase() === name.toLowerCase())
+        ? prev
+        : [...prev, { name, unit: '1 serving', calories: 0, protein: 0, carbs: 0, fat: 0 }]);
+      return;
+    }
+
+    try {
+      const res = await searchFoodNutrition(authToken, name);
+      const first = res.results?.[0];
+      const item: CustomFoodItem = first ? {
+        name: first.name ?? name,
+        unit: first.serving ?? '1 serving',
+        calories: Math.round(first.calories ?? 0),
+        protein:  Math.round(first.protein  ?? 0),
+        carbs:    Math.round(first.carbs    ?? 0),
+        fat:      Math.round(first.fat      ?? 0),
+      } : { name, unit: '1 serving', calories: 0, protein: 0, carbs: 0, fat: 0 };
+      setCustomFoods(prev => prev.some(f => f.name.toLowerCase() === item.name.toLowerCase())
+        ? prev
+        : [...prev, item]);
+    } catch {
+      // AI unreachable — stub it so the food still lands in the library.
+      setCustomFoods(prev => prev.some(f => f.name.toLowerCase() === name.toLowerCase())
+        ? prev
+        : [...prev, { name, unit: '1 serving', calories: 0, protein: 0, carbs: 0, fat: 0 }]);
+    }
   };
 
   const handleRoutineSave = async () => {
     const name = routineName.trim();
     if (!name) { Alert.alert('Name required', 'Give this routine a name.'); return; }
+    // mealType is required — `applyRoutines` in HomeScreen keys on it, so
+    // a routine with an empty mealType would be saved but never pinned to
+    // any meal slot on the plan. Force the user to pick one.
+    if (!routineMealType) {
+      Alert.alert('Meal type required', 'Pick whether this routine is breakfast, lunch, dinner, or a snack.');
+      return;
+    }
+
+    // Custom-food evaluation now happens inline in `handleRoutineAddFood`
+    // so the user sees macros populate the moment they add each food.
+    // Nothing to do here at save time.
+
     const entry: MealRoutineEntry = {
       id: editingRoutine?.id ?? Date.now().toString(),
       name,
@@ -411,6 +599,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     setMealRoutinesState(next);
     await saveMealRoutines(next);
     setRoutineModalVisible(false);
+    onRoutinesChanged?.();
   };
 
   const handleRoutineDelete = async (id: string) => {
@@ -420,6 +609,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         const next = mealRoutines.filter(r => r.id !== id);
         setMealRoutinesState(next);
         await saveMealRoutines(next);
+        onRoutinesChanged?.();
       }},
     ]);
   };
@@ -637,6 +827,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       equipment,
       foodsAvailable: actualFoods,
       customFoods,
+      customExercises,
       savedMeals,
       supplementsAvailable: finalSupps,
       mealRoutine: mealRoutine.trim() || undefined,
@@ -1261,14 +1452,62 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             ) : (
               /* ── Exercise list with filters ── */
               <>
-                {/* Search */}
-                <SearchInput
-                  style={styles.searchInput}
-                  value={exerciseSearch}
-                  onChangeText={setExerciseSearch}
-                  placeholder="Search exercises..."
-                  placeholderTextColor={tc.textMuted}
-                />
+                {/* Search — with an AI fallback that queries an LLM when
+                    the local library doesn't have what you want. Saved AI
+                    results get merged into the local library on next open. */}
+                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                  <SearchInput
+                    containerStyle={{ flex: 1 }}
+                    style={[styles.searchInput, { marginBottom: 0 }]}
+                    value={exerciseSearch}
+                    onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
+                    placeholder="Search exercises..."
+                    placeholderTextColor={tc.textMuted}
+                    returnKeyType="search"
+                    onSubmitEditing={handleAiExerciseSearch}
+                  />
+                  {exerciseSearch.trim().length > 1 && authToken && (
+                    <TouchableOpacity
+                      style={{ backgroundColor: tc.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
+                      onPress={handleAiExerciseSearch}
+                      disabled={aiExerciseLoading}>
+                      {aiExerciseLoading
+                        ? <ActivityIndicator size="small" color="#fff" />
+                        : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {aiExerciseResults.length > 0 && (
+                  <View style={{ marginTop: 12, marginBottom: 8 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>AI Results</Text>
+                    {aiExerciseResults.map((ex, i) => {
+                      const alreadySaved = (customExercises ?? []).some(c => c.name.toLowerCase() === ex.name.toLowerCase());
+                      return (
+                        <View key={`ai-${ex.name}-${i}`} style={{ backgroundColor: tc.surfaceRaised, borderColor: tc.primary + '55', borderWidth: 1.5, borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{ex.name}</Text>
+                          <Text style={{ fontSize: 12, color: tc.primary, marginTop: 2 }}>
+                            {ex.primary_muscle} · {ex.equipment} · {ex.sets}×{ex.reps}
+                          </Text>
+                          <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 4 }}>{ex.why}</Text>
+                          {ex.form_cues?.length > 0 && (
+                            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>
+                              Cues: {ex.form_cues.join(' · ')}
+                            </Text>
+                          )}
+                          <TouchableOpacity
+                            style={{ alignSelf: 'flex-start', marginTop: 10, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8, backgroundColor: alreadySaved ? tc.border : tc.primary }}
+                            onPress={() => handleSaveAiExerciseFromEdit(ex)}
+                            disabled={alreadySaved}>
+                            <Text style={{ color: alreadySaved ? tc.textMuted : '#fff', fontWeight: '700', fontSize: 13 }}>
+                              {alreadySaved ? '✓ In Library' : '+ Save to Library'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
 
                 {/* Filters — single row with labeled dropdowns */}
                 <View style={{ gap: 6, marginBottom: 10 }}>
@@ -2254,10 +2493,11 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     backgroundColor: colors.surface,
     color: colors.textPrimary,
+    fontSize: 16,
     marginBottom: 10,
   },
   filterRow: { gap: 8, paddingBottom: 12 },

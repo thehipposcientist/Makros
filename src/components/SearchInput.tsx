@@ -54,7 +54,7 @@ const SearchInput = forwardRef<TextInput, Props>(function SearchInput(
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           accessibilityRole="button"
           accessibilityLabel="Clear search">
-          <Text style={styles.clearBtnText}>✕</Text>
+          <Text style={styles.clearBtnText}>Clear</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -65,28 +65,41 @@ export default SearchInput;
 
 const styles = StyleSheet.create({
   wrapper: {
+    // Fill the parent's width by default so callers don't have to
+    // remember to pass `containerStyle={{ flex: 1 }}` everywhere. The
+    // containerStyle prop (if any) is merged AFTER, so explicit overrides
+    // still win.
     position: 'relative',
-    // Let the wrapped TextInput size itself via its own `style`.
-    flexShrink: 1,
-    flexGrow: 0,
+    flex: 1,
     alignSelf: 'stretch',
   },
   inputWithClear: {
-    // Reserve room for the clear button so text doesn't collide with it.
-    paddingRight: 36,
+    // Reserve room for the pill so text doesn't collide with it.
+    paddingRight: 72,
   },
   clearBtn: {
+    // Full-height pill that matches the search input's height exactly.
+    // top/bottom:0 stretches the button to fill the input regardless of
+    // the input's concrete height (which varies by screen since we reuse
+    // this component with different styles).
     position: 'absolute',
-    right: 8,
-    top: 0,
-    bottom: 0,
-    width: 26,
+    right: 6,
+    top: 4,
+    bottom: 4,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
   clearBtnText: {
-    fontSize: 14,
-    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 14,
+    color: colors.textPrimary,
     fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
 });

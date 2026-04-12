@@ -1,13 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { MealSuggestion, DailyNutritionPlan, SavedMealTemplate } from '../types';
+import {
+  MealSuggestion, DailyNutritionPlan, SavedMealTemplate,
+  MealItem, FoodUnit, FOOD_UNIT_LABELS, FOOD_UNIT_GROUPS,
+} from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
 import { scanFoodsPhoto, searchFoodNutrition } from '../services/api';
+import { ensureItems, syncLegacyFieldsFromItems, splitFoodString } from '../utils/mealItems';
 
 interface Props {
   visible: boolean;
@@ -26,17 +30,18 @@ interface Props {
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
 
-function calcMacros(foodNames: string[], allFoods: FoodItem[], extraMacros?: Map<string, { calories: number; protein: number; carbs: number; fat: number }>): Macros {
-  let cal = 0, prot = 0, carbs = 0, fat = 0;
-  for (const n of foodNames) {
-    const item = lookupFood(n, allFoods);
-    if (item) { cal += item.calories; prot += item.protein; carbs += item.carbs; fat += item.fat; }
-    else {
-      const ai = extraMacros?.get(n.toLowerCase());
-      if (ai) { cal += ai.calories; prot += ai.protein; carbs += ai.carbs; fat += ai.fat; }
-    }
-  }
-  return { calories: Math.round(cal), protein: Math.round(prot), carbs: Math.round(carbs), fat: Math.round(fat) };
+/** Sum macros directly from the structured item list. Each item carries its
+ *  own snapshotted macros so we don't need to look anything up here. */
+function calcMacrosFromItems(items: MealItem[]): Macros {
+  return items.reduce(
+    (acc, it) => ({
+      calories: acc.calories + (it.calories ?? 0),
+      protein:  acc.protein  + (it.protein  ?? 0),
+      carbs:    acc.carbs    + (it.carbs    ?? 0),
+      fat:      acc.fat      + (it.fat      ?? 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+  );
 }
 
 function addMacros(a: Macros, b: Macros): Macros {
@@ -82,30 +87,32 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
 }
 
 export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine }: Props) {
-  // `foods` and `amounts` are kept as parallel index-aligned arrays to match
-  // the MealSuggestion shape. Amounts are free-form text (e.g. "2", "1 cup",
-  // "3 oz") and are editable independently of the food — we don't re-derive
-  // macros from them yet, that's a larger feature.
-  const [foods,       setFoods]       = useState<string[]>(meal.foods);
-  const [amounts,     setAmounts]     = useState<string[]>(() => {
-    const existing = meal.amounts ?? [];
-    return meal.foods.map((_, i) => existing[i] ?? '');
-  });
+  // Structured items are the source of truth. Legacy foods[] / amounts[]
+  // shapes are migrated via `ensureItems()` on open so downstream code only
+  // has to handle the structured form. Each item gets a baseline rate
+  // captured at mount so the scaling math survives going through zero.
+  const seedItemBaselines = (arr: MealItem[]): MealItem[] => arr.map(it => ({
+    ...it,
+    baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
+    baseCalories: it.baseCalories ?? it.calories,
+    baseProtein:  it.baseProtein  ?? it.protein,
+    baseCarbs:    it.baseCarbs    ?? it.carbs,
+    baseFat:      it.baseFat      ?? it.fat,
+  }));
+  const [items, setItems] = useState<MealItem[]>(() => seedItemBaselines(ensureItems(meal).items ?? []));
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
-  // Track AI-found foods with macros so calcMacros can use them
-  const [aiFoodMacros, setAiFoodMacros] = useState<Map<string, { calories: number; protein: number; carbs: number; fat: number }>>(new Map());
+  // Track which item is currently showing the unit picker popover.
+  const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
 
   useEffect(() => {
     if (visible) {
-      setFoods(meal.foods);
-      const existing = meal.amounts ?? [];
-      setAmounts(meal.foods.map((_, i) => existing[i] ?? ''));
+      setItems(seedItemBaselines(ensureItems(meal).items ?? []));
       setSearch('');
       setAiResults([]);
-      setAiFoodMacros(new Map());
+      setUnitPickerIdx(null);
     }
   }, [visible, meal]);
 
@@ -121,7 +128,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       const res = await scanFoodsPhoto(authToken, {
         images: [{ image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' }],
       });
-      const picked = res.foods.filter(f => !foods.includes(f.name));
+      const picked = res.foods.filter(f => !items.some(it => it.name.toLowerCase() === f.name.toLowerCase()));
       if (res.foods.length === 0) {
         Alert.alert('No foods found', 'Could not identify any foods in that photo.');
         return;
@@ -129,9 +136,22 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       if (picked.length === 0) {
         Alert.alert('Already added', 'All identified foods are already in this meal.');
       } else {
-        setFoods(prev => [...prev, ...picked.map(p => p.name)]);
-        // Scanned items don't have per-item amounts from the API yet — start blank.
-        setAmounts(prev => [...prev, ...picked.map(() => '')]);
+        const newItems: MealItem[] = picked.map(p => {
+          const lib = lookupFood(p.name, allFoods);
+          const cal = lib?.calories ?? 0;
+          const prot = lib?.protein ?? 0;
+          const carb = lib?.carbs ?? 0;
+          const fat = lib?.fat ?? 0;
+          return {
+            name: p.name,
+            quantity: 1,
+            unit: 'serving' as FoodUnit,
+            calories: cal, protein: prot, carbs: carb, fat,
+            baseQuantity: 1,
+            baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+          };
+        });
+        setItems(prev => [...prev, ...newItems]);
       }
     } catch (e: any) {
       Alert.alert('Scan failed', e.message ?? 'Could not scan the photo.');
@@ -140,38 +160,64 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const rawMealMacros = calcMacros(foods, allFoods, aiFoodMacros);
-  // If recalc returns all zeros but original meal had macros and foods unchanged, show original values
-  const foodsMatchOriginal = foods.length === meal.foods.length && foods.every((f, i) => f === meal.foods[i]);
-  const mealMacros = (rawMealMacros.calories === 0 && rawMealMacros.protein === 0 && foodsMatchOriginal && ((meal.calories ?? 0) > 0 || (meal.protein ?? 0) > 0))
-    ? { calories: meal.calories, protein: meal.protein, carbs: meal.carbs ?? 0, fat: meal.fat ?? 0 }
-    : rawMealMacros;
+  const mealMacros = calcMacrosFromItems(items);
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
   const dayTotal    = addMacros(mealMacros, otherMacros);
 
-  const removeFood = (name: string) => {
-    setFoods(prev => {
-      const idx = prev.indexOf(name);
-      if (idx < 0) return prev;
+  const removeItem = (idx: number) => {
+    setItems(prev => {
       const next = prev.slice();
       next.splice(idx, 1);
-      setAmounts(prevAmts => {
-        const nextAmts = prevAmts.slice();
-        nextAmts.splice(idx, 1);
-        return nextAmts;
-      });
       return next;
     });
+    setUnitPickerIdx(null);
   };
-  const addFood = (name: string, amount: string = '') => {
-    if (foods.includes(name)) return;
-    setFoods(prev => [...prev, name]);
-    setAmounts(prev => [...prev, amount]);
+  const addFood = (name: string) => {
+    if (items.some(it => it.name.toLowerCase() === name.toLowerCase())) return;
+    const lib = lookupFood(name, allFoods);
+    const parsed = splitFoodString(name);
+    const cleanName = parsed.name || name;
+    const qty = parsed.quantity ?? 1;
+    const newItem: MealItem = {
+      name: cleanName,
+      quantity: qty,
+      unit: parsed.unit ?? 'serving',
+      calories: lib?.calories ?? 0,
+      protein:  lib?.protein  ?? 0,
+      carbs:    lib?.carbs    ?? 0,
+      fat:      lib?.fat      ?? 0,
+      baseQuantity: qty > 0 ? qty : 1,
+      baseCalories: lib?.calories ?? 0,
+      baseProtein:  lib?.protein  ?? 0,
+      baseCarbs:    lib?.carbs    ?? 0,
+      baseFat:      lib?.fat      ?? 0,
+    };
+    setItems(prev => [...prev, newItem]);
   };
-  const updateAmount = (index: number, value: string) => {
-    setAmounts(prev => {
+  const updateItem = (idx: number, patch: Partial<MealItem>) => {
+    setItems(prev => {
       const next = prev.slice();
-      next[index] = value;
+      const current = next[idx];
+      if (!current) return prev;
+      // Quantity changes scale macros off the item's *baseline* rate
+      // (captured at add-time) rather than off the current macros. This
+      // way zero → N edits still work: if the user clears the input and
+      // retypes, macros come back up from the baseline instead of being
+      // permanently stuck at 0.
+      if (patch.quantity != null && patch.quantity !== current.quantity) {
+        const baseQty = current.baseQuantity && current.baseQuantity > 0 ? current.baseQuantity : 1;
+        const ratio = patch.quantity / baseQty;
+        next[idx] = {
+          ...current,
+          ...patch,
+          calories: Math.round((current.baseCalories ?? current.calories) * ratio),
+          protein:  Math.round((current.baseProtein  ?? current.protein)  * ratio),
+          carbs:    Math.round((current.baseCarbs    ?? current.carbs)    * ratio),
+          fat:      Math.round((current.baseFat      ?? current.fat)      * ratio),
+        };
+      } else {
+        next[idx] = { ...current, ...patch };
+      }
       return next;
     });
   };
@@ -190,47 +236,62 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const addAiFood = (item: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number }) => {
-    if (!foods.includes(item.name)) {
-      setFoods(prev => [...prev, item.name]);
-      setAmounts(prev => [...prev, item.serving ?? '']);
+  const addAiFood = (aiItem: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number }) => {
+    if (!items.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) {
+      const parsed = aiItem.serving
+        ? splitFoodString(`${aiItem.serving} ${aiItem.name}`)
+        : { quantity: 1, unit: 'serving' as FoodUnit };
+      const qty = parsed.quantity ?? 1;
+      const cal = Math.round(aiItem.calories);
+      const prot = Math.round(aiItem.protein);
+      const carb = Math.round(aiItem.carbs);
+      const fat = Math.round(aiItem.fat);
+      const newItem: MealItem = {
+        name: aiItem.name,
+        quantity: qty,
+        unit: parsed.unit ?? 'serving',
+        calories: cal, protein: prot, carbs: carb, fat,
+        baseQuantity: qty > 0 ? qty : 1,
+        baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+      };
+      setItems(prev => [...prev, newItem]);
     }
-    // Store macros so calcMacros can use them
-    setAiFoodMacros(prev => {
-      const next = new Map(prev);
-      next.set(item.name.toLowerCase(), { calories: item.calories, protein: item.protein, carbs: item.carbs, fat: item.fat });
-      return next;
-    });
     // Persist to user's custom food library
     onAddCustomFood?.({
-      name: item.name,
-      unit: item.serving ?? '1 serving',
-      calories: Math.round(item.calories),
-      protein: Math.round(item.protein),
-      carbs: Math.round(item.carbs),
-      fat: Math.round(item.fat),
+      name: aiItem.name,
+      unit: aiItem.serving ?? '1 serving',
+      calories: Math.round(aiItem.calories),
+      protein: Math.round(aiItem.protein),
+      carbs: Math.round(aiItem.carbs),
+      fat: Math.round(aiItem.fat),
     });
-    setAiResults(prev => prev.filter(r => r.name !== item.name));
+    setAiResults(prev => prev.filter(r => r.name !== aiItem.name));
   };
 
-  const filteredCategories = foodCategories.map(cat => ({
-    ...cat,
-    foods: cat.foods.filter(f =>
-      f.name.toLowerCase().includes(search.toLowerCase()) && !foods.includes(f.name)
-    ),
-  })).filter(cat => cat.foods.length > 0);
+  // Memoized so it doesn't rebuild on every keystroke (the old code was
+  // re-scanning the entire food library on every render, which made typing
+  // in the search field feel laggy with the seeded ~200-item library).
+  const filteredCategories = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    const existingNames = new Set(items.map(it => it.name.toLowerCase()));
+    return foodCategories
+      .map(cat => ({
+        ...cat,
+        foods: cat.foods.filter(f =>
+          (!needle || f.name.toLowerCase().includes(needle))
+          && !existingNames.has(f.name.toLowerCase())
+        ),
+      }))
+      .filter(cat => cat.foods.length > 0);
+  }, [foodCategories, search, items]);
 
   const handleSave = () => {
-    // mealMacros already falls back to original values when recalc can't resolve foods
-    onSave({
-      ...meal,
-      foods,
-      amounts,
-      calories: mealMacros.calories,
-      protein:  mealMacros.protein,
-      carbs:    mealMacros.carbs,
-      fat:      mealMacros.fat,
-    });
+    // Keep legacy foods[]/amounts[] in sync with items[] on save so older
+    // readers (backend, other screens) still see correct data until the full
+    // schema migration lands.
+    const withItems: MealSuggestion = { ...meal, items };
+    const synced = syncLegacyFieldsFromItems(withItems);
+    onSave(synced);
     onClose();
   };
 
@@ -250,7 +311,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             {onToggleRoutine && (
               <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
                 <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
-                  {meal.isRoutine ? '📌 Everyday' : '○ Make Everyday'}
+                  {meal.isRoutine ? '📌 Routine' : '○ Pin as Routine'}
                 </Text>
               </TouchableOpacity>
             )}
@@ -301,47 +362,79 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             contentContainerStyle={s.scrollContent}
             keyboardShouldPersistTaps="handled">
 
-            {/* Current foods */}
+            {/* Current foods — structured editable rows */}
             <Text style={s.sectionLabel}>Current Foods</Text>
-            {foods.length === 0 && (
+            {items.length === 0 && (
               <Text style={s.emptyText}>No foods — add some below</Text>
             )}
-            {foods.map((name, idx) => {
-              const item = lookupFood(name, allFoods);
-              const aiMacro = !item ? aiFoodMacros.get(name.toLowerCase()) : undefined;
-              return (
-                <View key={name} style={s.currentFoodRow}>
-                  <View style={s.currentFoodInfo}>
-                    <Text style={s.currentFoodName}>{name}</Text>
+            {items.map((it, idx) => (
+              <View key={`${it.name}-${idx}`} style={s.currentFoodRow}>
+                <View style={s.currentFoodInfo}>
+                  {/* Food name — editable so users can rename without deleting */}
+                  <TextInput
+                    style={s.foodNameInput}
+                    value={it.name}
+                    onChangeText={(t) => updateItem(idx, { name: t })}
+                    placeholder="Food name"
+                    placeholderTextColor={colors.textMuted}
+                    returnKeyType="done"
+                  />
+                  {/* Quantity + unit row */}
+                  <View style={s.qtyRow}>
                     <TextInput
-                      style={s.amountInput}
-                      value={amounts[idx] ?? ''}
-                      onChangeText={(t) => updateAmount(idx, t)}
-                      placeholder="Amount (e.g. 2, 1 cup, 3 oz)"
+                      style={s.qtyInput}
+                      value={String(it.quantity)}
+                      onChangeText={(t) => {
+                        // Allow blank / partial decimal entries by storing 0 temporarily.
+                        const parsed = parseFloat(t);
+                        updateItem(idx, { quantity: Number.isFinite(parsed) ? parsed : 0 });
+                      }}
+                      keyboardType="decimal-pad"
+                      placeholder="1"
                       placeholderTextColor={colors.textMuted}
-                      returnKeyType="done"
                     />
-                    {item ? (
-                      <Text style={s.currentFoodMacros}>
-                        {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
-                      </Text>
-                    ) : aiMacro ? (
-                      <Text style={s.currentFoodMacros}>
-                        {aiMacro.calories} cal · {aiMacro.protein}g pro · {aiMacro.carbs}g carbs · {aiMacro.fat}g fat (AI)
-                      </Text>
-                    ) : (
-                      <Text style={s.currentFoodMacros}>Not in library — macros not counted</Text>
-                    )}
+                    <TouchableOpacity
+                      style={s.unitBtn}
+                      onPress={() => setUnitPickerIdx(unitPickerIdx === idx ? null : idx)}>
+                      <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} ▾</Text>
+                    </TouchableOpacity>
                   </View>
-                  <TouchableOpacity
-                    onPress={() => removeFood(name)}
-                    style={s.removeBtn}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={s.removeText}>−</Text>
-                  </TouchableOpacity>
+                  {unitPickerIdx === idx && (
+                    <View style={s.unitPicker}>
+                      {FOOD_UNIT_GROUPS.map(group => (
+                        <View key={group.label} style={s.unitGroup}>
+                          <Text style={s.unitGroupLabel}>{group.label}</Text>
+                          <View style={s.unitGroupRow}>
+                            {group.units.map(u => (
+                              <TouchableOpacity
+                                key={u}
+                                style={[s.unitChip, it.unit === u && s.unitChipActive]}
+                                onPress={() => {
+                                  updateItem(idx, { unit: u });
+                                  setUnitPickerIdx(null);
+                                }}>
+                                <Text style={[s.unitChipText, it.unit === u && s.unitChipTextActive]}>
+                                  {FOOD_UNIT_LABELS[u]}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                  <Text style={s.currentFoodMacros}>
+                    {Math.round(it.calories)} cal · {Math.round(it.protein)}g pro · {Math.round(it.carbs)}g carbs · {Math.round(it.fat)}g fat
+                  </Text>
                 </View>
-              );
-            })}
+                <TouchableOpacity
+                  onPress={() => removeItem(idx)}
+                  style={s.removeBtn}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={s.removeText}>−</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
 
             {savedMeals.length > 0 && (
               <>
@@ -519,19 +612,76 @@ const s = StyleSheet.create({
   },
   currentFoodInfo:   { flex: 1 },
   currentFoodName:   { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
-  amountInput: {
-    fontSize: 13,
+  foodNameInput: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    paddingVertical: 4,
+    marginBottom: 4,
+  },
+  qtyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  qtyInput: {
+    width: 68,
+    fontSize: 14,
     color: colors.textPrimary,
     backgroundColor: colors.background,
     borderRadius: radius.sm,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    marginBottom: 4,
-    alignSelf: 'flex-start',
-    minWidth: 120,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    textAlign: 'center',
   },
+  unitBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  unitBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  unitPicker: {
+    backgroundColor: colors.background,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 8,
+    marginBottom: 8,
+    gap: 6,
+  },
+  unitGroup: { gap: 4 },
+  unitGroupLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  unitGroupRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  unitChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  unitChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  unitChipText: { fontSize: 12, color: colors.textPrimary },
+  unitChipTextActive: { color: '#fff', fontWeight: '700' },
   currentFoodMacros: { fontSize: 12, color: colors.textMuted },
   savedMealRow: {
     flexDirection: 'row', alignItems: 'center',

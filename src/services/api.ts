@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const LOCAL_BACKEND_IP = '192.168.1.220'; // your dev machine's LAN IP
 
@@ -189,6 +190,148 @@ export interface WeeklyReview {
 }
 
 /** Full plan — called on first sign-up or when goal/pace changes (updates both sides). */
+/** AsyncStorage key where we persist the in-flight plan job id so we can
+ *  resume polling across app launches / backgrounding events. */
+const PENDING_PLAN_JOB_KEY = 'pending_plan_job';
+
+export type PendingPlanKind = 'full' | 'workout' | 'nutrition';
+export interface PendingPlanMarker {
+  id: number;
+  kind: PendingPlanKind;
+}
+
+async function readPendingPlanJob(): Promise<PendingPlanMarker | null> {
+  try {
+    const raw = await AsyncStorage.getItem(PENDING_PLAN_JOB_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Back-compat — older markers were just {id}.
+    if (parsed && typeof parsed.id === 'number') {
+      return { id: parsed.id, kind: (parsed.kind as PendingPlanKind) ?? 'full' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function writePendingPlanJob(id: number, kind: PendingPlanKind = 'full'): Promise<void> {
+  try { await AsyncStorage.setItem(PENDING_PLAN_JOB_KEY, JSON.stringify({ id, kind })); } catch {}
+}
+async function clearPendingPlanJob(): Promise<void> {
+  try { await AsyncStorage.removeItem(PENDING_PLAN_JOB_KEY); } catch {}
+}
+
+export async function getPendingPlanMarker(): Promise<PendingPlanMarker | null> {
+  return readPendingPlanJob();
+}
+/** @deprecated use getPendingPlanMarker — kept for API compatibility. */
+export async function getPendingPlanJobId(): Promise<number | null> {
+  const p = await readPendingPlanJob();
+  return p?.id ?? null;
+}
+
+/** Cancel the in-flight plan job (if any). Clears the persisted marker
+ *  regardless of whether the server-side delete succeeded. */
+export async function cancelPendingPlanJob(token: string): Promise<void> {
+  const p = await readPendingPlanJob();
+  await clearPendingPlanJob();
+  if (p?.id) {
+    try { await cancelPlanJob(token, p.id); } catch { /* server already done or unreachable — not fatal */ }
+  }
+}
+
+async function _pollPlanJobUntilDone(
+  token: string,
+  jobId: number,
+  opts?: { pollIntervalMs?: number; maxMs?: number },
+): Promise<any> {
+  const interval = opts?.pollIntervalMs ?? 2500;
+  const maxMs = opts?.maxMs ?? 10 * 60 * 1000; // 10 minutes — plenty for worst-case LLM latency
+  const deadline = Date.now() + maxMs;
+  let consecutive404 = 0;
+  let pollCount = 0;
+
+  while (Date.now() < deadline) {
+    pollCount++;
+    // Check if someone cleared the pending marker (e.g. user cancelled or
+    // a different job took over). Exit the poll loop if so.
+    const pending = await readPendingPlanJob();
+    if (!pending || pending.id !== jobId) {
+      throw new Error('Plan generation was cancelled');
+    }
+
+    let status: PlanJob | null = null;
+    try {
+      status = await getPlanJob(token, jobId);
+      consecutive404 = 0;
+    } catch (e: any) {
+      const msg = String(e?.message ?? '');
+      // 404 means the backend dropped the row — could be a `reset-db` or
+      // similar. Tolerate one transient miss but bail after two in a row.
+      if (msg.toLowerCase().includes('not found')) {
+        consecutive404++;
+        if (consecutive404 >= 2) {
+          await clearPendingPlanJob();
+          throw new Error('Plan generation job no longer exists on the server');
+        }
+      }
+      // Network error or one-off 404 — wait and retry once before surfacing.
+      await new Promise(r => setTimeout(r, interval));
+      try {
+        status = await getPlanJob(token, jobId);
+        consecutive404 = 0;
+      } catch (e2: any) {
+        // Still failing after one retry. If the poll has been alive for a
+        // while, the backend may have just restarted — surface as a
+        // dedicated error the UI can handle gracefully.
+        if (pollCount > 4) {
+          throw new Error(`Lost connection to plan job: ${e2?.message ?? e2}`);
+        }
+        // Early poll failure → real network error.
+        throw e2;
+      }
+    }
+
+    if (!status) {
+      await new Promise(r => setTimeout(r, interval));
+      continue;
+    }
+    if (status.status === 'completed') {
+      if (!status.result) {
+        // Backend says done but gave us nothing — treat as failure so the
+        // user isn't stuck on a spinner forever. This was the "sits at the
+        // end" bug from the user's report.
+        await clearPendingPlanJob();
+        throw new Error('Plan generation completed but returned no data');
+      }
+      await clearPendingPlanJob();
+      return status.result;
+    }
+    if (status.status === 'failed') {
+      await clearPendingPlanJob();
+      throw new Error(status.error ?? 'Plan generation failed');
+    }
+    if (status.status === 'cancelled') {
+      await clearPendingPlanJob();
+      throw new Error('Plan generation was cancelled');
+    }
+    await new Promise(r => setTimeout(r, interval));
+  }
+  // Timeout fallback — also clear the marker so the user doesn't get stuck
+  // trying to resume a job that the poll gave up on.
+  await clearPendingPlanJob();
+  throw new Error('Plan generation timed out');
+}
+
+/** Resume polling the persisted job id, if one exists. Returns the result
+ *  payload when the job completes, `null` if nothing was pending. Throws on
+ *  failure / cancellation so callers can show an error. */
+export async function resumePendingPlanJob(token: string): Promise<any | null> {
+  const pending = await readPendingPlanJob();
+  if (!pending?.id) return null;
+  return _pollPlanJobUntilDone(token, pending.id);
+}
+
 export async function getAIPlans(
   token: string,
   profile: import('../types').UserProfile,
@@ -218,16 +361,18 @@ export async function getAIPlans(
     payload.weeklyReview = options.weeklyReview;
   }
 
-  console.log('[getAIPlans] SEND → /ai/plans', {
+  console.log('[getAIPlans] ENQUEUE → /ai/plans/enqueue', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek,
     equipment: payload.equipment?.length ?? 0, foods: payload.foodsAvailable?.length ?? 0,
   });
 
-  const result = await request<any>('/ai/plans', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify(payload),
-  }, 240000);
+  // Enqueue the job server-side and persist its id so we can pick up where
+  // we left off after any app kill / backgrounding / network hiccup.
+  const job = await enqueuePlanJob(token, payload);
+  await writePendingPlanJob(job.id, 'full');
+  console.log(`[getAIPlans] job ${job.id} enqueued — polling`);
+
+  const result = await _pollPlanJobUntilDone(token, job.id);
 
   console.log('[getAIPlans] RECV ←', {
     trainerNote: (result?.trainerNote ?? result?.workout_plan?.trainerNote)?.slice(0, 80) ?? 'MISSING',
@@ -237,13 +382,17 @@ export async function getAIPlans(
   return result;
 }
 
-/** Workout-only plan — called when equipment changes. No food data sent. */
+/** Workout-only plan — called when equipment changes. Uses the job queue
+ *  so it survives app backgrounding / force-close just like full plan gen. */
 export async function getAIWorkoutPlan(
   token: string,
   profile: import('../types').UserProfile,
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
 ) {
-  const payload = {
+  // Backend's `run_workout_only_generation` expects a PlanRequest with the
+  // workout-relevant fields populated — same shape as the full path, just
+  // with foods/supplements empty.
+  const payload: Record<string, any> = {
     goal:                   profile.goal,
     secondaryGoal:          profile.secondaryGoal,
     focusedMuscleGroup:     profile.focusedMuscleGroup,
@@ -252,20 +401,23 @@ export async function getAIWorkoutPlan(
     daysPerWeek:            profile.daysPerWeek,
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
+    foodsAvailable:         [],
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations:  buildInjuries(profile),
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
-  console.log('[getAIWorkoutPlan] SEND → /ai/plans/workout', {
+  console.log('[getAIWorkoutPlan] ENQUEUE → /ai/plans/enqueue?kind=workout', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek, equipment: payload.equipment.length,
   });
 
-  const result = await request<any>('/ai/plans/workout', {
+  const job = await request<PlanJob>('/ai/plans/enqueue?kind=workout', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 240000);
+  });
+  await writePendingPlanJob(job.id, 'workout');
+  const result = await _pollPlanJobUntilDone(token, job.id);
 
   console.log('[getAIWorkoutPlan] RECV ←', {
     trainerNote: result?.trainerNote?.slice(0, 80) ?? 'MISSING',
@@ -274,18 +426,20 @@ export async function getAIWorkoutPlan(
   return result;
 }
 
-/** Nutrition-only plan — called when foods change. No equipment data sent. */
+/** Nutrition-only plan — called when foods change. Uses the job queue so it
+ *  survives app backgrounding / force-close just like full plan gen. */
 export async function getAINutritionPlan(
   token: string,
   profile: import('../types').UserProfile,
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
 ) {
   const mealRoutineText = await buildMealRoutineText(profile);
-  const payload = {
+  const payload: Record<string, any> = {
     goal:                 profile.goal,
     goalDetails:          profile.goalDetails,
     physicalStats:        profile.physicalStats,
     daysPerWeek:          profile.daysPerWeek,
+    equipment:            [],
     foodsAvailable:       profile.foodsAvailable,
     supplementsAvailable: profile.supplementsAvailable ?? [],
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
@@ -295,15 +449,17 @@ export async function getAINutritionPlan(
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
-  console.log('[getAINutritionPlan] SEND → /ai/plans/nutrition', {
+  console.log('[getAINutritionPlan] ENQUEUE → /ai/plans/enqueue?kind=nutrition', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek, foods: payload.foodsAvailable.length,
   });
 
-  const result = await request<any>('/ai/plans/nutrition', {
+  const job = await request<PlanJob>('/ai/plans/enqueue?kind=nutrition', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 240000);
+  });
+  await writePendingPlanJob(job.id, 'nutrition');
+  const result = await _pollPlanJobUntilDone(token, job.id);
 
   console.log('[getAINutritionPlan] RECV ←', {
     nutritionistNote: result?.nutritionistNote?.slice(0, 80) ?? 'MISSING',
@@ -385,12 +541,39 @@ export async function getGoals() {
   return request<any[]>('/meta/goals');
 }
 
-export async function getExercises(params?: { muscle?: string; equipment?: string }) {
+// Exercise library cache — the seed library is ~300+ items, so we cache
+// it in AsyncStorage and return instantly on subsequent opens. TTL is
+// long (24h) because the seed rarely changes. Pass { forceRefresh: true }
+// to bypass the cache.
+const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v1';
+const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
+
+export async function getExercises(params?: { muscle?: string; equipment?: string; forceRefresh?: boolean }) {
+  // Only the "all exercises" path (no filters) is cached — filter queries
+  // are rare and would create too many cache keys.
+  const unfiltered = !params?.muscle && !params?.equipment;
+  if (unfiltered && !params?.forceRefresh) {
+    try {
+      const raw = await AsyncStorage.getItem(EXERCISE_LIBRARY_CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.ts && Date.now() - parsed.ts < EXERCISE_LIBRARY_TTL_MS && Array.isArray(parsed.rows)) {
+          return parsed.rows as any[];
+        }
+      }
+    } catch {}
+  }
+
   const qp = new URLSearchParams();
   if (params?.muscle) qp.set('muscle', params.muscle);
   if (params?.equipment) qp.set('equipment', params.equipment);
   const suffix = qp.toString() ? `?${qp.toString()}` : '';
-  return request<any[]>(`/meta/exercises${suffix}`);
+  const rows = await request<any[]>(`/meta/exercises${suffix}`);
+
+  if (unfiltered) {
+    try { await AsyncStorage.setItem(EXERCISE_LIBRARY_CACHE_KEY, JSON.stringify({ ts: Date.now(), rows })); } catch {}
+  }
+  return rows;
 }
 
 export async function getPaces(goal?: string) {
@@ -519,6 +702,93 @@ export async function getCoachHistory(token: string, limit = 10): Promise<{ deci
   });
 }
 
+// ─── AI exercise search ──────────────────────────────────────────────────────
+
+export type AIExerciseResult = {
+  name: string;
+  primary_muscle: string;
+  equipment: string;
+  sets: number;
+  reps: string;
+  rest_seconds: number;
+  why: string;
+  form_cues: string[];
+};
+
+export async function searchExerciseAI(
+  token: string,
+  body: {
+    query: string;
+    equipment?: string[];
+    muscle_group?: string;
+    injuries?: string[];
+    /** Names the user already has in their library — AI should NOT return
+     *  these. We also filter client-side in case the model slips up. */
+    exclude?: string[];
+  },
+): Promise<{ results: AIExerciseResult[] }> {
+  const res = await request<{ results: AIExerciseResult[] }>('/ai/exercise-search', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  // Client-side dedupe belt-and-suspenders in case the backend prompt
+  // still returns a known exercise.
+  const excludeLower = new Set((body.exclude ?? []).map(n => n.toLowerCase()));
+  const filtered = (res.results ?? []).filter(r => !excludeLower.has(r.name.toLowerCase()));
+  return { results: filtered };
+}
+
+// ─── Async plan-job queue ────────────────────────────────────────────────────
+//
+// The client enqueues a plan-gen job, then polls for the result. This
+// replaces the long synchronous fetch pattern so plan generation survives
+// app backgrounding, screen lock, and force-close — the work runs entirely
+// server-side and the client just picks up the result when it reconnects.
+
+export type PlanJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface PlanJob {
+  id: number;
+  kind: string;
+  status: PlanJobStatus;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  has_result: boolean;
+  /** Present only on `status === 'completed'`. */
+  result?: any;
+}
+
+export async function enqueuePlanJob(token: string, planReq: any): Promise<PlanJob> {
+  return request('/ai/plans/enqueue', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(planReq),
+  });
+}
+
+export async function getPlanJob(token: string, jobId: number): Promise<PlanJob> {
+  return request(`/ai/plans/job/${jobId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function cancelPlanJob(token: string, jobId: number): Promise<PlanJob> {
+  return request(`/ai/plans/job/${jobId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getLatestPlanJob(token: string): Promise<{ job: PlanJob | null }> {
+  return request('/ai/plans/jobs/latest', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getGuardrails(token: string) {
   return request<{ warnings: string[] }>('/profile/guardrails', {
     headers: { Authorization: `Bearer ${token}` },
@@ -528,6 +798,22 @@ export async function getGuardrails(token: string) {
 export async function getCoachMemory(token: string) {
   return request<any[]>('/profile/coach-memory', {
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Client-state cross-device sync ──────────────────────────────────────────
+
+export async function getUserState(token: string): Promise<{ state: Record<string, any>; updated_at: string | null }> {
+  return request('/profile/state', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function putUserState(token: string, state: Record<string, any>): Promise<void> {
+  await request('/profile/state', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(state),
   });
 }
 

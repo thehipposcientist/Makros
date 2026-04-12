@@ -57,10 +57,12 @@ stop:
 	@echo "      Done."
 	@echo ""
 	@echo "[2/2] Stopping PostgreSQL + Backend (Docker Compose)..."
-	@docker compose down
+	@# Use `stop` (not `down`) so containers + network + volumes are preserved.
+	@# Only `make reset-db` is allowed to destroy database state.
+	@docker compose stop
 	@echo "      Done."
 	@echo ""
-	@echo "All services stopped."
+	@echo "All services stopped. Data preserved. Run 'make start' to resume."
 
 reset-db:
 	@echo ""

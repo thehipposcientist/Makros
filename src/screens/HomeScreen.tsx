@@ -11,10 +11,11 @@ import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainer
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
-  savePlanChange, loadMealRoutines, saveMealRoutines,
+  savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
+import { ensureItems } from '../utils/mealItems';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -45,6 +46,7 @@ interface HomeScreenProps {
   onViewAccount: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
   onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
+  onCancelPlanGen?: () => void;
 }
 
 interface ScheduleItem {
@@ -807,7 +809,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onProfileUpdate, onWeeklyRefresh }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onProfileUpdate, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -829,6 +831,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [activeTab, setActiveTab]         = useState<'workout' | 'meals'>('workout');
   const [menuOpen, setMenuOpen]           = useState(false);
   const [showCheckin, setShowCheckin]     = useState(false);
+  /** True while `loadPlans` is mid-flight. Prevents concurrent plan reads
+      from clobbering each other if an effect re-fires rapidly. */
+  const loadPlansInFlightRef = useRef(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
@@ -846,6 +851,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
   const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
   const [exerciseSearch, setExerciseSearch] = useState('');
+  // AI exercise search state — mirrors the food search flow. Results live
+  // next to the local library list so users can fall through to AI when
+  // the local library doesn't have what they want.
+  const [aiExerciseResults, setAiExerciseResults] = useState<import('../services/api').AIExerciseResult[]>([]);
+  const [aiExerciseLoading, setAiExerciseLoading] = useState(false);
+  const handleAiExerciseSearch = useCallback(async () => {
+    const q = exerciseSearch.trim();
+    if (!q || !authToken) return;
+    setAiExerciseLoading(true);
+    try {
+      const { searchExerciseAI } = await import('../services/api');
+      // Build the exclude list from the user's current library so AI
+      // doesn't waste a slot returning something they already have.
+      const exclude = exerciseLibrary.map(e => e.name).filter(Boolean);
+      const res = await searchExerciseAI(authToken, {
+        query: q,
+        equipment: userProfile?.equipment,
+        injuries: (userProfile?.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => i.bodyPart || i.description),
+        exclude,
+      });
+      setAiExerciseResults(res.results ?? []);
+      if ((res.results ?? []).length === 0) {
+        Alert.alert('No results', `AI couldn't find a good match for "${q}".`);
+      }
+    } catch (e: any) {
+      Alert.alert('Search failed', e?.message ?? 'Could not reach the AI server.');
+    } finally {
+      setAiExerciseLoading(false);
+    }
+  }, [exerciseSearch, authToken, userProfile, exerciseLibrary]);
   const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [showTrainerModal, setShowTrainerModal] = useState(false);
@@ -862,29 +897,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [workoutUpdateSummary, setWorkoutUpdateSummary] = useState<string | null>(null);
   const [nutritionUpdateSummary, setNutritionUpdateSummary] = useState<string | null>(null);
 
-  // Plan generation progress
+  // Plan generation progress.
+  // This is a client-side time-based animation — we don't get real progress
+  // from the backend LLM call. To avoid the "stuck at 95%" UX where the bar
+  // visually implies completion while we're still waiting, we:
+  //   1. Cap at 88% so the user never sees a near-full bar that isn't
+  //      actually near-full.
+  //   2. Jump to 100% only when the real updating flag goes false.
+  //   3. Use a longer time constant so the bar progresses steadily through
+  //      its plausible range instead of racing to the cap early.
   const [planProgress, setPlanProgress] = useState(0);
   const [planStep, setPlanStep] = useState('');
   useEffect(() => {
     if (!(isWorkoutUpdating || isNutritionUpdating)) {
-      setPlanProgress(0);
-      setPlanStep('');
-      return;
+      // When flags flip off, briefly snap to 100% so the bar fills before
+      // the overlay dismisses — feels like a real completion.
+      setPlanProgress(100);
+      setPlanStep('Done!');
+      const t = setTimeout(() => { setPlanProgress(0); setPlanStep(''); }, 400);
+      return () => clearTimeout(t);
     }
     setPlanProgress(0);
     const steps = [
-      { at: 0, label: 'Analyzing your foods and macros...' },
-      { at: 8, label: 'Building workout plan...' },
-      { at: 20, label: 'Building meal templates...' },
-      { at: 45, label: 'Optimizing nutrition targets...' },
-      { at: 65, label: 'Finalizing your plan...' },
-      { at: 85, label: 'Almost done...' },
+      { at: 0,  label: 'Analyzing your foods and macros…' },
+      { at: 5,  label: 'Building your workout plan…' },
+      { at: 15, label: 'Building your meal templates…' },
+      { at: 40, label: 'Optimizing nutrition targets…' },
+      { at: 70, label: 'Finalizing your plan — the AI is writing details…' },
+      { at: 110, label: 'Almost there — this plan is a long one, hang tight…' },
     ];
     let elapsed = 0;
     const interval = setInterval(() => {
       elapsed += 1;
-      // Asymptotic progress: approaches 95% over ~90s
-      const progress = Math.min(95, 100 * (1 - Math.exp(-elapsed / 35)));
+      // Asymptotic progress: reaches ~88% around 120s, never 95%+.
+      const progress = Math.min(88, 100 * (1 - Math.exp(-elapsed / 50)));
       setPlanProgress(progress);
       const currentStep = [...steps].reverse().find(s => elapsed >= s.at);
       if (currentStep) setPlanStep(currentStep.label);
@@ -984,7 +1030,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         setShowWeeklyCheckin(true);
       }
     });
-  }, [userProfile, authToken, meta.allFoods.length, planRefreshKey]);
+    // NOTE: `meta.allFoods.length` was previously in this dep array but caused
+    // `loadPlans` to re-fire whenever the parent re-rendered (e.g. when a menu
+    // opened), which made in-progress plan generation look like it was
+    // restarting. `loadPlans` reads from AsyncStorage, not from `meta`, so
+    // there's no functional need to depend on it here.
+  }, [userProfile, authToken, planRefreshKey]);
 
   useEffect(() => {
     let mounted = true;
@@ -1009,7 +1060,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     }, 60000);
     return () => clearInterval(timer);
-  }, [currentDate, userProfile, authToken, meta.allFoods.length]);
+  }, [currentDate, userProfile, authToken]);
 
   const loadDayStatus = async () => {
     const today = todayKey();
@@ -1060,6 +1111,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   };
 
   const loadPlans = async (profile: UserProfile) => {
+    // Drop concurrent / duplicate calls. Without this guard, rapid effect
+    // re-fires (e.g. during hot-reload or prop churn) can race against each
+    // other and leave state in an inconsistent half-loaded shape.
+    if (loadPlansInFlightRef.current) {
+      console.log('[loadPlans] already in flight — skipping duplicate call');
+      return;
+    }
+    loadPlansInFlightRef.current = true;
+    try {
     // Check for an AI-generated plan saved after user saves plan settings
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
     const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
@@ -1108,21 +1168,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         return [d.key, generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key)] as const;
       })
     );
-    // Stamp isRoutine from MealRoutineEntry[] (single source of truth)
+    // Apply routines from storage — the single source of truth for "make
+    // this meal repeat every day". Every code path that writes a nutrition
+    // plan into state should go through `applyRoutines()` so a regeneration
+    // can't wipe out the user's pinned meals.
     const routines = await loadMealRoutines();
-    const routineMealTypes = new Set(routines.map(r => r.mealType).filter(Boolean));
-    const stamped = localEntries.map(([key, plan]) => {
-      const p = { ...plan };
-      for (const k of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
-        const meal = p[k] as MealSuggestion | undefined;
-        if (meal) {
-          (p as any)[k] = { ...meal, isRoutine: routineMealTypes.has(k) };
-        }
-      }
-      return [key, p] as const;
-    });
-    setNutritionPlansByDate(Object.fromEntries(stamped));
-
+    const raw: Record<string, DailyNutritionPlan> = Object.fromEntries(localEntries);
+    setNutritionPlansByDate(applyRoutinesToAll(raw, routines));
+    } finally {
+      loadPlansInFlightRef.current = false;
+    }
   };
 
   const applySuppResult = (res: Awaited<ReturnType<typeof lookupSupplement>>, fallbackName: string) => {
@@ -1202,13 +1257,77 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setExerciseLibraryLoading(true);
     try {
       const rows = await getExercises();
-      setExerciseLibrary(rows);
+      // Merge the user's AI-saved custom exercises on top of the server
+      // library so both show up in the same filters and searches.
+      const customs = (userProfile?.customExercises ?? []).map(ce => ({
+        id: ce.id as any,
+        name: ce.name,
+        primary_muscle: ce.primary_muscle,
+        secondary_muscles: [] as string[],
+        equipment: ce.equipment,
+        description: ce.description ?? '',
+        is_custom: true,
+      })) as unknown as ExerciseLibraryItem[];
+      setExerciseLibrary([...customs, ...rows]);
     } catch {
-      setExerciseLibrary([]);
+      // On network error, still show the user's custom exercises.
+      const customs = (userProfile?.customExercises ?? []).map(ce => ({
+        id: ce.id as any,
+        name: ce.name,
+        primary_muscle: ce.primary_muscle,
+        secondary_muscles: [] as string[],
+        equipment: ce.equipment,
+        description: ce.description ?? '',
+        is_custom: true,
+      })) as unknown as ExerciseLibraryItem[];
+      setExerciseLibrary(customs);
     } finally {
       setExerciseLibraryLoading(false);
     }
-  }, [exerciseLibrary.length]);
+  }, [exerciseLibrary.length, userProfile?.customExercises]);
+
+  /** Save an AI-search result into the user's custom exercise library so
+   *  future local searches find it without another AI call. Persists via
+   *  `onProfileUpdate` so AsyncStorage + backend sync pick it up. */
+  const handleSaveAiExerciseToLibrary = useCallback(async (ex: import('../services/api').AIExerciseResult) => {
+    if (!userProfile) return;
+    const existing = userProfile.customExercises ?? [];
+    if (existing.some(e => e.name.toLowerCase() === ex.name.toLowerCase())) {
+      Alert.alert('Already in library', `${ex.name} is already saved.`);
+      return;
+    }
+    const newItem: import('../types').CustomExerciseItem = {
+      id: `custom_${Date.now()}`,
+      name: ex.name,
+      primary_muscle: ex.primary_muscle,
+      equipment: ex.equipment,
+      sets: ex.sets,
+      reps: ex.reps,
+      rest_seconds: ex.rest_seconds,
+      description: ex.why,
+      form_cues: ex.form_cues,
+      source: 'ai',
+      createdAt: new Date().toISOString(),
+    };
+    const nextCustoms = [...existing, newItem];
+    // Optimistically add to the in-memory library so it shows up immediately.
+    setExerciseLibrary(prev => [
+      ({
+        id: newItem.id as any,
+        name: newItem.name,
+        primary_muscle: newItem.primary_muscle,
+        secondary_muscles: [] as string[],
+        equipment: newItem.equipment,
+        description: newItem.description ?? '',
+        is_custom: true,
+      }) as unknown as ExerciseLibraryItem,
+      ...prev,
+    ]);
+    // Persist via the parent's profile-update callback. `skipRegen: true`
+    // so we don't trigger a plan regeneration just from saving an exercise.
+    onProfileUpdate?.({ customExercises: nextCustoms } as any, true);
+    Alert.alert('Saved', `${ex.name} added to your exercise library.`);
+  }, [userProfile, onProfileUpdate]);
 
   const exerciseMuscleOptions = Array.from(
     new Set(exerciseLibrary.map((item) => item.primary_muscle).filter(Boolean) as string[])
@@ -1630,18 +1749,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const baseMerge: DailyNutritionPlan = existingPlan
           ? { ...existingPlan, ...partial, targets: partial.targets ?? existingPlan.targets }
           : resp.updated_nutrition_plan as DailyNutritionPlan;
-        const mealKeys = ['breakfast', 'lunch', 'dinner', 'snack'] as const;
-        const mergedPlan: DailyNutritionPlan = { ...baseMerge };
+        // Re-apply routines on top of the AI-merged plan so pinned meals win.
         const currentRoutines = await loadMealRoutines();
-        const routineMealTypes = new Set(currentRoutines.map(r => r.mealType).filter(Boolean));
-        for (const k of mealKeys) {
-          const meal = baseMerge[k] as any;
-          if (meal) {
-            (mergedPlan as any)[k] = { ...meal, isRoutine: routineMealTypes.has(k) };
-          } else if (routineMealTypes.has(k) && existingPlan?.[k]) {
-            (mergedPlan as any)[k] = existingPlan[k];
-          }
-        }
+        const mergedPlan = applyRoutines(baseMerge, currentRoutines);
         appliedNutrition = mergedPlan;
         setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
         await saveNutritionPlan(today, mergedPlan);
@@ -1711,6 +1821,46 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     });
     if (nextPlan) await saveNutritionPlan(date, nextPlan);
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+
+    // Routine meal edits must also flow back to `mealRoutines` storage —
+    // otherwise the next plan reload re-applies the stale routine content
+    // and silently undoes the user's edit.
+    if (updated.isRoutine && !mealType.startsWith('extra_') && mealType !== 'new_extra') {
+      const routines = await loadMealRoutines();
+      const withItems = ensureItems(updated);
+      const snapItems = withItems.items ?? [];
+      const foods: MealRoutineFood[] = snapItems.length > 0
+        ? snapItems.map((it, i) => ({
+            id: `${Date.now()}_${i}`,
+            name: it.name,
+            quantity: it.unit === 'piece' ? String(it.quantity) : `${it.quantity} ${it.unit}`,
+          }))
+        : (updated.foods ?? []).map((f, i) => ({
+            id: `${Date.now()}_${i}`,
+            name: f,
+            quantity: updated.amounts?.[i],
+          }));
+      const existing = routines.find(r => r.mealType === mealType);
+      const refreshed: MealRoutineEntry = {
+        id: existing?.id ?? `routine_${mealType}_${Date.now()}`,
+        name: updated.meal,
+        mealType,
+        foods,
+        items: snapItems.length > 0 ? snapItems : undefined,
+        notes: existing?.notes,
+        photoUri: existing?.photoUri,
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
+        calories: updated.calories,
+        protein:  updated.protein,
+        carbs:    updated.carbs,
+        fat:      updated.fat,
+      };
+      const nextRoutines = [
+        ...routines.filter(r => r.mealType !== mealType),
+        refreshed,
+      ];
+      await saveMealRoutines(nextRoutines);
+    }
   }, [persistDayState]);
 
   const handleAddSnack = useCallback((date: string) => {
@@ -1753,80 +1903,69 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
 
   const handleToggleRoutine = useCallback(async (date: string, mealType: string) => {
-    const changedPlans: Record<string, DailyNutritionPlan> = {};
-    let toggledMeal: MealSuggestion | undefined;
-    let turningOn = false;
+    // Derive-don't-persist: mutate the routines storage, then re-apply to
+    // every plan in state. The plan itself never stores `isRoutine: true`
+    // directly — it's always derived from storage via `applyRoutines()`.
+    const current = nutritionPlansByDate[date];
+    if (!current) return;
+    const meal = (current as any)[mealType] as MealSuggestion | undefined;
+    if (!meal) return;
 
+    const routines = await loadMealRoutines();
+    const alreadyActive = routines.some(r => r.mealType === mealType);
+    const turningOn = !alreadyActive;
+
+    let nextRoutines: MealRoutineEntry[];
+    if (turningOn) {
+      // Snapshot the current meal into a routine entry. Prefer structured
+      // items (they carry per-item macros + unit), but also populate legacy
+      // `foods` for older code paths that still read it.
+      const withItems = ensureItems(meal);
+      const snapItems = withItems.items ?? [];
+      const foods: MealRoutineFood[] = snapItems.length > 0
+        ? snapItems.map((it, i) => ({
+            id: `${Date.now()}_${i}`,
+            name: it.name,
+            quantity: it.unit === 'piece' ? String(it.quantity) : `${it.quantity} ${it.unit}`,
+          }))
+        : (meal.foods ?? []).map((f, i) => ({
+            id: `${Date.now()}_${i}`,
+            name: f,
+            quantity: meal.amounts?.[i],
+          }));
+      const entry: MealRoutineEntry = {
+        id: `routine_${mealType}_${Date.now()}`,
+        name: meal.meal,
+        mealType,
+        foods,
+        items: snapItems.length > 0 ? snapItems : undefined,
+        createdAt: new Date().toISOString(),
+        calories: meal.calories,
+        protein:  meal.protein,
+        carbs:    meal.carbs,
+        fat:      meal.fat,
+      };
+      nextRoutines = [...routines.filter(r => r.mealType !== mealType), entry];
+    } else {
+      nextRoutines = routines.filter(r => r.mealType !== mealType);
+    }
+    await saveMealRoutines(nextRoutines);
+
+    // Re-apply routines to every plan currently in state. This gives us
+    // consistent `isRoutine` flags and meal content across all days without
+    // any per-day stamping races.
+    let appliedMap: Record<string, DailyNutritionPlan> = {};
     setNutritionPlansByDate(prev => {
-      const current = prev[date];
-      if (!current) return prev;
-      const meal = (current as any)[mealType] as MealSuggestion | undefined;
-      if (!meal) return prev;
-      const newRoutineValue = !meal.isRoutine;
-      turningOn = newRoutineValue;
-      toggledMeal = meal;
-      const next = { ...prev };
-
-      if (!newRoutineValue) {
-        // Turning OFF routine — remove isRoutine from this mealType across ALL days
-        for (const [d, plan] of Object.entries(next)) {
-          const m = (plan as any)[mealType] as MealSuggestion | undefined;
-          if (m?.isRoutine) {
-            const updated = { ...plan, [mealType]: { ...m, isRoutine: false } } as DailyNutritionPlan;
-            next[d] = updated;
-            changedPlans[d] = updated;
-          }
-        }
-      } else {
-        // Turning ON — copy this meal onto EVERY day so the routine actually
-        // repeats. We stamp `isRoutine: true` and overwrite the same mealType
-        // slot on each existing day's plan. Days without a plan yet get
-        // populated when HomeScreen initializes their plan (see the initial
-        // load path around line 1109).
-        for (const [d, plan] of Object.entries(next)) {
-          const updated = { ...plan, [mealType]: { ...meal, isRoutine: true } } as DailyNutritionPlan;
-          next[d] = updated;
-          changedPlans[d] = updated;
-        }
-      }
-
-      return next;
+      appliedMap = applyRoutinesToAll(prev, nextRoutines);
+      return appliedMap;
     });
 
-    // Persist all changed plans
-    for (const [d, plan] of Object.entries(changedPlans)) {
+    // Persist each re-applied plan so it survives reloads.
+    for (const [d, plan] of Object.entries(appliedMap)) {
       await saveNutritionPlan(d, plan);
       await persistDayState(d, { nutrition_plan: plan });
     }
-
-    // Sync with MealRoutineEntry[] (single source of truth for routines)
-    const routines = await loadMealRoutines();
-    if (turningOn && toggledMeal) {
-      // Create a MealRoutineEntry from this meal
-      const foods: MealRoutineFood[] = (toggledMeal.foods ?? []).map((f, i) => ({
-        id: `${Date.now()}_${i}`,
-        name: f,
-        quantity: toggledMeal!.amounts?.[i],
-      }));
-      const entry: MealRoutineEntry = {
-        id: `routine_${mealType}_${Date.now()}`,
-        name: toggledMeal.meal,
-        mealType,
-        foods,
-        createdAt: new Date().toISOString(),
-      };
-      // Remove any existing routine for the same mealType, then add
-      const updated = routines.filter(r => r.mealType !== mealType);
-      updated.push(entry);
-      await saveMealRoutines(updated);
-    } else {
-      // Remove routine entries that match this mealType
-      const updated = routines.filter(r => r.mealType !== mealType);
-      if (updated.length !== routines.length) {
-        await saveMealRoutines(updated);
-      }
-    }
-  }, [persistDayState]);
+  }, [nutritionPlansByDate, persistDayState]);
 
   const handleSkipToday = useCallback((focus: string) => {
     setSelectedSkipReason('');
@@ -1906,20 +2045,46 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </TouchableOpacity>
       </LinearGradient>
 
-      {/* AI plan updating — full overlay only when both sides regenerate simultaneously */}
-      {isWorkoutUpdating && isNutritionUpdating ? (
+      {/* Full-screen plan-generation overlay. Hides the old plan so users
+          don't confuse stale content with what's being rebuilt. Stays up
+          regardless of tab; the user is explicitly in a "wait for new plan"
+          state. Plan generation keeps running via expo-keep-awake while the
+          screen is on; if the user backgrounds the app, the foreground
+          AppState listener in app/index.tsx will auto-retry on return. */}
+      {/* Full-screen overlay is reserved for the simultaneous full-plan
+          regen case — both workout AND nutrition are rebuilding at once.
+          When only one section is rebuilding we show a section-scoped
+          placeholder inside that tab (see below) so the other tab stays
+          fully usable. */}
+      {(isWorkoutUpdating && isNutritionUpdating) ? (
         <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
           <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
-            {planStep || 'Starting AI generation...'}
+            {planStep || 'This usually takes 30–60 seconds.'}
           </Text>
           <View style={{ width: '80%', height: 6, borderRadius: 3, backgroundColor: themeColors.border, marginTop: 16, overflow: 'hidden' }}>
             <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 3, backgroundColor: themeColors.primary }} />
           </View>
-          <Text style={{ color: themeColors.textMuted, fontSize: 12, marginTop: 8 }}>
-            ~{Math.max(0, Math.round(60 - planProgress * 0.6))}s remaining
+          <Text style={{ color: themeColors.textMuted, fontSize: 12, marginTop: 12, textAlign: 'center', paddingHorizontal: 40 }}>
+            Safe to switch apps, lock your screen, or close the app entirely — your plan keeps building on our servers.
           </Text>
+          {onCancelPlanGen && (
+            <TouchableOpacity
+              style={{ marginTop: 20, paddingVertical: 10, paddingHorizontal: 24, borderRadius: 10, borderWidth: 1, borderColor: themeColors.border }}
+              onPress={() => {
+                Alert.alert(
+                  'Cancel plan generation?',
+                  'You can start a new plan anytime from the profile menu.',
+                  [
+                    { text: 'Keep waiting', style: 'cancel' },
+                    { text: 'Cancel', style: 'destructive', onPress: onCancelPlanGen },
+                  ],
+                );
+              }}>
+              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Cancel</Text>
+            </TouchableOpacity>
+          )}
         </View>
       ) : null}
 
@@ -1931,8 +2096,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       ) : null}
 
-      {/* Tab toggle — pill style */}
-      {!(isWorkoutUpdating && isNutritionUpdating) && <View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+      {/* Tab toggle — pill style. Always rendered now so the user can switch
+          tabs even while a plan is regenerating. */}
+      {<View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'workout' && [styles.tabActive, { backgroundColor: workoutPalette.strong }]]}
           onPress={() => setActiveTab('workout')}
@@ -1951,17 +2117,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </TouchableOpacity>
       </View>}
 
-      {/* Tab content */}
-      {!(isWorkoutUpdating && isNutritionUpdating) && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+      {/* Tab content. Each tab gets its own loading placeholder so
+          section-specific regens don't block the other tab. */}
+      {<ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {activeTab === 'workout' ? (
-          isWorkoutUpdating ? (
+          (isWorkoutUpdating && !isNutritionUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
               <ActivityIndicator size="large" color={workoutPalette.strong} />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your workout plan</Text>
-              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>{planStep || 'Generating a new schedule based on your updated equipment...'}</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
+                {planStep || 'This usually takes 30–60 seconds.'}
+              </Text>
               <View style={{ width: '70%', height: 4, borderRadius: 2, backgroundColor: themeColors.border, marginTop: 12, overflow: 'hidden' }}>
                 <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 2, backgroundColor: workoutPalette.strong }} />
               </View>
+              <Text style={{ color: themeColors.textMuted, fontSize: 11, marginTop: 12, textAlign: 'center', paddingHorizontal: 30 }}>
+                Safe to switch apps or lock your screen. Tap the Meals tab to keep using the app.
+              </Text>
+              {onCancelPlanGen && (
+                <TouchableOpacity
+                  style={{ marginTop: 16, paddingVertical: 8, paddingHorizontal: 20, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border }}
+                  onPress={() => Alert.alert('Cancel plan generation?', 'You can start a new plan anytime from the profile menu.', [
+                    { text: 'Keep waiting', style: 'cancel' },
+                    { text: 'Cancel', style: 'destructive', onPress: onCancelPlanGen },
+                  ])}>
+                  <Text style={{ color: themeColors.textSecondary, fontSize: 12, fontWeight: '600' }}>Cancel</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ) : (
           <>
@@ -2028,14 +2210,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           </>
           )
         ) : (
-          isNutritionUpdating ? (
+          // Meals tab — section-scoped loading placeholder when only the
+          // nutrition plan is rebuilding. Workout tab stays usable.
+          (isNutritionUpdating && !isWorkoutUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
               <ActivityIndicator size="large" color={mealPalette.strong} />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your meal plan</Text>
-              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>{planStep || 'Generating a new meal plan based on your updated foods...'}</Text>
+              <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
+                {planStep || 'This usually takes 30–60 seconds.'}
+              </Text>
               <View style={{ width: '70%', height: 4, borderRadius: 2, backgroundColor: themeColors.border, marginTop: 12, overflow: 'hidden' }}>
                 <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 2, backgroundColor: mealPalette.strong }} />
               </View>
+              <Text style={{ color: themeColors.textMuted, fontSize: 11, marginTop: 12, textAlign: 'center', paddingHorizontal: 30 }}>
+                Safe to switch apps or lock your screen. Tap the Workout tab to keep using the app.
+              </Text>
+              {onCancelPlanGen && (
+                <TouchableOpacity
+                  style={{ marginTop: 16, paddingVertical: 8, paddingHorizontal: 20, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border }}
+                  onPress={() => Alert.alert('Cancel plan generation?', 'You can start a new plan anytime from the profile menu.', [
+                    { text: 'Keep waiting', style: 'cancel' },
+                    { text: 'Cancel', style: 'destructive', onPress: onCancelPlanGen },
+                  ])}>
+                  <Text style={{ color: themeColors.textSecondary, fontSize: 12, fontWeight: '600' }}>Cancel</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ) : (
           <>
@@ -2137,17 +2336,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
           onToggleRoutine={() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type)}
-          onAddCustomFood={async (item) => {
-            // Persist AI-found food to user profile's custom foods
-            try {
-              const raw = await AsyncStorage.getItem('userProfile');
-              if (!raw) return;
-              const prof = JSON.parse(raw);
-              const existing: Array<{ name: string }> = prof.customFoods ?? [];
-              if (existing.some(f => f.name.toLowerCase() === item.name.toLowerCase())) return;
-              prof.customFoods = [...existing, item];
-              await AsyncStorage.setItem('userProfile', JSON.stringify(prof));
-            } catch {}
+          onAddCustomFood={(item) => {
+            // Route through `onProfileUpdate` so the new food:
+            //  1. Lands in React state (so `allFoodsWithCustom` picks it up
+            //     on the next render and the food becomes visible in the
+            //     meal-edit picker immediately),
+            //  2. Gets persisted to AsyncStorage, and
+            //  3. Syncs to the backend via `pushUserStateToBackend` so it
+            //     survives sign-out / cross-device.
+            const existing = userProfile?.customFoods ?? [];
+            if (existing.some(f => f.name.toLowerCase() === item.name.toLowerCase())) return;
+            const next = [...existing, item];
+            onProfileUpdate?.({ customFoods: next } as any, true); // skipRegen
           }}
         />
       )}
@@ -2387,13 +2587,79 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
               ) : (
                 <ScrollView contentContainerStyle={styles.libraryList}>
-                  <SearchInput
-                    value={exerciseSearch}
-                    onChangeText={setExerciseSearch}
-                    placeholder="Search exercises, muscles, or equipment"
-                    placeholderTextColor={themeColors.textMuted}
-                    style={[styles.librarySearchInput, { backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
-                  />
+                  <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 18 }}>
+                    <SearchInput
+                      containerStyle={{ flex: 1 }}
+                      value={exerciseSearch}
+                      onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
+                      placeholder="Search exercises, muscles, or equipment"
+                      placeholderTextColor={themeColors.textMuted}
+                      style={[styles.librarySearchInput, { marginBottom: 0, backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                      returnKeyType="search"
+                      onSubmitEditing={handleAiExerciseSearch}
+                    />
+                    {exerciseSearch.trim().length > 1 && authToken && (
+                      <TouchableOpacity
+                        style={{ backgroundColor: workoutPalette.strong, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
+                        onPress={handleAiExerciseSearch}
+                        disabled={aiExerciseLoading}>
+                        {aiExerciseLoading
+                          ? <ActivityIndicator size="small" color="#fff" />
+                          : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* If the local library has nothing, nudge the user toward
+                      AI search — same pattern as the food search in
+                      MealEditModal. */}
+                  {exerciseSearch.trim().length > 1
+                    && filteredExerciseLibrary.length === 0
+                    && aiExerciseResults.length === 0
+                    && !aiExerciseLoading
+                    && authToken && (
+                    <TouchableOpacity
+                      style={{ backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10, padding: 14, marginBottom: 12, alignItems: 'center' }}
+                      onPress={handleAiExerciseSearch}>
+                      <Text style={{ color: themeColors.textPrimary, fontSize: 14, fontWeight: '600' }}>
+                        No local matches for "{exerciseSearch.trim()}"
+                      </Text>
+                      <Text style={{ color: workoutPalette.strong, fontSize: 13, fontWeight: '700', marginTop: 4 }}>
+                        Tap AI Search to find it →
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {aiExerciseResults.length > 0 && (
+                    <View style={{ marginBottom: 16 }}>
+                      <Text style={[styles.libraryItemName, { color: themeColors.textMuted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }]}>AI Results</Text>
+                      {aiExerciseResults.map((ex, i) => {
+                        const alreadySaved = (userProfile?.customExercises ?? []).some(c => c.name.toLowerCase() === ex.name.toLowerCase());
+                        return (
+                          <View key={`${ex.name}-${i}`} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: workoutPalette.strong + '55', borderWidth: 1.5 }]}>
+                            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
+                            <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
+                              {ex.primary_muscle} · {ex.equipment} · {ex.sets}×{ex.reps}
+                            </Text>
+                            <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.why}</Text>
+                            {ex.form_cues?.length > 0 && (
+                              <Text style={[styles.libraryItemDesc, { color: themeColors.textMuted, marginTop: 4, fontSize: 12 }]}>
+                                Cues: {ex.form_cues.join(' · ')}
+                              </Text>
+                            )}
+                            <TouchableOpacity
+                              style={{ marginTop: 10, alignSelf: 'flex-start', backgroundColor: alreadySaved ? themeColors.border : workoutPalette.strong, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8 }}
+                              onPress={() => handleSaveAiExerciseToLibrary(ex)}
+                              disabled={alreadySaved}>
+                              <Text style={{ color: alreadySaved ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 13 }}>
+                                {alreadySaved ? '✓ In Library' : '+ Save to Library'}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
 
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
                     <TouchableOpacity
@@ -3530,7 +3796,16 @@ const styles = StyleSheet.create({
   goalBadgeText:   { fontSize: 12, color: colors.primary, fontWeight: '600' },
   goalSubText:     { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
   planLoadingOverlay: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 40,
+    // Absolute + high zIndex so it covers the header, tabs, and everything
+    // else. Previously this was `flex: 1` which made it a regular flex child
+    // competing with the ScrollView — old meal/workout content could leak
+    // through underneath.
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 1000,
+    elevation: 10,
+    alignItems: 'center', justifyContent: 'center',
+    gap: 16, paddingHorizontal: 40,
   },
   planLoadingTitle:    { fontSize: 20, fontWeight: '700', textAlign: 'center' },
   planLoadingSubtitle: { fontSize: 14, textAlign: 'center', lineHeight: 22, opacity: 0.7 },
@@ -3760,10 +4035,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     backgroundColor: colors.background,
     color: colors.textPrimary,
+    fontSize: 16,
     marginBottom: 10,
   },
   libraryFilterRow: { gap: 8, paddingBottom: 10 },

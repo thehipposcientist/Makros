@@ -13,10 +13,17 @@ def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
     meals = t["meals"]
 
     def _meal_block(name: str, cal: int, prot: int, carb: int, fat_g: int) -> str:
+        # IMPORTANT: the canonical field is now `items` — a structured list
+        # where `name`, `quantity`, and `unit` are separate. Do NOT put the
+        # quantity inside the food name (wrong: "2 eggs"; right:
+        # {name: "eggs", quantity: 2, unit: "piece"}). The app edits each
+        # item's quantity and unit independently of the name.
         return (
             f'    "{name}": {{\n'
             f'      "meal": "Short descriptive recipe name",\n'
-            f'      "foods": ["ingredient with amount", "..."],\n'
+            f'      "items": [\n'
+            f'        {{"name": "plain food name, no quantity", "quantity": 1, "unit": "g|oz|lb|ml|fl_oz|cup|tbsp|tsp|piece|slice|scoop|serving", "calories": 0, "protein": 0, "carbs": 0, "fat": 0}}\n'
+            f'      ],\n'
             f'      "calories": {cal},\n'
             f'      "protein": {prot},\n'
             f'      "carbs": {carb},\n'
@@ -301,7 +308,7 @@ INSTRUCTIONS:
 
 Return ONLY valid JSON matching this schema exactly:
 {{
-  "trainerNote": "60-80 word explanation of why this split suits this user's goal and equipment.",
+  "trainerNote": "120-180 word explanation. Cover: (1) WHY this split structure fits the user's goal, training days, and recovery needs — reference specific muscle groups and frequency. (2) WHY the chosen exercises fit their equipment AND any injuries/limitations — name at least 2 exercises and why. (3) HOW the progression strategy will work over the next 4 weeks (sets/reps/load). (4) What the user should FEEL by the end of a session so they can self-assess. Speak directly to the user ('you'). No generic platitudes.",
   "workout_plan": {{
     "name": "string",
     "totalDays": {req.daysPerWeek},
@@ -419,7 +426,21 @@ Per-meal targets (reference):
 {meal_summary}
 
 INSTRUCTIONS:
-- Each template: recipe name + ingredient list with amounts per meal.
+- Each template: recipe name + STRUCTURED items[] list. Every item MUST have
+  name (plain food name, no quantity), quantity (number), unit (one of: g,
+  oz, lb, ml, fl_oz, cup, tbsp, tsp, piece, slice, scoop, serving), and its
+  own per-item calories/protein/carbs/fat macros.
+- WRONG: "name": "2 eggs", "name": "3 oz chicken", "name": "1 cup oats".
+  RIGHT: {{"name": "eggs", "quantity": 2, "unit": "piece"}},
+         {{"name": "chicken breast", "quantity": 3, "unit": "oz"}},
+         {{"name": "oats", "quantity": 1, "unit": "cup"}}.
+  The user edits quantity and unit independently of the food name — never
+  bake the number into the name.
+- Use "piece" for countable items (eggs, apples, bananas, slices-implicit),
+  "slice" for explicit slices (bread, cheese), "scoop" for protein powder,
+  "serving" as a fallback when no clean unit applies.
+- Per-item macros MUST sum to the meal-level calories/protein/carbs/fat
+  totals. Double-check the math before returning.
 - "estimated_alignment" per meal (e.g. "high protein, moderate carb").
 - Templates must differ meaningfully — vary recipes, not just amounts.
 - Fixed routine meals → "isRoutine": true; AI meals → "isRoutine": false.
@@ -433,7 +454,7 @@ Return only the required JSON.
 
 Return ONLY valid JSON:
 {{
-  "nutritionistNote": "60-80 word explanation of calorie target, macro split, and rotation approach.",
+  "nutritionistNote": "120-180 word explanation. Cover: (1) WHY this exact calorie target hits the user's goal — show the TDEE math briefly ('your maintenance is ~X, we cut Y to hit Z cal'). (2) WHY the protein target fits their bodyweight + training volume — reference the g/lb target and what it's doing for muscle retention / growth. (3) WHY these specific meal templates work with their available foods + prep time + budget. (4) How to adjust if they feel overly hungry or flat. Speak directly to the user ('you'). No generic 'eat balanced meals' language.",
   "supplementStack": [
     {{"name": "string", "dose": "string", "timing": "string", "purpose": "string"}}
   ],

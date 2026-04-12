@@ -7,7 +7,7 @@ from app.models import (
     User, UserProfile, UserGoal, UserPreferences,
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
     UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate,
-    CoachMemory, UserCoachingState, WorkoutCompletion,
+    CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
 )
 from app.auth import get_current_user
 
@@ -340,3 +340,47 @@ def get_coach_memory(
         .order_by(CoachMemory.created_at.desc())
     ).all()
     return entries[: max(1, min(100, limit))]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Client-state JSON blob — cross-device sync.
+#
+# Client pushes the union of its AsyncStorage keys as a single JSON dict;
+# backend stores it opaquely. On sign-in or device switch the client pulls
+# it back and re-hydrates AsyncStorage. Gives us cross-device state without
+# modeling every client-side concept as a column.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/state")
+def get_user_state(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    row = session.exec(
+        select(UserState).where(UserState.user_id == current_user.id)
+    ).first()
+    return {
+        "state": (row.state_json if row else {}),
+        "updated_at": (row.updated_at.isoformat() if row and row.updated_at else None),
+    }
+
+
+@router.put("/state")
+def put_user_state(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    row = session.exec(
+        select(UserState).where(UserState.user_id == current_user.id)
+    ).first()
+    now = datetime.now(timezone.utc)
+    if row:
+        row.state_json = body
+        row.updated_at = now
+    else:
+        row = UserState(user_id=current_user.id, state_json=body, updated_at=now)
+    session.add(row)
+    session.commit()
+    return {"ok": True, "updated_at": now.isoformat()}

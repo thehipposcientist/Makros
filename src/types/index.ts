@@ -65,6 +65,23 @@ export interface CustomFoodItem {
   fat: number;
 }
 
+/** User-saved exercise from AI search. Stored in userProfile.customExercises
+ *  (AsyncStorage) and merged into the library view on read. Deliberately
+ *  client-only for now so we don't need a new backend table + migration. */
+export interface CustomExerciseItem {
+  id: string;                    // locally generated UUID-ish
+  name: string;
+  primary_muscle: string;        // matches the Exercise library muscle strings
+  equipment: string;             // free-form to match the library's equipment tokens
+  sets?: number;
+  reps?: string;
+  rest_seconds?: number;
+  description?: string;          // the AI's "why" copy
+  form_cues?: string[];
+  source: 'ai' | 'manual';
+  createdAt: string;             // ISO
+}
+
 export interface SavedMealTemplate {
   id: string;
   name: string;
@@ -115,6 +132,7 @@ export interface UserProfile {
   foodsAvailable: string[];
   supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
+  customExercises?: CustomExerciseItem[]; // AI-found exercises the user saved to their library
   savedMeals?: SavedMealTemplate[];
   mealRoutine?: string;          // user's fixed meal habits
   injuries?: string;             // legacy: free-text injuries
@@ -177,10 +195,67 @@ export interface MealMicronutrients {
   potassium?: number;   // mg
 }
 
+/** Canonical unit system for meal items. Kept as a string union so it
+ *  serializes cleanly to AsyncStorage/JSON without enum mapping.
+ *  - Weight:  g, oz, lb
+ *  - Volume:  ml, fl_oz, cup, tbsp, tsp
+ *  - Discrete: piece (eggs, apples), slice (bread), scoop (protein powder),
+ *    serving (generic "as the label says") */
+export type FoodUnit =
+  | 'g' | 'oz' | 'lb'
+  | 'ml' | 'fl_oz' | 'cup' | 'tbsp' | 'tsp'
+  | 'piece' | 'slice' | 'scoop' | 'serving';
+
+/** Display labels for each unit, used in the MealEditModal unit picker. */
+export const FOOD_UNIT_LABELS: Record<FoodUnit, string> = {
+  g: 'g', oz: 'oz', lb: 'lb',
+  ml: 'ml', fl_oz: 'fl oz', cup: 'cup', tbsp: 'tbsp', tsp: 'tsp',
+  piece: 'piece', slice: 'slice', scoop: 'scoop', serving: 'serving',
+};
+
+export const FOOD_UNIT_GROUPS: { label: string; units: FoodUnit[] }[] = [
+  { label: 'Weight', units: ['g', 'oz', 'lb'] },
+  { label: 'Volume', units: ['ml', 'fl_oz', 'cup', 'tbsp', 'tsp'] },
+  { label: 'Count',  units: ['piece', 'slice', 'scoop', 'serving'] },
+];
+
+/** One structured food entry inside a MealSuggestion. Quantity and unit are
+ *  edited independently from the name so the user can change "2 eggs" → "3
+ *  eggs" or "3 oz milk" → "1 cup milk" without re-picking the food.
+ *
+ *  Macros are snapshotted at add-time and NOT auto-recalculated when the
+ *  quantity changes. Building per-gram recalculation on top of the
+ *  food_servings table is a follow-up feature — for now edits are
+ *  display-only on the frontend. */
+export interface MealItem {
+  name: string;         // "eggs", "chicken breast", "oatmeal" — no quantity
+  quantity: number;     // 2, 1.5, 200
+  unit: FoodUnit;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  // Baseline rate used by the edit UI to scale macros proportionally when
+  // the user changes `quantity`. Captured at add-time so zero → N edits
+  // still work (scaling off `current` breaks when current hits 0).
+  // Optional so existing saved meals without these fields keep working;
+  // the edit UI captures them lazily on first load.
+  baseQuantity?: number;
+  baseCalories?: number;
+  baseProtein?: number;
+  baseCarbs?: number;
+  baseFat?: number;
+}
+
 export interface MealSuggestion {
   meal: string;
+  /** Canonical structured list. Prefer this over `foods`/`amounts` in new code. */
+  items?: MealItem[];
+  /** @deprecated Parallel arrays preserved for backwards compat with older
+   *  saved plans and the backend schema. New code should read from `items`
+   *  and fall through to these only when migrating old data. */
   foods: string[];
-  amounts?: string[];   // portion per food item, parallel to foods[] e.g. ["6 oz", "1 cup", "2 cups"]
+  amounts?: string[];
   calories: number;
   protein: number;
   carbs?: number;
@@ -189,6 +264,7 @@ export interface MealSuggestion {
   micronutrients?: MealMicronutrients;
   instructions?: string; // brief recipe/cooking notes
   isRoutine?: boolean;   // user eats this meal every day — AI keeps it fixed
+  estimated_alignment?: string;
 }
 
 export interface SupplementItem {
@@ -246,6 +322,18 @@ export interface MealRoutineEntry {
   notes?: string;
   photoUri?: string;          // local file URI from camera/gallery
   createdAt: string;          // ISO
+  // Snapshot of macros at the time the routine was pinned. Used to rebuild the
+  // MealSuggestion when the routine is applied to a day without losing nutrient
+  // totals. Optional for backwards compat with older routines saved before
+  // this field was added.
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+  // Canonical structured snapshot of the items at pin time. Preferred over
+  // `foods` when applying the routine back to a day's plan because each item
+  // carries its own per-item macros, unit, and quantity.
+  items?: MealItem[];
 }
 
 export interface DailyNutritionPlan {

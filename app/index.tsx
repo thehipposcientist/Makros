@@ -1,8 +1,182 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
+import * as KeepAwake from 'expo-keep-awake';
+
+/** Keep the device awake while plan generation is in flight. iOS suspends
+ *  JS execution ~30s after the app backgrounds or the screen locks, which
+ *  kills long-running `fetch` calls. A dedicated tag so multiple activations
+ *  don't stomp each other. */
+const PLAN_GEN_AWAKE_TAG = 'makros-plan-gen';
+async function holdPlanGenAwake(): Promise<void> {
+  try { await KeepAwake.activateKeepAwakeAsync(PLAN_GEN_AWAKE_TAG); } catch {}
+}
+function releasePlanGenAwake(): void {
+  try { KeepAwake.deactivateKeepAwake(PLAN_GEN_AWAKE_TAG); } catch {}
+}
+
+/** Persistent marker describing an in-flight plan generation. When the user
+ *  backgrounds the app mid-gen iOS suspends the `fetch` promise, and on the
+ *  next foreground event we look for a leftover marker and re-kick the same
+ *  generation. Cleared on success OR explicit failure. */
+const PLAN_GEN_MARKER_KEY = 'plan_gen_pending';
+type PlanGenMarker = {
+  kind: 'full' | 'workout' | 'nutrition';
+  startedAt: number;  // epoch ms — used to skip stale markers
+  attempts: number;
+};
+async function setPlanGenMarker(kind: PlanGenMarker['kind']): Promise<void> {
+  const existing = await AsyncStorage.getItem(PLAN_GEN_MARKER_KEY);
+  const prev: PlanGenMarker | null = existing ? (() => { try { return JSON.parse(existing); } catch { return null; } })() : null;
+  const marker: PlanGenMarker = {
+    kind,
+    startedAt: Date.now(),
+    attempts: (prev?.attempts ?? 0) + 1,
+  };
+  try { await AsyncStorage.setItem(PLAN_GEN_MARKER_KEY, JSON.stringify(marker)); } catch {}
+}
+async function clearPlanGenMarker(): Promise<void> {
+  try { await AsyncStorage.removeItem(PLAN_GEN_MARKER_KEY); } catch {}
+}
+async function readPlanGenMarker(): Promise<PlanGenMarker | null> {
+  try {
+    const raw = await AsyncStorage.getItem(PLAN_GEN_MARKER_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as PlanGenMarker;
+  } catch {
+    return null;
+  }
+}
+
+/** Don't retry forever — if something is genuinely broken, three attempts is
+ *  enough to prove it and clear the marker so the user isn't stuck in a loop. */
+const PLAN_GEN_MAX_ATTEMPTS = 3;
+/** Ignore markers older than this — probably orphaned from a much earlier
+ *  session or a version the user has since abandoned. */
+const PLAN_GEN_MARKER_STALE_MS = 15 * 60 * 1000;
+
+/** iOS Keychain / Android KeyStore-backed token storage. Falls back to
+ *  AsyncStorage on platforms where SecureStore isn't available (web, some
+ *  simulators). Kept here instead of a separate util file because auth is
+ *  the only consumer. */
+const AUTH_TOKEN_KEY = 'auth_token';
+async function saveAuthToken(token: string): Promise<void> {
+  try { await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token); return; } catch {}
+  try { await AsyncStorage.setItem(AUTH_TOKEN_KEY, token); } catch {}
+}
+async function loadAuthToken(): Promise<string | null> {
+  try { const t = await SecureStore.getItemAsync(AUTH_TOKEN_KEY); if (t) return t; } catch {}
+  try { return await AsyncStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; }
+}
+async function clearAuthToken(): Promise<void> {
+  try { await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY); } catch {}
+  try { await AsyncStorage.removeItem(AUTH_TOKEN_KEY); } catch {}
+  // Legacy key name — clean it up too so upgraded users don't end up with two tokens.
+  try { await AsyncStorage.removeItem('authToken'); } catch {}
+}
+
+/** Detect auth-failure errors from `request()`. The backend throws
+ *  HTTPException(401, "Invalid or expired token"); `request()` surfaces that
+ *  as an Error whose .message is the detail string. We also match "401" /
+ *  "unauthorized" for robustness in case other endpoints use different
+ *  wording. Network errors and 5xx responses DON'T match here — those are
+ *  treated as transient and leave the token alone. */
+function isAuthFailureError(err: any): boolean {
+  const msg = (err?.message ?? '').toLowerCase();
+  return (
+    msg.includes('401') ||
+    msg.includes('unauthorized') ||
+    msg.includes('invalid or expired') ||
+    msg.includes('invalid token') ||
+    msg.includes('expired token') ||
+    // Fresh-DB case: JWT decodes but user lookup fails, backend returns
+    // the same 401 "Invalid or expired token".
+    msg.includes('not found') && msg.includes('user')
+  );
+}
+
+/** Hard-clear everything tied to a previous session. Used when we detect
+ *  a stale token at cold start (fresh DB, deleted user, etc.) so the user
+ *  lands on the Auth screen with zero ghost state from the prior session. */
+async function hardResetSession(): Promise<void> {
+  await clearAuthToken();
+  try { await AsyncStorage.removeItem(LAST_USER_ID_KEY); } catch {}
+  try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+}
+
+/** Track the last signed-in user id so we can detect a user switch on the
+ *  same device. On a switch we wipe the previous user's cached data so the
+ *  new user doesn't inherit it; on the same user returning we leave cache
+ *  alone so sign-out → sign-in is non-destructive. */
+const LAST_USER_ID_KEY = 'last_user_id';
+/** Every AsyncStorage key that holds user-scoped state. When a different
+ *  user signs in we remove all of these in one shot. This list also doubles
+ *  as the set of keys synced to the backend via `pushUserState` —
+ *  transient / device-only keys (pending plan job, metaData cache) are
+ *  excluded from sync via SYNCED_STATE_KEYS below. */
+const USER_SCOPED_KEYS = [
+  'userProfile', 'aiWorkoutPlan',
+  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+  'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1',
+  'weekStartDate', 'mealEdits', 'mealChecks',
+  'workoutHistory', 'userLog', 'skippedWorkouts',
+  'mealRoutines', 'planChangeHistory', 'goalHistory',
+  'pending_plan_job',
+];
+
+/** Keys that get pushed to the backend for cross-device sync. Subset of
+ *  USER_SCOPED_KEYS that excludes device-only / transient state (meta
+ *  cache, in-flight plan job id). */
+const SYNCED_STATE_KEYS = [
+  'userProfile',
+  'aiWorkoutPlan',
+  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+  'trainerNote', 'nutritionistNote', 'supplementStack',
+  'weekStartDate', 'mealEdits', 'mealChecks',
+  'workoutHistory', 'userLog', 'skippedWorkouts',
+  'mealRoutines', 'planChangeHistory', 'goalHistory',
+];
+
+/** Push the local AsyncStorage state blob to the backend. Best-effort —
+ *  swallows errors so a failed sync never blocks sign-out / app backgrounding. */
+async function pushUserStateToBackend(token: string): Promise<void> {
+  try {
+    const pairs = await AsyncStorage.multiGet(SYNCED_STATE_KEYS);
+    const state: Record<string, any> = {};
+    for (const [k, v] of pairs) {
+      if (v == null) continue;
+      try { state[k] = JSON.parse(v); } catch { state[k] = v; }
+    }
+    await putUserState(token, state);
+    console.log(`[user-state] pushed ${Object.keys(state).length} keys`);
+  } catch (e: any) {
+    console.warn('[user-state] push failed:', e?.message ?? e);
+  }
+}
+
+/** Pull the backend state blob and write it into AsyncStorage. Called on
+ *  sign-in (especially on a new device) so the user's data comes back. */
+async function pullUserStateFromBackend(token: string): Promise<void> {
+  try {
+    const { state } = await getUserState(token);
+    if (!state || Object.keys(state).length === 0) {
+      console.log('[user-state] pull: empty remote state');
+      return;
+    }
+    const pairs: [string, string][] = [];
+    for (const [k, v] of Object.entries(state)) {
+      if (v == null) continue;
+      pairs.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+    }
+    if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
+    console.log(`[user-state] pulled ${pairs.length} keys`);
+  } catch (e: any) {
+    console.warn('[user-state] pull failed:', e?.message ?? e);
+  }
+}
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState } from '../src/services/api';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -61,6 +235,22 @@ export default function Index() {
   const [trainerNote, setTrainerNote]     = useState<string | null>(null);
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
+  // Ref so AppState listener can call the latest version of the resume
+  // handler without restarting the subscription on every render.
+  const resumePlanGenRef = useRef<() => Promise<void>>(async () => {});
+
+  /** Cancel the current plan-generation job on the server. The poll loop
+   *  picks up the cancelled status and throws, which the existing .catch
+   *  handlers turn into a no-op (cancel-specific messages suppressed). */
+  const cancelPlanGen = async () => {
+    if (authToken) {
+      try { await cancelPendingPlanJob(authToken); } catch {}
+    }
+    await clearPlanGenMarker();
+    setIsWorkoutUpdating(false);
+    setIsNutritionUpdating(false);
+    releasePlanGenAwake();
+  };
 
   /** Merge AI-returned custom foods into the user profile's customFoods list */
   const _mergeCustomFoods = async (foods: Array<{ name: string; unit?: string; calories: number; protein: number; carbs: number; fat: number }>) => {
@@ -90,6 +280,22 @@ export default function Index() {
 
   useEffect(() => { initApp(); }, []);
 
+  // AppState listener:
+  //   - 'active' → check for an orphaned plan job and resume polling
+  //   - 'background' / 'inactive' → push local state to the backend as a
+  //     safety net so users who never explicitly sign out still get their
+  //     latest state synced
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      if (nextState === 'active') {
+        resumePlanGenRef.current?.().catch(() => null);
+      } else if (nextState === 'background' || nextState === 'inactive') {
+        if (authToken) pushUserStateToBackend(authToken).catch(() => null);
+      }
+    });
+    return () => sub.remove();
+  }, [authToken]);
+
   const initApp = async () => {
     const CACHE_VERSION = '5';
     const storedVersion = await AsyncStorage.getItem('cacheVersion');
@@ -113,8 +319,134 @@ export default function Index() {
     if (tn) setTrainerNote(tn);
     if (nn) setNutritionistNote(nn);
     if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
+
+    // NOTE: we intentionally do NOT clear the plan-gen marker on cold start.
+    // Closing the app should not cancel an in-flight plan generation — the
+    // backend job queue holds state server-side, and the client picks it up
+    // on next open via the polling loop.
+
+    // Restore persisted auth token. If we have one, validate against the
+    // backend so an expired/revoked token sends the user to the login screen
+    // instead of silently hanging. Network errors are tolerated — we keep the
+    // token optimistically and let individual requests surface errors.
+    //
+    // IMPORTANT: we `await loadProfile` BEFORE `setAuthToken` so the first
+    // render after isLoading=false has BOTH the token and the profile in
+    // place. Otherwise React renders one frame with authToken set but
+    // userProfile still null, which trips the `if (!userProfile) return
+    // <OnboardingScreen>` branch and flashes the onboarding screen for a
+    // split second.
+    const persistedToken = await loadAuthToken();
+    if (persistedToken) {
+      try {
+        await getMe(persistedToken);
+        await loadProfile(persistedToken);
+        setAuthToken(persistedToken);
+      } catch (err: any) {
+        if (isAuthFailureError(err)) {
+          console.log('[initApp] stale token detected, hard-resetting session:', err?.message);
+          await hardResetSession();
+        } else {
+          // Transient failure (no network, backend down): keep the token so
+          // the next successful request re-establishes the session. We
+          // still try to hydrate the profile from cache.
+          try { await loadProfile(persistedToken); } catch {}
+          setAuthToken(persistedToken);
+        }
+      }
+    }
     setIsLoading(false);
+
+    // After init, if a plan job is still running on the server from a
+    // previous session, reconnect and pick up the result. This is what
+    // makes "close the app, come back, your plan is ready" work.
+    // Deferred to next tick so setAuthToken has committed to state.
+    setTimeout(() => {
+      resumePlanGenRef.current?.().catch(() => null);
+    }, 100);
   };
+
+  /** Save the AI plan result to AsyncStorage + state. Factored out so
+   *  every path (sync gen, resumed-from-queue, weekly refresh, chat update)
+   *  writes the same keys in the same order. */
+  const applyPlanResult = async (aiPlans: any): Promise<void> => {
+    if (aiPlans?.workout_plan) {
+      await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+      const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
+      if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
+    }
+    if (aiPlans?.nutrition_plan_a) {
+      await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
+      await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
+    }
+    if (aiPlans?.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
+    if (aiPlans?.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
+    if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
+    if (aiPlans?.supplementStack?.length) {
+      await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
+      setSupplementStack(aiPlans.supplementStack);
+    }
+    if (aiPlans?.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
+    setPlanRefreshKey(k => k + 1);
+  };
+
+  /** Resume polling an in-flight plan job if one was persisted. Called from
+   *  `initApp` (cold start) and the AppState 'active' listener. The server
+   *  is holding the job so this survives any amount of app kill / network
+   *  interruption — we just need to reconnect to it. */
+  const resumePlanGenIfPending = async () => {
+    if (!authToken) return;
+    const marker = await getPendingPlanMarker();
+    if (!marker) return;
+    // IMPORTANT: we do NOT bail when updating flags are already set.
+    // The original polling promise may be stuck in a suspended setTimeout
+    // (iOS freezes JS when the app backgrounds) and will never finish on
+    // its own. Always kick a fresh poll here — if the old promise is
+    // somehow still alive, the first one to see `completed` wins and the
+    // loser throws `cancelled` which we swallow.
+
+    console.log(`[plan-gen] resuming pending job id=${marker.id} kind=${marker.kind}`);
+    // Section-specific loading — only set the flag(s) for the slice that's
+    // actually being regenerated so the user returns to the same tab view
+    // they left instead of a full-screen overlay.
+    if (marker.kind === 'workout' || marker.kind === 'full') setIsWorkoutUpdating(true);
+    if (marker.kind === 'nutrition' || marker.kind === 'full') setIsNutritionUpdating(true);
+    holdPlanGenAwake();
+    try {
+      const aiPlans = await resumePendingPlanJob(authToken);
+      if (aiPlans) {
+        await applyPlanResult(aiPlans);
+        Alert.alert('Plan ready', 'Your new plan is done — tap anywhere to continue.');
+      }
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.toLowerCase().includes('cancelled')) {
+        console.log('[plan-gen] resume: job was cancelled');
+      } else if (msg.includes('orphaned_on_restart')) {
+        // Backend restarted mid-generation — the job is lost. Let the user
+        // know gently and give them a one-tap retry rather than a scary
+        // "failed" message.
+        console.log('[plan-gen] resume: orphaned by backend restart');
+        Alert.alert(
+          'Plan generation interrupted',
+          'Your last plan was interrupted. Tap OK and generate again from the profile menu.',
+        );
+      } else {
+        console.error('[plan-gen] resume failed:', msg);
+        Alert.alert('Plan generation failed', msg || 'Try again from the profile menu.');
+      }
+    } finally {
+      setIsWorkoutUpdating(false);
+      setIsNutritionUpdating(false);
+      releasePlanGenAwake();
+    }
+  };
+
+  // Keep the ref pointed at the latest closure so the AppState listener
+  // always has the current auth token + profile available.
+  useEffect(() => {
+    resumePlanGenRef.current = resumePlanGenIfPending;
+  });
 
   const loadProfile = async (token: string) => {
     let profile: UserProfile | null = null;
@@ -131,59 +463,85 @@ export default function Index() {
     if (!profile) return;
     setUserProfile(profile);
 
-    // If AI plans were wiped (e.g. after sign-out/sign-in), regenerate them
-    const hasPlans = await AsyncStorage.getItem('aiWorkoutPlan');
-    if (!hasPlans) {
-      setIsWorkoutUpdating(true);
-      setIsNutritionUpdating(true);
-      getAIPlans(token, profile)
-        .then(async (aiPlans) => {
-          if (aiPlans?.workout_plan) {
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-            const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
-            if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
-          }
-          if (aiPlans?.nutrition_plan_a) {
-            await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-            await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
-          }
-          if (aiPlans?.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-          if (aiPlans?.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
-          if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
-          if (aiPlans?.supplementStack?.length) {
-            await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
-            setSupplementStack(aiPlans.supplementStack);
-          }
-          if (aiPlans?.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
-          await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-          setPlanRefreshKey(k => k + 1);
-        })
-        .catch(() => null)
-        .finally(() => {
-          setIsWorkoutUpdating(false);
-          setIsNutritionUpdating(false);
-        });
-    }
+    // Rehydrate in-memory caches that sign-out cleared — these live in
+    // AsyncStorage persistently, but the React state got reset when the
+    // user signed out, so the coach notes / supplements need re-setting.
+    try {
+      const [tn, nn, ss] = await Promise.all([
+        AsyncStorage.getItem('trainerNote'),
+        AsyncStorage.getItem('nutritionistNote'),
+        AsyncStorage.getItem('supplementStack'),
+      ]);
+      if (tn) setTrainerNote(tn);
+      if (nn) setNutritionistNote(nn);
+      if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
+    } catch {}
+
+    // NOTE: auto-regeneration of missing plans has been removed from this
+    // path. It was firing on sign-in (because sign-out used to wipe the
+    // plan cache) and on any cold start where the cache hadn't yet been
+    // populated. Plan generation is an expensive, minutes-long LLM call
+    // and should only happen on explicit user intent — onboarding flow,
+    // profile edit save, weekly review, or an explicit "Generate plan"
+    // tap. If a user signs in and has no plan yet, they see the empty
+    // state; they can kick a generation from the profile menu when ready.
   };
 
   const handleAuthenticated = async (token: string, isNewUser: boolean) => {
-    setAuthToken(token);
+    // Persist so switching apps / killing the process doesn't force re-login.
+    await saveAuthToken(token);
+
+    // Detect a user switch on the same device. If a different user signs in,
+    // we wipe the previous user's cached state so their plans/notes/routines
+    // don't leak through. Same user returning? Keep the cache — sign-out
+    // should be non-destructive.
+    let incomingUserId: string | number | null = null;
+    try {
+      const me = await getMe(token);
+      incomingUserId = (me as any)?.id ?? (me as any)?.user_id ?? null;
+    } catch {
+      incomingUserId = null;
+    }
+    const previousUserId = await AsyncStorage.getItem(LAST_USER_ID_KEY);
+    const userSwitched = incomingUserId != null
+      && previousUserId != null
+      && String(incomingUserId) !== String(previousUserId);
+    if (incomingUserId != null) {
+      await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
+    }
+
+    // IMPORTANT: we hydrate profile state BEFORE setting authToken. If we
+    // set authToken first, React renders one frame where authToken is
+    // present but userProfile is still null — the `if (!userProfile)
+    // return <OnboardingScreen>` branch fires and we flash the onboarding
+    // screen for a split second before loadProfile lands.
     if (isNewUser) {
-      // Wipe everything — brand new account should start with zero local state
-      await AsyncStorage.multiRemove([
-        'userProfile', 'aiWorkoutPlan',
-        'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
-        'trainerNote', 'nutritionistNote', 'supplementStack',
-        'mealEdits', 'mealChecks', 'workoutHistory', 'userLog',
-        'skippedWorkouts', 'weekStartDate', 'metaData_v1',
-      ]);
+      // Brand new account — wipe any leftover state, then fall into the
+      // onboarding flow (userProfile stays null).
+      await AsyncStorage.multiRemove(USER_SCOPED_KEYS);
       setUserProfile(null);
       setTrainerNote(null);
       setNutritionistNote(null);
       setSupplementStack([]);
-    } else {
-      await loadProfile(token);
+      setAuthToken(token);
+      return;
     }
+
+    if (userSwitched) {
+      // Different user on same device — clear the previous user's state
+      // before hydrating this one so nothing leaks across accounts.
+      await AsyncStorage.multiRemove(USER_SCOPED_KEYS);
+      setTrainerNote(null);
+      setNutritionistNote(null);
+      setSupplementStack([]);
+    }
+
+    // Same user (or user-switched) — pull from backend first, then load
+    // profile from cache, THEN flip the token so the render lands straight
+    // on HomeScreen with all the data in place.
+    await pullUserStateFromBackend(token);
+    await loadProfile(token);
+    setAuthToken(token);
   };
 
   const handleProfileComplete = async (profile: UserProfile) => {
@@ -197,6 +555,8 @@ export default function Index() {
     // Generate initial plan with both loading states active
     setIsWorkoutUpdating(true);
     setIsNutritionUpdating(true);
+    holdPlanGenAwake();
+    setPlanGenMarker('full').catch(() => null);
 
     getAIPlans(authToken, stamped, stamped.lastWorkoutContext ? { extraContext: `Recent workout context from user: ${stamped.lastWorkoutContext}` } : undefined)
       .then(async (aiPlans) => {
@@ -267,22 +627,39 @@ export default function Index() {
         }
       })
       .catch((err) => {
-        Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
+        const msg = err?.message ?? '';
+        if (msg.toLowerCase().includes('cancelled')) return;  // user cancelled, no alert
+        if (msg.includes('orphaned_on_restart')) return;     // handled by resume flow
+        Alert.alert('Plan generation failed', msg || 'Could not reach the AI server. Make sure the backend is running and try again.');
       })
+      .then(() => clearPlanGenMarker().catch(() => null))
       .finally(() => {
         setIsWorkoutUpdating(false);
         setIsNutritionUpdating(false);
+        releasePlanGenAwake();
       });
   };
 
   const handleSignOut = async () => {
-    await AsyncStorage.multiRemove([
-      'authToken', 'userProfile', 'aiWorkoutPlan',
-      'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
-      'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1',
-      'weekStartDate', 'mealEdits', 'mealChecks',
-      'workoutHistory', 'userLog', 'skippedWorkouts',
-    ]);
+    // Push the current state to the backend BEFORE clearing the token so
+    // the next sign-in (or a sign-in on another device) restores
+    // everything. Best-effort — swallows errors.
+    if (authToken) {
+      await pushUserStateToBackend(authToken);
+    }
+    // Clear any in-flight plan-job marker — otherwise the next sign-in sees
+    // a stale pending id, tries to resume it, and the user thinks we're
+    // triggering a fresh plan generation on sign-in. The marker is
+    // session-scoped: the backend job is still in the database if it's
+    // actually running, but this device won't try to reconnect to it.
+    try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
+    // Sign-out is now non-destructive for disk state — we only clear the
+    // auth token and reset in-memory React state so the user lands on the
+    // login screen. The cached profile / plans / routines stay on device
+    // so the same user signing back in restores everything instantly.
+    // A DIFFERENT user signing in is handled in `handleAuthenticated` via
+    // the user-switch detection, which wipes before hydrating.
+    await clearAuthToken();
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
@@ -291,9 +668,9 @@ export default function Index() {
     setShowAccount(false);
     setShowSupplements(false);
     setActiveWorkout(null);
-    setTrainerNote(null);
-    setNutritionistNote(null);
-    setSupplementStack([]);
+    // Keep trainerNote / nutritionistNote / supplementStack in memory so if
+    // the same user signs back in they don't flicker away — they'll be
+    // re-populated from AsyncStorage by loadProfile anyway.
   };
 
   const handleSaveProfile = async (updated: UserProfile) => {
@@ -307,6 +684,8 @@ export default function Index() {
     setUserProfile(stamped);
     setIsEditing(false);
     setEditMode('goal');
+    // Sync to backend so the edit is available on other devices.
+    if (authToken) pushUserStateToBackend(authToken).catch(() => null);
     if (authToken) {
       syncOnboarding(authToken, stamped).catch(() => null);
 
@@ -355,6 +734,7 @@ export default function Index() {
 
         if (regenWorkout) setIsWorkoutUpdating(true);
         if (regenNutrition) setIsNutritionUpdating(true);
+        if (regenWorkout || regenNutrition) holdPlanGenAwake();
 
         const opts = { userLog, extraContext };
 
@@ -408,12 +788,16 @@ export default function Index() {
             setPlanRefreshKey(k => k + 1);
           })
           .catch((err: any) => {
-            console.error('[planCall] failed:', err?.message ?? err);
-            Alert.alert('Plan generation failed', err?.message ?? 'Could not reach the AI server. Make sure the backend is running and try again.');
+            const msg = err?.message ?? '';
+            if (msg.toLowerCase().includes('cancelled')) return;  // user cancelled
+            if (msg.includes('orphaned_on_restart')) return;     // handled by resume flow
+            console.error('[planCall] failed:', msg || err);
+            Alert.alert('Plan generation failed', msg || 'Could not reach the AI server. Make sure the backend is running and try again.');
           })
           .finally(() => {
             setIsWorkoutUpdating(false);
             setIsNutritionUpdating(false);
+            releasePlanGenAwake();
           });
       }
     }
@@ -461,21 +845,8 @@ export default function Index() {
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (!userProfile) return <OnboardingScreen authToken={authToken ?? ''} onComplete={handleProfileComplete} />;
 
-  if (showSupplements) {
-    return (
-      <SupplementsScreen
-        userProfile={userProfile}
-        themeName={userProfile.themePreference}
-        onSave={handleSaveSupplements}
-        onBack={() => setShowSupplements(false)}
-      />
-    );
-  }
-
-  if (isEditing) {
-    return <EditProfileScreen authToken={authToken} profile={userProfile} mode={editMode} onSave={handleSaveProfile} onCancel={() => { setIsEditing(false); setEditMode('goal'); }} />;
-  }
-
+  // ActiveWorkoutScreen is a long-duration full takeover — unmount HomeScreen
+  // while a workout is active so its effects/timers stop.
   if (activeWorkout) {
     return (
       <ActiveWorkoutScreen
@@ -490,10 +861,9 @@ export default function Index() {
     );
   }
 
-  if (showProgress) {
-    return <ProgressScreen authToken={authToken} userProfile={userProfile} themeName={userProfile.themePreference} onBack={() => setShowProgress(false)} onUpdateWeight={handleUpdateWeight} />;
-  }
-
+  // Everything else is an OVERLAY on top of HomeScreen so that plan generation
+  // in flight is preserved across menu navigation. Unmounting HomeScreen while
+  // a plan is generating caused it to look like the plan restarted on return.
   return (
     <>
       <HomeScreen
@@ -502,6 +872,7 @@ export default function Index() {
         planRefreshKey={planRefreshKey}
         isWorkoutUpdating={isWorkoutUpdating}
         isNutritionUpdating={isNutritionUpdating}
+        onCancelPlanGen={cancelPlanGen}
         trainerNote={trainerNote}
         nutritionistNote={nutritionistNote}
         supplementStack={supplementStack}
@@ -535,6 +906,10 @@ export default function Index() {
           if (needsWorkout || needsNutrition) {
             if (needsWorkout) setIsWorkoutUpdating(true);
             if (needsNutrition) setIsNutritionUpdating(true);
+            holdPlanGenAwake();
+            setPlanGenMarker(
+              (needsWorkout && needsNutrition) ? 'full' : needsWorkout ? 'workout' : 'nutrition'
+            ).catch(() => null);
             const recentSessions = (await loadWorkoutHistory()).filter(s => !s.skipped && s.completed).slice(0, 3);
             const sessionLines = recentSessions.length
               ? 'Last 3 completed workouts:\n' + recentSessions.map(s => `  [${s.date.slice(0, 10)}] ${s.focus}`).join('\n')
@@ -563,11 +938,13 @@ export default function Index() {
               }
               if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
               setPlanRefreshKey(k => k + 1);
-            }).catch((err: any) => {
+            }).then(() => clearPlanGenMarker().catch(() => null))
+            .catch((err: any) => {
               console.error('[onProfileUpdate] plan regen failed:', err?.message ?? err);
             }).finally(() => {
               setIsWorkoutUpdating(false);
               setIsNutritionUpdating(false);
+              releasePlanGenAwake();
             });
           } else {
             setPlanRefreshKey(k => k + 1);
@@ -600,6 +977,8 @@ export default function Index() {
 
           setIsWorkoutUpdating(true);
           setIsNutritionUpdating(true);
+          holdPlanGenAwake();
+          setPlanGenMarker('full').catch(() => null);
 
           getAIPlans(authToken, userProfile, {
             userLog,
@@ -629,12 +1008,17 @@ export default function Index() {
               setPlanRefreshKey(k => k + 1);
             })
             .catch((err) => {
-              console.error('[weeklyRefresh] failed:', err?.message ?? err);
+              const msg = err?.message ?? '';
+              if (msg.toLowerCase().includes('cancelled')) return;
+              if (msg.includes('orphaned_on_restart')) return;
+              console.error('[weeklyRefresh] failed:', msg || err);
               Alert.alert('Plan refresh failed', 'Could not generate a new plan. Your current plan is unchanged.');
             })
+            .then(() => clearPlanGenMarker().catch(() => null))
             .finally(() => {
               setIsWorkoutUpdating(false);
               setIsNutritionUpdating(false);
+              releasePlanGenAwake();
             });
         }}
       />
@@ -646,6 +1030,56 @@ export default function Index() {
           onSignOut={handleSignOut}
         />
       )}
+
+      {/* Edit-profile overlay (goal, workout, meal plan, theme). Kept as a Modal
+          so HomeScreen stays mounted behind it — preserves any in-flight plan
+          generation state so nothing appears to "restart" on close. */}
+      <Modal
+        visible={isEditing}
+        animationType="slide"
+        onRequestClose={() => { setIsEditing(false); setEditMode('goal'); }}>
+        {isEditing && authToken && userProfile && (
+          <EditProfileScreen
+            authToken={authToken}
+            profile={userProfile}
+            mode={editMode}
+            onSave={handleSaveProfile}
+            onCancel={() => { setIsEditing(false); setEditMode('goal'); }}
+            onRoutinesChanged={() => setPlanRefreshKey(k => k + 1)}
+          />
+        )}
+      </Modal>
+
+      {/* Supplements overlay */}
+      <Modal
+        visible={showSupplements}
+        animationType="slide"
+        onRequestClose={() => setShowSupplements(false)}>
+        {showSupplements && userProfile && (
+          <SupplementsScreen
+            userProfile={userProfile}
+            themeName={userProfile.themePreference}
+            onSave={handleSaveSupplements}
+            onBack={() => setShowSupplements(false)}
+          />
+        )}
+      </Modal>
+
+      {/* Progress overlay */}
+      <Modal
+        visible={showProgress}
+        animationType="slide"
+        onRequestClose={() => setShowProgress(false)}>
+        {showProgress && authToken && userProfile && (
+          <ProgressScreen
+            authToken={authToken}
+            userProfile={userProfile}
+            themeName={userProfile.themePreference}
+            onBack={() => setShowProgress(false)}
+            onUpdateWeight={handleUpdateWeight}
+          />
+        )}
+      </Modal>
     </>
   );
 }
