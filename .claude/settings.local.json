@@ -85,7 +85,10 @@
       "Bash(TASKLIST //FI \"PID eq 14440\" //FO TABLE)",
       "Bash(venv/Scripts/activate)",
       "Bash(uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
-      "Bash(E:/WorkoutPal/backend/venv/Scripts/python:*)"
+      "Bash(E:/WorkoutPal/backend/venv/Scripts/python:*)",
+      "Bash(brew --version)",
+      "Bash(/opt/homebrew/bin/brew --version)",
+      "Bash(/usr/local/bin/brew --version)"
     ]
   }
 }
