@@ -4,7 +4,8 @@ export type AppThemeName =
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
-  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender';
+  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
+  | 'aurora'   | 'copper'  | 'storm';
 
 export interface ThemeColors {
   background: string;
@@ -795,6 +796,98 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#201028', strong: '#D878A8', text: '#F0A8D0' },  // soft ROSE
       planner: { soft: '#201828', strong: '#A880D0', text: '#D0B0F0' },
       account: { soft: '#1C1018', strong: '#E07090', text: '#F8B0C8' },
+    },
+  },
+
+  // ── NEW THEMES ───────────────────────────────────────────────────────────────
+
+  aurora: {
+    // Northern-lights inspired — deep dark blue with shifting green, teal, and violet accents.
+    name: 'aurora',
+    label: 'Aurora Borealis',
+    description: 'Deep arctic night with shimmering green, teal, and violet — like the northern lights.',
+    colors: {
+      background:    '#060B14',
+      surface:       '#0C1420',
+      surfaceRaised: '#14202E',
+      border:        '#1C2C3E',
+      primary:       '#40E8A0',  // aurora green
+      primaryDark:   '#28B878',
+      primaryLight:  '#80F8C8',
+      accent:        '#60B8F0',  // icy blue
+      textPrimary:   '#E8F0F8',
+      textSecondary: '#90A8C0',
+      textMuted:     '#506878',
+      error:         '#F06070',
+      warning:       '#E8B040',
+      success:       '#40D888',
+    },
+    sections: {
+      workout: { soft: '#081820', strong: '#40E8A0', text: '#90F8D0' },   // AURORA GREEN
+      meals:   { soft: '#081420', strong: '#60B8F0', text: '#A0D8F8' },   // ICY BLUE
+      ai:      { soft: '#140C28', strong: '#A070E8', text: '#C8A8F8' },   // VIOLET
+      planner: { soft: '#0C1C28', strong: '#48C8D8', text: '#90E0E8' },   // TEAL
+      account: { soft: '#181020', strong: '#B868D8', text: '#D8A0F0' },
+    },
+  },
+
+  copper: {
+    // Warm industrial — charcoal-brown base with rich copper, burnished gold, and warm cream.
+    name: 'copper',
+    label: 'Burnished Copper',
+    description: 'Charcoal-brown with rich copper and burnished gold — warm, industrial, bold.',
+    colors: {
+      background:    '#0E0C0A',
+      surface:       '#181410',
+      surfaceRaised: '#24201A',
+      border:        '#383028',
+      primary:       '#D88040',  // copper
+      primaryDark:   '#B06028',
+      primaryLight:  '#F0A868',
+      accent:        '#E8C048',  // burnished gold
+      textPrimary:   '#F0E8E0',
+      textSecondary: '#B8A898',
+      textMuted:     '#786858',
+      error:         '#E85848',
+      warning:       '#E8A830',
+      success:       '#68B860',
+    },
+    sections: {
+      workout: { soft: '#201810', strong: '#D88040', text: '#F0B078' },   // COPPER
+      meals:   { soft: '#141C10', strong: '#88B848', text: '#B8D878' },   // OLIVE GREEN
+      ai:      { soft: '#201418', strong: '#C86070', text: '#E89098' },   // DUSTY ROSE
+      planner: { soft: '#201C10', strong: '#E8C048', text: '#F0D888' },   // GOLD
+      account: { soft: '#181410', strong: '#C89060', text: '#E0B888' },
+    },
+  },
+
+  storm: {
+    // Electric storm — dark slate with electric blue-white lightning, cool grays, and sharp cyan.
+    name: 'storm',
+    label: 'Thunderstorm',
+    description: 'Dark slate with electric blue-white highlights — charged, sharp, powerful.',
+    colors: {
+      background:    '#0A0C10',
+      surface:       '#12151C',
+      surfaceRaised: '#1C2028',
+      border:        '#2C3040',
+      primary:       '#70A8F8',  // lightning blue
+      primaryDark:   '#4880D0',
+      primaryLight:  '#A0C8F8',
+      accent:        '#E0E8F8',  // bright white-blue
+      textPrimary:   '#E8ECF4',
+      textSecondary: '#98A4B8',
+      textMuted:     '#586474',
+      error:         '#F06068',
+      warning:       '#E8B040',
+      success:       '#50C878',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#70A8F8', text: '#A0C8F8' },   // LIGHTNING BLUE
+      meals:   { soft: '#0C1818', strong: '#48B8B8', text: '#88D8D8' },   // STORM TEAL
+      ai:      { soft: '#181020', strong: '#9880D8', text: '#C0A8F0' },   // ELECTRIC PURPLE
+      planner: { soft: '#101418', strong: '#6890C0', text: '#98B8E0' },   // SLATE BLUE
+      account: { soft: '#181418', strong: '#A888C0', text: '#C8B0D8' },
     },
   },
 

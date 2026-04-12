@@ -7,7 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { MealSuggestion, DailyNutritionPlan, SavedMealTemplate } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
-import { scanFoodsPhoto } from '../services/api';
+import { scanFoodsPhoto, searchFoodNutrition } from '../services/api';
 
 interface Props {
   visible: boolean;
@@ -20,15 +20,20 @@ interface Props {
   authToken?: string;
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
+  onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
 }
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
 
-function calcMacros(foodNames: string[], allFoods: FoodItem[]): Macros {
+function calcMacros(foodNames: string[], allFoods: FoodItem[], extraMacros?: Map<string, { calories: number; protein: number; carbs: number; fat: number }>): Macros {
   let cal = 0, prot = 0, carbs = 0, fat = 0;
   for (const n of foodNames) {
     const item = lookupFood(n, allFoods);
     if (item) { cal += item.calories; prot += item.protein; carbs += item.carbs; fat += item.fat; }
+    else {
+      const ai = extraMacros?.get(n.toLowerCase());
+      if (ai) { cal += ai.calories; prot += ai.protein; carbs += ai.carbs; fat += ai.fat; }
+    }
   }
   return { calories: Math.round(cal), protein: Math.round(prot), carbs: Math.round(carbs), fat: Math.round(fat) };
 }
@@ -75,15 +80,21 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   return total;
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood }: Props) {
   const [foods,       setFoods]       = useState<string[]>(meal.foods);
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
+  const [aiSearchLoading, setAiSearchLoading] = useState(false);
+  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
+  // Track AI-found foods with macros so calcMacros can use them
+  const [aiFoodMacros, setAiFoodMacros] = useState<Map<string, { calories: number; protein: number; carbs: number; fat: number }>>(new Map());
 
   useEffect(() => {
     if (visible) {
       setFoods(meal.foods);
       setSearch('');
+      setAiResults([]);
+      setAiFoodMacros(new Map());
     }
   }, [visible, meal]);
 
@@ -114,13 +125,54 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const mealMacros  = calcMacros(foods, allFoods);
+  const rawMealMacros = calcMacros(foods, allFoods, aiFoodMacros);
+  // If recalc returns all zeros but original meal had macros and foods unchanged, show original values
+  const foodsMatchOriginal = foods.length === meal.foods.length && foods.every((f, i) => f === meal.foods[i]);
+  const mealMacros = (rawMealMacros.calories === 0 && rawMealMacros.protein === 0 && foodsMatchOriginal && ((meal.calories ?? 0) > 0 || (meal.protein ?? 0) > 0))
+    ? { calories: meal.calories, protein: meal.protein, carbs: meal.carbs ?? 0, fat: meal.fat ?? 0 }
+    : rawMealMacros;
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
   const dayTotal    = addMacros(mealMacros, otherMacros);
 
   const removeFood = (name: string) => setFoods(prev => prev.filter(f => f !== name));
   const addFood    = (name: string) => {
     if (!foods.includes(name)) setFoods(prev => [...prev, name]);
+  };
+
+  const handleAiSearch = async () => {
+    if (!authToken || !search.trim()) return;
+    setAiSearchLoading(true);
+    try {
+      const res = await searchFoodNutrition(authToken, search.trim());
+      setAiResults(res.results ?? []);
+      if (!res.results?.length) Alert.alert('No results', `Could not find nutrition info for "${search}".`);
+    } catch (e: any) {
+      Alert.alert('Search failed', e.message ?? 'Could not reach the AI server.');
+    } finally {
+      setAiSearchLoading(false);
+    }
+  };
+
+  const addAiFood = (item: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number }) => {
+    if (!foods.includes(item.name)) {
+      setFoods(prev => [...prev, item.name]);
+    }
+    // Store macros so calcMacros can use them
+    setAiFoodMacros(prev => {
+      const next = new Map(prev);
+      next.set(item.name.toLowerCase(), { calories: item.calories, protein: item.protein, carbs: item.carbs, fat: item.fat });
+      return next;
+    });
+    // Persist to user's custom food library
+    onAddCustomFood?.({
+      name: item.name,
+      unit: item.serving ?? '1 serving',
+      calories: Math.round(item.calories),
+      protein: Math.round(item.protein),
+      carbs: Math.round(item.carbs),
+      fat: Math.round(item.fat),
+    });
+    setAiResults(prev => prev.filter(r => r.name !== item.name));
   };
 
   const filteredCategories = foodCategories.map(cat => ({
@@ -131,6 +183,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   })).filter(cat => cat.foods.length > 0);
 
   const handleSave = () => {
+    // mealMacros already falls back to original values when recalc can't resolve foods
     onSave({
       ...meal,
       foods,
@@ -207,6 +260,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             )}
             {foods.map(name => {
               const item = lookupFood(name, allFoods);
+              const aiMacro = !item ? aiFoodMacros.get(name.toLowerCase()) : undefined;
               return (
                 <View key={name} style={s.currentFoodRow}>
                   <View style={s.currentFoodInfo}>
@@ -215,8 +269,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                       <Text style={s.currentFoodMacros}>
                         {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
                       </Text>
+                    ) : aiMacro ? (
+                      <Text style={s.currentFoodMacros}>
+                        {aiMacro.calories} cal · {aiMacro.protein}g pro · {aiMacro.carbs}g carbs · {aiMacro.fat}g fat (AI)
+                      </Text>
                     ) : (
-                      <Text style={s.currentFoodMacros}>Not in local library — macros not counted</Text>
+                      <Text style={s.currentFoodMacros}>Not in library — macros not counted</Text>
                     )}
                   </View>
                   <TouchableOpacity
@@ -289,8 +347,38 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               returnKeyType="search"
             />
 
-            {filteredCategories.length === 0 && search.length > 0 && (
-              <Text style={s.emptyText}>No matches for "{search}"</Text>
+            {filteredCategories.length === 0 && search.length > 0 && !aiSearchLoading && aiResults.length === 0 && (
+              <Text style={s.emptyText}>No local matches for "{search}"</Text>
+            )}
+
+            {/* AI Food Search */}
+            {authToken && search.length > 1 && (
+              <TouchableOpacity
+                style={[s.aiSearchBtn, aiSearchLoading && { opacity: 0.5 }]}
+                onPress={handleAiSearch}
+                disabled={aiSearchLoading}>
+                {aiSearchLoading
+                  ? <ActivityIndicator size="small" color={colors.primary} />
+                  : <Text style={s.aiSearchBtnText}>Search "{search}" with AI</Text>}
+              </TouchableOpacity>
+            )}
+
+            {aiResults.length > 0 && (
+              <View style={{ marginBottom: 16 }}>
+                <Text style={s.sectionLabel}>AI Results</Text>
+                {aiResults.map((item, idx) => (
+                  <TouchableOpacity key={`${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.aiResultName}>{item.name}</Text>
+                      <Text style={s.aiResultServing}>{item.serving}</Text>
+                      <Text style={s.aiResultMacros}>
+                        {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
+                      </Text>
+                    </View>
+                    <Text style={s.aiResultAdd}>+ Add</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             )}
 
             {filteredCategories.map(cat => (
@@ -409,4 +497,22 @@ const s = StyleSheet.create({
   },
   foodChipName: { fontSize: 13, color: colors.textPrimary, fontWeight: '500' },
   foodChipCal:  { fontSize: 11, color: colors.textMuted },
+
+  // AI search
+  aiSearchBtn: {
+    backgroundColor: colors.primary + '18',
+    borderRadius: radius.md, borderWidth: 1, borderColor: colors.primary + '44',
+    paddingVertical: 10, paddingHorizontal: 16, alignItems: 'center', marginBottom: 16,
+  },
+  aiSearchBtnText: { fontSize: 13, fontWeight: '600', color: colors.primary },
+  aiResultRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.primary + '44',
+    padding: 12, marginBottom: 8,
+  },
+  aiResultName:    { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
+  aiResultServing: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  aiResultMacros:  { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
+  aiResultAdd:     { fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 },
 });

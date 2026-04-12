@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image,
+  TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
@@ -243,6 +243,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const summaryCardRef = useRef<ViewShot>(null);
+  const repsInputRef = useRef<TextInput>(null);
 
   const handleShareSummary = async () => {
     try {
@@ -1170,7 +1171,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       )}
 
       {/* Exercise list */}
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {warmupDone && exercises.map((ex, i) => {
           const targetSetCount  = getTargetSetCount(ex.targetSets);
           const totalSetCount   = targetSetCount + (extraSetCounts[i] ?? 0);
@@ -1405,6 +1406,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 editable={!isLogged}
                                 selectTextOnFocus
                                 returnKeyType="done"
+                                onSubmitEditing={() => Keyboard.dismiss()}
                               />
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               <TouchableOpacity
@@ -1507,22 +1509,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     value={logWeight}
                     onChangeText={setLogWeight}
                     keyboardType="decimal-pad"
+                    returnKeyType="next"
                     placeholder="0"
                     placeholderTextColor={themeColors.textMuted}
                     autoFocus
                     selectTextOnFocus
+                    onSubmitEditing={() => repsInputRef.current?.focus()}
+                    blurOnSubmit={false}
                   />
                 </View>
                 <View style={styles.logInputWrap}>
                   <Text style={styles.logInputLabel}>Reps</Text>
                   <TextInput
+                    ref={repsInputRef}
                     style={styles.logInput}
                     value={logReps}
                     onChangeText={setLogReps}
                     keyboardType="number-pad"
+                    returnKeyType="done"
                     placeholder="0"
                     placeholderTextColor={themeColors.textMuted}
                     selectTextOnFocus
+                    onSubmitEditing={handleLogSet}
                   />
                 </View>
               </View>

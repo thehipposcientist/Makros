@@ -12,6 +12,7 @@ import {
   Image,
   ActivityIndicator,
   Modal,
+  Keyboard,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
@@ -1271,7 +1272,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         <View style={styles.header}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
           <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}</Text>

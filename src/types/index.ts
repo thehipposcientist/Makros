@@ -11,7 +11,8 @@ export type AppThemeName =
   | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
-  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender';
+  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
+  | 'aurora'   | 'copper'  | 'storm';
 
 export interface GoalOption {
   value: string;

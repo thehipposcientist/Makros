@@ -1,0 +1,471 @@
+from __future__ import annotations
+
+import json
+
+import openai
+from openai import OpenAI
+from fastapi import HTTPException, Depends
+
+from app.auth import get_current_user
+from app.models import User
+
+from .router import router
+from .models import (
+    FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest,
+    SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
+)
+from .utils import (
+    get_openai_api_key, model_meal_parsing, model_chat,
+    _is_gpt5, _build_chat_kwargs, _chat_create, _extract_json,
+    _log_openai_error,
+    SCHEMA_FOOD_PHOTO, SCHEMA_SCAN_FOODS, SCHEMA_SUPPLEMENT_INFO,
+    SCHEMA_SCAN_EQUIPMENT, SCHEMA_FORM_PHOTO,
+)
+
+
+@router.post("/food-photo")
+def analyze_food_photo(
+    body: FoodPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Estimate meal contents and macros from a food photo."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    _fp_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition coach analyzing meal photos. Estimate likely meal contents and macros. "
+                "Use practical ranges but return a single best estimate. Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Analyze this meal photo. Identify likely foods in plain English, "
+                        "estimate total macros and micronutrients, and provide a short meal name. "
+                        'Return exactly this JSON schema: '
+                        '{"meal_name": string, "items": [string], "calories": number, '
+                        '"protein": number, "carbs": number, "fat": number, "fiber": number, '
+                        '"micronutrients": {"fiber": number, "sugar": number, "sodium": number, '
+                        '"cholesterol": number, "vitaminA": number, "vitaminC": number, '
+                        '"vitaminD": number, "calcium": number, "iron": number, "potassium": number}}'
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=200, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food photo analysis failed: {str(e)}")
+
+
+@router.post("/scan-foods")
+def scan_foods_photo(
+    body: ScanFoodsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify multiple individual food items from one or more photos, each with macros per serving."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.images:
+        raise HTTPException(status_code=400, detail="At least one image is required")
+
+    client = OpenAI(api_key=api_key)
+
+    context_hint = f"\nExtra context from the user: {body.context}" if body.context else ""
+
+    # Build content blocks: text prompt first, then all images
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"List every individual food item you can identify across all provided image(s). "
+                "For each one, provide a short common name, typical serving size, and estimated macros. "
+                f"{context_hint}"
+                "Return exactly this JSON schema — no extra text: "
+                '{"foods": [{"name": string, "serving": string, "calories": number, '
+                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}'
+            ),
+        }
+    ]
+    for img in body.images:
+        image_data_url = f"data:{img.mime_type};base64,{img.image_base64}"
+        user_content.append({"type": "image_url", "image_url": {"url": image_data_url}})
+
+    _sf_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition expert. Identify every distinct food item visible in the image(s). "
+                "For each item, estimate its name, a typical serving size, and macros per that serving. "
+                "Return valid JSON only."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=500, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
+
+
+@router.post("/food-search")
+def food_nutrition_search(
+    body: FoodNutritionSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Search for food nutrition info by name/description using AI."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    client = OpenAI(api_key=api_key)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition database. Given a food query, return nutrition info. "
+                "If the user specifies a quantity (e.g. '100g chicken'), use that. "
+                "If not, use a standard serving size. "
+                "Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Food query: "{body.query}"\n\n'
+                "Return JSON with this exact schema:\n"
+                '{"results": [{"name": string, "serving": string, "calories": number, '
+                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}\n\n'
+                "Return 1-5 results. If the query is vague (e.g. 'chicken'), return common preparations. "
+                "If specific (e.g. '6oz grilled chicken breast'), return exactly that."
+            ),
+        },
+    ]
+    try:
+        resp = client.chat.completions.create(
+            model=model_meal_parsing(),
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=500,
+            timeout=15,
+        )
+        data = json.loads(resp.choices[0].message.content or '{"results": []}')
+        results = data if isinstance(data, list) else data.get("results", [])
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food search failed: {str(e)}")
+
+
+@router.post("/supplement-info")
+def get_supplement_info(
+    body: SupplementLookupRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Look up evidence-based info for any supplement by name."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Supplement name is required")
+
+    _si_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a sports nutrition expert with deep knowledge of supplements, "
+                "their mechanisms, evidence base, and safe use. Always respond with valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Look up this supplement: "{body.name.strip()}"\n\n'
+                "If it is a real, recognized supplement or ingredient, return a JSON object with:\n"
+                '- "found": true\n'
+                '- "name": canonical common name\n'
+                '- "category": one of "Protein", "Performance", "Recovery", "Health", "Weight Management", "Sleep & Stress", "Other"\n'
+                '- "tagline": one short sentence\n'
+                '- "whatItDoes": 2-3 sentences on mechanism and benefits\n'
+                '- "evidence": one of "strong", "moderate", or "limited"\n'
+                '- "dose": typical effective dose with unit (e.g. "5g daily")\n'
+                '- "timing": when to take it\n'
+                '- "goodFor": array of 1-4 strings from: "Strength", "Muscle gain", "Fat loss", "Endurance", "Recovery", "General health", "Athletic performance", "Sleep"\n'
+                '- "cautions": 1-2 sentences on side effects or who should avoid it\n\n'
+                'If not a real supplement, return {"found": false, "name": "' + body.name.strip() + '"}'
+            ),
+        },
+    ]
+    client = OpenAI(api_key=api_key)
+    try:
+        kwargs = _build_chat_kwargs(model_chat(), _si_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supplement lookup failed: {str(e)}")
+
+
+@router.post("/supplement-photo")
+def get_supplement_from_photo(
+    body: SupplementPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify a supplement from a photo of its label/packaging and return evidence-based info."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    client = OpenAI(api_key=api_key)
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+
+    _sp_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a sports nutrition expert. Identify supplements from photos of labels, "
+                "packaging, or pills, then provide evidence-based information. "
+                "Always respond with valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Identify the supplement shown in this image. "
+                        'If you can identify it, return {"found": true, "name": ..., "category": ..., '
+                        '"tagline": ..., "whatItDoes": ..., "evidence": ..., "dose": ..., "timing": ..., '
+                        '"goodFor": [...], "cautions": ...}. '
+                        'If you cannot identify it, return {"found": false, "name": ""}.'
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _sp_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supplement photo lookup failed: {str(e)}")
+
+
+@router.post("/scan-equipment")
+def scan_equipment_photo(
+    body: FoodPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify gym equipment visible in a photo and return names matching the app's equipment library."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    known_equipment = [
+        "Pull-up bar", "Resistance bands", "Yoga mat", "Jump rope", "Foam roller",
+        "Ab wheel", "Dip bars", "Suspension trainer",
+        "Dumbbells", "Barbell", "Kettlebell", "EZ curl bar", "Weight plates",
+        "Trap bar", "Medicine ball",
+        "Flat bench", "Adjustable bench", "Incline bench",
+        "Squat rack", "Power rack", "Landmine attachment",
+        "Cable machine", "Leg press", "Lat pulldown", "Chest press machine",
+        "Seated row machine", "Leg extension", "Leg curl machine",
+        "Shoulder press machine", "Hip abduction machine", "Hip adduction machine",
+        "Smith machine", "Hack squat machine", "Assisted pull-up machine",
+        "Treadmill", "Stationary bike", "Elliptical", "Rowing machine",
+        "Stair climber", "Assault bike", "Swimming pool", "Battle ropes",
+        "Plyo box", "Sled",
+    ]
+
+    _eq_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a fitness equipment expert. Identify gym equipment visible in the image. "
+                "Only return equipment names that exactly match items in the provided list. "
+                "Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"Identify all gym equipment visible in this image. "
+                        f"Only include items whose names exactly match something in this list: {known_equipment}. "
+                        'Return exactly this JSON: {"equipment": [<array of matching equipment name strings>]}'
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=150, timeout_secs=20)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Equipment scan failed: {str(e)}")
+
+
+@router.post("/form-photo")
+def analyze_form_photo(
+    body: FormPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze a form photo for quick coaching cues."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    _form_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a workout form coach analyzing a single exercise photo. "
+                "Provide practical setup/posture cues, likely muscle targeting notes, and obvious red flags. "
+                "Do not pretend to diagnose injury from one image. Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"Exercise: {body.exercise_name or 'unknown'}\n"
+                        f"User concern: {body.question or 'General form check'}\n\n"
+                        "Analyze this form photo. Return exactly this JSON schema: "
+                        '{"answer": string, "quick_cues": [string], "likely_target": string, '
+                        '"red_flags": [string], "safety_note": string}'
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_chat(), _form_messages, json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30)
+        response = _chat_create(client, **kwargs)
+        return _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Form photo analysis failed: {str(e)}")
+
+
+@router.post("/body-scan")
+def body_scan(
+    body: BodyScanRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Estimate body composition from a photo using AI vision."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="image_base64 is required")
+
+    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    client = OpenAI(api_key=api_key)
+
+    context_lines = []
+    if body.gender:
+        context_lines.append(f"Gender: {body.gender}")
+    if body.weight_lbs:
+        context_lines.append(f"Weight: {body.weight_lbs} lbs")
+    if body.height_inches:
+        feet = int(body.height_inches // 12)
+        inches = int(body.height_inches % 12)
+        context_lines.append(f"Height: {feet}'{inches}\"")
+    if body.age:
+        context_lines.append(f"Age: {body.age}")
+    context_str = "\n".join(context_lines) if context_lines else "No additional info provided."
+
+    _scan_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert physique analyst and certified personal trainer. "
+                "Analyze the provided photo to estimate body composition. "
+                "Be honest but encouraging. This is an ESTIMATE — always include a disclaimer. "
+                "Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"User info:\n{context_str}\n\n"
+                        "Analyze this physique photo. Estimate body composition and provide feedback.\n\n"
+                        "Return exactly this JSON:\n"
+                        "{\n"
+                        '  "bodyFatPct": number (estimated body fat percentage, e.g. 18.5),\n'
+                        '  "bodyFatRange": string (e.g. "17-20%"),\n'
+                        '  "muscleMass": string (one of: "low", "below_average", "average", "above_average", "high"),\n'
+                        '  "category": string (e.g. "Athletic", "Lean", "Average", "Overweight"),\n'
+                        '  "strengths": [string] (2-3 visible strong points),\n'
+                        '  "improvements": [string] (2-3 areas to work on),\n'
+                        '  "assessment": string (2-3 sentence overall assessment, encouraging tone),\n'
+                        '  "disclaimer": string (brief note that this is a visual estimate)\n'
+                        "}"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_chat(), _scan_messages, json_schema=None, max_tokens=500, timeout_secs=40)
+        response = _chat_create(client, **kwargs)
+        result = _extract_json(response.choices[0].message.content)
+        return result
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Body scan failed: {str(e)}")
+

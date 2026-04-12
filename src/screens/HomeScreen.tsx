@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions } from 'react-native';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -7,7 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
@@ -799,6 +799,13 @@ function buildAvailability(
 export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onWeeklyRefresh }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
+  // Merge user's custom foods into allFoods so lookups work everywhere
+  const allFoodsWithCustom = useMemo(() => {
+    const custom = (userProfile?.customFoods ?? []).filter(
+      cf => !meta.allFoods.some(f => f.name.toLowerCase() === cf.name.toLowerCase()),
+    );
+    return custom.length ? [...meta.allFoods, ...custom] : meta.allFoods;
+  }, [meta.allFoods, userProfile?.customFoods]);
   const theme = getTheme(userProfile?.themePreference);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
@@ -831,6 +838,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [showTrainerModal, setShowTrainerModal] = useState(false);
   const [coachMode, setCoachMode] = useState<'trainer' | 'nutritionist'>('trainer');
+  const [chatTopic, setChatTopic] = useState<string | null>(null);
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
   const [isChatPlanUpdating, setIsChatPlanUpdating] = useState(false);
@@ -1005,11 +1013,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
     const mealDays = getNextMealDays(7);
 
-    /** Returns true only if meals carry real per-meal calorie data. */
+    /** Returns true if the plan has at least one meal with real calorie data. */
     const hasMealMacros = (plan: DailyNutritionPlan | null | undefined): boolean => {
       if (!plan) return false;
       const meals = [plan.breakfast, plan.lunch, plan.dinner].filter(Boolean);
-      return meals.length > 0 && meals.every(m => (m?.calories ?? 0) > 0);
+      return meals.length > 0 && meals.some(m => (m?.calories ?? 0) > 0);
     };
 
     const localEntries = await Promise.all(
@@ -1032,7 +1040,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }
 
         // 4. Local generator fallback
-        return [d.key, generateDailyNutritionForDate(profile, meta.allFoods, d.key)] as const;
+        return [d.key, generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key)] as const;
       })
     );
     setNutritionPlansByDate(Object.fromEntries(localEntries));
@@ -1282,7 +1290,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       };
 
       // Build a structured summary of the current plan so the AI always knows what to modify
+      // Include calendar mapping so AI knows which plan day = which real date
+      const today = new Date();
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const scheduleMapping = schedule.filter(s => !s.isRest && s.workout).map(s => {
+        const calDate = dateKey(s.date);
+        const isToday = calDate === todayKey();
+        const isTomorrow = (() => { const t = new Date(); t.setDate(t.getDate() + 1); return calDate === dateKey(t); })();
+        const dayLabel = isToday ? 'today' : isTomorrow ? 'tomorrow' : dayNames[s.date.getDay()];
+        return { calendarDate: calDate, dayLabel, planDay: s.workout!.day, focus: s.workout!.focus };
+      });
+
       const currentPlanContext = {
+        scheduleMapping,  // e.g. [{calendarDate: "2026-04-11", dayLabel: "today", planDay: "Day 1", focus: "Upper Body"}, ...]
         workoutDays: (workoutPlan?.days ?? []).map(d => ({
           focus: d.focus,
           exercises: (d.exercises ?? []).map(e => ({ name: e.name, sets: e.sets, reps: e.reps })),
@@ -1315,6 +1335,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const resp = await askTrainerQuestion(authToken, {
         question: q,
         mode: coachMode,
+        topic: chatTopic,
         profile: slimProfile,
         // Pass full workout plan so AI returns the correct structure (with 'days' key, not 'workoutDays')
         workoutPlan: coachMode === 'trainer' ? (workoutPlan ?? undefined) : undefined,
@@ -1360,13 +1381,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           let appliedNutrition: DailyNutritionPlan | null = null;
 
           if (canUpdateWorkout && resp.updated_workout_plan) {
-            const updatedPlan = resp.updated_workout_plan as WorkoutPlan;
-            const prevDay1 = prevWorkout?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
-            const nextDay1 = updatedPlan?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
-            console.log('[handleAskTrainer] setting workout plan, days:', updatedPlan?.days?.length ?? 'no days key', 'prev day1:', prevDay1, 'next day1:', nextDay1);
-            setWorkoutPlan(updatedPlan);
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-            console.log('[handleAskTrainer] updated workout plan saved to AsyncStorage');
+            let updatedPlan = resp.updated_workout_plan as WorkoutPlan;
+            // Validate structure — AI sometimes returns {workoutDays:[...]} instead of {days:[...]}
+            if (!updatedPlan.days && (updatedPlan as any).workoutDays) {
+              updatedPlan = { ...updatedPlan, days: (updatedPlan as any).workoutDays };
+            }
+            // Validate the plan actually has days with exercises
+            const isValid = Array.isArray(updatedPlan.days) && updatedPlan.days.length > 0
+              && updatedPlan.days.some((d: any) => Array.isArray(d.exercises));
+            if (isValid) {
+              // Carry over any fields from previous plan that AI may have dropped
+              if (prevWorkout?.name && !updatedPlan.name) updatedPlan.name = prevWorkout.name;
+              if (prevWorkout?.totalDays && !updatedPlan.totalDays) updatedPlan.totalDays = updatedPlan.days.length;
+              const prevDay1 = prevWorkout?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
+              const nextDay1 = updatedPlan.days[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
+              console.log('[handleAskTrainer] setting workout plan, days:', updatedPlan.days.length, 'prev day1:', prevDay1, 'next day1:', nextDay1);
+              setWorkoutPlan(updatedPlan);
+              await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+              console.log('[handleAskTrainer] updated workout plan saved to AsyncStorage');
+            } else {
+              console.warn('[handleAskTrainer] AI returned invalid workout plan structure:', JSON.stringify(updatedPlan).slice(0, 300));
+              // Don't apply — tell user
+              setActiveChat(prev => [...prev, { role: 'assistant', content: 'I tried to update the plan but the changes didn\'t come through correctly. Try asking again — for example: "Change Day 2 to Upper Body with bench press, rows, and overhead press."' }]);
+            }
           }
           if (canUpdateNutrition && resp.updated_nutrition_plan) {
             const today = todayKey();
@@ -1479,6 +1516,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               completed: true,
             };
             await saveWorkoutSession(session);
+            // Sync to backend so getWorkoutStatus() sees it
+            if (authToken) {
+              logWorkoutDone(authToken, w.date, session.focus, session.durationSeconds).catch(() => null);
+            }
             // If the logged workout is today, mark today as done
             if (w.date === today) {
               setTodayDone(true);
@@ -1503,7 +1544,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setTrainerLoading(false);
     }
-  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, persistDayState]);
+  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, chatTopic, persistDayState]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     const current = checkedMealsByDate[date] ?? {};
@@ -1705,7 +1746,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       </View>}
 
       {/* Tab content */}
-      {!(isWorkoutUpdating && isNutritionUpdating) && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+      {!(isWorkoutUpdating && isNutritionUpdating) && <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {activeTab === 'workout' ? (
           isWorkoutUpdating ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
@@ -1870,12 +1911,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           mealType={editingMeal.type}
           meal={editingMeal.meal}
           nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
-          allFoods={meta.allFoods}
+          allFoods={allFoodsWithCustom}
           foodCategories={meta.foodCategories}
           savedMeals={userProfile.savedMeals ?? []}
           authToken={authToken}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
+          onAddCustomFood={async (item) => {
+            // Persist AI-found food to user profile's custom foods
+            try {
+              const raw = await AsyncStorage.getItem('userProfile');
+              if (!raw) return;
+              const prof = JSON.parse(raw);
+              const existing: Array<{ name: string }> = prof.customFoods ?? [];
+              if (existing.some(f => f.name.toLowerCase() === item.name.toLowerCase())) return;
+              prof.customFoods = [...existing, item];
+              await AsyncStorage.setItem('userProfile', JSON.stringify(prof));
+            } catch {}
+          }}
         />
       )}
 
@@ -2236,7 +2289,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={[styles.coachModePicker, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
               <TouchableOpacity
                 style={[styles.coachModeBtn, coachMode === 'trainer' && { backgroundColor: workoutPalette.strong }]}
-                onPress={() => setCoachMode('trainer')}
+                onPress={() => { setCoachMode('trainer'); setChatTopic(null); }}
                 activeOpacity={0.8}>
                 <Text style={[styles.coachModeBtnText, { color: coachMode === 'trainer' ? '#FFFFFF' : themeColors.textSecondary }]}>
                   Workout Plan
@@ -2244,7 +2297,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.coachModeBtn, coachMode === 'nutritionist' && { backgroundColor: mealPalette.strong }]}
-                onPress={() => setCoachMode('nutritionist')}
+                onPress={() => { setCoachMode('nutritionist'); setChatTopic(null); }}
                 activeOpacity={0.8}>
                 <Text style={[styles.coachModeBtnText, { color: coachMode === 'nutritionist' ? '#FFFFFF' : themeColors.textSecondary }]}>
                   Meal Plan
@@ -2252,11 +2305,58 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.trainerHint, { color: themeColors.textSecondary }]}>
-              {coachMode === 'nutritionist'
-                ? 'Your full meal plan is loaded. Say things like "swap my lunch for something lighter" or "I had a shake this morning — update breakfast." Changes apply immediately.'
-                : 'Your full workout plan is loaded. Say things like "remove squats, my knee hurts" or "add more back work." Changes apply immediately.'}
-            </Text>
+            {chatTopic === null ? (
+              /* ── Topic Picker ──────────────────────────────────── */
+              <View style={{ flex: 1, paddingHorizontal: 16, paddingTop: 16 }}>
+                <Text style={[styles.trainerHint, { color: themeColors.textSecondary, marginBottom: 16 }]}>
+                  What would you like help with?
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center' }}>
+                  {(coachMode === 'trainer'
+                    ? [
+                        { key: 'change_plan', label: 'Change My Plan', icon: '\u270F\uFE0F' },
+                        { key: 'log_activity', label: 'Log Activity', icon: '\uD83D\uDCDD' },
+                        { key: 'report_injury', label: 'Report Injury', icon: '\uD83E\uDE79' },
+                        { key: 'general', label: 'General Question', icon: '\uD83D\uDCAC' },
+                      ]
+                    : [
+                        { key: 'change_meals', label: 'Change My Meals', icon: '\uD83C\uDF7D\uFE0F' },
+                        { key: 'log_food', label: 'Log Food', icon: '\uD83D\uDCDD' },
+                        { key: 'general', label: 'General Question', icon: '\uD83D\uDCAC' },
+                      ]
+                  ).map(t => (
+                    <TouchableOpacity
+                      key={t.key}
+                      style={{
+                        width: '46%',
+                        paddingVertical: 18,
+                        paddingHorizontal: 12,
+                        borderRadius: 14,
+                        backgroundColor: themeColors.surfaceRaised,
+                        borderWidth: 1,
+                        borderColor: themeColors.border,
+                        alignItems: 'center',
+                      }}
+                      activeOpacity={0.7}
+                      onPress={() => setChatTopic(t.key)}
+                    >
+                      <Text style={{ fontSize: 28, marginBottom: 6 }}>{t.icon}</Text>
+                      <Text style={{ color: themeColors.textPrimary, fontSize: 14, fontWeight: '600', textAlign: 'center' }}>{t.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            ) : (
+              /* ── Chat UI (topic selected) ──────────────────────── */
+              <>
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 4 }}>
+                <TouchableOpacity onPress={() => setChatTopic(null)} style={{ paddingRight: 8 }}>
+                  <Text style={{ color: themeColors.primary, fontSize: 15, fontWeight: '600' }}>{'\u2190'} Topics</Text>
+                </TouchableOpacity>
+                <Text style={[styles.trainerHint, { color: themeColors.textSecondary, flex: 1 }]}>
+                  {chatTopic === 'change_plan' ? 'Change My Plan' : chatTopic === 'log_activity' ? 'Log Activity' : chatTopic === 'report_injury' ? 'Report Injury' : chatTopic === 'change_meals' ? 'Change My Meals' : chatTopic === 'log_food' ? 'Log Food' : 'General Question'}
+                </Text>
+              </View>
 
             {(coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary) && (
               <View style={[styles.trainerSummaryCard, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
@@ -2265,7 +2365,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
               {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
                 <Text style={[styles.trainerEmpty, { color: themeColors.textMuted }]}>
                   {coachMode === 'nutritionist'
@@ -2346,6 +2446,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {trainerLoading ? <ActivityIndicator size="small" color={themeColors.background} /> : <Text style={styles.trainerSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
+              </>
+            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>

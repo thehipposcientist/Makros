@@ -67,7 +67,10 @@
       "Bash(npm list:*)",
       "Bash(npx kill-port:*)",
       "Bash(ls -la /e/WorkoutPal/*.json /e/WorkoutPal/*.js)",
-      "Bash(npm view:*)"
+      "Bash(npm view:*)",
+      "Bash(ls:*)",
+      "Bash(mv ai.py ai.py.bak)",
+      "Bash(mv ai_pkg ai)"
     ]
   }
 }

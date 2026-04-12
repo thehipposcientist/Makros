@@ -496,6 +496,18 @@ export async function getMealSwap(token: string, meal_type: string, foods: strin
   });
 }
 
+/** Search food nutrition info by name using AI. */
+export async function searchFoodNutrition(
+  token: string,
+  query: string,
+): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number }> }> {
+  return request<any>('/ai/food-search', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ query }),
+  }, 15000);
+}
+
 /** Parse natural language workout descriptions into structured sessions. */
 export async function parseRecentWorkouts(
   token: string,
@@ -513,10 +525,12 @@ export async function askTrainerQuestion(
   payload: {
     question: string;
     mode: 'trainer' | 'nutritionist';
+    topic?: string | null;
     profile: any;
     workoutPlan?: any;
     nutritionPlan?: any;
     currentPlanContext?: {
+      scheduleMapping?: Array<{ calendarDate: string; dayLabel: string; planDay: string; focus: string }>;
       workoutDays: Array<{ focus: string; exercises: Array<{ name: string; sets: number; reps: string }> }>;
       todayMeals: Array<{ type: string; meal: string; foods: string[]; calories: number; protein: number }>;
       mealRoutine?: string;
@@ -646,7 +660,7 @@ export async function scanFoodsPhoto(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
 }
 
 export async function lookupSupplementFromPhoto(

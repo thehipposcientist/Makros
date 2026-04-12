@@ -202,6 +202,7 @@ class TrainerQuestionRequest(BaseModel):
     profile: dict
     workoutPlan: dict | None = None
     nutritionPlan: dict | None = None
+    currentPlanContext: dict | None = None  # scheduleMapping, workoutDays, todayMeals
     progress: dict | None = None
     conversation: list[dict] | None = None
     userContext: str | None = None  # recent activity log, same as plan generation
@@ -238,6 +239,9 @@ class FormPhotoRequest(BaseModel):
     exercise_name: str | None = None
     question: str | None = None
 
+
+class FoodNutritionSearchRequest(BaseModel):
+    query: str   # free-text: "100g chicken breast" or "1 avocado" or "pizza slice"
 
 class SupplementLookupRequest(BaseModel):
     name: str
@@ -2064,18 +2068,20 @@ If the user just says a body part or type (e.g. "legs yesterday"), create the se
 If they mention specific exercises/weights (e.g. "benched 185 for 3x8"), include those.
 If they say "rest day" or "off day", do NOT create a session for that day.
 
-Return ONLY a valid JSON array — no markdown, no explanation:
-[
-  {{
-    "date": "YYYY-MM-DD",
-    "focus": "string",
-    "completed": true,
-    "durationSeconds": 3600,
-    "exercises": []
-  }}
-]
+Return ONLY a valid JSON object with a "sessions" key — no markdown, no explanation:
+{{
+  "sessions": [
+    {{
+      "date": "YYYY-MM-DD",
+      "focus": "string",
+      "completed": true,
+      "durationSeconds": 3600,
+      "exercises": []
+    }}
+  ]
+}}
 
-If nothing parseable, return an empty array: []"""
+If nothing parseable, return: {{"sessions": []}}"""
 
     try:
         resp = client.chat.completions.create(
@@ -2121,16 +2127,25 @@ def ask_trainer_question(
     if is_nutritionist:
         context_blob["nutritionPlan"] = body.nutritionPlan
     else:
-        # Slim down workout plan — only send exercise names/sets/reps per day, not full details
+        # Send full workout plan so the AI can return a complete updated plan
+        # with all fields (equipment, restSeconds, etc.)
         wp = body.workoutPlan
         if isinstance(wp, dict) and "days" in wp:
-            slim_days = []
+            # Keep full exercise details but cap to avoid token overflow
+            full_days = []
             for d in wp.get("days", []):
-                slim_exs = [{"name": e.get("name"), "sets": e.get("sets"), "reps": e.get("reps")} for e in (d.get("exercises") or [])]
-                slim_days.append({"day": d.get("day"), "focus": d.get("focus"), "exercises": slim_exs})
-            context_blob["workoutPlan"] = {"name": wp.get("name"), "totalDays": wp.get("totalDays"), "days": slim_days}
+                exs = [{"name": e.get("name"), "sets": e.get("sets"), "reps": e.get("reps"),
+                         "restSeconds": e.get("restSeconds", 60), "equipment": e.get("equipment", "")}
+                        for e in (d.get("exercises") or [])]
+                full_days.append({"day": d.get("day"), "focus": d.get("focus"), "exercises": exs})
+            context_blob["workoutPlan"] = {"name": wp.get("name"), "totalDays": wp.get("totalDays"), "days": full_days}
         else:
             context_blob["workoutPlan"] = wp
+    # Include schedule mapping so AI knows which plan day = which calendar date
+    if body.currentPlanContext and isinstance(body.currentPlanContext, dict):
+        mapping = body.currentPlanContext.get("scheduleMapping")
+        if mapping:
+            context_blob["scheduleMapping"] = mapping
     if body.userContext:
         context_blob["recentActivityLog"] = body.userContext[:800]
 
@@ -2177,6 +2192,17 @@ def ask_trainer_question(
             "reps, and weights from their actual plan. "
             "Always check the profile's 'injuries' and 'injuryEntries' fields first — if injuries are present, "
             "remove or substitute any exercises that stress those areas. "
+            "SCHEDULE MAPPING: The context includes a 'scheduleMapping' array that maps plan days to "
+            "calendar dates. When the user says 'tomorrow' or 'today' or a weekday name, use this mapping "
+            "to identify which plan day (Day 1, Day 2, etc.) they mean, then modify THAT day. "
+            "REBALANCING: When a user changes a day's focus (e.g. 'make tomorrow back day'), you MUST "
+            "rebalance the ENTIRE week to account for the change. Consider: "
+            "(1) Don't schedule the same muscle group on consecutive days — ensure adequate recovery. "
+            "(2) If the changed day duplicates another day's focus, swap or adjust the other day. "
+            "(3) If a recovery/rest day was replaced with training, consider adding recovery elsewhere. "
+            "(4) Keep the total number of training days the same unless the user asked to change it. "
+            "(5) Maintain balanced muscle group coverage across the week. "
+            "Think of yourself as reprogramming the whole week, not just editing one slot. "
             "If the user asks for plan changes, exercise swaps, or injury modifications, "
             "set needs_plan_update=true and return the COMPLETE updated workout plan "
             "(all days, all exercises — not just the changed ones). "
@@ -2283,7 +2309,7 @@ def ask_trainer_question(
         # Don't pass json_schema for gpt-5 — the trainer schema has optional/typeless
         # fields (updated_workout_plan: {}) that gpt-5's json_schema mode rejects.
         # Instead, rely on prompt-enforced JSON which works reliably.
-        kwargs = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=2500, timeout_secs=50)
+        kwargs = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=4000, timeout_secs=60)
         response = _chat_create(client, **kwargs)
         choice = response.choices[0]
         raw = choice.message.content
@@ -2335,8 +2361,8 @@ def ask_trainer_question(
             }
 
         if _looks_truncated(raw):
-            print(f"[trainer-question] phase-1 truncated — retrying at 3500 tokens")
-            kwargs1b = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=3500, timeout_secs=60)
+            print(f"[trainer-question] phase-1 truncated — retrying at 5000 tokens")
+            kwargs1b = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=5000, timeout_secs=65)
             response = _chat_create(client, **kwargs1b)
             raw = response.choices[0].message.content or raw
 
@@ -2348,7 +2374,7 @@ def ask_trainer_question(
         needs_nutrition = is_nutritionist and result.get("needs_plan_update") and not result.get("updated_nutrition_plan")
         if needs_workout or needs_nutrition:
             plan_type = "workout" if needs_workout else "nutrition"
-            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 3500 tokens")
+            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 4500 tokens")
             # Build a focused phase-2 message: carry the answer already given, just ask for the plan
             phase2_answer = result.get("answer", "")
             phase2_injuries = result.get("updated_injuries")
@@ -2383,7 +2409,7 @@ def ask_trainer_question(
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": phase2_user},
             ]
-            kwargs2 = _build_chat_kwargs(_m_full, phase2_messages, json_schema=None, max_tokens=3500, timeout_secs=65)
+            kwargs2 = _build_chat_kwargs(_m_full, phase2_messages, json_schema=None, max_tokens=4500, timeout_secs=70)
             response2 = _chat_create(client, **kwargs2)
             raw2 = response2.choices[0].message.content
             result2 = _extract_json(raw2)
@@ -2577,6 +2603,56 @@ def scan_foods_photo(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
+
+
+@router.post("/food-search")
+def food_nutrition_search(
+    body: FoodNutritionSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Search for food nutrition info by name/description using AI."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    client = OpenAI(api_key=api_key)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition database. Given a food query, return nutrition info. "
+                "If the user specifies a quantity (e.g. '100g chicken'), use that. "
+                "If not, use a standard serving size. "
+                "Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Food query: "{body.query}"\n\n'
+                "Return JSON with this exact schema:\n"
+                '{"results": [{"name": string, "serving": string, "calories": number, '
+                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}\n\n'
+                "Return 1-5 results. If the query is vague (e.g. 'chicken'), return common preparations. "
+                "If specific (e.g. '6oz grilled chicken breast'), return exactly that."
+            ),
+        },
+    ]
+    try:
+        resp = client.chat.completions.create(
+            model=model_meal_parsing(),
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=500,
+            timeout=15,
+        )
+        data = json.loads(resp.choices[0].message.content or '{"results": []}')
+        results = data if isinstance(data, list) else data.get("results", [])
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Food search failed: {str(e)}")
 
 
 @router.post("/supplement-info")

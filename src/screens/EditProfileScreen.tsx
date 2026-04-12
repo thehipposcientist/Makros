@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking,
+  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
-import { analyzeFoodPhoto, scanFoodsPhoto, getExercises } from '../services/api';
+import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition } from '../services/api';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
@@ -258,6 +258,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>('all');
+  const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
+  const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
 
   // Custom macro overrides
   const [useCustomMacros, setUseCustomMacros] = useState(!!profile.customMacros);
@@ -537,6 +539,33 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
+  const handleAiFoodSearch = async () => {
+    if (!authToken || !foodSearch.trim()) return;
+    setAiFoodSearchLoading(true);
+    try {
+      const res = await searchFoodNutrition(authToken, foodSearch.trim());
+      setAiFoodResults(res.results ?? []);
+      if (!res.results?.length) Alert.alert('No results', `Could not find nutrition info for "${foodSearch}".`);
+    } catch (e: any) {
+      Alert.alert('Search failed', e.message ?? 'Could not reach the AI server.');
+    } finally {
+      setAiFoodSearchLoading(false);
+    }
+  };
+
+  const addAiFoodResult = (item: { name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }) => {
+    const customItem: CustomFoodItem = {
+      name: item.name,
+      unit: item.serving,
+      calories: Math.round(item.calories),
+      protein: Math.round(item.protein),
+      carbs: Math.round(item.carbs),
+      fat: Math.round(item.fat),
+    };
+    handleAddCustomFood(customItem);
+    setAiFoodResults(prev => prev.filter(r => r.name !== item.name));
+  };
+
   const confirmPhotoMeal = () => {
     if (!photoMealDraft) return;
     // Apply serving fraction — e.g. if batch makes 4 servings and user eats 3, multiply by 3/4
@@ -691,7 +720,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
 
         {mode === 'goal' && (
         <>
@@ -1553,9 +1582,42 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 ) : null}
               </ScrollView>
 
-              {filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 ? (
-                <Text style={styles.emptySearchText}>No foods match the current search and category filter.</Text>
+              {filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && aiFoodResults.length === 0 ? (
+                <Text style={styles.emptySearchText}>No local foods match — try AI search below.</Text>
               ) : null}
+
+              {/* AI Food Search */}
+              {authToken && foodSearch.length > 1 && (
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { alignItems: 'center', marginBottom: 10, backgroundColor: tc.primary + '18', borderColor: tc.primary }]}
+                  onPress={handleAiFoodSearch}
+                  disabled={aiFoodSearchLoading}>
+                  {aiFoodSearchLoading
+                    ? <ActivityIndicator size="small" color={tc.primary} />
+                    : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search "{foodSearch}" with AI</Text>}
+                </TouchableOpacity>
+              )}
+
+              {aiFoodResults.length > 0 && (
+                <View style={{ marginBottom: 16 }}>
+                  <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>AI Results</Text>
+                  {aiFoodResults.map((item, idx) => (
+                    <TouchableOpacity
+                      key={`${item.name}-${idx}`}
+                      style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
+                      onPress={() => addAiFoodResult(item)}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary }}>{item.name}</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>{item.serving}</Text>
+                        <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
+                          {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, marginLeft: 8 }}>+ Add</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
 
               {filteredFoodCategories.map(category => (
                 <View key={category.key} style={styles.chipGroup}>
