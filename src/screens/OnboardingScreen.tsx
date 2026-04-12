@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   Modal,
   findNodeHandle,
+  UIManager,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
@@ -206,21 +207,26 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const meta = useMetaData();
   const scrollRef = useRef<ScrollView>(null);
 
-  /** Scroll so the focused input is visible above the keyboard */
+  /** Scroll so the focused input is visible above the keyboard.
+   *
+   * `event.target` here is a React fiber tag (number on the new arch) or a
+   * component instance — not a direct host-component ref, so calling
+   * `node.measureLayout` on it warns. We resolve both sides to node handles
+   * and use `UIManager.measureLayout`, which works for either case. */
   const scrollToInput = useCallback((event: any) => {
-    const node = event?.target;
-    if (!node || !scrollRef.current) return;
+    const targetNode = findNodeHandle(event?.target);
+    const scrollNode = findNodeHandle(scrollRef.current);
+    if (!targetNode || !scrollNode) return;
     setTimeout(() => {
-      const scrollNode = findNodeHandle(scrollRef.current);
-      if (!scrollNode) return;
-      (node as any).measureLayout?.(
+      UIManager.measureLayout(
+        targetNode,
         scrollNode,
-        (_x: number, y: number, _w: number, h: number) => {
-          scrollRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
-        },
         () => {
-          // measureLayout failed — fallback to scrollToEnd
+          // Failure — fall back to scrolling to the end so the input is at least visible.
           scrollRef.current?.scrollToEnd({ animated: true });
+        },
+        (_x: number, y: number, _w: number, _h: number) => {
+          scrollRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
         },
       );
     }, 350);

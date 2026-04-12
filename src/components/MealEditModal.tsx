@@ -82,7 +82,15 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
 }
 
 export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine }: Props) {
+  // `foods` and `amounts` are kept as parallel index-aligned arrays to match
+  // the MealSuggestion shape. Amounts are free-form text (e.g. "2", "1 cup",
+  // "3 oz") and are editable independently of the food — we don't re-derive
+  // macros from them yet, that's a larger feature.
   const [foods,       setFoods]       = useState<string[]>(meal.foods);
+  const [amounts,     setAmounts]     = useState<string[]>(() => {
+    const existing = meal.amounts ?? [];
+    return meal.foods.map((_, i) => existing[i] ?? '');
+  });
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
@@ -93,6 +101,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   useEffect(() => {
     if (visible) {
       setFoods(meal.foods);
+      const existing = meal.amounts ?? [];
+      setAmounts(meal.foods.map((_, i) => existing[i] ?? ''));
       setSearch('');
       setAiResults([]);
       setAiFoodMacros(new Map());
@@ -111,14 +121,18 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       const res = await scanFoodsPhoto(authToken, {
         images: [{ image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' }],
       });
-      const names = res.foods.map(f => f.name);
-      if (names.length === 0) {
+      const picked = res.foods.filter(f => !foods.includes(f.name));
+      if (res.foods.length === 0) {
         Alert.alert('No foods found', 'Could not identify any foods in that photo.');
         return;
       }
-      const newFoods = names.filter(n => !foods.includes(n));
-      setFoods(prev => [...prev, ...newFoods]);
-      if (newFoods.length === 0) Alert.alert('Already added', 'All identified foods are already in this meal.');
+      if (picked.length === 0) {
+        Alert.alert('Already added', 'All identified foods are already in this meal.');
+      } else {
+        setFoods(prev => [...prev, ...picked.map(p => p.name)]);
+        // Scanned items don't have per-item amounts from the API yet — start blank.
+        setAmounts(prev => [...prev, ...picked.map(() => '')]);
+      }
     } catch (e: any) {
       Alert.alert('Scan failed', e.message ?? 'Could not scan the photo.');
     } finally {
@@ -135,9 +149,31 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
   const dayTotal    = addMacros(mealMacros, otherMacros);
 
-  const removeFood = (name: string) => setFoods(prev => prev.filter(f => f !== name));
-  const addFood    = (name: string) => {
-    if (!foods.includes(name)) setFoods(prev => [...prev, name]);
+  const removeFood = (name: string) => {
+    setFoods(prev => {
+      const idx = prev.indexOf(name);
+      if (idx < 0) return prev;
+      const next = prev.slice();
+      next.splice(idx, 1);
+      setAmounts(prevAmts => {
+        const nextAmts = prevAmts.slice();
+        nextAmts.splice(idx, 1);
+        return nextAmts;
+      });
+      return next;
+    });
+  };
+  const addFood = (name: string, amount: string = '') => {
+    if (foods.includes(name)) return;
+    setFoods(prev => [...prev, name]);
+    setAmounts(prev => [...prev, amount]);
+  };
+  const updateAmount = (index: number, value: string) => {
+    setAmounts(prev => {
+      const next = prev.slice();
+      next[index] = value;
+      return next;
+    });
   };
 
   const handleAiSearch = async () => {
@@ -157,6 +193,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const addAiFood = (item: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number }) => {
     if (!foods.includes(item.name)) {
       setFoods(prev => [...prev, item.name]);
+      setAmounts(prev => [...prev, item.serving ?? '']);
     }
     // Store macros so calcMacros can use them
     setAiFoodMacros(prev => {
@@ -188,6 +225,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     onSave({
       ...meal,
       foods,
+      amounts,
       calories: mealMacros.calories,
       protein:  mealMacros.protein,
       carbs:    mealMacros.carbs,
@@ -268,13 +306,21 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             {foods.length === 0 && (
               <Text style={s.emptyText}>No foods — add some below</Text>
             )}
-            {foods.map(name => {
+            {foods.map((name, idx) => {
               const item = lookupFood(name, allFoods);
               const aiMacro = !item ? aiFoodMacros.get(name.toLowerCase()) : undefined;
               return (
                 <View key={name} style={s.currentFoodRow}>
                   <View style={s.currentFoodInfo}>
                     <Text style={s.currentFoodName}>{name}</Text>
+                    <TextInput
+                      style={s.amountInput}
+                      value={amounts[idx] ?? ''}
+                      onChangeText={(t) => updateAmount(idx, t)}
+                      placeholder="Amount (e.g. 2, 1 cup, 3 oz)"
+                      placeholderTextColor={colors.textMuted}
+                      returnKeyType="done"
+                    />
                     {item ? (
                       <Text style={s.currentFoodMacros}>
                         {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
@@ -473,6 +519,19 @@ const s = StyleSheet.create({
   },
   currentFoodInfo:   { flex: 1 },
   currentFoodName:   { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
+  amountInput: {
+    fontSize: 13,
+    color: colors.textPrimary,
+    backgroundColor: colors.background,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 4,
+    alignSelf: 'flex-start',
+    minWidth: 120,
+  },
   currentFoodMacros: { fontSize: 12, color: colors.textMuted },
   savedMealRow: {
     flexDirection: 'row', alignItems: 'center',

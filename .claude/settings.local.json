@@ -88,7 +88,8 @@
       "Bash(E:/WorkoutPal/backend/venv/Scripts/python:*)",
       "Bash(brew --version)",
       "Bash(/opt/homebrew/bin/brew --version)",
-      "Bash(/usr/local/bin/brew --version)"
+      "Bash(/usr/local/bin/brew --version)",
+      "Bash(wc -l /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/routers/ai/*.py)"
     ]
   }
 }

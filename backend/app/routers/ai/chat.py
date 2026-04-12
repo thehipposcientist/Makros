@@ -175,6 +175,11 @@ def ask_trainer_question(
         "• If the user asks to change training days (e.g. 'make it 6 days'), return an updated plan "
         "with the new number of days. The app will detect the change and update their settings automatically.\n"
         "• If they ask to change equipment focus, adjust exercises accordingly in the updated plan.\n"
+        "• Change the user's primary fitness GOAL. If they say things like 'switch me to fat loss', "
+        "'I want to build muscle instead', 'change my goal to strength', set the `updated_goal` field "
+        "to the new goal id (see allowed values in the schema). The app will confirm with the user and "
+        "regenerate plans accordingly. Also set needs_plan_update=true and return a plan that matches "
+        "the new goal so the change takes effect immediately after approval.\n"
         "• Log workouts, track injuries.\n"
         "\n"
         "WHAT YOU CANNOT DO (redirect the user):\n"
@@ -281,10 +286,14 @@ def ask_trainer_question(
         '  "action_items": ["specific actionable step 1", "..."],\n'
         '  "needs_plan_update": true|false,\n'
         '  "safety_note": "string or empty string",\n'
+        '  "updated_goal": "fat_loss|muscle_gain|body_recomp|strength|endurance|athletic_performance|toning|maintain" or null,\n'
         + plan_schema
         + workout_log_schema
         + injury_schema +
         '}\n\n'
+        "GOAL UPDATES: Set `updated_goal` ONLY when the user explicitly asks to change their fitness goal "
+        "(e.g. 'I want to cut now', 'switch me to strength'). Otherwise leave it null. "
+        "Never change the goal silently just because you think it would be better.\n"
         "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
         "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly.\n"
         "PLAN SETTING CHANGES: If the user asks to change training days, workout duration, or equipment, "
@@ -399,6 +408,7 @@ def ask_trainer_question(
                 "action_items": [],
                 "needs_plan_update": False,
                 "safety_note": "",
+                "updated_goal": None,
                 "updated_workout_plan": None,
                 "updated_nutrition_plan": None,
                 "updated_injuries": None,
@@ -480,6 +490,7 @@ def ask_trainer_question(
             "action_items": [],
             "needs_plan_update": False,
             "safety_note": "",
+            "updated_goal": None,
             "updated_workout_plan": None,
             "updated_nutrition_plan": None,
             "updated_profile": None,

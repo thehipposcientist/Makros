@@ -13,6 +13,7 @@ import {
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
+import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 
 
@@ -1261,7 +1262,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               /* ── Exercise list with filters ── */
               <>
                 {/* Search */}
-                <TextInput
+                <SearchInput
                   style={styles.searchInput}
                   value={exerciseSearch}
                   onChangeText={setExerciseSearch}
@@ -1552,7 +1553,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
-              <TextInput
+              <SearchInput
                 style={styles.searchInput}
                 value={foodSearch}
                 onChangeText={setFoodSearch}

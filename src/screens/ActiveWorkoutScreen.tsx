@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion } from '../services/api';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
+import SearchInput from '../components/SearchInput';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 
 interface WorkoutCoachMessage {
@@ -1935,7 +1936,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </TouchableOpacity>
             </View>
 
-            <TextInput
+            <SearchInput
               value={exerciseSearch}
               onChangeText={setExerciseSearch}
               placeholder="Search exercise library..."

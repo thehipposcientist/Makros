@@ -464,6 +464,61 @@ export async function getInsights(token: string) {
   });
 }
 
+// ─── AI Coach check-ins (phase 2 system) ─────────────────────────────────────
+
+export type CoachCheckinFeedback = {
+  energy?: number;           // 1–5
+  hunger?: number;           // 1–5
+  soreness?: number;         // 1–5
+  motivation?: number;       // 1–5
+  stress?: number;           // 1–5
+  sleep_self?: number;       // 1–5
+  schedule_issue?: boolean;
+  adherence_self?: 'on' | 'mostly' | 'off';
+  note?: string;
+};
+
+export type CoachFlag = {
+  key: string;
+  severity: 'low' | 'med' | 'high';
+  value?: string | null;
+};
+
+export type CoachCheckinResponse = {
+  decision_id: number | null;
+  response_type: 'coach_only' | 'small_adjust' | 'deep_review' | 'leave_alone' | 'ask_more';
+  message: string;
+  delta: Record<string, number> | null;
+  rationale_key: string | null;
+  overrides: string[];
+  applied_kcal_adjustment_total: number | null;
+  flags: CoachFlag[];
+  schema: string;
+};
+
+export async function submitCoachCheckin(
+  token: string,
+  body: { checkin_type?: 'micro' | 'weekly' | 'manual' | 'event'; feedback: CoachCheckinFeedback; dry_run?: boolean },
+): Promise<CoachCheckinResponse> {
+  return request('/coach/checkin', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ checkin_type: 'manual', ...body }),
+  });
+}
+
+export async function getCoachFlags(token: string): Promise<{ flags: Array<CoachFlag & { active_since: string; last_evaluated: string; details?: any }> }> {
+  return request('/coach/flags', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getCoachHistory(token: string, limit = 10): Promise<{ decisions: Array<{ id: number; created_at: string; checkin_type: string; response_type: string; rationale_key: string | null; delta: any; message: string | null; flags_snapshot: any; model: string | null }> }> {
+  return request(`/coach/history?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getGuardrails(token: string) {
   return request<{ warnings: string[] }>('/profile/guardrails', {
     headers: { Authorization: `Bearer ${token}` },

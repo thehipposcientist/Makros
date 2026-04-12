@@ -105,6 +105,105 @@ class CoachMemory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ─── AI check-in system: rollups, flags, decisions ────────────────────────────
+#
+# Foundation for the coach check-in payload described in docs/ai-checkin.md.
+# These tables are **derived** from existing meal/workout/checkin data so they
+# can always be recomputed. Never write business logic against them as the
+# source of truth — they're a precomputed cache for fast payload assembly and
+# flag evaluation.
+
+class DailyRollup(SQLModel, table=True):
+    """One row per user per day. Derived from meals + workout_sessions + checkins."""
+    __tablename__ = "daily_rollups"
+    __table_args__ = (UniqueConstraint("user_id", "day", name="uq_daily_rollup"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    day: date = Field(index=True)
+    # Nutrition totals
+    kcal: float = Field(default=0)
+    protein_g: float = Field(default=0)
+    carbs_g: float = Field(default=0)
+    fat_g: float = Field(default=0)
+    meals_logged: int = Field(default=0)
+    # Targets snapshot (from active plan at time of rollup)
+    kcal_target: float | None = Field(default=None)
+    protein_target_g: float | None = Field(default=None)
+    # Training
+    session_planned: bool = Field(default=False)
+    session_completed: bool = Field(default=False)
+    session_focus: str | None = Field(default=None)   # e.g. "Upper", "Lower", "Push"
+    session_rpe_avg: float | None = Field(default=None)
+    session_duration_min: int | None = Field(default=None)
+    # Body / recovery (sparse — may come from checkin or HealthKit later)
+    weight_lbs: float | None = Field(default=None)
+    sleep_h: float | None = Field(default=None)
+    steps: int | None = Field(default=None)
+    # Self-report (latest checkin on or before this day)
+    energy: int | None = Field(default=None)
+    soreness: int | None = Field(default=None)
+    computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class UserRollup(SQLModel, table=True):
+    """Rolling 7/14/28-day aggregates for a user, keyed by window. One row per window."""
+    __tablename__ = "user_rollups"
+    __table_args__ = (UniqueConstraint("user_id", "window_days", name="uq_user_rollup_window"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    window_days: int = Field(index=True)  # 7, 14, or 28
+    as_of: date = Field(index=True)
+    # Nutrition
+    kcal_avg: float | None = Field(default=None)
+    kcal_target_delta_pct: float | None = Field(default=None)
+    protein_adherence_pct: float | None = Field(default=None)  # % of days ≥85% of target
+    days_logged: int = Field(default=0)
+    adherence_pct: float | None = Field(default=None)          # % of days within ±15% of kcal target
+    # Training
+    sessions_planned: int = Field(default=0)
+    sessions_completed: int = Field(default=0)
+    session_completion_pct: float | None = Field(default=None)
+    # Body / recovery
+    weight_ema_lbs: float | None = Field(default=None)
+    weight_slope_lbs_per_wk: float | None = Field(default=None)
+    sleep_avg_h: float | None = Field(default=None)
+    steps_avg: int | None = Field(default=None)
+    computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class UserFlag(SQLModel, table=True):
+    """Active coaching flags. Evaluated from UserRollup + DailyRollup by the flag engine."""
+    __tablename__ = "user_flags"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_flag_key"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    key: str = Field(index=True)                # e.g. "low_adherence_7d"
+    severity: str = Field(default="low")        # low | med | high
+    value: str | None = Field(default=None)     # human-readable e.g. "86% of target"
+    details: dict | None = Field(default=None, sa_column=Column(JSON))
+    active_since: date
+    last_evaluated: date
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class AIDecision(SQLModel, table=True):
+    """Structured record of every AI coaching decision. Replaces prose chat history in payloads."""
+    __tablename__ = "ai_decisions"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    checkin_type: str                 # "micro" | "weekly" | "manual" | "event"
+    response_type: str                # "coach_only" | "small_adjust" | "deep_review" | "leave_alone" | "ask_more"
+    rationale_key: str | None = Field(default=None)   # enum/slug like "stall_2wk_cut"
+    delta: dict | None = Field(default=None, sa_column=Column(JSON))  # structured diff e.g. {"kcal": -100}
+    flags_snapshot: list | None = Field(default=None, sa_column=Column(JSON))  # [{key, severity}, ...]
+    message: str | None = Field(default=None)         # short coaching message shown to user
+    plan_version_before: int | None = Field(default=None)
+    plan_version_after: int | None = Field(default=None)
+    accepted: bool = Field(default=True)              # user accepted the adjustment (if any)
+    model: str | None = Field(default=None)           # which LLM model produced this
+
+
 # ─── Exercise library (seeded reference data) ─────────────────────────────────
 
 class Exercise(SQLModel, table=True):

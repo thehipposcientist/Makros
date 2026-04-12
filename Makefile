@@ -1,5 +1,10 @@
 .PHONY: start tunnel stop reset-db wait-backend
 
+# Run recipes in a login zsh so ~/.zprofile (brew shellenv, etc.) is sourced
+# and tools like `npx` / `node` are on PATH.
+SHELL := /bin/zsh
+.SHELLFLAGS := -l -c
+
 start:
 	@echo ""
 	@echo "  ███╗   ███╗ █████╗ ██╗  ██╗██████╗  ██████╗ ███████╗"

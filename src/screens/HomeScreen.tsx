@@ -20,6 +20,8 @@ import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
+import SearchInput from '../components/SearchInput';
+import CoachCheckinModal from '../components/CoachCheckinModal';
 import { colors, getTheme, radius } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
@@ -826,6 +828,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
   const [activeTab, setActiveTab]         = useState<'workout' | 'meals'>('workout');
   const [menuOpen, setMenuOpen]           = useState(false);
+  const [showCheckin, setShowCheckin]     = useState(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
@@ -1447,7 +1450,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
       console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
 
-      if (resp.needs_plan_update && hasUpdate) {
+      const hasStructuredGoal = typeof (resp as any).updated_goal === 'string' && (resp as any).updated_goal.trim().length > 0;
+      if ((resp.needs_plan_update && hasUpdate) || hasStructuredGoal) {
         // Detect profile changes from the plan diff + user question
         const profileChanges: Partial<UserProfile> = {};
         const summaryParts: string[] = [];
@@ -1476,21 +1480,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           summaryParts.push('Meal plan updated');
         }
-        // Detect goal changes by matching against all known goals from goalConfig
-        const combinedText = `${q} ${resp.answer ?? ''}`.toLowerCase();
-        // Sort longer labels first so "body recomposition" matches before "body"
-        const sortedGoals = [...PRIMARY_GOALS].sort((a, b) => b.label.length - a.label.length);
-        for (const g of sortedGoals) {
-          // Match on label (e.g. "Build Muscle") or id with underscores→spaces (e.g. "build muscle")
-          const labelLower = g.label.toLowerCase();
-          const idAsWords = g.id.replace(/_/g, ' ');
-          if (combinedText.includes(labelLower) || combinedText.includes(idAsWords)) {
-            if (g.id !== userProfile?.goal) {
-              profileChanges.goal = g.id as any;
-              summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${g.label}`);
+        // Goal changes: prefer the structured `updated_goal` field from the AI response.
+        // Fall back to string matching for backwards compatibility with older backend versions.
+        const structuredGoalRaw = typeof (resp as any).updated_goal === 'string' ? (resp as any).updated_goal.trim() : '';
+        const structuredGoal = structuredGoalRaw || null;
+        let matchedGoal: typeof PRIMARY_GOALS[number] | null = null;
+        if (structuredGoal) {
+          matchedGoal = PRIMARY_GOALS.find(g => g.id === structuredGoal) ?? null;
+        }
+        if (!matchedGoal) {
+          const combinedText = `${q} ${resp.answer ?? ''}`.toLowerCase();
+          const sortedGoals = [...PRIMARY_GOALS].sort((a, b) => b.label.length - a.label.length);
+          for (const g of sortedGoals) {
+            const labelLower = g.label.toLowerCase();
+            const idAsWords = g.id.replace(/_/g, ' ');
+            if (combinedText.includes(labelLower) || combinedText.includes(idAsWords)) {
+              matchedGoal = g;
+              break;
             }
-            break;
           }
+        }
+        if (matchedGoal && matchedGoal.id !== userProfile?.goal) {
+          profileChanges.goal = matchedGoal.id as any;
+          summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${matchedGoal.label}`);
         }
         const summary = summaryParts.length > 0 ? summaryParts.join(' · ') : (coachMode === 'trainer' ? 'Workout plan updated' : 'Meal plan updated');
         // Store as pending — wait for user approval
@@ -1766,10 +1778,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
         }
       } else {
-        // Turning ON — only set on this day (user can pin from any day)
-        const updated = { ...current, [mealType]: { ...meal, isRoutine: true } } as DailyNutritionPlan;
-        next[date] = updated;
-        changedPlans[date] = updated;
+        // Turning ON — copy this meal onto EVERY day so the routine actually
+        // repeats. We stamp `isRoutine: true` and overwrite the same mealType
+        // slot on each existing day's plan. Days without a plan yet get
+        // populated when HomeScreen initializes their plan (see the initial
+        // load path around line 1109).
+        for (const [d, plan] of Object.entries(next)) {
+          const updated = { ...plan, [mealType]: { ...meal, isRoutine: true } } as DailyNutritionPlan;
+          next[d] = updated;
+          changedPlans[d] = updated;
+        }
       }
 
       return next;
@@ -2098,6 +2116,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         )}
       </ScrollView>}
 
+      {/* Coach check-in modal */}
+      <CoachCheckinModal
+        visible={showCheckin}
+        authToken={authToken}
+        onClose={() => setShowCheckin(false)}
+      />
+
       {/* Meal edit modal */}
       {editingMeal && nutritionPlansByDate[editingMeal.dateKey] && (
         <MealEditModal
@@ -2362,7 +2387,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
               ) : (
                 <ScrollView contentContainerStyle={styles.libraryList}>
-                  <TextInput
+                  <SearchInput
                     value={exerciseSearch}
                     onChangeText={setExerciseSearch}
                     placeholder="Search exercises, muscles, or equipment"
@@ -2540,6 +2565,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </TouchableOpacity>
                   ))}
                 </View>
+
+                {/* Coach check-in — lives under the topic grid so users have
+                    one clear entry point to rate how they're doing. Opens the
+                    CoachCheckinModal (doesn't start a chat thread). */}
+                <TouchableOpacity
+                  style={[styles.checkinCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border, marginHorizontal: 0, marginTop: 24 }]}
+                  onPress={() => setShowCheckin(true)}
+                  activeOpacity={0.8}>
+                  <View style={styles.checkinCardIconWrap}>
+                    <Text style={styles.checkinCardIcon}>🩺</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.checkinCardTitle, { color: themeColors.textPrimary }]}>Check in with coach</Text>
+                    <Text style={[styles.checkinCardSub, { color: themeColors.textSecondary }]}>15-second rate — no typing needed.</Text>
+                  </View>
+                  <Text style={[styles.checkinCardChevron, { color: themeColors.textMuted }]}>›</Text>
+                </TouchableOpacity>
               </View>
             ) : (
               /* ── Chat UI (topic selected) ──────────────────────── */
@@ -2984,8 +3026,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {/* AI search — text + photo */}
                 <View style={{ paddingHorizontal: 16, marginBottom: 6, gap: 6 }}>
                   <View style={{ flexDirection: 'row', gap: 8 }}>
-                    <TextInput
-                      style={[styles.libSearch, { flex: 1, marginHorizontal: 0, marginBottom: 0, backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                    <SearchInput
+                      containerStyle={{ flex: 1 }}
+                      style={[styles.libSearch, { marginHorizontal: 0, marginBottom: 0, backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
                       value={suppAiQuery}
                       onChangeText={(t) => { setSuppAiQuery(t); setSuppAiResult(null); setSuppAiNotFound(false); }}
                       placeholder="Search any supplement with AI…"
@@ -3452,6 +3495,30 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+
+  checkinCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  checkinCardIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.primary + '22',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  checkinCardIcon: { fontSize: 22 },
+  checkinCardTitle: { fontSize: 15, fontWeight: '700', marginBottom: 2 },
+  checkinCardSub: { fontSize: 12 },
+  checkinCardChevron: { fontSize: 22, marginLeft: 8, fontWeight: '300' },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 0, borderBottomWidth: 1 },
   headerLogoWrap: { width: 200, height: 60, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
