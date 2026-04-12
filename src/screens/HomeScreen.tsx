@@ -1476,28 +1476,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           summaryParts.push('Meal plan updated');
         }
-        // Detect goal changes from user question + AI answer
-        const goalKeywords: [RegExp, string, string][] = [
-          [/\bbuild\s*muscle/i, 'build_muscle', 'Build Muscle'],
-          [/\blose\s*(fat|weight)/i, 'lose_fat', 'Lose Fat'],
-          [/\bget\s*lean/i, 'get_lean', 'Get Lean'],
-          [/\blean\s*bulk/i, 'lean_bulk', 'Lean Bulk'],
-          [/\bgain\s*(weight|mass)/i, 'gain_weight', 'Gain Weight'],
-          [/\bmaintain\s*(weight|physique|current)/i, 'maintain', 'Maintain'],
-          [/\brecomp/i, 'body_recomp', 'Body Recomp'],
-          [/\bcutting\s*(phase|cycle)?|goal\s*.*\bcut\b/i, 'cut', 'Cut'],
-          [/\bstrength/i, 'increase_strength', 'Increase Strength'],
-          [/\bendurance/i, 'improve_endurance', 'Improve Endurance'],
-          [/\bgeneral\s*fitness/i, 'general_fitness', 'General Fitness'],
-        ];
-        const combinedText = `${q} ${resp.answer ?? ''}`;
-        // Always scan for goal keywords when plan was updated — the AI already made the change,
-        // we just need to detect what the new goal is
-        for (const [regex, goalId, goalLabel] of goalKeywords) {
-          if (regex.test(combinedText)) {
-            if (goalId !== userProfile?.goal) {
-              profileChanges.goal = goalId as any;
-              summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${goalLabel}`);
+        // Detect goal changes by matching against all known goals from goalConfig
+        const combinedText = `${q} ${resp.answer ?? ''}`.toLowerCase();
+        // Sort longer labels first so "body recomposition" matches before "body"
+        const sortedGoals = [...PRIMARY_GOALS].sort((a, b) => b.label.length - a.label.length);
+        for (const g of sortedGoals) {
+          // Match on label (e.g. "Build Muscle") or id with underscores→spaces (e.g. "build muscle")
+          const labelLower = g.label.toLowerCase();
+          const idAsWords = g.id.replace(/_/g, ' ');
+          if (combinedText.includes(labelLower) || combinedText.includes(idAsWords)) {
+            if (g.id !== userProfile?.goal) {
+              profileChanges.goal = g.id as any;
+              summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${g.label}`);
             }
             break;
           }

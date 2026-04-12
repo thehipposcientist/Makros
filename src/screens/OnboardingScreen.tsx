@@ -12,7 +12,6 @@ import {
   Image,
   ActivityIndicator,
   Modal,
-  Keyboard,
   findNodeHandle,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
@@ -217,7 +216,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       (node as any).measureLayout?.(
         scrollNode,
         (_x: number, y: number, _w: number, h: number) => {
-          scrollRef.current?.scrollTo({ y: Math.max(0, y - 120), animated: true });
+          scrollRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
         },
         () => {
           // measureLayout failed — fallback to scrollToEnd
@@ -1426,7 +1425,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         style={styles.container}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
-        onScrollBeginDrag={Keyboard.dismiss}
+        keyboardDismissMode="interactive"
       >
         <View style={styles.header}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
@@ -1479,7 +1478,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  content: { padding: 24, paddingBottom: 120 },
+  content: { padding: 24, paddingBottom: 200 },
   header: { marginTop: 20, marginBottom: 20 },
   logo: { width: 260, height: 88 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
