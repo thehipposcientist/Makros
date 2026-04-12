@@ -1,17 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard } from 'react-native';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
-  savePlanChange,
+  savePlanChange, loadMealRoutines, saveMealRoutines,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
@@ -41,6 +41,7 @@ interface HomeScreenProps {
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
+  onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
   onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
 }
 
@@ -58,6 +59,14 @@ interface MealDay {
 interface TrainerChatMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface PendingPlanUpdate {
+  resp: any;
+  question: string;
+  coachMode: 'trainer' | 'nutritionist';
+  profileChanges: Partial<UserProfile>;  // detected from plan diff
+  summary: string;                       // human-readable description
 }
 
 interface AvailabilityItem {
@@ -796,7 +805,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onWeeklyRefresh }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onProfileUpdate, onWeeklyRefresh }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -842,6 +851,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
   const [isChatPlanUpdating, setIsChatPlanUpdating] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<PendingPlanUpdate | null>(null);
+  const chatProgressAnim = useRef(new Animated.Value(0)).current;
   const [attachedImage, setAttachedImage] = useState<{ base64: string; uri: string } | null>(null);
   const [workoutChat, setWorkoutChat] = useState<TrainerChatMessage[]>([]);
   const [nutritionChat, setNutritionChat] = useState<TrainerChatMessage[]>([]);
@@ -877,6 +888,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }, 1000);
     return () => clearInterval(interval);
   }, [isWorkoutUpdating, isNutritionUpdating]);
+
+  // Chat loading progress animation
+  useEffect(() => {
+    if (trainerLoading) {
+      chatProgressAnim.setValue(0);
+      Animated.timing(chatProgressAnim, {
+        toValue: 0.85,
+        duration: 15000, // approaches 85% over 15s
+        useNativeDriver: false,
+      }).start();
+    } else {
+      // Snap to 100% briefly then reset
+      Animated.timing(chatProgressAnim, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: false,
+      }).start(() => {
+        chatProgressAnim.setValue(0);
+      });
+    }
+  }, [trainerLoading]);
 
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
@@ -1073,7 +1105,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         return [d.key, generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key)] as const;
       })
     );
-    setNutritionPlansByDate(Object.fromEntries(localEntries));
+    // Stamp isRoutine from MealRoutineEntry[] (single source of truth)
+    const routines = await loadMealRoutines();
+    const routineMealTypes = new Set(routines.map(r => r.mealType).filter(Boolean));
+    const stamped = localEntries.map(([key, plan]) => {
+      const p = { ...plan };
+      for (const k of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
+        const meal = p[k] as MealSuggestion | undefined;
+        if (meal) {
+          (p as any)[k] = { ...meal, isRoutine: routineMealTypes.has(k) };
+        }
+      }
+      return [key, p] as const;
+    });
+    setNutritionPlansByDate(Object.fromEntries(stamped));
 
   };
 
@@ -1401,97 +1446,69 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const canUpdateNutrition = coachMode === 'nutritionist';
       const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
       console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
-      if (resp.needs_plan_update && hasUpdate) {
-        // Apply plan update asynchronously — answer is already visible
-        setIsChatPlanUpdating(true);
-        console.log('[handleAskTrainer] applying plan update...');
-        try {
-          const prevWorkout = workoutPlan;
-          const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
-          let appliedNutrition: DailyNutritionPlan | null = null;
 
-          if (canUpdateWorkout && resp.updated_workout_plan) {
-            let updatedPlan = resp.updated_workout_plan as WorkoutPlan;
-            // Validate structure — AI sometimes returns {workoutDays:[...]} instead of {days:[...]}
-            if (!updatedPlan.days && (updatedPlan as any).workoutDays) {
-              updatedPlan = { ...updatedPlan, days: (updatedPlan as any).workoutDays };
-            }
-            // Validate the plan actually has days with exercises
-            const isValid = Array.isArray(updatedPlan.days) && updatedPlan.days.length > 0
-              && updatedPlan.days.some((d: any) => Array.isArray(d.exercises));
-            if (isValid) {
-              // Carry over any fields from previous plan that AI may have dropped
-              if (prevWorkout?.name && !updatedPlan.name) updatedPlan.name = prevWorkout.name;
-              if (prevWorkout?.totalDays && !updatedPlan.totalDays) updatedPlan.totalDays = updatedPlan.days.length;
-              const prevDay1 = prevWorkout?.days?.[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
-              const nextDay1 = updatedPlan.days[0]?.exercises?.map((e: any) => e.name).join(', ') ?? 'none';
-              console.log('[handleAskTrainer] setting workout plan, days:', updatedPlan.days.length, 'prev day1:', prevDay1, 'next day1:', nextDay1);
-              setWorkoutPlan(updatedPlan);
-              await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-              console.log('[handleAskTrainer] updated workout plan saved to AsyncStorage');
-            } else {
-              console.warn('[handleAskTrainer] AI returned invalid workout plan structure:', JSON.stringify(updatedPlan).slice(0, 300));
-              // Don't apply — tell user
-              setActiveChat(prev => [...prev, { role: 'assistant', content: 'I tried to update the plan but the changes didn\'t come through correctly. Try asking again — for example: "Change Day 2 to Upper Body with bench press, rows, and overhead press."' }]);
-            }
+      if (resp.needs_plan_update && hasUpdate) {
+        // Detect profile changes from the plan diff + user question
+        const profileChanges: Partial<UserProfile> = {};
+        const summaryParts: string[] = [];
+        if (canUpdateWorkout && resp.updated_workout_plan) {
+          const newPlan = resp.updated_workout_plan as WorkoutPlan;
+          const newDays = Array.isArray(newPlan.days) ? newPlan.days.length : (newPlan.totalDays ?? 0);
+          if (newDays > 0 && newDays !== (userProfile?.daysPerWeek ?? 0)) {
+            profileChanges.daysPerWeek = newDays;
+            summaryParts.push(`Training days: ${userProfile?.daysPerWeek ?? '?'} → ${newDays}`);
           }
-          if (canUpdateNutrition && resp.updated_nutrition_plan) {
-            const today = todayKey();
-            // Merge partial update into existing plan — AI may only return changed meals
-            const existingPlan = nutritionPlansByDate[today] ?? null;
-            const partial = resp.updated_nutrition_plan as Partial<DailyNutritionPlan>;
-            // Build merged plan — AI update takes precedence except for routine meals
-            const baseMerge: DailyNutritionPlan = existingPlan
-              ? { ...existingPlan, ...partial, targets: partial.targets ?? existingPlan.targets }
-              : resp.updated_nutrition_plan as DailyNutritionPlan;
-            // Re-stamp isRoutine from the existing plan so AI can't accidentally clear them
-            const mealKeys = ['breakfast', 'lunch', 'dinner', 'snack'] as const;
-            const mergedPlan: DailyNutritionPlan = { ...baseMerge };
-            if (existingPlan) {
-              for (const k of mealKeys) {
-                const existing = existingPlan[k] as any;
-                const updated  = baseMerge[k] as any;
-                if (existing?.isRoutine && updated) {
-                  (mergedPlan as any)[k] = { ...updated, isRoutine: true };
-                } else if (existing?.isRoutine && !updated) {
-                  // AI removed a routine meal — restore it
-                  (mergedPlan as any)[k] = existing;
-                }
-              }
-            }
-            appliedNutrition = mergedPlan;
-            setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
-            await saveNutritionPlan(today, mergedPlan);
-            await persistDayState(today, { nutrition_plan: mergedPlan });
-            // Auto-reveal the updated plan
-            setActiveTab('meals');
-            setExpandedMealDays(prev => { const next = new Set(prev); next.add(today); return next; });
-            console.log('[handleAskTrainer] updated nutrition plan saved to AsyncStorage (merged)');
-          }
-          if (resp.updated_workout_plan && !resp.updated_nutrition_plan) {
-            setActiveTab('workout');
-          }
-          const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
-          setUpdateSummary(changeSummary);
-          const planLabel = coachMode === 'trainer' ? 'workout' : 'meal';
-          setActiveChat(prev => [...prev, { role: 'assistant', content: `✅ Done! Your ${planLabel} plan has been updated. Close this chat to see the changes on your home screen.` }]);
-          // Save to plan change history so user can review it in Progress
-          await savePlanChange({
-            id: Date.now().toString(),
-            changedAt: new Date().toISOString(),
-            changedBy: coachMode === 'trainer' ? 'trainer' : 'nutritionist',
-            summary: changeSummary,
-            question: q,
-          });
-        } catch (planErr: any) {
-          console.error('[handleAskTrainer] plan application error:', planErr);
-          setActiveChat(prev => [...prev, { role: 'assistant', content: 'I understood your request, but had trouble applying the plan changes. You can try asking again or edit your plan from the menu.' }]);
-        } finally {
-          setIsChatPlanUpdating(false);
+          // Detect exercise changes
+          const prevExCount = (workoutPlan?.days ?? []).reduce((s, d) => s + (d.exercises?.length ?? 0), 0);
+          const nextExCount = (newPlan.days ?? []).reduce((s: number, d: any) => s + (d.exercises?.length ?? 0), 0);
+          if (prevExCount !== nextExCount) summaryParts.push(`Exercises: ${prevExCount} → ${nextExCount}`);
+          // Detect focus changes
+          const prevFocuses = (workoutPlan?.days ?? []).map(d => d.focus).join(', ');
+          const nextFocuses = (newPlan.days ?? []).map((d: any) => d.focus).join(', ');
+          if (prevFocuses !== nextFocuses) summaryParts.push('Day focuses changed');
         }
+        if (canUpdateNutrition && resp.updated_nutrition_plan) {
+          const np = resp.updated_nutrition_plan as any;
+          const todayPlanLocal = nutritionPlansByDate[todayKey()];
+          if (np.targets && todayPlanLocal?.targets) {
+            if (np.targets.calories !== todayPlanLocal.targets.calories) summaryParts.push(`Calories: ${todayPlanLocal.targets.calories} → ${np.targets.calories}`);
+            if (np.targets.protein !== todayPlanLocal.targets.protein) summaryParts.push(`Protein: ${todayPlanLocal.targets.protein}g → ${np.targets.protein}g`);
+          }
+          summaryParts.push('Meal plan updated');
+        }
+        // Detect goal changes from user question + AI answer
+        const goalKeywords: [RegExp, string, string][] = [
+          [/\bbuild\s*muscle/i, 'build_muscle', 'Build Muscle'],
+          [/\blose\s*(fat|weight)/i, 'lose_fat', 'Lose Fat'],
+          [/\bget\s*lean/i, 'get_lean', 'Get Lean'],
+          [/\blean\s*bulk/i, 'lean_bulk', 'Lean Bulk'],
+          [/\bgain\s*(weight|mass)/i, 'gain_weight', 'Gain Weight'],
+          [/\bmaintain\s*(weight|physique|current)/i, 'maintain', 'Maintain'],
+          [/\brecomp/i, 'body_recomp', 'Body Recomp'],
+          [/\bcutting\s*(phase|cycle)?|goal\s*.*\bcut\b/i, 'cut', 'Cut'],
+          [/\bstrength/i, 'increase_strength', 'Increase Strength'],
+          [/\bendurance/i, 'improve_endurance', 'Improve Endurance'],
+          [/\bgeneral\s*fitness/i, 'general_fitness', 'General Fitness'],
+        ];
+        const combinedText = `${q} ${resp.answer ?? ''}`;
+        // Always scan for goal keywords when plan was updated — the AI already made the change,
+        // we just need to detect what the new goal is
+        for (const [regex, goalId, goalLabel] of goalKeywords) {
+          if (regex.test(combinedText)) {
+            if (goalId !== userProfile?.goal) {
+              profileChanges.goal = goalId as any;
+              summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${goalLabel}`);
+            }
+            break;
+          }
+        }
+        const summary = summaryParts.length > 0 ? summaryParts.join(' · ') : (coachMode === 'trainer' ? 'Workout plan updated' : 'Meal plan updated');
+        // Store as pending — wait for user approval
+        setPendingUpdate({ resp, question: q, coachMode, profileChanges, summary });
+        console.log('[handleAskTrainer] pending update stored for approval:', summary);
       }
 
-      // Handle injury updates (trainer mode only)
+      // Handle injury updates immediately (no approval needed)
       if (coachMode === 'trainer' && resp.updated_injuries && Array.isArray(resp.updated_injuries) && resp.updated_injuries.length > 0) {
         try {
           const profileRaw = await AsyncStorage.getItem('userProfile');
@@ -1506,7 +1523,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               status: inj.status ?? 'active',
               notes: inj.notes,
             }));
-            // Merge: replace entry if same id exists, otherwise append
             const merged = [...existingEntries];
             for (const entry of incoming) {
               const idx = merged.findIndex(e => e.id === entry.id);
@@ -1522,7 +1538,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }
       }
 
-      // Handle workout logging (trainer mode only)
+      // Handle workout logging immediately (no approval needed)
       if (coachMode === 'trainer' && resp.logged_workouts && Array.isArray(resp.logged_workouts) && resp.logged_workouts.length > 0) {
         try {
           const today = todayKey();
@@ -1546,11 +1562,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               completed: true,
             };
             await saveWorkoutSession(session);
-            // Sync to backend so getWorkoutStatus() sees it
             if (authToken) {
               logWorkoutDone(authToken, w.date, session.focus, session.durationSeconds).catch(() => null);
             }
-            // If the logged workout is today, mark today as done
             if (w.date === today) {
               setTodayDone(true);
             }
@@ -1575,6 +1589,98 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setTrainerLoading(false);
     }
   }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, chatTopic, persistDayState]);
+
+  // ── Approval flow for plan changes ───────────────────────────────────────
+  const applyPendingUpdate = useCallback(async () => {
+    if (!pendingUpdate) return;
+    const { resp, question: q, coachMode: mode, profileChanges } = pendingUpdate;
+    const setActiveChat = mode === 'trainer' ? setWorkoutChat : setNutritionChat;
+    setIsChatPlanUpdating(true);
+    setPendingUpdate(null);
+    try {
+      const canUpdateWorkout   = mode === 'trainer';
+      const canUpdateNutrition = mode === 'nutritionist';
+      const prevWorkout = workoutPlan;
+      const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
+      let appliedNutrition: DailyNutritionPlan | null = null;
+
+      if (canUpdateWorkout && resp.updated_workout_plan) {
+        let updatedPlan = resp.updated_workout_plan as WorkoutPlan;
+        if (!updatedPlan.days && (updatedPlan as any).workoutDays) {
+          updatedPlan = { ...updatedPlan, days: (updatedPlan as any).workoutDays };
+        }
+        const isValid = Array.isArray(updatedPlan.days) && updatedPlan.days.length > 0
+          && updatedPlan.days.some((d: any) => Array.isArray(d.exercises));
+        if (isValid) {
+          if (prevWorkout?.name && !updatedPlan.name) updatedPlan.name = prevWorkout.name;
+          if (!updatedPlan.totalDays) updatedPlan.totalDays = updatedPlan.days.length;
+          setWorkoutPlan(updatedPlan);
+          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+        } else {
+          setActiveChat(prev => [...prev, { role: 'assistant', content: 'The plan changes didn\'t come through correctly. Try asking again.' }]);
+          return;
+        }
+      }
+      if (canUpdateNutrition && resp.updated_nutrition_plan) {
+        const today = todayKey();
+        const existingPlan = nutritionPlansByDate[today] ?? null;
+        const partial = resp.updated_nutrition_plan as Partial<DailyNutritionPlan>;
+        const baseMerge: DailyNutritionPlan = existingPlan
+          ? { ...existingPlan, ...partial, targets: partial.targets ?? existingPlan.targets }
+          : resp.updated_nutrition_plan as DailyNutritionPlan;
+        const mealKeys = ['breakfast', 'lunch', 'dinner', 'snack'] as const;
+        const mergedPlan: DailyNutritionPlan = { ...baseMerge };
+        const currentRoutines = await loadMealRoutines();
+        const routineMealTypes = new Set(currentRoutines.map(r => r.mealType).filter(Boolean));
+        for (const k of mealKeys) {
+          const meal = baseMerge[k] as any;
+          if (meal) {
+            (mergedPlan as any)[k] = { ...meal, isRoutine: routineMealTypes.has(k) };
+          } else if (routineMealTypes.has(k) && existingPlan?.[k]) {
+            (mergedPlan as any)[k] = existingPlan[k];
+          }
+        }
+        appliedNutrition = mergedPlan;
+        setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
+        await saveNutritionPlan(today, mergedPlan);
+        await persistDayState(today, { nutrition_plan: mergedPlan });
+        setActiveTab('meals');
+        setExpandedMealDays(prev => { const next = new Set(prev); next.add(today); return next; });
+      }
+      if (resp.updated_workout_plan && !resp.updated_nutrition_plan) {
+        setActiveTab('workout');
+      }
+
+      // Apply detected profile changes (e.g., daysPerWeek changed)
+      if (Object.keys(profileChanges).length > 0 && onProfileUpdate) {
+        onProfileUpdate(profileChanges, true); // skipRegen — plan already applied
+      }
+
+      const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+      const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
+      const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
+      setUpdateSummary(changeSummary);
+      setActiveChat(prev => [...prev, { role: 'assistant', content: `✅ Changes applied! Close this chat to see them on your home screen.` }]);
+      await savePlanChange({
+        id: Date.now().toString(),
+        changedAt: new Date().toISOString(),
+        changedBy: mode === 'trainer' ? 'trainer' : 'nutritionist',
+        summary: changeSummary,
+        question: q,
+      });
+    } catch (err: any) {
+      console.error('[applyPendingUpdate] error:', err);
+      setActiveChat(prev => [...prev, { role: 'assistant', content: 'Had trouble applying the changes. Try asking again.' }]);
+    } finally {
+      setIsChatPlanUpdating(false);
+    }
+  }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, summarizeTrainerUpdate]);
+
+  const dismissPendingUpdate = useCallback(() => {
+    const setActiveChat = pendingUpdate?.coachMode === 'trainer' ? setWorkoutChat : setNutritionChat;
+    setPendingUpdate(null);
+    setActiveChat(prev => [...prev, { role: 'assistant', content: 'Changes dismissed. Let me know if you\'d like something different.' }]);
+  }, [pendingUpdate]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     const current = checkedMealsByDate[date] ?? {};
@@ -1645,17 +1751,73 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
 
   const handleToggleRoutine = useCallback(async (date: string, mealType: string) => {
-    let nextPlan: DailyNutritionPlan | null = null;
+    const changedPlans: Record<string, DailyNutritionPlan> = {};
+    let toggledMeal: MealSuggestion | undefined;
+    let turningOn = false;
+
     setNutritionPlansByDate(prev => {
       const current = prev[date];
       if (!current) return prev;
       const meal = (current as any)[mealType] as MealSuggestion | undefined;
       if (!meal) return prev;
-      nextPlan = { ...current, [mealType]: { ...meal, isRoutine: !meal.isRoutine } } as DailyNutritionPlan;
-      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+      const newRoutineValue = !meal.isRoutine;
+      turningOn = newRoutineValue;
+      toggledMeal = meal;
+      const next = { ...prev };
+
+      if (!newRoutineValue) {
+        // Turning OFF routine — remove isRoutine from this mealType across ALL days
+        for (const [d, plan] of Object.entries(next)) {
+          const m = (plan as any)[mealType] as MealSuggestion | undefined;
+          if (m?.isRoutine) {
+            const updated = { ...plan, [mealType]: { ...m, isRoutine: false } } as DailyNutritionPlan;
+            next[d] = updated;
+            changedPlans[d] = updated;
+          }
+        }
+      } else {
+        // Turning ON — only set on this day (user can pin from any day)
+        const updated = { ...current, [mealType]: { ...meal, isRoutine: true } } as DailyNutritionPlan;
+        next[date] = updated;
+        changedPlans[date] = updated;
+      }
+
+      return next;
     });
-    if (nextPlan) await saveNutritionPlan(date, nextPlan);
-    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+
+    // Persist all changed plans
+    for (const [d, plan] of Object.entries(changedPlans)) {
+      await saveNutritionPlan(d, plan);
+      await persistDayState(d, { nutrition_plan: plan });
+    }
+
+    // Sync with MealRoutineEntry[] (single source of truth for routines)
+    const routines = await loadMealRoutines();
+    if (turningOn && toggledMeal) {
+      // Create a MealRoutineEntry from this meal
+      const foods: MealRoutineFood[] = (toggledMeal.foods ?? []).map((f, i) => ({
+        id: `${Date.now()}_${i}`,
+        name: f,
+        quantity: toggledMeal!.amounts?.[i],
+      }));
+      const entry: MealRoutineEntry = {
+        id: `routine_${mealType}_${Date.now()}`,
+        name: toggledMeal.meal,
+        mealType,
+        foods,
+        createdAt: new Date().toISOString(),
+      };
+      // Remove any existing routine for the same mealType, then add
+      const updated = routines.filter(r => r.mealType !== mealType);
+      updated.push(entry);
+      await saveMealRoutines(updated);
+    } else {
+      // Remove routine entries that match this mealType
+      const updated = routines.filter(r => r.mealType !== mealType);
+      if (updated.length !== routines.length) {
+        await saveMealRoutines(updated);
+      }
+    }
   }, [persistDayState]);
 
   const handleSkipToday = useCallback((focus: string) => {
@@ -1959,6 +2121,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           authToken={authToken}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
+          onToggleRoutine={() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type)}
           onAddCustomFood={async (item) => {
             // Persist AI-found food to user profile's custom foods
             try {
@@ -2422,17 +2585,59 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 ))
               )}
               {trainerLoading && (
-                <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%' }]}>
-                  <ActivityIndicator size="small" color={themeColors.primary} />
-                  <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted, marginTop: 4 }]}>Thinking…</Text>
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%', paddingVertical: 14, paddingHorizontal: 16 }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <ActivityIndicator size="small" color={themeColors.primary} />
+                    <Text style={[styles.trainerBubbleText, { color: themeColors.textMuted }]}>
+                      {coachMode === 'nutritionist' ? 'Nutritionist is thinking…' : 'Trainer is thinking…'}
+                    </Text>
+                  </View>
+                  <View style={{ height: 4, borderRadius: 2, backgroundColor: themeColors.border, overflow: 'hidden' }}>
+                    <Animated.View style={{
+                      height: '100%',
+                      borderRadius: 2,
+                      backgroundColor: themeColors.primary,
+                      width: chatProgressAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ['0%', '100%'],
+                      }),
+                    }} />
+                  </View>
+                </View>
+              )}
+              {pendingUpdate && (
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.primary + '15', borderColor: themeColors.primary + '44', alignSelf: 'flex-start', maxWidth: '95%', padding: 14 }]}>
+                  <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 6 }}>Proposed Changes</Text>
+                  <Text style={{ fontSize: 12, color: themeColors.textSecondary, lineHeight: 18, marginBottom: 4 }}>{pendingUpdate.summary}</Text>
+                  {Object.keys(pendingUpdate.profileChanges).length > 0 && (
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 8 }}>
+                      Settings update: {Object.entries(pendingUpdate.profileChanges).map(([k, v]) => `${k}: ${v}`).join(', ')}
+                    </Text>
+                  )}
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                    <TouchableOpacity
+                      onPress={applyPendingUpdate}
+                      style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center' }}
+                      activeOpacity={0.8}>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#FFFFFF' }}>Apply</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={dismissPendingUpdate}
+                      style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center', borderWidth: 1, borderColor: themeColors.border }}
+                      activeOpacity={0.8}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textSecondary }}>Dismiss</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               )}
               {isChatPlanUpdating && (
-                <View style={[styles.trainerBubble, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55', alignSelf: 'flex-start', maxWidth: '95%', flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
-                  <ActivityIndicator size="small" color={themeColors.primary} />
-                  <Text style={[styles.trainerBubbleText, { color: themeColors.primary }]}>
-                    Updating your {coachMode === 'trainer' ? 'workout' : 'meal'} plan…
-                  </Text>
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55', alignSelf: 'flex-start', maxWidth: '95%', paddingVertical: 12, paddingHorizontal: 16 }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <ActivityIndicator size="small" color={themeColors.primary} />
+                    <Text style={[styles.trainerBubbleText, { color: themeColors.primary }]}>
+                      Applying changes…
+                    </Text>
+                  </View>
                 </View>
               )}
             </ScrollView>

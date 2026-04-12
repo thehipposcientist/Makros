@@ -70,7 +70,22 @@
       "Bash(npm view:*)",
       "Bash(ls:*)",
       "Bash(mv ai.py ai.py.bak)",
-      "Bash(mv ai_pkg ai)"
+      "Bash(mv ai_pkg ai)",
+      "Bash(npx ngrok:*)",
+      "Bash(findstr \":8081 \")",
+      "Bash(findstr \"LISTENING\")",
+      "Bash(findstr \":8000 \")",
+      "Bash(taskkill:*)",
+      "Bash(TASKKILL:*)",
+      "Bash(docker:*)",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(findstr \":5432 \")",
+      "Bash(TASKLIST //FI \"PID eq 6208\" //FO TABLE)",
+      "Bash(TASKLIST //FI \"PID eq 14440\" //FO TABLE)",
+      "Bash(venv/Scripts/activate)",
+      "Bash(uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(E:/WorkoutPal/backend/venv/Scripts/python:*)"
     ]
   }
 }

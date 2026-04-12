@@ -89,14 +89,15 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         {/* Logo */}
         <View style={styles.logoContainer}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.tagline}>AI-powered fitness, built around you.</Text>
+          <Text style={styles.tagline}>Your AI personal trainer and nutritionist.</Text>
           <View style={styles.featureRow}>
-            {(['Smart workout plans', 'Nutrition tracking', 'Real-time AI coaching'] as const).map(f => (
+            {(['Custom workout plans', 'Personalised nutrition', 'AI coaching that adapts'] as const).map(f => (
               <View key={f} style={styles.featureChip}>
                 <Text style={styles.featureChipText}>{f}</Text>
               </View>
             ))}
           </View>
+          <Text style={styles.subtag}>Set up in under 3 minutes</Text>
         </View>
 
         <View style={styles.divider} />
@@ -197,7 +198,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             {loading
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
-                  {mode === 'login' ? 'Log In' : 'Create Account'}
+                  {mode === 'login' ? 'Log In' : 'Get Started'}
                 </Text>
             }
           </TouchableOpacity>
@@ -220,6 +221,7 @@ const styles = StyleSheet.create({
   featureRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14, justifyContent: 'center' },
   featureChip:   { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.border },
   featureChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  subtag: { fontSize: 13, color: colors.textMuted, marginTop: 12, fontWeight: '500' },
 
   divider: { height: 1, backgroundColor: colors.border, marginBottom: 24 },
 

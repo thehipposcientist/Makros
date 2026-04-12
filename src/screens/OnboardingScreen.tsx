@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   Modal,
   Keyboard,
+  findNodeHandle,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
@@ -81,6 +82,42 @@ const SUPPLEMENT_CATEGORIES = [
     icon: '😴',
     label: 'Sleep & Stress',
     items: ['Melatonin', 'Ashwagandha', 'ZMA', 'Magnesium Glycinate', 'L-Theanine'],
+  },
+];
+
+// ─── Food presets ────────────────────────────────────────────────────────────
+
+interface FoodPreset {
+  id: string;
+  label: string;
+  description: string;
+  items: string[];
+}
+
+const FOOD_PRESETS: FoodPreset[] = [
+  {
+    id: 'high_protein',
+    label: 'High Protein',
+    description: 'Lean meats & eggs',
+    items: ['Chicken Breast', 'Ground Turkey', 'Eggs', 'Greek Yogurt', 'Salmon', 'Tuna', 'Cottage Cheese', 'Whey Protein'],
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced Diet',
+    description: 'Variety of everything',
+    items: ['Chicken Breast', 'Salmon', 'Eggs', 'Brown Rice', 'Sweet Potato', 'Broccoli', 'Banana', 'Oats', 'Olive Oil', 'Greek Yogurt', 'Avocado'],
+  },
+  {
+    id: 'plant_based',
+    label: 'Plant-Based',
+    description: 'Vegan / vegetarian',
+    items: ['Tofu', 'Tempeh', 'Lentils', 'Black Beans', 'Chickpeas', 'Quinoa', 'Brown Rice', 'Oats', 'Peanut Butter', 'Avocado', 'Broccoli', 'Spinach', 'Banana'],
+  },
+  {
+    id: 'keto',
+    label: 'Low Carb / Keto',
+    description: 'High fat, low carb',
+    items: ['Chicken Breast', 'Salmon', 'Eggs', 'Ground Beef', 'Avocado', 'Olive Oil', 'Butter', 'Cheddar Cheese', 'Bacon', 'Spinach', 'Broccoli'],
   },
 ];
 
@@ -168,6 +205,27 @@ interface OnboardingScreenProps {
 
 export default function OnboardingScreen({ authToken, onComplete }: OnboardingScreenProps) {
   const meta = useMetaData();
+  const scrollRef = useRef<ScrollView>(null);
+
+  /** Scroll so the focused input is visible above the keyboard */
+  const scrollToInput = useCallback((event: any) => {
+    const node = event?.target;
+    if (!node || !scrollRef.current) return;
+    setTimeout(() => {
+      const scrollNode = findNodeHandle(scrollRef.current);
+      if (!scrollNode) return;
+      (node as any).measureLayout?.(
+        scrollNode,
+        (_x: number, y: number, _w: number, h: number) => {
+          scrollRef.current?.scrollTo({ y: Math.max(0, y - 120), animated: true });
+        },
+        () => {
+          // measureLayout failed — fallback to scrollToEnd
+          scrollRef.current?.scrollToEnd({ animated: true });
+        },
+      );
+    }, 350);
+  }, []);
 
   // meta.goalConfig still available for legacy pace lookups
 
@@ -202,6 +260,12 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [equipScanLoading, setEquipScanLoading] = useState(false);
   const [scannedEquipment, setScannedEquipment] = useState<string[]>([]);
   const [showEquipScanModal, setShowEquipScanModal] = useState(false);
+
+  // Search filters & template selection
+  const [equipmentSearch, setEquipmentSearch] = useState('');
+  const [foodSearch, setFoodSearch] = useState('');
+  const [selectedEquipTemplate, setSelectedEquipTemplate] = useState<string | null>(null);
+  const [selectedFoodPreset, setSelectedFoodPreset] = useState<string | null>(null);
 
   // Step 6 — Foods
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
@@ -252,6 +316,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const applyTemplate = (template: EquipmentTemplate) => {
     setSelectedEquipment(template.items);
+    setSelectedEquipTemplate(template.id);
   };
 
   const validate = (): string | null => {
@@ -271,7 +336,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         if (isNaN(hf) || hf < 3 || hf > 8) return 'Enter a valid height';
         if (isNaN(hi) || hi < 0 || hi > 11) return 'Inches must be between 0–11';
         if (isNaN(a) || a < 13 || a > 100) return 'Enter a valid age (13–100)';
-        if (!gender) return 'Please select a gender option';
+        if (!gender) return 'Please select a biological sex option';
         return null;
       }
       case 'trainingDays': {
@@ -289,7 +354,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const handleNext = () => {
     const error = validate();
-    if (error) { Alert.alert('Hold on', error); return; }
+    if (error) { Alert.alert('One more thing', error); return; }
 
     if (currentStep < totalSteps - 1) {
       setCurrentStep(s => s + 1);
@@ -460,9 +525,10 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     return (
       <View style={styles.stepContainer}>
         <Text style={styles.stepTitle}>What's Your Goal?</Text>
-        <Text style={styles.stepDescription}>Pick one primary goal for your plan.</Text>
+        <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style.</Text>
 
         {/* Launch goals — the 8 most common */}
+        <Text style={styles.sectionHeading}>Most popular</Text>
         <View style={styles.goalGrid}>
           {LAUNCH_GOALS.map(g => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
@@ -476,7 +542,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
               >
                 <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
                 <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
-                <Text style={[styles.goalDesc, active && styles.goalDescActive]}>{g.description}</Text>
               </TouchableOpacity>
             );
           })}
@@ -574,8 +639,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       <View style={styles.stepContainer}>
         <Text style={styles.stepTitle}>Refine Your Plan</Text>
         <Text style={styles.stepDescription}>
-          Customise how you approach {goalLabel.toLowerCase()}.
+          Fine-tune how the AI builds your {goalLabel.toLowerCase()} programme.
         </Text>
+        <Text style={styles.optionalBanner}>Everything on this page is optional — tap Next to skip.</Text>
 
         {/* Modifiers — up to 2 */}
         {availableModifiers.length > 0 && (
@@ -705,7 +771,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderPhysicalStatsStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>About You</Text>
-      <Text style={styles.stepDescription}>Used to calculate your personalised calorie and macro targets</Text>
+      <Text style={styles.stepDescription}>We use this to calculate your daily calorie and macro targets — nothing is shared.</Text>
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>Current weight</Text>
@@ -769,8 +835,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       </View>
 
       <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Gender</Text>
-        <View style={styles.genderRow}>
+        <Text style={styles.fieldLabel}>Biological sex</Text>
+        <Text style={styles.hint}>Used only to calculate your calorie and macro targets — hormones affect metabolism.</Text>
+        <View style={[styles.genderRow, { marginTop: 10 }]}>
           {([
             { value: 'male',              label: 'Male' },
             { value: 'female',            label: 'Female' },
@@ -803,7 +870,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderTrainingDaysStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Training Schedule</Text>
-      <Text style={styles.stepDescription}>How many days per week can you commit?</Text>
+      <Text style={styles.stepDescription}>How many days per week can you realistically train?</Text>
       <View style={styles.inlineInput}>
         <TextInput
           style={[styles.input, { flex: 1 }]}
@@ -816,7 +883,15 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         />
         <Text style={styles.unit}>days/week</Text>
       </View>
-      <Text style={styles.hint}>Recommended: 3–4 days for optimal recovery</Text>
+      {parseInt(daysPerWeek) >= 5 ? (
+        <Text style={[styles.hint, { color: colors.warning }]}>
+          {parseInt(daysPerWeek) >= 6
+            ? 'That\'s a serious commitment — make sure you\'re getting enough sleep and recovery.'
+            : '5 days works great if you manage recovery well. The AI will schedule rest days strategically.'}
+        </Text>
+      ) : (
+        <Text style={styles.hint}>3–4 days is ideal for most people — quality over quantity.</Text>
+      )}
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>How long per session?</Text>
@@ -837,25 +912,28 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const renderEquipmentStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Available Equipment</Text>
+      <Text style={styles.stepTitle}>Your Equipment</Text>
       <Text style={styles.stepDescription}>
-        Select everything you have access to
+        The AI only programmes exercises you can actually do.
         {selectedEquipment.length > 0 ? `  ·  ${selectedEquipment.length} selected` : ''}
       </Text>
 
       {/* Quick-start templates */}
       <Text style={styles.sectionHeading}>Quick select by gym type</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
-        {EQUIPMENT_TEMPLATES.map(t => (
-          <TouchableOpacity
-            key={t.id}
-            style={styles.templateChip}
-            onPress={() => applyTemplate(t)}
-            activeOpacity={0.75}>
-            <Text style={styles.templateChipLabel}>{t.label}</Text>
-            <Text style={styles.templateChipDesc}>{t.description}</Text>
-          </TouchableOpacity>
-        ))}
+        {EQUIPMENT_TEMPLATES.map(t => {
+          const active = selectedEquipTemplate === t.id;
+          return (
+            <TouchableOpacity
+              key={t.id}
+              style={[styles.templateChip, active && styles.templateChipActive]}
+              onPress={() => applyTemplate(t)}
+              activeOpacity={0.75}>
+              <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{t.label}</Text>
+              <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{t.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
       </ScrollView>
 
       {/* Photo scan */}
@@ -882,29 +960,51 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
       {/* Manual selection */}
       <Text style={styles.sectionHeading}>Or pick manually</Text>
+      <View style={styles.searchRow}>
+        <TextInput
+          style={[styles.input, styles.searchInput, { flex: 1 }]}
+          placeholder="Search equipment..."
+          placeholderTextColor={colors.textMuted}
+          value={equipmentSearch}
+          onChangeText={setEquipmentSearch}
+          autoCapitalize="none"
+          returnKeyType="done"
+        />
+        {equipmentSearch.length > 0 && (
+          <TouchableOpacity style={styles.clearBtn} onPress={() => setEquipmentSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={styles.clearBtnText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
       {meta.loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
       ) : (
-        meta.equipmentCategories.map(category => (
-          <View key={category.label} style={styles.foodCategory}>
-            <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
-            <View style={styles.foodChips}>
-              {category.items.map(item => {
-                const selected = selectedEquipment.includes(item.name);
-                return (
-                  <TouchableOpacity
-                    key={item.name}
-                    style={[styles.foodChip, selected && styles.foodChipActive]}
-                    onPress={() => toggleEquipment(item.name)}>
-                    <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
-                      {item.name}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+        meta.equipmentCategories.map(category => {
+          const filteredItems = equipmentSearch.trim()
+            ? category.items.filter(item => item.name.toLowerCase().includes(equipmentSearch.toLowerCase()))
+            : category.items;
+          if (filteredItems.length === 0) return null;
+          return (
+            <View key={category.label} style={styles.foodCategory}>
+              <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+              <View style={styles.foodChips}>
+                {filteredItems.map(item => {
+                  const selected = selectedEquipment.includes(item.name);
+                  return (
+                    <TouchableOpacity
+                      key={item.name}
+                      style={[styles.foodChip, selected && styles.foodChipActive]}
+                      onPress={() => toggleEquipment(item.name)}>
+                      <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                        {item.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             </View>
-          </View>
-        ))
+          );
+        })
       )}
 
       {/* Equipment scan confirm modal */}
@@ -948,9 +1048,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const renderFoodsStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>What's in your kitchen?</Text>
+      <Text style={styles.stepTitle}>Your Kitchen</Text>
       <Text style={styles.stepDescription}>
-        Select foods you have available — your meal plan will be built around these
+        Your meal plan is built from foods you actually eat — no mystery ingredients.
         {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
       </Text>
 
@@ -976,31 +1076,78 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         </View>
       </View>
 
+      {/* Quick diet presets */}
+      <Text style={styles.sectionHeading}>Quick start by diet type</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+        {FOOD_PRESETS.map(p => {
+          const active = selectedFoodPreset === p.id;
+          return (
+            <TouchableOpacity
+              key={p.id}
+              style={[styles.templateChip, active && styles.templateChipActive]}
+              onPress={() => {
+                setSelectedFoodPreset(p.id);
+                setFoodsAvailable(prev => {
+                  const next = [...prev];
+                  for (const name of p.items) { if (!next.includes(name)) next.push(name); }
+                  return next;
+                });
+              }}
+              activeOpacity={0.75}>
+              <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{p.label}</Text>
+              <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{p.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
       {/* Manual selection */}
       <Text style={styles.sectionHeading}>Or pick manually</Text>
+      <View style={styles.searchRow}>
+        <TextInput
+          style={[styles.input, styles.searchInput, { flex: 1 }]}
+          placeholder="Search foods..."
+          placeholderTextColor={colors.textMuted}
+          value={foodSearch}
+          onChangeText={setFoodSearch}
+          autoCapitalize="none"
+          returnKeyType="done"
+        />
+        {foodSearch.length > 0 && (
+          <TouchableOpacity style={styles.clearBtn} onPress={() => setFoodSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={styles.clearBtnText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
       {meta.loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
       ) : (
-        meta.foodCategories.map(category => (
-          <View key={category.key} style={styles.foodCategory}>
-            <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
-            <View style={styles.foodChips}>
-              {category.foods.map(food => {
-                const selected = foodsAvailable.includes(food.name);
-                return (
-                  <TouchableOpacity
-                    key={food.name}
-                    style={[styles.foodChip, selected && styles.foodChipActive]}
-                    onPress={() => toggleFood(food.name)}>
-                    <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
-                      {food.name}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+        meta.foodCategories.map(category => {
+          const filteredFoods = foodSearch.trim()
+            ? category.foods.filter(food => food.name.toLowerCase().includes(foodSearch.toLowerCase()))
+            : category.foods;
+          if (filteredFoods.length === 0) return null;
+          return (
+            <View key={category.key} style={styles.foodCategory}>
+              <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+              <View style={styles.foodChips}>
+                {filteredFoods.map(food => {
+                  const selected = foodsAvailable.includes(food.name);
+                  return (
+                    <TouchableOpacity
+                      key={food.name}
+                      style={[styles.foodChip, selected && styles.foodChipActive]}
+                      onPress={() => toggleFood(food.name)}>
+                      <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                        {food.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             </View>
-          </View>
-        ))
+          );
+        })
       )}
 
       {/* Custom food input */}
@@ -1012,6 +1159,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           placeholderTextColor={colors.textMuted}
           value={customFoodInput}
           onChangeText={setCustomFoodInput}
+          onFocus={scrollToInput}
           onSubmitEditing={() => {
             const name = customFoodInput.trim();
             if (name && !foodsAvailable.includes(name)) {
@@ -1095,11 +1243,12 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const renderSupplementsStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>What supplements do you take?</Text>
+      <Text style={styles.stepTitle}>Supplements</Text>
       <Text style={styles.stepDescription}>
-        Select what you already have or use — your AI trainer will factor these into your supplement recommendations
+        Already taking supplements? Select them so the AI doesn't recommend duplicates.
         {supplementsAvailable.length > 0 ? `  ·  ${supplementsAvailable.length} selected` : ''}
       </Text>
+      <Text style={styles.optionalBanner}>Completely optional — most people skip this step.</Text>
 
       {SUPPLEMENT_CATEGORIES.map(category => (
         <View key={category.key} style={styles.foodCategory}>
@@ -1122,15 +1271,15 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         </View>
       ))}
 
-      <Text style={styles.hint}>Skip if you don't take any — the AI will recommend what's best for your goal</Text>
+      <Text style={styles.hint}>Don't take any? Just tap Next — the AI will suggest what could help your goal later.</Text>
     </View>
   );
 
   const renderMealRoutineStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Your Meal Routine</Text>
+      <Text style={styles.stepTitle}>Meal Routine</Text>
       <Text style={styles.stepDescription}>
-        Do you already follow a regular meal routine? Describe it so your AI nutritionist can plan around it.
+        Have a go-to eating pattern? The AI nutritionist will build around it instead of replacing it.
       </Text>
       <TextInput
         style={[styles.input, { height: 120, textAlignVertical: 'top', paddingTop: 12 }]}
@@ -1140,11 +1289,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         onChangeText={setMealRoutine}
         multiline
         numberOfLines={5}
+        onFocus={scrollToInput}
       />
-      <Text style={styles.hint}>
-        You can also update this anytime by chatting with your AI Nutritionist in the app.
-      </Text>
-      <Text style={styles.hint}>Leave blank if you have no fixed routine — the AI will plan everything for you.</Text>
+      <Text style={styles.hint}>Leave blank and the AI will plan everything from scratch. You can always change this later.</Text>
     </View>
   );
 
@@ -1156,9 +1303,9 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const renderContextStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>A Little More About You</Text>
+      <Text style={styles.stepTitle}>Almost Done</Text>
       <Text style={styles.stepDescription}>
-        This helps your AI trainer personalise your first workout and avoid anything that could hurt you.
+        Help your AI trainer nail the first workout — safe weights, smart exercise selection, no guesswork.
       </Text>
 
       <View style={styles.fieldGroup}>
@@ -1187,6 +1334,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           value={injuries}
           onChangeText={setInjuries}
           multiline
+          onFocus={scrollToInput}
         />
         <Text style={styles.hint}>Your AI trainer will avoid exercises that could aggravate these.</Text>
       </View>
@@ -1202,6 +1350,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           value={lastWorkoutContext}
           onChangeText={setLastWorkoutContext}
           multiline
+          onFocus={scrollToInput}
         />
         <Text style={styles.hint}>Helps the AI pick the right starting weights and avoid training the same muscles back-to-back.</Text>
       </View>
@@ -1271,11 +1420,30 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}>
+      <ScrollView
+        ref={scrollRef}
+        style={styles.container}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        onScrollBeginDrag={Keyboard.dismiss}
+      >
         <View style={styles.header}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}</Text>
+          <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}  ·  {
+            ({
+              goal: 'Goal',
+              goalRefine: 'Refine',
+              physicalStats: 'About You',
+              trainingDays: 'Schedule',
+              equipment: 'Equipment',
+              foods: 'Foods',
+              supplements: 'Supplements',
+              mealRoutine: 'Meals',
+              appleHealth: 'Health',
+              context: 'Final Details',
+            } as Record<StepKey, string>)[currentStepKey]
+          }</Text>
         </View>
 
         <View style={styles.progressBar}>
@@ -1311,7 +1479,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  content: { padding: 24, paddingBottom: 48 },
+  content: { padding: 24, paddingBottom: 120 },
   header: { marginTop: 20, marginBottom: 20 },
   logo: { width: 260, height: 88 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
@@ -1325,7 +1493,7 @@ const styles = StyleSheet.create({
   stepDescription: { fontSize: 15, color: colors.textSecondary, lineHeight: 22, marginBottom: 24 },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  goalCard: { width: '48%', padding: 14, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
+  goalCard: { width: '48%', padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   goalIcon: { fontSize: 26, marginBottom: 6 },
   goalLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
@@ -1358,6 +1526,15 @@ const styles = StyleSheet.create({
   },
   unit: { fontSize: 14, color: colors.textSecondary, fontWeight: '500', minWidth: 40 },
   hint: { fontSize: 13, color: colors.textMuted, marginTop: 8 },
+  optionalBanner: { fontSize: 13, color: colors.primary, fontWeight: '500', marginBottom: 16, fontStyle: 'italic' },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
+  searchInput: { marginBottom: 0, paddingVertical: 11, color: colors.textPrimary },
+  clearBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  clearBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '700' },
+  textArea: {
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    padding: 14, fontSize: 16, backgroundColor: colors.surface, color: colors.textPrimary,
+  },
 
   genderRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   genderButton: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: radius.full, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface },
@@ -1378,8 +1555,11 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.border,
     paddingVertical: 10, paddingHorizontal: 14, minWidth: 110,
   },
+  templateChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '18' },
   templateChipLabel: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  templateChipLabelActive: { color: colors.primary },
   templateChipDesc: { fontSize: 11, color: colors.textMuted },
+  templateChipDescActive: { color: colors.primaryLight },
 
   // Photo scan
   scanSection: { marginBottom: 20, padding: 16, backgroundColor: colors.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },

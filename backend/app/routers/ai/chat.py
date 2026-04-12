@@ -167,6 +167,25 @@ def ask_trainer_question(
 
     trimmed_convo = (body.conversation or [])[-6:]
 
+    # ── What the AI can and cannot do ────────────────────────────────────────
+    _capability_instructions = (
+        "\n\nWHAT YOU CAN DO:\n"
+        "• Modify the plan directly (swap exercises, change days, adjust meals/macros) — "
+        "set needs_plan_update=true and return the full updated plan.\n"
+        "• If the user asks to change training days (e.g. 'make it 6 days'), return an updated plan "
+        "with the new number of days. The app will detect the change and update their settings automatically.\n"
+        "• If they ask to change equipment focus, adjust exercises accordingly in the updated plan.\n"
+        "• Log workouts, track injuries.\n"
+        "\n"
+        "WHAT YOU CANNOT DO (redirect the user):\n"
+        "• Body stats (weight, height, age) → 'You can update that from the ☰ menu → Account.'\n"
+        "• Food preferences or dietary restrictions → 'Head to ☰ menu → Edit Meal Plan to update those.'\n"
+        "• Supplements → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.'\n"
+        "• Meal routines → 'You can edit those from ☰ menu → Edit Meal Plan → Meal Routines.'\n"
+        "• Theme/appearance → 'You can change that from ☰ menu → Themes.'\n"
+        "For anything not listed above, give your best advice and suggest the appropriate menu path if needed.\n"
+    )
+
     # Schema differs by mode — AI can only update its own side
     if is_nutritionist:
         plan_schema = (
@@ -183,6 +202,9 @@ def ask_trainer_question(
             "so their totals actually hit the new targets. Don't just change targets without changing meals. "
             "Preserve isRoutine=true meals exactly as-is. "
             "updated_workout_plan must always be null. Return JSON only."
+            + _capability_instructions +
+            "As a nutritionist you CANNOT modify the workout plan — if they ask about exercises or training, "
+            "tell them to switch to the Trainer chat for that."
         )
     else:
         plan_schema = (
@@ -228,6 +250,9 @@ def ask_trainer_question(
             "If they just say 'I did legs today' with no details, log it with an empty exercises array. "
             "Do NOT log workouts if the user is just asking about future plans or hypotheticals. "
             "Return JSON only."
+            + _capability_instructions +
+            "As a trainer you CANNOT modify the meal plan — if they ask about food or nutrition, "
+            "tell them to switch to the Nutritionist chat for that."
         )
 
     workout_log_schema = (
@@ -262,6 +287,10 @@ def ask_trainer_question(
         '}\n\n'
         "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
         "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly.\n"
+        "PLAN SETTING CHANGES: If the user asks to change training days, workout duration, or equipment, "
+        "set needs_plan_update=true and return the FULL updated plan reflecting the change. "
+        "For example, if they say 'make it 6 days', return a complete 6-day plan. "
+        "Do NOT just say you've made the change — you must actually return the updated plan.\n"
         + (
             "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
             '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}'
@@ -453,6 +482,7 @@ def ask_trainer_question(
             "safety_note": "",
             "updated_workout_plan": None,
             "updated_nutrition_plan": None,
+            "updated_profile": None,
             "updated_injuries": None,
             "injury_clarification_needed": False,
         }

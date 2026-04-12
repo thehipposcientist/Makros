@@ -1,19 +1,39 @@
 @echo off
 echo.
-echo [reset-db] Stopping backend on port 8000...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    taskkill /F /PID %%a >nul 2>&1
+echo  WARNING: This will delete ALL data and recreate the database from scratch.
+echo.
+set /p confirm="Are you sure? (y/N): "
+if /i not "%confirm%"=="y" (
+    echo Cancelled.
+    pause
+    exit /b 0
 )
-echo        Done.
 echo.
 
-echo [reset-db] Deleting database...
-if exist "%~dp0backend\workoutpal.db" (
-    del /F "%~dp0backend\workoutpal.db"
-    echo        Deleted workoutpal.db
-) else (
-    echo        No database found.
-)
+echo [1/3] Stopping everything...
+docker compose down -v
+echo       Done.
 echo.
-echo [reset-db] Done. Run start.bat to restart.
+
+echo [2/3] Rebuilding and starting fresh...
+docker compose up -d --build
+if %errorlevel% neq 0 (
+    echo       ERROR: Docker Compose failed. Is Docker Desktop running?
+    pause
+    exit /b 1
+)
+echo       Done.
+echo.
+
+echo [3/3] Waiting for backend to seed database...
+:wait_backend
+curl -sf http://localhost:8000/health >nul 2>&1
+if %errorlevel% neq 0 (
+    timeout /t 2 /nobreak >nul
+    goto wait_backend
+)
+echo       Done.
+echo.
+
+echo Database reset complete. Run "start.bat" to launch the app.
 pause

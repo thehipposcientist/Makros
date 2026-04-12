@@ -15,6 +15,8 @@ from app.models import (
     UserGoal,
     UserPreferences,
     Exercise,
+    Equipment,
+    ExerciseEquipment,
     WorkoutSession,
     WorkoutExercise,
     ExerciseSet,
@@ -544,27 +546,71 @@ def _pick_candidate_exercises(
     equipment_names: set[str],
     user_id: int,
 ) -> list[Exercise]:
-    allowed_types = _map_equipment_names_to_types(equipment_names)
+    """
+    Select exercises for a muscle group that the user can actually perform.
 
-    rows = db.exec(
-        select(Exercise).where(
-            Exercise.primary_muscle == muscle,
-            Exercise.equipment.in_(allowed_types) if allowed_types else True,
-        )
+    Uses ExerciseEquipment join table: an exercise is available if the user
+    owns ALL of its required equipment.  Exercises with no equipment mappings
+    (bodyweight) are always available.
+    """
+    # Resolve user's equipment names → Equipment IDs
+    owned_ids = _resolve_owned_equipment_ids(db, equipment_names)
+
+    # All exercises for the target muscle
+    all_for_muscle = db.exec(
+        select(Exercise).where(Exercise.primary_muscle == muscle)
     ).all()
 
-    # if nothing matched, allow full-body/bodyweight fallback
+    # Build required-equipment lookup for all exercises in one query
+    req_cache = _build_required_equipment_cache(db)
+
+    rows = [ex for ex in all_for_muscle if _user_can_do(ex.id, owned_ids, req_cache)]
+
+    # Fallback: if nothing matched, try full_body + bodyweight-only
     if not rows:
-        rows = db.exec(
+        fallback = db.exec(
             select(Exercise).where(
                 Exercise.primary_muscle.in_([muscle, MuscleGroup.FULL_BODY]),
             )
         ).all()
+        rows = [ex for ex in fallback if _user_can_do(ex.id, owned_ids, req_cache)]
 
     return rows
 
 
+def _resolve_owned_equipment_ids(db: Session, equipment_names: set[str]) -> set[int]:
+    """Map user's equipment display-names to Equipment.id set."""
+    if not equipment_names:
+        return set()
+    names_lower = {n.strip().lower() for n in equipment_names}
+    all_equip = db.exec(select(Equipment)).all()
+    return {eq.id for eq in all_equip if eq.name.lower() in names_lower}
+
+
+def _build_required_equipment_cache(db: Session) -> dict[int, set[int]]:
+    """Load all required ExerciseEquipment mappings in one query."""
+    cache: dict[int, set[int]] = {}
+    mappings = db.exec(
+        select(ExerciseEquipment).where(ExerciseEquipment.required == True)
+    ).all()
+    for m in mappings:
+        cache.setdefault(m.exercise_id, set()).add(m.equipment_id)
+    return cache
+
+
+def _user_can_do(exercise_id: int, owned_ids: set[int], req_cache: dict[int, set[int]]) -> bool:
+    """
+    True if user owns all REQUIRED equipment for this exercise.
+    Exercises with no required equipment (bodyweight) are always available.
+    """
+    required = req_cache.get(exercise_id, set())
+    if not required:
+        return True
+    return required.issubset(owned_ids)
+
+
 def _map_equipment_names_to_types(equipment_names: set[str]) -> list[EquipmentType]:
+    """Legacy compat — maps concrete equipment names to broad EquipmentType buckets."""
     names = {x.strip().lower() for x in equipment_names}
     out: set[EquipmentType] = {EquipmentType.BODYWEIGHT}
 

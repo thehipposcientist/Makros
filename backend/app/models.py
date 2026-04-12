@@ -5,7 +5,7 @@ from datetime import datetime, date, timezone
 from app.enums import (
     GoalType, GoalPace, Gender, MealType,
     EquipmentType, MuscleGroup, WorkoutSource, MealSource, FoodCategory,
-    FoodSource,
+    FoodSource, ExerciseType, EquipmentRole,
 )
 
 
@@ -110,21 +110,19 @@ class CoachMemory(SQLModel, table=True):
 class Exercise(SQLModel, table=True):
     __tablename__ = "exercises"
     id: int | None = Field(default=None, primary_key=True)
+    slug: str = Field(default="", index=True, unique=True)   # stable key for seeding
     name: str = Field(unique=True, index=True)
     primary_muscle: MuscleGroup = Field(sa_column=Column(SAEnum(MuscleGroup), nullable=False))
     secondary_muscles: list = Field(default_factory=list, sa_column=Column(JSON))
+    # Legacy broad bucket — kept for WorkoutExercise compat. New code should use ExerciseEquipment.
     equipment: EquipmentType = Field(sa_column=Column(SAEnum(EquipmentType), nullable=False))
     is_compound: bool = Field(default=False)
     description: str | None = Field(default=None)
     is_custom: bool = Field(default=False)
-    # Extended metadata — optional, defaults safe for existing rows
-    movement_pattern: str | None = Field(default=None)      # e.g. "push", "pull", "hinge", "squat", "carry"
-    difficulty: str | None = Field(default=None)            # e.g. "beginner", "intermediate", "advanced"
-    requires_equipment: list = Field(default_factory=list, sa_column=Column(JSON))  # specific equipment names
-    contraindications: list = Field(default_factory=list, sa_column=Column(JSON))   # injury notes e.g. ["knee pain"]
+    movement_pattern: str | None = Field(default=None)       # MovementPattern enum value
+    exercise_type: str = Field(default="strength")           # ExerciseType enum value
+    is_machine: bool = Field(default=False)
     is_unilateral: bool = Field(default=False)
-    is_cardio: bool = Field(default=False)
-    is_mobility: bool = Field(default=False)
 
 
 # ─── Food library ─────────────────────────────────────────────────────────────
@@ -148,7 +146,8 @@ class Food(SQLModel, table=True):
     normalized_name: str = Field(default="", index=True)  # lowercase, stripped, for dedup/search
     category: FoodCategory = Field(sa_column=Column(SAEnum(FoodCategory), nullable=False))
     source: FoodSource = Field(
-        sa_column=Column(SAEnum(FoodSource), nullable=False, server_default="seed"),
+        default=FoodSource.SEED,
+        sa_column=Column(SAEnum(FoodSource), nullable=False),
     )
     owner_user_id: int | None = Field(default=None, foreign_key="user.id", index=True)
     external_id: str | None = Field(default=None, index=True)   # USDA fdc_id, Open Food Facts id, etc.
@@ -232,10 +231,22 @@ class UserRecentFood(SQLModel, table=True):
 class Equipment(SQLModel, table=True):
     __tablename__ = "equipment"
     id: int | None = Field(default=None, primary_key=True)
+    slug: str = Field(default="", index=True, unique=True)  # stable key for seeding
     name: str = Field(unique=True, index=True)
     category: str  # e.g. "Bodyweight & Home", "Free Weights", etc.
     icon: str      # emoji
     is_custom: bool = Field(default=False)
+
+
+class ExerciseEquipment(SQLModel, table=True):
+    """Many-to-many: which concrete equipment items an exercise needs."""
+    __tablename__ = "exercise_equipment"
+    __table_args__ = (UniqueConstraint("exercise_id", "equipment_id", name="uq_exercise_equipment"),)
+    id: int | None = Field(default=None, primary_key=True)
+    exercise_id: int = Field(foreign_key="exercises.id", index=True)
+    equipment_id: int = Field(foreign_key="equipment.id", index=True)
+    required: bool = Field(default=True)
+    role: str = Field(default="primary")  # EquipmentRole: primary | support | optional
 
 
 # ─── Goal options (seeded reference data) ─────────────────────────────────────

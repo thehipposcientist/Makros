@@ -513,6 +513,66 @@ export default function Index() {
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
+        onProfileUpdate={async (changes, skipRegen) => {
+          if (!userProfile || !authToken) return;
+          const updated = { ...userProfile, ...changes };
+          const stamped = changes.goal ? stampGoalStart(updated, userProfile) : updated;
+          if (changes.goal) {
+            await recordGoalChange(stamped.goal, stamped.goalDetails.pace, stamped.physicalStats.weightLbs);
+          }
+          await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
+          setUserProfile(stamped);
+          syncOnboarding(authToken, stamped).catch(() => null);
+          // If the chat already included an updated plan, just refresh without regen
+          if (skipRegen) {
+            console.log('[onProfileUpdate] profile saved, skipping regen (plan already applied from chat)');
+            setPlanRefreshKey(k => k + 1);
+            return;
+          }
+          // Otherwise trigger plan regeneration
+          const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal;
+          const needsNutrition = !!changes.goal;
+          if (needsWorkout || needsNutrition) {
+            if (needsWorkout) setIsWorkoutUpdating(true);
+            if (needsNutrition) setIsNutritionUpdating(true);
+            const recentSessions = (await loadWorkoutHistory()).filter(s => !s.skipped && s.completed).slice(0, 3);
+            const sessionLines = recentSessions.length
+              ? 'Last 3 completed workouts:\n' + recentSessions.map(s => `  [${s.date.slice(0, 10)}] ${s.focus}`).join('\n')
+              : '';
+            const userLogRaw = await AsyncStorage.getItem('userLog');
+            const userLog: import('../src/types').UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+            const opts = { userLog, extraContext: sessionLines || undefined };
+            const planCall = (needsWorkout && needsNutrition)
+              ? getAIPlans(authToken, stamped, opts)
+              : needsWorkout
+                ? getAIWorkoutPlan(authToken, stamped, opts)
+                : getAINutritionPlan(authToken, stamped, opts);
+            planCall.then(async (aiPlans: any) => {
+              if (aiPlans.workout_plan) {
+                await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+                const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
+                if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
+              }
+              if (aiPlans.nutrition_plan_a) {
+                await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
+                await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
+                if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
+                if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
+                const nnNote = aiPlans.nutritionistNote || null;
+                if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
+              }
+              if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
+              setPlanRefreshKey(k => k + 1);
+            }).catch((err: any) => {
+              console.error('[onProfileUpdate] plan regen failed:', err?.message ?? err);
+            }).finally(() => {
+              setIsWorkoutUpdating(false);
+              setIsNutritionUpdating(false);
+            });
+          } else {
+            setPlanRefreshKey(k => k + 1);
+          }
+        }}
         onWeeklyRefresh={async (review) => {
           if (!authToken || !userProfile) return;
           await appendUserLog({

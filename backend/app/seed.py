@@ -1,6 +1,6 @@
 import re
 from sqlmodel import Session, select, col
-from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, Equipment, GoalOption, PaceOption
+from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, Equipment, ExerciseEquipment, GoalOption, PaceOption
 from app.enums import FoodSource
 
 
@@ -8,236 +8,155 @@ def _normalize(name: str) -> str:
     """Lowercase, collapse whitespace, strip punctuation for dedup/search."""
     return re.sub(r"[^a-z0-9 ]", "", name.lower()).strip()
 
-# ─── Exercise library seed data ───────────────────────────────────────────────
-# Format: (name, primary_muscle, secondary_muscles, equipment, is_compound, description)
-#
-# equipment values must match EquipmentType enum:
-#   "gym"        – barbell, cable, or machine exercises requiring a full gym
-#   "dumbbells"  – dumbbell-based (home or gym)
-#   "bodyweight" – no equipment required
-#   "home"       – pull-up bar, resistance bands, or other home-gym gear
-#   "cardio"     – treadmill, stationary bike, elliptical, etc.
-#   "other"      – kettlebell, sled, medicine ball, landmine, etc.
-#
-# primary_muscle must match MuscleGroup enum:
-#   chest | back | shoulders | biceps | triceps | quads | hamstrings
-#   glutes | calves | core | full_body | cardio
 
-EXERCISES = [
-    # ── Chest ────────────────────────────────────────────────────────────────
-    ("Barbell Bench Press",       "chest",      ["triceps", "shoulders"],        "gym",        True,  "Classic horizontal press — primary chest builder"),
-    ("Incline Barbell Press",     "chest",      ["triceps", "shoulders"],        "gym",        True,  "Upper chest focus with inclined barbell press"),
-    ("Decline Bench Press",       "chest",      ["triceps", "shoulders"],        "gym",        True,  "Lower chest press variation"),
-    ("Dumbbell Bench Press",      "chest",      ["triceps", "shoulders"],        "dumbbells",  True,  "Greater range of motion than barbell"),
-    ("Incline Dumbbell Press",    "chest",      ["triceps", "shoulders"],        "dumbbells",  True,  "Upper chest dumbbell pressing"),
-    ("Decline Push-ups",          "chest",      ["triceps", "shoulders"],        "bodyweight", True,  "Harder push-up variation emphasizing upper chest"),
-    ("Push-ups",                  "chest",      ["triceps", "shoulders"],        "bodyweight", True,  "Foundational bodyweight chest exercise"),
-    ("Wide Push-ups",             "chest",      ["shoulders"],                   "bodyweight", True,  "Wider hand placement for extra chest emphasis"),
-    ("Diamond Push-ups",          "triceps",    ["chest", "shoulders"],          "bodyweight", True,  "Close-hand push-up emphasizing triceps"),
-    ("Chest Dips",                "chest",      ["triceps"],                     "home",       True,  "Forward-lean dip for chest emphasis — needs dip bars"),
-    ("Dumbbell Fly",              "chest",      [],                              "dumbbells",  False, "Isolation stretch for the chest"),
-    ("Cable Fly",                 "chest",      [],                              "gym",        False, "Constant tension chest isolation on cable"),
-    ("Machine Chest Press",       "chest",      ["triceps", "shoulders"],        "gym",        True,  "Stable machine-based chest press"),
-    ("Pec Deck",                  "chest",      [],                              "gym",        False, "Machine chest fly isolation"),
-    ("Scap Push-up",              "back",       ["shoulders"],                   "bodyweight", False, "Protract and retract the scapula at the bottom of a push-up position — improves shoulder health"),
+def _slugify(name: str) -> str:
+    """Generate a slug from a display name: lowercase, underscores, alphanumeric only."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
-    # ── Back ─────────────────────────────────────────────────────────────────
-    ("Deadlift",                  "back",       ["hamstrings", "glutes", "core"], "gym",       True,  "King of compound lifts — full posterior chain"),
-    ("Romanian Deadlift",         "hamstrings", ["glutes", "back"],              "gym",        True,  "Hip-hinge pattern targeting hamstrings"),
-    ("Rack Pull",                 "back",       ["glutes", "hamstrings"],        "gym",        True,  "Partial deadlift emphasizing upper posterior chain"),
-    ("Barbell Row",               "back",       ["biceps"],                      "gym",        True,  "Horizontal pull — lat and mid-back thickness"),
-    ("Pendlay Row",               "back",       ["biceps"],                      "gym",        True,  "Explosive strict row from the floor"),
-    ("T-Bar Row",                 "back",       ["biceps"],                      "gym",        True,  "Heavy rowing variation for back thickness"),
-    ("Dumbbell Row",              "back",       ["biceps"],                      "dumbbells",  True,  "Unilateral back builder with good stretch"),
-    ("Chest Supported Row",       "back",       ["biceps"],                      "dumbbells",  True,  "Lower-back-friendly incline dumbbell row"),
-    ("Pull-ups",                  "back",       ["biceps"],                      "home",       True,  "Best bodyweight back exercise — requires pull-up bar"),
-    ("Chin-ups",                  "back",       ["biceps"],                      "home",       True,  "Supinated pull-up — more biceps involvement"),
-    ("Assisted Pull-up",          "back",       ["biceps"],                      "gym",        True,  "Machine-assisted pull-up for beginners building lat strength"),
-    ("Lat Pulldown",              "back",       ["biceps"],                      "gym",        True,  "Cable pull-down for lat width"),
-    ("Seated Cable Row",          "back",       ["biceps"],                      "gym",        True,  "Horizontal cable pull for mid-back thickness"),
-    ("Straight-arm Pulldown",     "back",       [],                              "gym",        False, "Lat isolation keeping arms straight on cable"),
-    ("Face Pull",                 "shoulders",  ["back"],                        "gym",        False, "Rear delt and rotator cuff health with cable rope"),
-    ("Inverted Row",              "back",       ["biceps"],                      "home",       True,  "Horizontal bodyweight pull from a low bar"),
-    ("Superman Hold",             "back",       ["glutes"],                      "bodyweight", False, "Posterior chain and spinal erector isometric hold"),
-    ("Thoracic Rotation",         "back",       ["core"],                        "bodyweight", False, "Controlled rotation drill for thoracic spine mobility"),
-    ("Back Extension (Back Focused)",  "back",  ["glutes", "hamstrings"],        "gym",        False, "45° hyperextension bench — neutral spine targets spinal erectors"),
-    ("Back Extension (Glute Focused)", "glutes", ["hamstrings", "back"],         "gym",        False, "45° hyperextension bench — posterior pelvic tilt maximises glute activation"),
 
-    # ── Shoulders ─────────────────────────────────────────────────────────────
-    ("Overhead Press",            "shoulders",  ["triceps"],                     "gym",        True,  "Standing or seated barbell shoulder press"),
-    ("Push Press",                "shoulders",  ["triceps", "quads"],            "gym",        True,  "Explosive overhead press using leg drive"),
-    ("Dumbbell Shoulder Press",   "shoulders",  ["triceps"],                     "dumbbells",  True,  "Seated or standing dumbbell press for shoulders"),
-    ("Arnold Press",              "shoulders",  ["triceps"],                     "dumbbells",  True,  "Rotational press hitting all three delt heads"),
-    ("Machine Shoulder Press",    "shoulders",  ["triceps"],                     "gym",        True,  "Stable overhead press on shoulder machine"),
-    ("Lateral Raise",             "shoulders",  [],                              "dumbbells",  False, "Side delt isolation — shoulder width"),
-    ("Front Raise",               "shoulders",  [],                              "dumbbells",  False, "Anterior delt isolation"),
-    ("Rear Delt Fly",             "shoulders",  ["back"],                        "dumbbells",  False, "Rear shoulder isolation — posture and balance"),
-    ("Cable Lateral Raise",       "shoulders",  [],                              "gym",        False, "Constant-tension side delt work on cable"),
-    ("Upright Row",               "shoulders",  ["traps"],                       "gym",        True,  "Vertical pull for shoulders and upper traps"),
-    ("Pike Push-ups",             "shoulders",  ["triceps"],                     "bodyweight", True,  "Bodyweight overhead press progression"),
-    ("Landmine Press",            "shoulders",  ["chest", "triceps"],            "gym",        True,  "Angled press from landmine attachment — shoulder-friendly"),
-    ("Band Pull-Apart",           "shoulders",  ["back"],                        "home",       False, "Resistance band pull for rear delts and scapular health"),
-    ("Wall Slide",                "shoulders",  ["back"],                        "bodyweight", False, "Overhead wall slide drill for shoulder mobility and stability"),
+# ─── Exercise + Equipment seed functions ─────────────────────────────────────
 
-    # ── Biceps ───────────────────────────────────────────────────────────────
-    ("Barbell Curl",              "biceps",     [],                              "gym",        False, "Classic barbell bicep curl"),
-    ("EZ Bar Curl",               "biceps",     [],                              "gym",        False, "More wrist-friendly curling variation"),
-    ("Dumbbell Curl",             "biceps",     [],                              "dumbbells",  False, "Alternating or simultaneous dumbbell curl"),
-    ("Hammer Curl",               "biceps",     ["forearms"],                    "dumbbells",  False, "Neutral grip curl for brachialis and forearm thickness"),
-    ("Incline Dumbbell Curl",     "biceps",     [],                              "dumbbells",  False, "Long-head focused curl on incline bench"),
-    ("Concentration Curl",        "biceps",     [],                              "dumbbells",  False, "Strict unilateral bicep isolation"),
-    ("Preacher Curl",             "biceps",     [],                              "gym",        False, "Isolates biceps with preacher bench support"),
-    ("Cable Curl",                "biceps",     [],                              "gym",        False, "Constant tension curl on cable machine"),
 
-    # ── Triceps ──────────────────────────────────────────────────────────────
-    ("Skull Crusher",             "triceps",    [],                              "gym",        False, "Lying tricep extension with barbell or EZ bar"),
-    ("Tricep Pushdown",           "triceps",    [],                              "gym",        False, "Cable pushdown for tricep isolation"),
-    ("Rope Pushdown",             "triceps",    [],                              "gym",        False, "Cable rope pushdown for full lockout and flare"),
-    ("Close-grip Bench Press",    "triceps",    ["chest"],                       "gym",        True,  "Bench press variation with close grip for triceps"),
-    ("Overhead Tricep Extension", "triceps",    [],                              "dumbbells",  False, "Long head stretch with overhead dumbbell position"),
-    ("Bench Dips",                "triceps",    ["chest"],                       "bodyweight", True,  "Bodyweight tricep dip using a bench or chair"),
-    ("Kickbacks",                 "triceps",    [],                              "dumbbells",  False, "Strict tricep lockout with dumbbell"),
+def seed_equipment(session: Session) -> None:
+    """Upsert equipment by slug — updates name/category/icon on existing rows."""
+    from app.seed_exercises_data import SEED_EQUIPMENT
 
-    # ── Quads ────────────────────────────────────────────────────────────────
-    ("Barbell Squat",             "quads",      ["glutes", "hamstrings"],        "gym",        True,  "Foundational lower body compound movement"),
-    ("Front Squat",               "quads",      ["core", "glutes"],              "gym",        True,  "Quad-dominant squat with very upright torso"),
-    ("Leg Press",                 "quads",      ["glutes", "hamstrings"],        "gym",        True,  "Machine squat variation — high volume friendly"),
-    ("Leg Extension",             "quads",      [],                              "gym",        False, "Quad isolation on leg extension machine"),
-    ("Hack Squat",                "quads",      ["glutes"],                      "gym",        True,  "Machine squat with upright torso and loaded back pad"),
-    ("Smith Machine Squat",       "quads",      ["glutes", "hamstrings"],        "gym",        True,  "Guided barbell squat for beginners or heavy volume"),
-    ("Bulgarian Split Squat",     "quads",      ["glutes", "hamstrings"],        "dumbbells",  True,  "Unilateral leg exercise with rear foot elevated"),
-    ("Walking Lunges",            "quads",      ["glutes", "hamstrings"],        "bodyweight", True,  "Dynamic forward lunge for strength and coordination"),
-    ("Reverse Lunges",            "quads",      ["glutes", "hamstrings"],        "bodyweight", True,  "Knee-friendly lunge variation stepping backward"),
-    ("Goblet Squat",              "quads",      ["glutes", "core"],              "dumbbells",  True,  "Beginner-friendly squat holding a dumbbell at chest"),
-    ("Step-ups",                  "quads",      ["glutes", "hamstrings"],        "dumbbells",  True,  "Single-leg step-up with dumbbells for strength"),
-    ("Bodyweight Squat",          "quads",      ["glutes"],                      "bodyweight", True,  "Air squat with no added weight"),
-    ("Wall Sit",                  "quads",      [],                              "bodyweight", False, "Isometric quad endurance hold against a wall"),
-    ("Landmine Squat",            "quads",      ["glutes", "core"],              "gym",        True,  "Goblet-style squat holding a landmine — very beginner-friendly"),
-    ("Couch Stretch",             "quads",      ["hip_flexors"],                 "bodyweight", False, "Deep hip flexor and quad stretch with rear foot elevated"),
+    existing = {e.slug: e for e in session.exec(select(Equipment)).all() if e.slug}
+    # Also index by name for backfilling slugs on pre-existing rows
+    existing_by_name = {e.name: e for e in session.exec(select(Equipment)).all()}
+    added = 0
+    updated = 0
 
-    # ── Hamstrings ───────────────────────────────────────────────────────────
-    ("Leg Curl",                  "hamstrings", [],                              "gym",        False, "Lying hamstring curl on machine"),
-    ("Seated Hamstring Curl",     "hamstrings", [],                              "gym",        False, "Seated leg curl machine — constant tension at peak contraction"),
-    ("Good Morning",              "hamstrings", ["back", "glutes"],              "gym",        True,  "Hip hinge with barbell on upper back — posterior chain"),
-    ("Nordic Curl",               "hamstrings", [],                              "bodyweight", True,  "Advanced eccentric hamstring curl — injury prevention staple"),
-    ("Single-leg Romanian Deadlift", "hamstrings", ["glutes", "core"],          "dumbbells",  True,  "Balance-demanding unilateral hinge for hamstrings"),
-    ("Smith Machine Romanian Deadlift", "hamstrings", ["glutes", "back"],       "gym",        True,  "Guided RDL for beginners or heavy loading without balance demand"),
+    for entry in SEED_EQUIPMENT:
+        slug = entry["slug"]
+        name = entry["name"]
 
-    # ── Glutes ───────────────────────────────────────────────────────────────
-    ("Hip Thrust",                "glutes",     ["hamstrings"],                  "gym",        True,  "Barbell hip thrust — most effective glute builder"),
-    ("Glute Bridge",              "glutes",     ["hamstrings"],                  "bodyweight", True,  "Bodyweight hip extension on the floor"),
-    ("Single-leg Glute Bridge",   "glutes",     ["hamstrings"],                  "bodyweight", True,  "Unilateral glute bridge progression"),
-    ("Cable Glute Kickback",      "glutes",     [],                              "gym",        False, "Cable kickback for isolated glute contraction"),
-    ("Donkey Kicks",              "glutes",     [],                              "bodyweight", False, "Quadruped bodyweight glute isolation"),
-    ("Fire Hydrants",             "glutes",     [],                              "bodyweight", False, "Quadruped glute medius and external rotation work"),
-    ("Hip Abduction Machine",     "glutes",     [],                              "gym",        False, "Seated machine for glute medius and abductor isolation"),
+        if slug in existing:
+            eq = existing[slug]
+            eq.name = name
+            eq.category = entry["category"]
+            eq.icon = entry["icon"]
+            session.add(eq)
+            updated += 1
+        elif name in existing_by_name:
+            # Backfill slug on pre-existing row matched by name
+            eq = existing_by_name[name]
+            eq.slug = slug
+            eq.category = entry["category"]
+            eq.icon = entry["icon"]
+            session.add(eq)
+            updated += 1
+        else:
+            session.add(Equipment(
+                slug=slug,
+                name=name,
+                category=entry["category"],
+                icon=entry["icon"],
+                is_custom=False,
+            ))
+            added += 1
 
-    # ── Adductors ────────────────────────────────────────────────────────────
-    ("Hip Adduction Machine",     "quads",      ["adductors"],                   "gym",        False, "Seated machine for inner thigh and adductor isolation"),
-    ("Copenhagen Plank",          "core",       ["adductors"],                   "bodyweight", False, "Side plank with top leg elevated — heavy adductor and core load"),
-    ("Sumo Squat",                "quads",      ["glutes", "adductors"],         "dumbbells",  True,  "Wide-stance squat with toes flared — inner thigh and glutes"),
-
-    # ── Calves ───────────────────────────────────────────────────────────────
-    ("Standing Calf Raise",       "calves",     [],                              "gym",        False, "Bilateral calf raise on machine or loaded step"),
-    ("Seated Calf Raise",         "calves",     [],                              "gym",        False, "Soleus focus with knee bent on seated calf machine"),
-    ("Single-leg Calf Raise",     "calves",     [],                              "bodyweight", False, "Bodyweight single-leg calf raise on a step"),
-    ("Jump Rope (Calf Focus)",    "calves",     ["cardio"],                      "home",       False, "Jump rope with emphasis on plantar flexion at bottom"),
-
-    # ── Tibialis / Shin ──────────────────────────────────────────────────────
-    ("Tibialis Raise",            "calves",     [],                              "bodyweight", False, "Stand against a wall and raise toes — strengthens tibialis anterior and shin"),
-    ("Ankle Mobility Drill",      "calves",     [],                              "bodyweight", False, "Controlled ankle circles and wall ankle flexion for joint health"),
-
-    # ── Core ─────────────────────────────────────────────────────────────────
-    ("Plank",                     "core",       [],                              "bodyweight", False, "Isometric core stabilisation hold"),
-    ("Side Plank",                "core",       [],                              "bodyweight", False, "Oblique and anti-lateral flexion isometric work"),
-    ("Dead Bug",                  "core",       [],                              "bodyweight", False, "Beginner-friendly anti-extension core coordination move"),
-    ("Bird Dog",                  "core",       ["back"],                        "bodyweight", False, "Core stability and contralateral coordination drill"),
-    ("Cable Crunch",              "core",       [],                              "gym",        False, "Weighted kneeling crunch using cable machine"),
-    ("Hanging Leg Raise",         "core",       [],                              "home",       False, "Lower ab focus hanging from pull-up bar"),
-    ("Russian Twist",             "core",       [],                              "bodyweight", False, "Rotational core exercise with or without weight"),
-    ("Ab Wheel Rollout",          "core",       ["shoulders"],                   "home",       False, "Challenging anti-extension core exercise with ab wheel"),
-    ("Mountain Climbers",         "core",       ["cardio"],                      "bodyweight", True,  "Dynamic core and cardiovascular conditioning drill"),
-    ("Cable Woodchop",            "core",       ["shoulders"],                   "gym",        True,  "Rotational cable pull for anti-rotation and oblique strength"),
-    ("Pallof Press",              "core",       [],                              "gym",        False, "Anti-rotation cable press — builds lateral core stability"),
-
-    # ── Rotator Cuff / Shoulder Health ───────────────────────────────────────
-    ("External Rotation (Band)",  "shoulders",  [],                              "home",       False, "Band external rotation for rotator cuff health"),
-    ("Internal Rotation (Band)",  "shoulders",  [],                              "home",       False, "Band internal rotation drill for shoulder balance"),
-    ("Prone Y-T-W",               "back",       ["shoulders"],                   "bodyweight", False, "Prone scapular control drill — Y, T, and W positions"),
-    ("Cuban Press",               "shoulders",  [],                              "dumbbells",  False, "External rotation to overhead press combo for shoulder prehab"),
-
-    # ── Mobility / Warmup ────────────────────────────────────────────────────
-    ("World's Greatest Stretch",  "full_body",  [],                              "bodyweight", False, "Lunge to thoracic rotation — total mobility warmup"),
-    ("Hip 90-90 Stretch",         "glutes",     ["hamstrings"],                  "bodyweight", False, "Hip internal and external rotation mobility drill"),
-    ("Leg Swings",                "hamstrings", ["glutes"],                      "bodyweight", False, "Dynamic hip flexor and hamstring warmup swing"),
-    ("Arm Circles",               "shoulders",  [],                              "bodyweight", False, "Dynamic shoulder warmup and mobility drill"),
-    ("Cat-Cow",                   "back",       ["core"],                        "bodyweight", False, "Spinal flexion and extension mobility flow"),
-    ("Inchworm",                  "full_body",  ["core", "shoulders"],           "bodyweight", True,  "Walk-out warmup targeting hamstrings, core, and shoulders"),
-
-    # ── Cardio — machine ─────────────────────────────────────────────────────
-    ("Treadmill Run",             "cardio",     [],                              "cardio",     False, "Steady-state or interval treadmill run"),
-    ("Treadmill Intervals",       "cardio",     [],                              "cardio",     True,  "Alternating sprint and recovery on treadmill"),
-    ("Incline Walk",              "cardio",     ["glutes", "calves"],            "cardio",     False, "Low-impact incline treadmill walk for conditioning"),
-    ("Stationary Bike",           "cardio",     ["quads", "calves"],             "cardio",     False, "Low-impact cycling cardio on stationary bike"),
-    ("Stationary Bike Intervals", "cardio",     ["quads"],                       "cardio",     True,  "High-intensity cycling sprints on stationary bike"),
-    ("Assault Bike",              "cardio",     ["full_body"],                   "cardio",     True,  "Fan bike — brutal full-body cardiovascular effort"),
-    ("Elliptical",                "cardio",     [],                              "cardio",     False, "Joint-friendly low-impact cardio"),
-    ("Stair Climber",             "cardio",     ["glutes", "quads"],             "cardio",     False, "Lower-body-focused cardio stair climbing machine"),
-    ("Rowing Machine",            "full_body",  ["back", "legs"],                "cardio",     True,  "Full-body cardio with strong back and leg activation"),
-    ("Rowing Machine Intervals",  "full_body",  ["back", "legs"],                "cardio",     True,  "High-intensity rowing sprints with recovery periods"),
-
-    # ── Cardio — outdoor / bodyweight ────────────────────────────────────────
-    ("Running (Outdoor)",         "cardio",     [],                              "bodyweight", False, "Steady-state outdoor run"),
-    ("Jogging",                   "cardio",     [],                              "bodyweight", False, "Easy-pace endurance jogging outdoors"),
-    ("Sprint Intervals",          "cardio",     ["quads", "glutes"],             "bodyweight", True,  "All-out sprints with walking recovery"),
-    ("Hill Sprints",              "cardio",     ["glutes", "calves"],            "bodyweight", True,  "Uphill sprint repeats for power and conditioning"),
-    ("Swimming Laps",             "cardio",     ["back", "shoulders"],           "bodyweight", True,  "Full-body low-impact cardio in pool"),
-    ("Cycling (Outdoor)",         "cardio",     ["quads", "calves"],             "bodyweight", False, "Steady outdoor bike ride"),
-    ("Jump Rope",                 "cardio",     ["calves"],                      "home",       False, "Jump rope cardiovascular conditioning"),
-    ("Jump Rope HIIT",            "cardio",     ["calves", "shoulders"],         "home",       True,  "High-intensity jump rope intervals"),
-    ("HIIT Circuit",              "full_body",  [],                              "bodyweight", True,  "High-intensity interval circuit — no equipment needed"),
-    ("Battle Ropes",              "full_body",  ["shoulders", "core"],           "gym",        True,  "Wave and slam conditioning with battle ropes"),
-
-    # ── Full body / power ─────────────────────────────────────────────────────
-    ("Kettlebell Swing",          "full_body",  ["glutes", "hamstrings"],        "other",      True,  "Hip-hinge power movement with kettlebell"),
-    ("Burpees",                   "full_body",  [],                              "bodyweight", True,  "High-intensity full body conditioning movement"),
-    ("Box Jump",                  "quads",      ["glutes"],                      "gym",        True,  "Plyometric lower body power onto a plyo box"),
-    ("Broad Jump",                "quads",      ["glutes"],                      "bodyweight", True,  "Horizontal plyometric power jump"),
-    ("Jump Squats",               "quads",      ["glutes"],                      "bodyweight", True,  "Explosive squat with a jump at the top"),
-    ("Thrusters",                 "full_body",  ["shoulders", "quads"],          "dumbbells",  True,  "Squat-to-press full body exercise with dumbbells"),
-    ("Farmer Carry",              "full_body",  ["core", "grip"],                "dumbbells",  True,  "Heavy loaded carry for full-body stability and grip"),
-    ("Sled Push",                 "full_body",  ["quads", "glutes"],             "other",      True,  "Sled drive for power, conditioning, and leg strength"),
-    ("Med Ball Slam",             "full_body",  ["core", "shoulders"],           "other",      True,  "Explosive overhead slam with a medicine ball"),
-
-    # ── Loaded carries / athletic movements ──────────────────────────────────
-    ("Suitcase Carry",            "core",       ["glutes", "traps"],             "dumbbells",  True,  "Unilateral loaded carry for anti-lateral flexion core strength"),
-    ("Sled Drag",                 "full_body",  ["hamstrings", "glutes"],        "other",      True,  "Backward sled drag for posterior chain conditioning"),
-    ("Trap Bar Deadlift",         "full_body",  ["quads", "glutes", "back"],     "gym",        True,  "Deadlift with trap bar — more upright torso, beginner-friendly"),
-]
+    session.commit()
+    if added or updated:
+        print(f"[seed] equipment: {added} new, {updated} updated")
 
 
 def seed_exercises(session: Session) -> None:
-    """Insert new exercises by name — skips any that already exist."""
-    existing_names = set(r.name for r in session.exec(select(Exercise)).all())
-    seen_in_batch: set[str] = set()
+    """
+    Upsert exercises by slug, then sync ExerciseEquipment mappings.
+
+    - Existing exercises (by slug or name): all fields updated.
+    - New exercises: created.
+    - ExerciseEquipment: replaced to match current seed data.
+    """
+    from app.seed_exercises_data import SEED_EXERCISES
+
+    # Build equipment slug -> id lookup
+    equip_by_slug: dict[str, int] = {}
+    for eq in session.exec(select(Equipment)).all():
+        if eq.slug:
+            equip_by_slug[eq.slug] = eq.id
+
+    # Index existing exercises
+    existing_by_slug: dict[str, Exercise] = {}
+    existing_by_name: dict[str, Exercise] = {}
+    for ex in session.exec(select(Exercise)).all():
+        if ex.slug:
+            existing_by_slug[ex.slug] = ex
+        existing_by_name[ex.name] = ex
+
     added = 0
-    for name, primary, secondary, equipment, compound, desc in EXERCISES:
-        if name in existing_names or name in seen_in_batch:
-            continue
-        seen_in_batch.add(name)
-        session.add(Exercise(
-            name=name,
-            primary_muscle=primary,
-            secondary_muscles=secondary,
-            equipment=equipment,
-            is_compound=compound,
-            description=desc,
-            is_custom=False,
-        ))
-        added += 1
+    updated = 0
+
+    for entry in SEED_EXERCISES:
+        slug = entry["slug"]
+        name = entry["name"]
+
+        # Find existing by slug first, then by name (backfill slug)
+        ex = existing_by_slug.get(slug) or existing_by_name.get(name)
+
+        if ex:
+            # Update all fields
+            ex.slug = slug
+            ex.name = name
+            ex.primary_muscle = entry["primary_muscle"]
+            ex.secondary_muscles = entry["secondary_muscles"]
+            ex.equipment = entry["equipment_bucket"]
+            ex.is_compound = entry["is_compound"]
+            ex.description = entry["description"]
+            ex.movement_pattern = entry.get("movement_pattern")
+            ex.exercise_type = entry.get("exercise_type", "strength")
+            ex.is_machine = entry.get("is_machine", False)
+            ex.is_unilateral = entry.get("is_unilateral", False)
+            session.add(ex)
+            updated += 1
+        else:
+            ex = Exercise(
+                slug=slug,
+                name=name,
+                primary_muscle=entry["primary_muscle"],
+                secondary_muscles=entry["secondary_muscles"],
+                equipment=entry["equipment_bucket"],
+                is_compound=entry["is_compound"],
+                description=entry["description"],
+                is_custom=False,
+                movement_pattern=entry.get("movement_pattern"),
+                exercise_type=entry.get("exercise_type", "strength"),
+                is_machine=entry.get("is_machine", False),
+                is_unilateral=entry.get("is_unilateral", False),
+            )
+            session.add(ex)
+            added += 1
+
+        session.flush()  # ensure ex.id is populated
+
+        # ── Sync ExerciseEquipment mappings ──────────────────────────
+        old_mappings = session.exec(
+            select(ExerciseEquipment).where(ExerciseEquipment.exercise_id == ex.id)
+        ).all()
+        for m in old_mappings:
+            session.delete(m)
+        session.flush()
+
+        for eq_entry in entry.get("equipment", []):
+            eq_id = equip_by_slug.get(eq_entry["slug"])
+            if not eq_id:
+                continue  # equipment not seeded yet — skip silently
+            session.add(ExerciseEquipment(
+                exercise_id=ex.id,
+                equipment_id=eq_id,
+                required=eq_entry.get("required", True),
+                role=eq_entry.get("role", "primary"),
+            ))
+
     session.commit()
-    if added:
-        print(f"[seed] inserted {added} new exercises")
+    if added or updated:
+        print(f"[seed] exercises: {added} new, {updated} updated")
+
+
+# ─── Legacy exercise data removed — see seed_exercises_data.py ───────────────
+
+EXERCISES = []  # kept as empty list so any imports don't break
 
 
 # ─── Food library seed data ───────────────────────────────────────────────────
@@ -446,88 +365,6 @@ def seed_foods(session: Session) -> None:
     session.commit()
     if added or updated:
         print(f"[seed] foods: {added} new, {updated} updated")
-
-
-# ─── Equipment library seed data ──────────────────────────────────────────────
-# Format: (name, category, icon)
-
-EQUIPMENT_DATA = [
-    # Bodyweight & Home
-    ("Pull-up bar",              "Bodyweight & Home", "🔩"),
-    ("Resistance bands",         "Bodyweight & Home", "🔗"),
-    ("Yoga mat",                 "Bodyweight & Home", "🧘"),
-    ("Jump rope",                "Bodyweight & Home", "⚡"),
-    ("Foam roller",              "Bodyweight & Home", "🛢️"),
-    ("Ab wheel",                 "Bodyweight & Home", "⭕"),
-    ("Dip bars",                 "Bodyweight & Home", "🤸"),
-    ("Suspension trainer",       "Bodyweight & Home", "🪢"),
-
-    # Free Weights
-    ("Dumbbells",                "Free Weights", "🏋️"),
-    ("Barbell",                  "Free Weights", "🏋️"),
-    ("Kettlebell",               "Free Weights", "🔔"),
-    ("EZ curl bar",              "Free Weights", "〰️"),
-    ("Weight plates",            "Free Weights", "⭕"),
-    ("Trap bar",                 "Free Weights", "⬡"),
-    ("Medicine ball",            "Free Weights", "⚽"),
-
-    # Benches & Racks
-    ("Flat bench",               "Benches & Racks", "🪑"),
-    ("Adjustable bench",         "Benches & Racks", "📐"),
-    ("Incline bench",            "Benches & Racks", "📐"),
-    ("Squat rack",               "Benches & Racks", "🏗️"),
-    ("Power rack",               "Benches & Racks", "🏗️"),
-    ("Landmine attachment",      "Benches & Racks", "🔧"),
-
-    # Gym Machines
-    ("Cable machine",            "Gym Machines", "🔗"),
-    ("Leg press",                "Gym Machines", "🦵"),
-    ("Lat pulldown",             "Gym Machines", "⬇️"),
-    ("Chest press machine",      "Gym Machines", "💪"),
-    ("Seated row machine",       "Gym Machines", "🔙"),
-    ("Leg extension",            "Gym Machines", "🦵"),
-    ("Leg curl machine",         "Gym Machines", "🦵"),
-    ("Shoulder press machine",   "Gym Machines", "⬆️"),
-    ("Hip abduction machine",    "Gym Machines", "🦵"),
-    ("Hip adduction machine",    "Gym Machines", "🦵"),
-    ("Smith machine",            "Gym Machines", "📍"),
-    ("Hack squat machine",       "Gym Machines", "🦵"),
-    ("Assisted pull-up machine", "Gym Machines", "🤝"),
-    ("Leverage machines",        "Gym Machines", "⚙️"),
-
-    # Cardio
-    ("Treadmill",                "Cardio", "🏃"),
-    ("Stationary bike",          "Cardio", "🚴"),
-    ("Elliptical",               "Cardio", "🔄"),
-    ("Rowing machine",           "Cardio", "🚣"),
-    ("Stair climber",            "Cardio", "🪜"),
-    ("Assault bike",             "Cardio", "💨"),
-    ("Swimming pool",            "Cardio", "🏊"),
-    ("Battle ropes",             "Cardio", "🪢"),
-
-    # Athletic / Functional
-    ("Plyo box",                 "Athletic / Functional", "📦"),
-    ("Sled",                     "Athletic / Functional", "🛷"),
-]
-
-
-def seed_equipment(session: Session) -> None:
-    """Insert new equipment by name — skips any that already exist."""
-    existing_names = set(r.name for r in session.exec(select(Equipment)).all())
-    added = 0
-    for name, category, icon in EQUIPMENT_DATA:
-        if name not in existing_names:
-            session.add(Equipment(
-                name=name,
-                category=category,
-                icon=icon,
-                is_custom=False,
-            ))
-            added += 1
-    session.commit()
-    if added:
-        print(f"[seed] inserted {added} new equipment items")
-
 
 # ─── Goal & Pace seed data ────────────────────────────────────────────────────
 

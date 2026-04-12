@@ -44,18 +44,52 @@ class EquipmentType(str, Enum):
 
 
 class MuscleGroup(str, Enum):
-    CHEST       = "chest"
-    BACK        = "back"
-    SHOULDERS   = "shoulders"
-    BICEPS      = "biceps"
-    TRICEPS     = "triceps"
-    QUADS       = "quads"
-    HAMSTRINGS  = "hamstrings"
-    GLUTES      = "glutes"
-    CALVES      = "calves"
-    CORE        = "core"
-    FULL_BODY   = "full_body"
-    CARDIO      = "cardio"
+    CHEST        = "chest"
+    BACK         = "back"
+    SHOULDERS    = "shoulders"
+    BICEPS       = "biceps"
+    TRICEPS      = "triceps"
+    QUADS        = "quads"
+    HAMSTRINGS   = "hamstrings"
+    GLUTES       = "glutes"
+    CALVES       = "calves"
+    CORE         = "core"
+    TRAPS        = "traps"
+    FOREARMS     = "forearms"
+    ADDUCTORS    = "adductors"
+    HIP_FLEXORS  = "hip_flexors"
+    FULL_BODY    = "full_body"
+    CARDIO       = "cardio"
+
+
+class MovementPattern(str, Enum):
+    SQUAT           = "squat"
+    HINGE           = "hinge"
+    LUNGE           = "lunge"
+    HORIZONTAL_PRESS = "horizontal_press"
+    VERTICAL_PRESS  = "vertical_press"
+    HORIZONTAL_PULL = "horizontal_pull"
+    VERTICAL_PULL   = "vertical_pull"
+    CARRY           = "carry"
+    ROTATION        = "rotation"
+    ANTI_ROTATION   = "anti_rotation"
+    ANTI_EXTENSION  = "anti_extension"
+    ISOLATION       = "isolation"
+    CARDIO          = "cardio"
+    MOBILITY        = "mobility"
+    PLYOMETRIC      = "plyometric"
+
+
+class ExerciseType(str, Enum):
+    STRENGTH = "strength"
+    CARDIO   = "cardio"
+    MOBILITY = "mobility"
+
+
+class EquipmentRole(str, Enum):
+    PRIMARY  = "primary"
+    SUPPORT  = "support"
+    OPTIONAL = "optional"
 
 
 class WorkoutSource(str, Enum):

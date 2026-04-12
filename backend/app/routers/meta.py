@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.enums import GoalType, GoalPace, Gender, MealType, EquipmentType, MuscleGroup, FoodCategory
-from app.models import Exercise, Food, Equipment, GoalOption, PaceOption
+from app.models import Exercise, Food, Equipment, ExerciseEquipment, GoalOption, PaceOption
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 

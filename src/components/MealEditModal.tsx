@@ -21,6 +21,7 @@ interface Props {
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
   onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
+  onToggleRoutine?: () => void;
 }
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
@@ -80,7 +81,7 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   return total;
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine }: Props) {
   const [foods,       setFoods]       = useState<string[]>(meal.foods);
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
@@ -206,7 +207,16 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={s.title}>{titleMap[mealType] ?? (mealType.startsWith('extra_') ? 'Extra Meal' : mealType)}</Text>
+          <View style={s.headerCenter}>
+            <Text style={s.title}>{titleMap[mealType] ?? (mealType.startsWith('extra_') ? 'Extra Meal' : mealType)}</Text>
+            {onToggleRoutine && (
+              <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
+                  {meal.isRoutine ? '📌 Everyday' : '○ Make Everyday'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.saveText}>Save</Text>
           </TouchableOpacity>
@@ -338,29 +348,35 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               </View>
             )}
 
-            <TextInput
-              style={s.searchInput}
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Search foods..."
-              placeholderTextColor={colors.textMuted}
-              returnKeyType="search"
-            />
+            <View style={s.searchRow}>
+              <TextInput
+                style={[s.searchInput, { flex: 1, marginBottom: 0 }]}
+                value={search}
+                onChangeText={(t) => { setSearch(t); setAiResults([]); }}
+                placeholder="Search foods..."
+                placeholderTextColor={colors.textMuted}
+                returnKeyType="search"
+                onSubmitEditing={authToken && search.length > 1 ? handleAiSearch : undefined}
+              />
+              {search.length > 0 && (
+                <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={s.clearBtnText}>✕</Text>
+                </TouchableOpacity>
+              )}
+              {authToken && search.length > 1 && (
+                <TouchableOpacity
+                  style={[s.aiSearchInlineBtn, aiSearchLoading && { opacity: 0.5 }]}
+                  onPress={handleAiSearch}
+                  disabled={aiSearchLoading}>
+                  {aiSearchLoading
+                    ? <ActivityIndicator size="small" color="#FFFFFF" />
+                    : <Text style={s.aiSearchInlineBtnText}>AI Search</Text>}
+                </TouchableOpacity>
+              )}
+            </View>
 
             {filteredCategories.length === 0 && search.length > 0 && !aiSearchLoading && aiResults.length === 0 && (
-              <Text style={s.emptyText}>No local matches for "{search}"</Text>
-            )}
-
-            {/* AI Food Search */}
-            {authToken && search.length > 1 && (
-              <TouchableOpacity
-                style={[s.aiSearchBtn, aiSearchLoading && { opacity: 0.5 }]}
-                onPress={handleAiSearch}
-                disabled={aiSearchLoading}>
-                {aiSearchLoading
-                  ? <ActivityIndicator size="small" color={colors.primary} />
-                  : <Text style={s.aiSearchBtnText}>Search "{search}" with AI</Text>}
-              </TouchableOpacity>
+              <Text style={s.emptyText}>No local matches — tap AI Search to find it</Text>
             )}
 
             {aiResults.length > 0 && (
@@ -412,7 +428,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 16, paddingTop: 56, paddingBottom: 14,
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
+  headerCenter: { alignItems: 'center', flex: 1 },
   title:      { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  routineBadge: { marginTop: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  routineBadgeText: { fontSize: 11, fontWeight: '600', color: colors.textMuted },
+  routineBadgeTextActive: { color: colors.primary },
   cancelText: { fontSize: 15, color: colors.textSecondary },
   saveText:   { fontSize: 15, fontWeight: '700', color: colors.primary },
 
@@ -480,11 +500,14 @@ const s = StyleSheet.create({
   },
   scanBtnText: { fontSize: 13, fontWeight: '600', color: colors.primary },
 
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
   searchInput: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
     padding: 12, fontSize: 14, color: colors.textPrimary,
     backgroundColor: colors.surface, marginBottom: 14,
   },
+  clearBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  clearBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '700' },
 
   catSection: { marginBottom: 16 },
   catLabel:   { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8 },
@@ -498,13 +521,14 @@ const s = StyleSheet.create({
   foodChipName: { fontSize: 13, color: colors.textPrimary, fontWeight: '500' },
   foodChipCal:  { fontSize: 11, color: colors.textMuted },
 
-  // AI search
-  aiSearchBtn: {
-    backgroundColor: colors.primary + '18',
-    borderRadius: radius.md, borderWidth: 1, borderColor: colors.primary + '44',
-    paddingVertical: 10, paddingHorizontal: 16, alignItems: 'center', marginBottom: 16,
+  // AI search — inline button next to search input
+  aiSearchInlineBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    paddingVertical: 10, paddingHorizontal: 14,
+    alignItems: 'center', justifyContent: 'center',
   },
-  aiSearchBtnText: { fontSize: 13, fontWeight: '600', color: colors.primary },
+  aiSearchInlineBtnText: { fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
   aiResultRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.surface, borderRadius: radius.md,

@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+split_ai.py
+reset_db.py
+reseed.py

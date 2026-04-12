@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16
+    container_name: makros-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: makros
+      POSTGRES_PASSWORD: makros
+      POSTGRES_DB: makros
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    volumes:
+      - makros-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U makros"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: makros-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override DATABASE_URL to use the Docker network hostname
+      DATABASE_URL: postgresql://makros:makros@db:5432/makros
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  makros-pgdata:
