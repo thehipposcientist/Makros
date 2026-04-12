@@ -1,19 +1,82 @@
-.PHONY: start backend frontend install
+.PHONY: start tunnel stop reset-db wait-backend
 
-# Start both backend and frontend (opens backend in a new window)
 start:
-	start "Makros Backend" cmd /k "cd /d $(CURDIR)/backend && venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-	npx expo start
-
-# Start backend only
-backend:
-	cd backend && venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# Start frontend only
-frontend:
+	@echo ""
+	@echo "  ███╗   ███╗ █████╗ ██╗  ██╗██████╗  ██████╗ ███████╗"
+	@echo "  ████╗ ████║██╔══██╗██║ ██╔╝██╔══██╗██╔═══██╗██╔════╝"
+	@echo "  ██╔████╔██║███████║█████╔╝ ██████╔╝██║   ██║███████╗"
+	@echo "  ██║╚██╔╝██║██╔══██║██╔═██╗ ██╔══██╗██║   ██║╚════██║"
+	@echo "  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║  ██║╚██████╔╝███████║"
+	@echo "  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝"
+	@echo ""
+	@echo "Starting Makros..."
+	@echo ""
+	@echo "[1/3] Starting PostgreSQL + Backend (Docker Compose)..."
+	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
+	@echo "      Done."
+	@echo ""
+	@echo "[2/3] Waiting for backend to be ready..."
+	@$(MAKE) wait-backend
+	@echo "      Done."
+	@echo ""
+	@echo "[3/3] Starting Expo (LAN mode)..."
+	@echo "      Scan the QR code with Expo Go on your phone."
+	@echo "      Both devices must be on the same WiFi network."
+	@echo ""
 	npx expo start --clear
 
-# Install all dependencies
-install:
-	npm install
-	cd backend && pip install -r requirements.txt
+tunnel:
+	@echo ""
+	@echo "Starting Makros (TUNNEL mode)..."
+	@echo ""
+	@echo "NOTE: Tunnel mode requires a free ngrok account."
+	@echo "      If you see an error, run: npx ngrok authtoken YOUR_TOKEN"
+	@echo ""
+	@echo "[1/3] Starting PostgreSQL + Backend (Docker Compose)..."
+	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
+	@echo "      Done."
+	@echo ""
+	@echo "[2/3] Waiting for backend to be ready..."
+	@$(MAKE) wait-backend
+	@echo "      Done."
+	@echo ""
+	@echo "[3/3] Starting Expo (tunnel)..."
+	npx expo start --clear --tunnel
+
+stop:
+	@echo ""
+	@echo "Stopping Makros..."
+	@echo ""
+	@echo "[1/2] Stopping Expo / Metro (port 8081)..."
+	@lsof -ti:8081 | xargs kill -9 2>/dev/null || true
+	@echo "      Done."
+	@echo ""
+	@echo "[2/2] Stopping PostgreSQL + Backend (Docker Compose)..."
+	@docker compose down
+	@echo "      Done."
+	@echo ""
+	@echo "All services stopped."
+
+reset-db:
+	@echo ""
+	@echo "  WARNING: This will delete ALL data and recreate the database from scratch."
+	@echo ""
+	@read -p "Are you sure? (y/N): " confirm; \
+	if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then echo "Cancelled."; exit 1; fi
+	@echo ""
+	@echo "[1/3] Stopping everything..."
+	@docker compose down -v
+	@echo "      Done."
+	@echo ""
+	@echo "[2/3] Rebuilding and starting fresh..."
+	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
+	@echo "      Done."
+	@echo ""
+	@echo "[3/3] Waiting for backend to seed database..."
+	@$(MAKE) wait-backend
+	@echo "      Done."
+	@echo ""
+	@echo "Database reset complete. Run 'make start' to launch the app."
+
+wait-backend:
+	@until curl -sf http://localhost:8000/health >/dev/null 2>&1; do sleep 2; done
