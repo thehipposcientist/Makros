@@ -63,6 +63,199 @@ def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
 
 
 
+def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]:
+    """Build the exercise library the AI is allowed to choose from.
+
+    Filters `SEED_EXERCISES` by the user's owned equipment: an exercise is
+    eligible if every `required=True` equipment entry on it is in the
+    user's owned set, OR the exercise has no required equipment (pure
+    bodyweight). Bodyweight-bucket exercises are always eligible.
+
+    Each returned entry is the minimum the prompt + canonicalizer need:
+        {
+          "slug": str,
+          "name": str,                 # canonical display name (e.g. "Barbell Squat")
+          "primary_muscle": str,
+          "equipment_label": str,      # human-readable equipment list
+          "equipment_slugs": list[str],
+        }
+
+    Without this filter the AI used to invent exercises like "Squats" with
+    no qualifier or "Leg Press" listed under the leg extension machine.
+    Forcing the choice into a closed set kills both classes of bug.
+    """
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    owned = {s for s in (equipment_slugs or []) if s}
+    # Also accept the legacy bucket strings so a user with `equipment:
+    # ["bodyweight"]` still gets bodyweight exercises even though
+    # "bodyweight" isn't an Equipment slug.
+    owned_buckets = {"bodyweight", "home", "dumbbells", "gym", "other"} & set(equipment_slugs or [])
+
+    # Equipment slug → display name lookup (so the prompt can show humans
+    # something other than "leg_press_machine").
+    slug_to_name = {e["slug"]: e["name"] for e in SEED_EQUIPMENT}
+
+    library: list[dict] = []
+    for ex in SEED_EXERCISES:
+        eq_entries = ex.get("equipment") or []
+        required_slugs = [e["slug"] for e in eq_entries if e.get("required")]
+
+        # Eligibility:
+        #   - bodyweight bucket → always eligible (no required equipment, or
+        #     all required equipment is owned)
+        #   - other buckets → every required slug must be in `owned`
+        bucket = ex.get("equipment_bucket")
+        if required_slugs and not all(s in owned for s in required_slugs):
+            # Required equipment missing — skip unless it's bodyweight
+            # bucket AND the user owns "bodyweight" as a legacy bucket.
+            if not (bucket == "bodyweight" and "bodyweight" in owned_buckets):
+                continue
+
+        # Build a human-readable equipment label from the primary + support
+        # entries. Optional entries are deliberately omitted to keep the
+        # prompt tight.
+        labels = []
+        for e in eq_entries:
+            if e.get("role") in ("primary", "support") and e.get("required", True):
+                labels.append(slug_to_name.get(e["slug"], e["slug"]))
+        if not labels:
+            labels.append("bodyweight")
+
+        library.append({
+            "slug": ex["slug"],
+            "name": ex["name"],
+            "primary_muscle": ex.get("primary_muscle", ""),
+            "equipment_label": ", ".join(labels),
+            "equipment_slugs": [e["slug"] for e in eq_entries],
+        })
+    return library
+
+
+def _normalize_token(s: str) -> str:
+    return " ".join(s.lower().replace("-", " ").replace("(", " ").replace(")", " ").split())
+
+
+# Tokens that mark a library entry as a SPECIALIZED variant rather than a
+# base movement. When the AI uses a generic name ("squats", "rows"), we
+# don't want to promote it to the jump/single-leg/pause variant by accident.
+_VARIANT_TOKENS = {
+    "jump", "jumping", "single", "alternating", "pause", "tempo", "deficit",
+    "decline", "incline", "weighted", "banded", "explosive", "depth", "tuck",
+    "split", "lateral", "curtsy", "reverse",
+}
+
+# Tokens that mark an entry as a DEFAULT / canonical loaded variant. When
+# the AI says "Squats" we prefer the barbell version over goblet → dumbbell
+# → bodyweight when all three would otherwise tie.
+_PRIMARY_LOAD_PRIORITY = ["barbell", "dumbbell", "machine", "cable", "kettlebell", "bodyweight"]
+
+
+def _singular_token(t: str) -> str:
+    return t[:-1] if len(t) > 3 and t.endswith("s") else t
+
+
+def _match_library_exercise(name: str, library: list[dict]) -> dict | None:
+    """Resolve an AI-returned exercise name to a real library entry.
+
+    Three-tier match:
+      1. Exact normalized name
+      2. All AI-name tokens (singular-normalized) are a subset of a library
+         entry's tokens — picks the BEST candidate by score, not the first
+      3. Largest token-overlap fallback for fuzzy cases
+
+    Tier-2 scoring prefers:
+      * fewer specialty-variant tokens (no "jump", "single", "pause", etc.
+        unless the AI name explicitly includes them)
+      * smaller token count (closer to a base movement)
+      * higher load-priority (barbell > dumbbell > machine > bodyweight)
+    """
+    if not name or not library:
+        return None
+    target = _normalize_token(name)
+    target_tokens = {_singular_token(t) for t in target.split()}
+
+    # Tier 1: exact normalized match (still uses raw tokens)
+    for ex in library:
+        if _normalize_token(ex["name"]) == target:
+            return ex
+
+    # Tier 2: AI tokens (singular-normalized) are a subset of library tokens.
+    # Score each candidate; lowest score wins.
+    candidates: list[tuple[tuple, dict]] = []
+    for ex in library:
+        ex_tokens_raw = set(_normalize_token(ex["name"]).split())
+        ex_tokens = {_singular_token(t) for t in ex_tokens_raw}
+        if not target_tokens or not target_tokens.issubset(ex_tokens):
+            continue
+        # Penalty for variant tokens that the AI didn't ask for.
+        unwanted_variants = (ex_tokens - target_tokens) & _VARIANT_TOKENS
+        variant_penalty = len(unwanted_variants)
+        # Smaller token count → closer to a base movement.
+        size_penalty = len(ex_tokens) - len(target_tokens)
+        # Load priority: lower index = preferred (barbell first).
+        load_index = len(_PRIMARY_LOAD_PRIORITY)  # default: worst
+        for i, load in enumerate(_PRIMARY_LOAD_PRIORITY):
+            if load in ex_tokens:
+                load_index = i
+                break
+        score = (variant_penalty, size_penalty, load_index)
+        candidates.append((score, ex))
+    if candidates:
+        candidates.sort(key=lambda c: c[0])
+        return candidates[0][1]
+
+    # Tier 3: best overlap fallback
+    best: tuple[int, dict] | None = None
+    for ex in library:
+        ex_tokens = {_singular_token(t) for t in _normalize_token(ex["name"]).split()}
+        if not ex_tokens:
+            continue
+        overlap = len(target_tokens & ex_tokens)
+        if overlap < 2:
+            continue
+        if overlap / max(len(target_tokens), 1) < 0.5:
+            continue
+        if best is None or overlap > best[0]:
+            best = (overlap, ex)
+    return best[1] if best else None
+
+
+def canonicalize_workout_exercises(workout_data: dict, library: list[dict]) -> dict:
+    """Walk every day's exercises and rewrite each to match a library entry.
+
+    For each exercise: try to resolve it to a library entry. If matched,
+    overwrite the `name` and `equipment` fields with the canonical values.
+    If not matched, log loudly but keep the AI's output as-is so we never
+    drop an exercise outright.
+
+    This kills the "Leg Press shown on the leg extension machine" class of
+    bug because the equipment string can no longer drift from the seed.
+    """
+    if not library:
+        return workout_data
+    wp = workout_data.get("workout_plan") or {}
+    days = wp.get("days") or []
+    rewrites = 0
+    misses = 0
+    for day in days:
+        for ex in day.get("exercises") or []:
+            ai_name = str(ex.get("name") or "")
+            match = _match_library_exercise(ai_name, library)
+            if match:
+                if ai_name != match["name"]:
+                    rewrites += 1
+                    print(f"[workout-canonicalize] '{ai_name}' → '{match['name']}'")
+                ex["name"] = match["name"]
+                ex["equipment"] = match["equipment_label"]
+            else:
+                misses += 1
+                print(f"[workout-canonicalize] no match for '{ai_name}' — keeping AI output")
+    if rewrites or misses:
+        print(f"[workout-canonicalize] {rewrites} rewritten, {misses} unmatched")
+    return workout_data
+
+
 def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_tokens: int = 2000) -> dict:
     """Synchronous OpenAI call for the workout plan (run in a thread)."""
     last_error: Exception | None = None
@@ -562,6 +755,15 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     _m = model_plan_generation()
     print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
 
+    # Build the canonical exercise library for this user. Without this the
+    # AI invents exercise names ("Squats") and equipment strings ("Leg Press
+    # on the leg extension machine"). With it, the AI is constrained to a
+    # closed set and we canonicalize the response below.
+    workout_library = build_user_exercise_library(req.equipment)
+    if not req.exerciseLibrary and workout_library:
+        req.exerciseLibrary = [
+            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
+        ]
     workout_prompt = build_workout_prompt(req)
 
     # Deterministic target macros (source of truth for the assembler).
@@ -596,6 +798,10 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     )
     enriched = nutrition_bundle["enriched"]
     nutrition_data = nutrition_bundle["nutrition"]
+
+    # Canonicalize the AI workout response against the seed library so the
+    # client always sees real seed names + equipment instead of AI freeform.
+    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
 
     plans_list = nutrition_data.get("nutrition_plans") or []
     # Back-compat fallback in case the model still emits the legacy A/B/C keys.
@@ -654,10 +860,19 @@ async def run_workout_only_generation(plan_req: PlanRequest) -> dict:
     client = OpenAI(api_key=api_key)
     _m = model_plan_update()
     print(f"[plan-gen workout] goal={plan_req.goal}, days={plan_req.daysPerWeek}")
+
+    # Same library + canonicalize pipeline as the full plan generator.
+    workout_library = build_user_exercise_library(plan_req.equipment)
+    if not plan_req.exerciseLibrary and workout_library:
+        plan_req.exerciseLibrary = [
+            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
+        ]
+
     # 1800-token baseline (retry at 2300) — enough for a 6-day plan with the
     # new verbose trainerNote. 800 was the old cap and was truncating on
     # bigger plans, which turned into "failed after 2 attempts" errors.
     workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 1800)
+    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
     return {
         "trainerNote":  workout_data.get("trainerNote", ""),
         "workout_plan": workout_data["workout_plan"],

@@ -240,11 +240,25 @@ def build_workout_prompt(req: PlanRequest) -> str:
     )
 
     # ── Exercise library constraint ───────────────────────────────────────────
+    # The library is a closed set of exercises the user can actually do
+    # given their owned equipment. Each line is `Name → Equipment` so the
+    # AI can't invent generic names ("Squats") or hallucinate machines
+    # ("Leg Press on the leg extension machine"). The post-processing pass
+    # in `canonicalize_workout_exercises` matches the AI response back
+    # against this list and rewrites any drift.
     if req.exerciseLibrary:
-        lib_names = [ex.get("name", "") for ex in req.exerciseLibrary if ex.get("name")]
+        lib_lines = []
+        for ex in req.exerciseLibrary:
+            name = ex.get("name", "")
+            if not name:
+                continue
+            eq = ex.get("equipment", "")
+            lib_lines.append(f"  - {name}" + (f" → {eq}" if eq else ""))
         library_str = (
-            "EXERCISE LIBRARY CONSTRAINT: You MUST only choose exercises from this list — "
-            "do not invent exercises outside it:\n" + ", ".join(lib_names)
+            "EXERCISE LIBRARY — you MUST choose exercises EXACTLY from this list. "
+            "Use the name verbatim and do NOT invent variants. Each line shows the "
+            "equipment that exercise requires:\n"
+            + "\n".join(lib_lines)
         )
     else:
         library_str = (
