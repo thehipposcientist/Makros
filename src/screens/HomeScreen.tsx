@@ -12,6 +12,7 @@ import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
+  , loadPreservedCompletedWorkouts,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
@@ -1000,6 +1001,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
+  const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
 
   // Skip reason modal
   const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
@@ -1145,6 +1147,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const summaries = await loadWorkoutSummaries();
     const todaySummaryEntry = summaries.find(s => s.date.startsWith(today)) ?? null;
     setTodaySummary(todaySummaryEntry);
+
+    // Load preserved completed workouts so plan regeneration can't replace
+    // a day the user already finished.
+    setPreservedWorkouts(await loadPreservedCompletedWorkouts());
   };
 
   const loadPlans = async (profile: UserProfile) => {
@@ -2080,7 +2086,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
     ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
     ?? userProfile.goal;
-  const schedule  = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates) : [];
+  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates) : [];
+  // Overlay preserved completed workouts: any date the user has already
+  // finished keeps its original WorkoutDay snapshot, so a plan regen can't
+  // swap a done day's exercises out from under them.
+  const schedule = scheduleRaw.map(item => {
+    if (item.isRest) return item;
+    const k = dateKey(item.date);
+    const preserved = preservedWorkouts[k];
+    if (preserved) return { ...item, workout: preserved };
+    return item;
+  });
   const mealDays = getNextMealDays(7);
 
   const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow'].includes(userProfile.themePreference ?? 'midnight');  // blossom is now dark

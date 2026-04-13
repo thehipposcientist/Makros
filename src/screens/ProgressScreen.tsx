@@ -93,6 +93,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const meta = useMetaData();
   const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'summaries' | 'body'>('prs');
   const fitnessScoreRef = useRef<ViewShot>(null);
+  const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
@@ -141,6 +142,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     loadHealthSummary().then(setHealthSummary);
     loadHealthScore().then(setHealthScore);
   }, []);
+
+  const handleShareBodyScan = async () => {
+    try {
+      const ref = bodyScanShareRef.current as any;
+      if (!ref?.capture) return;
+      const uri = await ref.capture();
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Body Scan' });
+      } else {
+        Alert.alert('Saved', 'Screenshot saved to your device.');
+      }
+    } catch {
+      Alert.alert('Error', 'Could not share the body scan.');
+    }
+  };
 
   const handleShareFitnessScore = async () => {
     try {
@@ -853,6 +870,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
           {/* Latest result */}
           {bodyScanResult && !bodyScanLoading && (
+            <>
+            <ViewShot ref={bodyScanShareRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.bodyScanResultCard}>
               <View style={styles.bodyScanResultHeader}>
                 <View>
@@ -894,6 +913,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {bodyScanResult.disclaimer}
               </Text>
             </View>
+            </ViewShot>
+            <TouchableOpacity
+              onPress={handleShareBodyScan}
+              style={{
+                marginTop: 10, alignSelf: 'center', paddingHorizontal: 18, paddingVertical: 10,
+                borderRadius: 999, backgroundColor: tc.primary,
+              }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Share Result</Text>
+            </TouchableOpacity>
+            </>
           )}
 
           {/* History */}

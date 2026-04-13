@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion } from '../types';
+import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay } from '../types';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -7,6 +7,7 @@ const SUMMARIES_KEY      = 'workoutSummaries';
 const GOAL_HIST_KEY      = 'goalHistory';
 const PLAN_CHANGES_KEY   = 'planChangeHistory';
 const MEAL_ROUTINES_KEY  = 'mealRoutines';
+const PRESERVED_WORKOUTS_KEY = 'preservedCompletedWorkouts';
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -59,6 +60,36 @@ export async function isTodayWorkoutDone(): Promise<boolean> {
   const today = todayKey();
   const history = await loadWorkoutHistory();
   return history.some(s => s.date.startsWith(today) && s.completed);
+}
+
+// ── Preserved completed workouts ──────────────────────────────────────────────
+// When the user finishes a workout, snapshot the exact WorkoutDay they
+// completed. Next time the plan regenerates, HomeScreen overlays this on the
+// schedule for that date so the completed day never gets replaced with a
+// different workout from the new plan.
+
+type PreservedWorkoutMap = Record<string, WorkoutDay>;
+
+export async function savePreservedCompletedWorkout(date: string, workout: WorkoutDay): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(PRESERVED_WORKOUTS_KEY);
+    const all: PreservedWorkoutMap = raw ? JSON.parse(raw) : {};
+    all[date] = workout;
+    // Keep 30 days to bound storage.
+    const keys = Object.keys(all).sort().reverse().slice(0, 30);
+    const pruned: PreservedWorkoutMap = {};
+    keys.forEach(k => { pruned[k] = all[k]; });
+    await AsyncStorage.setItem(PRESERVED_WORKOUTS_KEY, JSON.stringify(pruned));
+  } catch {}
+}
+
+export async function loadPreservedCompletedWorkouts(): Promise<PreservedWorkoutMap> {
+  try {
+    const raw = await AsyncStorage.getItem(PRESERVED_WORKOUTS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
 }
 
 // ── Skipped days ──────────────────────────────────────────────────────────────

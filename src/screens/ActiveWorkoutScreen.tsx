@@ -9,7 +9,7 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -976,6 +976,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       completed: true,
     };
     await saveWorkoutSession(session);
+    // Snapshot the exact WorkoutDay the user just finished so plan
+    // regeneration can't replace today's card with a different workout.
+    await savePreservedCompletedWorkout(dateKey(now), workout);
     clearRestState();
     setFinishedSession(session);
     setFinishModalVisible(false);
