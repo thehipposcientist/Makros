@@ -354,6 +354,7 @@ export async function getAIPlans(
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations,
     mealRoutine:            mealRoutineText,
+    mealVariety:            Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
     customMacros:           profile.customMacros ?? undefined,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -445,6 +446,7 @@ export async function getAINutritionPlan(
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            (profile as any).allergies ?? [],
     mealRoutine:          mealRoutineText,
+    mealVariety:          Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
     customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -797,6 +799,29 @@ export async function getGuardrails(token: string) {
 
 export async function getCoachMemory(token: string) {
   return request<any[]>('/profile/coach-memory', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Calorie reference ranges ────────────────────────────────────────────────
+
+export interface CalorieRanges {
+  bmr: number;
+  activity_multiplier: number;
+  maintenance_calories: number;
+  cut_calories: number;
+  bulk_calories: number;
+  cut_protein_g: number;
+  maintain_protein_g: number;
+  bulk_protein_g: number;
+}
+
+/** Cut / maintain / bulk calorie reference card for the signed-in user.
+ *  Computed server-side by the same calorie_calculator module that drives
+ *  the meal plan targets — read-only preview, doesn't change the user's
+ *  actual goal. */
+export async function getCalorieRanges(token: string): Promise<CalorieRanges> {
+  return request('/profile/calorie-ranges', {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

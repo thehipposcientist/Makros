@@ -82,13 +82,26 @@ def enrich_foods_with_macros(
 
     prompt = (
         "Convert the following food items and/or meal routine into structured nutrition data.\n"
-        "For each food, estimate a standard serving size and macros per serving.\n"
-        "For meal routine entries, parse each described meal into individual food items with macros.\n\n"
+        "For each food, return a STANDARD SERVING as an explicit numeric quantity and a\n"
+        "concrete unit. NEVER use the word 'serving' as a unit — always pick one of:\n"
+        "  g, oz, lb, ml, fl_oz, cup, tbsp, tsp, piece, slice, scoop\n"
+        "Guidelines for choosing the unit:\n"
+        "  - Meats, fish, tofu → oz (e.g. 6 oz chicken breast)\n"
+        "  - Cooked grains, pasta, rice, oatmeal → cup\n"
+        "  - Dry grains (oats, rice uncooked) → cup\n"
+        "  - Eggs, fruit (apple, banana, orange) → piece\n"
+        "  - Nuts, seeds, cheese chunks → oz\n"
+        "  - Protein powder → scoop\n"
+        "  - Bread, deli meat → slice\n"
+        "  - Oils, dressings, nut butters → tbsp\n"
+        "  - Milk, yogurt, liquids → cup or fl_oz\n"
+        "  - Vegetables → cup\n"
+        "Macros must match the quantity + unit exactly (USDA values).\n\n"
         + "\n\n".join(parts) + "\n\n"
         "Return JSON with this exact schema:\n"
         '{\n'
         '  "foods": [\n'
-        '    {"name": "chicken breast", "serving": "6 oz (170g)", "calories": 280, "protein": 53, "carbs": 0, "fat": 6}\n'
+        '    {"name": "chicken breast", "quantity": 6, "unit": "oz", "calories": 280, "protein": 53, "carbs": 0, "fat": 6}\n'
         '  ],\n'
         '  "routine_meals": [\n'
         '    {\n'
@@ -308,190 +321,71 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     Compute TDEE via Mifflin-St Jeor, then derive a calorie target and
     macro split appropriate for the user's goal.
 
-    If targetWeightLbs + timelineWeeks are both present, we derive the
-    required weekly rate, clamp it to safe ranges, and convert to a daily
-    adjustment.  Otherwise we fall back to the pace-based table.
+    Thin delegator — all the actual math lives in
+    `app/services/calorie_calculator.py` and the goal-specific params
+    live in `app/services/goal_nutrition_params.py`. This function just
+    builds the inputs and re-shapes the output into the dict shape the
+    prompt builder expects (with per-meal splits).
     """
+    from app.services.calorie_calculator import (
+        CalorieInputs, CustomMacroOverrides, compute_targets,
+    )
+
     ps = req.physicalStats
-    weight_kg = ps.weightLbs / 2.205
-    height_cm = (ps.heightFeet * 12 + ps.heightInches) * 2.54
 
-    # Mifflin-St Jeor BMR
-    base = 10 * weight_kg + 6.25 * height_cm - 5 * ps.age
-    if ps.gender == "male":
-        bmr = base + 5
-    elif ps.gender == "female":
-        bmr = base - 161
-    else:
-        bmr = base - 78  # average for nonbinary / prefer not to say
+    # Build the calculator's input dataclass from the PlanRequest shape.
+    # PlanRequest stores the user's goal config under slightly different
+    # field names; this is the ONLY place that bridges the two.
+    overrides = None
+    if req.customMacros:
+        overrides = CustomMacroOverrides(
+            calories=req.customMacros.calories,
+            protein=req.customMacros.protein,
+            carbs=req.customMacros.carbs,
+            fat=req.customMacros.fat,
+        )
+    calc_inputs = CalorieInputs(
+        weight_lbs=ps.weightLbs,
+        height_feet=ps.heightFeet,
+        height_inches=ps.heightInches,
+        age=ps.age,
+        gender=ps.gender,
+        training_days_per_week=req.daysPerWeek,
+        session_minutes=getattr(req, "workoutDurationMinutes", 60) or 60,
+        goal_id=req.goal,
+        pace=req.goalDetails.pace,
+        target_weight_lbs=req.goalDetails.targetWeightLbs,
+        timeline_weeks=req.goalDetails.timelineWeeks,
+        custom_overrides=overrides,
+    )
 
-    # Activity multiplier based on training days
-    if req.daysPerWeek <= 1:
-        multiplier = 1.2
-    elif req.daysPerWeek <= 3:
-        multiplier = 1.375
-    elif req.daysPerWeek <= 5:
-        multiplier = 1.55
-    else:
-        multiplier = 1.725
+    targets = compute_targets(calc_inputs)
 
-    tdee = round(bmr * multiplier)
+    # Diagnostic log — lets us (and the user) verify that the numbers
+    # flowing into the prompt match the user's profile + goal. If the
+    # app ever displays calories that don't match this line, the drift
+    # happened downstream (in the AI response or the client-side sum),
+    # not in our calculator.
+    print(
+        f"[compute_tdee_and_targets] goal={req.goal} pace={req.goalDetails.pace} "
+        f"weight={ps.weightLbs}lb days/wk={req.daysPerWeek} → "
+        f"bucket={targets.bucket_name} bmr={targets.bmr} tdee={targets.tdee} "
+        f"kcal={targets.calories} protein={targets.protein_g}g "
+        f"carbs={targets.carbs_g}g fat={targets.fat_g}g "
+        f"override={targets.override_applied} floor={targets.min_calories_enforced} "
+        f"[{targets.rate_summary}]"
+    )
 
-    goal = req.goal
-    pace = req.goalDetails.pace
-    goal_rate_summary: str
-
-    # ── Normalise goal id to a nutrition bucket ─────────────────────────────
-    # New hierarchical IDs map to the same calorie/macro logic via category.
-    _DEFICIT_GOALS = {
-        "fat_loss", "toning",                                      # legacy
-        "lose_fat", "get_lean", "cut", "preserve_muscle_cutting",  # new
-    }
-    _SURPLUS_MUSCLE_GOALS = {
-        "muscle_gain",                                                     # legacy
-        "build_muscle", "lean_bulk", "gain_weight", "improve_aesthetics",  # new
-        "build_glutes", "build_upper_body", "build_lower_body",
-        "build_arms", "build_shoulders",
-    }
-    _RECOMP_GOALS = {"body_recomp", "maintain", "maintain_physique"}
-    _STRENGTH_GOALS = {
-        "strength",                                                        # legacy
-        "build_strength", "increase_overall", "improve_1rm", "powerlifting",
-        "improve_squat", "improve_bench", "improve_deadlift", "improve_ohp",
-        "improve_pullups", "improve_grip", "functional_strength",
-        "explosive_strength", "relative_strength",
-    }
-    _ENDURANCE_GOALS = {
-        "endurance",                                                       # legacy
-        "improve_cardio", "improve_conditioning", "aerobic_base",
-        "improve_vo2", "increase_stamina", "running_fitness",
-        "train_5k", "train_10k", "train_half", "train_marathon",
-        "sprint_speed", "interval_perf", "hiking_endurance",
-        "cycling_endurance", "rowing_endurance", "swimming_endurance",
-        "work_capacity",
-    }
-    _ATHLETIC_GOALS = {
-        "athletic_performance",                                            # legacy
-        "improve_athleticism", "improve_speed", "improve_agility",
-        "improve_power", "improve_vertical", "improve_acceleration",
-        "improve_cod", "improve_coordination", "improve_balance",
-        "sport_performance", "offseason_training", "inseason_maintenance",
-        "return_to_sport",
-    }
-
-    # ── Try target-weight / timeline path first ──────────────────────────────
-    target_lbs = req.goalDetails.targetWeightLbs
-    timeline_wk = req.goalDetails.timelineWeeks
-
-    if target_lbs is not None and timeline_wk is not None and timeline_wk > 0:
-        raw_delta_lbs = target_lbs - ps.weightLbs          # positive = gain, negative = loss
-        raw_rate = raw_delta_lbs / timeline_wk              # lbs/week
-
-        # Clamp per goal direction
-        if goal in _DEFICIT_GOALS:
-            clamped_rate = max(-_MAX_LOSS_RATE, min(raw_rate, 0.0))
-        elif goal in _SURPLUS_MUSCLE_GOALS:
-            clamped_rate = max(0.0, min(raw_rate, _MAX_GAIN_RATE))
-        elif goal in _RECOMP_GOALS:
-            clamped_rate = max(-0.25, min(raw_rate, 0.25))   # near-maintenance band
-        elif goal in _STRENGTH_GOALS:
-            clamped_rate = max(0.0, min(raw_rate, _MAX_GAIN_RATE * 0.6))  # mild surplus
-        else:
-            clamped_rate = max(-0.5, min(raw_rate, 0.5))
-
-        daily_adjustment = round((clamped_rate * _CALS_PER_LB) / 7)
-
-        if abs(clamped_rate) < 0.05:
-            goal_rate_summary = f"Maintenance calories — target weight is close to current weight."
-        elif clamped_rate < 0:
-            goal_rate_summary = (
-                f"Targeting {abs(clamped_rate):.2f} lb/week loss "
-                f"({timeline_wk} weeks to reach {target_lbs} lbs)."
-            )
-        else:
-            goal_rate_summary = (
-                f"Targeting {clamped_rate:.2f} lb/week gain "
-                f"({timeline_wk} weeks to reach {target_lbs} lbs)."
-            )
-
-    else:
-        # ── Fallback: pace-based adjustment table ────────────────────────────
-        # Map goal → bucket key for the pace table
-        if goal in _DEFICIT_GOALS:
-            _bucket = "fat_loss"
-        elif goal in _SURPLUS_MUSCLE_GOALS:
-            _bucket = "muscle_gain"
-        elif goal in _RECOMP_GOALS:
-            _bucket = "body_recomp"
-        elif goal in _STRENGTH_GOALS:
-            _bucket = "strength"
-        elif goal in _ENDURANCE_GOALS:
-            _bucket = "endurance"
-        elif goal in _ATHLETIC_GOALS:
-            _bucket = "athletic_performance"
-        else:
-            _bucket = goal  # fallback for any unrecognised id
-
-        pace_adjustments: dict[str, dict[str, int]] = {
-            "fat_loss":             {"conservative": -250, "moderate": -500, "aggressive": -750},
-            "muscle_gain":          {"conservative":  150, "moderate":  300, "aggressive":  500},
-            "body_recomp":          {"conservative": -100, "moderate":    0, "aggressive":  100},
-            "strength":             {"conservative":  200, "moderate":  350, "aggressive":  500},
-            "endurance":            {"conservative":  100, "moderate":  200, "aggressive":  300},
-            "athletic_performance": {"conservative":  150, "moderate":  250, "aggressive":  400},
-        }
-        daily_adjustment = pace_adjustments.get(_bucket, {}).get(pace, 0)
-        pace_label = {"conservative": "slow", "moderate": "moderate", "aggressive": "fast"}.get(pace, pace)
-        goal_rate_summary = f"Using {pace_label} pace adjustment ({daily_adjustment:+d} cal/day from TDEE)."
-
-    calories = max(_MIN_CALORIES, tdee + daily_adjustment)
-
-    # ── Protein (g/lb bodyweight, goal-specific) ─────────────────────────────
-    if goal in _SURPLUS_MUSCLE_GOALS | _RECOMP_GOALS | _STRENGTH_GOALS:
-        protein_per_lb = 1.0
-    elif goal in _DEFICIT_GOALS:
-        protein_per_lb = 0.9
-    elif goal in _ENDURANCE_GOALS:
-        protein_per_lb = 0.8
-    else:  # health, lifestyle, athletic, etc.
-        protein_per_lb = 0.75
-
-    protein = round(ps.weightLbs * protein_per_lb)
-    protein_cals = protein * 4
-
-    # ── Fat (floor at 0.3 g/lb) ──────────────────────────────────────────────
-    fat_floor_g   = math.ceil(ps.weightLbs * 0.3)
-    fat_floor_cal = fat_floor_g * 9
-
-    # ── Carbs from remaining calories ────────────────────────────────────────
-    remaining_for_carbs_and_fat = calories - protein_cals
-    # Tentative fat: 30 % of total calories, but not below floor
-    fat_target_cal = max(fat_floor_cal, round(calories * 0.30))
-    fat = round(fat_target_cal / 9)
-
-    carb_cals = remaining_for_carbs_and_fat - (fat * 9)
-    carbs = max(0, round(carb_cals / 4))
-
-    # Enforce minimum 75 g carbs: reduce fat if needed, but keep fat ≥ floor
-    if carbs < 75:
-        deficit_cals = (75 - carbs) * 4
-        transferable_fat_cals = max(0, (fat * 9) - fat_floor_cal)
-        transfer = min(deficit_cals, transferable_fat_cals)
-        fat  = round((fat * 9 - transfer) / 9)
-        carbs = round((carb_cals + transfer) / 4)
-
-    # ── Apply custom macro overrides (user-set targets take precedence) ────
-    cm = req.customMacros
-    if cm:
-        if cm.calories is not None:
-            calories = cm.calories
-            goal_rate_summary = f"Using custom calorie target ({calories} cal)."
-        if cm.protein is not None:
-            protein = cm.protein
-        if cm.carbs is not None:
-            carbs = cm.carbs
-        if cm.fat is not None:
-            fat = cm.fat
+    # Re-shape the calculator output into the existing dict contract so
+    # prompt builders don't need to change. Debug fields (`bmr`, `tdee`,
+    # `rate_summary`, etc.) come straight from the calculator for
+    # transparency.
+    tdee = targets.tdee
+    calories = targets.calories
+    protein = targets.protein_g
+    carbs = targets.carbs_g
+    fat = targets.fat_g
+    goal_rate_summary = targets.rate_summary
 
     # ── Normalise mealsPerDay ────────────────────────────────────────────────
     meals = req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3

@@ -61,6 +61,9 @@ class PlanRequest(BaseModel):
     dietaryPreference: str | None = None
     allergies: list[str] = []
     mealsPerDay: int = 3
+    # How many distinct daily meal templates to generate (1-7). Client
+    # rotates these across 7 days. Fewer templates = faster generation.
+    mealVariety: int = 3
     cookingSkill: str | None = None
     prepTimeMinutes: int | None = None
     budgetLevel: str | None = None

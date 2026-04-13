@@ -328,7 +328,13 @@ IMPORTANT: Each day must have exactly 5 exercises. No more, no fewer."""
 
 
 def build_nutrition_prompt(req: PlanRequest, enriched_foods: dict | None = None) -> str:
-    """Prompt for nutrition plan only — runs in parallel with workout prompt."""
+    """Prompt for nutrition plan only — runs in parallel with workout prompt.
+
+    Generates a user-controlled number of distinct meal templates
+    (`req.mealVariety`, 1-7). The client rotates these across 7 days,
+    so fewer templates = less output = faster generation at the cost of
+    meal variety. 1 template means "same plan every day" (fastest).
+    """
     ps  = req.physicalStats
     t   = compute_tdee_and_targets(req)
     foods_str = ", ".join(req.foodsAvailable) if req.foodsAvailable else "general healthy foods"
@@ -350,6 +356,9 @@ def build_nutrition_prompt(req: PlanRequest, enriched_foods: dict | None = None)
     height_str = f"{ps.heightFeet}'{ps.heightInches}\""
     _, meal_schema = _meal_schema_and_targets(t)
     meal_summary, _ = _meal_schema_and_targets(t)
+
+    # Clamp variety to [1, 7]. Default 3 preserves the legacy A/B/C shape.
+    variety = max(1, min(7, int(getattr(req, 'mealVariety', None) or 3)))
 
     # Build enriched food reference block if available
     enriched_block = ""
@@ -403,8 +412,25 @@ def build_nutrition_prompt(req: PlanRequest, enriched_foods: dict | None = None)
         if req.userContext else ""
     )
 
+    # Intro line reflects the user's actual variety setting. Hardcoded
+    # "3 templates" here used to contradict the variety=N instruction
+    # below, which caused the AI to ignore the lower-variety request.
+    _variety_intro = (
+        f"Generate exactly {variety} distinct daily meal template"
+        f"{'' if variety == 1 else 's'} for this user. "
+        + (
+            "The user wants the same plan every day, so make ONE template and "
+            "return it as the only entry in `nutrition_plans`. Do NOT return "
+            "more than one."
+            if variety == 1 else
+            f"All {variety} must hit the same daily targets using the same "
+            "available foods, but vary the meals, recipes, and portion "
+            "combinations so the user has rotation."
+        )
+    )
+
     return f"""You are a registered dietitian.
-Generate 3 distinct daily meal templates (A, B, C) for this user. All three must hit the same daily targets using the same available foods, but vary the meals, recipes, and portion combinations to provide variety across the week.
+{_variety_intro}
 
 USER PROFILE:
 - Goal: {req.goalSelection.primaryGoal if req.goalSelection else req.goal} (pace: {req.goalDetails.pace}){f"  |  Modifiers: {', '.join(req.goalSelection.modifiers)}" if req.goalSelection and req.goalSelection.modifiers else ""}
@@ -420,9 +446,33 @@ Supplements user already takes: {supps_str if supps_str else "none — recommend
 {diet_context}
 Meals per day: {t['meals']}
 
-DAILY TARGETS (same for all three templates):
-{t['calories']} cal / {t['protein']}g protein / {t['carbs']}g carbs / {t['fat']}g fat
-Per-meal targets (reference):
+NUMBER OF TEMPLATES TO GENERATE: {variety}
+Each template is one distinct daily meal plan. The client app will rotate
+these across the 7-day week. Every template must independently hit the
+daily targets below — the user eats one full template per day.
+
+DAILY TARGETS — HARD CONSTRAINTS, NOT SUGGESTIONS:
+  {t['calories']} calories
+  {t['protein']}g protein
+  {t['carbs']}g carbs
+  {t['fat']}g fat
+
+These targets come from our own deterministic calculator (Mifflin-St Jeor
+BMR + activity multiplier from training volume + goal-specific adjustment).
+They are NOT estimates — they are the exact numbers this user needs. Your
+job is to assemble meals to hit them.
+
+Rules:
+  - The sum of meal-level calories across ALL meals in a template MUST
+    equal {t['calories']} within ±2%.
+  - The sum of protein across all meals MUST equal {t['protein']}g within ±5%.
+  - Same tolerance for carbs and fat.
+  - Do NOT round to "nicer" numbers. Do NOT decide a different target
+    would be healthier. Do NOT adjust for your own opinion on macros.
+  - You are not a nutritionist here — you are a meal assembler working
+    to a prescribed spec.
+
+Per-meal suggested splits (use as a starting point, adjust for realism):
 {meal_summary}
 
 INSTRUCTIONS:
@@ -452,24 +502,22 @@ INSTRUCTIONS:
 
 Return only the required JSON.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON. The top-level must have a `nutrition_plans` array
+containing EXACTLY {variety} template{'' if variety == 1 else 's'}, in the
+shape shown below. Variety-1 means the user wants the same plan every day;
+higher variety means the client will rotate them.
 {{
   "nutritionistNote": "120-180 word explanation. Cover: (1) WHY this exact calorie target hits the user's goal — show the TDEE math briefly ('your maintenance is ~X, we cut Y to hit Z cal'). (2) WHY the protein target fits their bodyweight + training volume — reference the g/lb target and what it's doing for muscle retention / growth. (3) WHY these specific meal templates work with their available foods + prep time + budget. (4) How to adjust if they feel overly hungry or flat. Speak directly to the user ('you'). No generic 'eat balanced meals' language.",
   "supplementStack": [
     {{"name": "string", "dose": "string", "timing": "string", "purpose": "string"}}
   ],
-  "nutrition_plan_a": {{
-    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
+  "nutrition_plans": [
+    {{
+      "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
 {meal_schema}
-  }},
-  "nutrition_plan_b": {{
-    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
-{meal_schema}
-  }},
-  "nutrition_plan_c": {{
-    "targets": {{"calories": {t['calories']}, "protein": {t['protein']}, "carbs": {t['carbs']}, "fat": {t['fat']}}},
-{meal_schema}
-  }}
+    }}
+    /* …repeat the object above for a total of {variety} distinct templates. */
+  ]
 }}"""
 
 

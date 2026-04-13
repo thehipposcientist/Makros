@@ -7,7 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
-import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult } from '../services/api';
+import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
@@ -249,6 +249,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Workout prefs
   const [daysPerWeek, setDaysPerWeek] = useState(profile.daysPerWeek);
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
+  const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 3);
+  // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
+  // macros tab is opened so the macros section isn't waiting on an extra
+  // roundtrip every time EditProfileScreen mounts.
+  const [calorieRanges, setCalorieRanges] = useState<CalorieRanges | null>(null);
+  const [calorieRangesLoading, setCalorieRangesLoading] = useState(false);
   const [equipment, setEquipment]     = useState<string[]>(profile.equipment as string[]);
   const [foods, setFoods]             = useState<string[]>([
     ...profile.foodsAvailable,
@@ -368,6 +374,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   useEffect(() => {
     loadMealRoutines().then(setMealRoutinesState);
   }, []);
+
+  // Load calorie ranges when the macros tab is opened. Cached in
+  // component state so switching tabs doesn't re-fetch.
+  useEffect(() => {
+    if (mode === 'mealplan' && mealplanTab === 'macros' && authToken && !calorieRanges && !calorieRangesLoading) {
+      setCalorieRangesLoading(true);
+      getCalorieRanges(authToken)
+        .then(setCalorieRanges)
+        .catch(() => setCalorieRanges(null))
+        .finally(() => setCalorieRangesLoading(false));
+    }
+  }, [mode, mealplanTab, authToken]);
 
   // Load exercise library when exercises tab is opened. Merges user's
   // AI-saved custom exercises on top of the seeded backend library so
@@ -655,9 +673,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       const asset = result.assets[0];
       const imageBase64 = asset.base64;
       if (!imageBase64) return;
+      // Force image/jpeg — expo-image-picker base64 path transcodes
+      // HEIC/HEIF to JPEG but `asset.mimeType` sometimes still reports
+      // the original. OpenAI vision rejects HEIC with a format error.
       const analysis = await analyzeFoodPhoto(authToken, {
         image_base64: imageBase64,
-        mime_type: asset.mimeType ?? 'image/jpeg',
+        mime_type: 'image/jpeg',
       });
       setPhotoMealDraft(analysis);
       setPhotoMealContext('');
@@ -688,7 +709,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     if (result.canceled || !result.assets?.length) return;
     const newImages = result.assets
       .filter(a => a.base64)
-      .map(a => ({ image_base64: a.base64!, mime_type: a.mimeType ?? 'image/jpeg' }));
+      .map(a => ({ image_base64: a.base64!, mime_type: 'image/jpeg' }));
     setPendingImages(prev => [...prev, ...newImages]);
   };
 
@@ -824,6 +845,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
+      mealVariety: Math.min(7, Math.max(1, mealVariety)),
       equipment,
       foodsAvailable: actualFoods,
       customFoods,
@@ -1750,6 +1772,47 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mealplanTab === 'foods' && (
         <View style={styles.section}>
+          {/* ── Meal variety ──────────────────────────────────────────
+              How many distinct daily meal templates the AI builds. The
+              app rotates these across your week. Lower = faster plan
+              generation, higher = more variety day-to-day. */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>🔁  Meal Variety</Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
+              How many unique daily meal plans the AI will build. Lower means
+              faster plan generation and simpler prep; higher means more
+              variety day-to-day. Every plan still hits your calorie and
+              macro targets exactly.
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <TouchableOpacity
+                style={[styles.daysBtn, mealVariety <= 1 && styles.daysBtnDisabled]}
+                onPress={() => setMealVariety(v => Math.max(1, v - 1))}
+                disabled={mealVariety <= 1}>
+                <Text style={styles.daysBtnText}>−</Text>
+              </TouchableOpacity>
+              <View style={{ alignItems: 'center', minWidth: 140 }}>
+                <Text style={styles.daysValue}>{mealVariety}</Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                  {mealVariety === 1
+                    ? 'Same plan every day (fastest)'
+                    : mealVariety === 7
+                      ? 'Unique plan every day (slowest)'
+                      : `${mealVariety} rotating plans`}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.daysBtn, mealVariety >= 7 && styles.daysBtnDisabled]}
+                onPress={() => setMealVariety(v => Math.min(7, v + 1))}
+                disabled={mealVariety >= 7}>
+                <Text style={styles.daysBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 15 }}>
+              Example at 3: Mon/Thu/Sun use Plan A, Tue/Fri use Plan B, Wed/Sat use Plan C.
+            </Text>
+          </View>
+
           <View style={{ marginBottom: 8 }}>
             <View style={styles.sectionTopRow}>
               <Text style={styles.sectionLabel}>
@@ -1917,58 +1980,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 </View>
               )}
 
-              {/* ── Meal Routines ──────────────────────────────────────── */}
-              <View style={[styles.chipGroup, { marginTop: 8 }]}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <Text style={styles.chipGroupLabel}>🍱  Meal Routines</Text>
-                  <TouchableOpacity
-                    onPress={openAddRoutine}
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary + '18', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 5 }}
-                    activeOpacity={0.75}
-                  >
-                    <Text style={{ fontSize: 16, color: tc.primary, lineHeight: 20 }}>+</Text>
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Add</Text>
-                  </TouchableOpacity>
-                </View>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: -6, marginBottom: 10, lineHeight: 16 }}>
-                  Save your regular meals here. The AI planner uses these when building your meal plan.
-                </Text>
-                {mealRoutines.length === 0 ? (
-                  <TouchableOpacity
-                    onPress={openAddRoutine}
-                    style={{ borderWidth: 1, borderColor: tc.border, borderStyle: 'dashed', borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', gap: 4, backgroundColor: tc.surface }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={{ fontSize: 24 }}>🍽️</Text>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary, fontWeight: '600' }}>Add your first routine</Text>
-                    <Text style={{ fontSize: 11, color: tc.textMuted, textAlign: 'center', paddingHorizontal: 16 }}>e.g. "High Protein Breakfast" with eggs, oats, banana</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <View style={styles.savedMealsList}>
-                    {mealRoutines.map(r => (
-                      <TouchableOpacity key={r.id} onPress={() => openEditRoutine(r)} activeOpacity={0.8}>
-                        <View style={[styles.savedMealCard, { gap: 0 }]}>
-                          {r.photoUri && (
-                            <Image source={{ uri: r.photoUri }} style={{ width: 52, height: 52, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, marginRight: 10 }} resizeMode="cover" />
-                          )}
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.savedMealName}>{r.name}{r.mealType ? ` · ${r.mealType}` : ''}</Text>
-                            {r.foods.length > 0 && (
-                              <Text style={styles.savedMealMeta} numberOfLines={1}>
-                                {r.foods.map(f => f.name + (f.quantity ? ` (${f.quantity})` : '')).join(', ')}
-                              </Text>
-                            )}
-                            {r.notes && <Text style={styles.savedMealMeta} numberOfLines={1}>{r.notes}</Text>}
-                          </View>
-                          <TouchableOpacity onPress={() => handleRoutineDelete(r.id)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                            <Text style={styles.savedMealDelete}>Delete</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
-              </View>
+              {/* Routine management moved out of the edit-meal-plan page.
+                  Pin meals as routines directly from the Meal card on the
+                  home screen via "Pin as Routine" — one-tap, tied to the
+                  exact meal the user is looking at. No duplicate UI. */}
             </>
           )}
         </View>
@@ -2048,10 +2063,48 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mealplanTab === 'macros' && (
         <>
+        {/* Reference card: cut / maintain / bulk calories at a glance.
+            Informational only — doesn't change the user's actual goal.
+            Lets them see where their other options would land. */}
+        <View style={[styles.section, { marginBottom: 14 }]}>
+          <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Your Calorie Ranges</Text>
+          <Text style={styles.sectionHint}>
+            Calculated from your body stats and training volume. This is informational — your current goal's target is below.
+          </Text>
+          {calorieRangesLoading ? (
+            <ActivityIndicator color={tc.primary} style={{ marginTop: 14 }} />
+          ) : calorieRanges ? (
+            <View style={{ marginTop: 14, gap: 8 }}>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <View style={{ flex: 1, backgroundColor: tc.surface, padding: 12, borderRadius: radius.md, borderWidth: 1, borderColor: tc.border }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Cut</Text>
+                  <Text style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary, marginTop: 4 }}>{calorieRanges.cut_calories}</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>cal · {calorieRanges.cut_protein_g}g protein</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: tc.primary + '15', padding: 12, borderRadius: radius.md, borderWidth: 1.5, borderColor: tc.primary + '55' }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Maintain</Text>
+                  <Text style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary, marginTop: 4 }}>{calorieRanges.maintenance_calories}</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>cal · {calorieRanges.maintain_protein_g}g protein</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: tc.surface, padding: 12, borderRadius: radius.md, borderWidth: 1, borderColor: tc.border }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Bulk</Text>
+                  <Text style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary, marginTop: 4 }}>{calorieRanges.bulk_calories}</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>cal · {calorieRanges.bulk_protein_g}g protein</Text>
+                </View>
+              </View>
+              <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 14, marginTop: 4 }}>
+                BMR {calorieRanges.bmr} · activity multiplier {calorieRanges.activity_multiplier}× · ranges use a moderate pace
+              </Text>
+            </View>
+          ) : (
+            <Text style={[styles.sectionHint, { marginTop: 8 }]}>Finish onboarding to see your calorie ranges.</Text>
+          )}
+        </View>
+
         <View style={styles.section}>
           <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Daily Macro Targets</Text>
           <Text style={styles.sectionHint}>
-            Override AI-calculated targets with your own values. Leave any field blank to let AI calculate it.
+            Leave any field blank to use the calculator's target based on your goal + training volume. Fill a field to pin it manually — the calculator won't override what you set.
           </Text>
           <View style={{ marginTop: 14, gap: 10 }}>
             <View style={{ flexDirection: 'row', gap: 10 }}>

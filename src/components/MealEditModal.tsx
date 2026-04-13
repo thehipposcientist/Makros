@@ -106,6 +106,10 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
   // Track which item is currently showing the unit picker popover.
   const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
+  // In-progress text for each row's quantity input. Lets the user type
+  // intermediate states like "0." or "" without the parent state clobbering
+  // the field. Committed back to `items` on blur / when parse is valid.
+  const [qtyDrafts, setQtyDrafts] = useState<Record<number, string>>({});
 
   useEffect(() => {
     if (visible) {
@@ -118,6 +122,19 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
+    if (source === 'camera') {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Camera permission needed', 'Enable camera access in Settings to scan food photos.');
+        return;
+      }
+    } else {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Photo library permission needed', 'Enable photo access in Settings to scan food photos.');
+        return;
+      }
+    }
     const result = source === 'camera'
       ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images' })
       : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: 'images' });
@@ -125,8 +142,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     const asset = result.assets[0];
     setScanLoading(true);
     try {
+      // Force `image/jpeg`. Expo ImagePicker with `base64: true` transcodes
+      // HEIC/HEIF to JPEG bytes before returning base64, but `asset.mimeType`
+      // still sometimes reports the original HEIC type. OpenAI vision
+      // rejects HEIC outright ("wrong format" error), so we send the
+      // mime that actually matches the bytes.
       const res = await scanFoodsPhoto(authToken, {
-        images: [{ image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' }],
+        images: [{ image_base64: asset.base64!, mime_type: 'image/jpeg' }],
       });
       const picked = res.foods.filter(f => !items.some(it => it.name.toLowerCase() === f.name.toLowerCase()));
       if (res.foods.length === 0) {
@@ -383,11 +405,29 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                   <View style={s.qtyRow}>
                     <TextInput
                       style={s.qtyInput}
-                      value={String(it.quantity)}
+                      value={qtyDrafts[idx] ?? String(it.quantity)}
                       onChangeText={(t) => {
-                        // Allow blank / partial decimal entries by storing 0 temporarily.
+                        // Keep the raw text locally so intermediate states
+                        // ("0.", ".5", "") render correctly. Only push a
+                        // parsed number to the item when the text is a
+                        // complete, valid number — otherwise the parent
+                        // clobbers the field mid-typing.
+                        setQtyDrafts(d => ({ ...d, [idx]: t }));
+                        if (t === '' || t === '.' || t.endsWith('.')) return;
                         const parsed = parseFloat(t);
-                        updateItem(idx, { quantity: Number.isFinite(parsed) ? parsed : 0 });
+                        if (Number.isFinite(parsed)) {
+                          updateItem(idx, { quantity: parsed });
+                        }
+                      }}
+                      onBlur={() => {
+                        // Commit on blur: if the draft is empty or invalid,
+                        // fall back to 1 so we never leave the item at NaN.
+                        const draft = qtyDrafts[idx];
+                        if (draft != null) {
+                          const parsed = parseFloat(draft);
+                          updateItem(idx, { quantity: Number.isFinite(parsed) && parsed >= 0 ? parsed : 1 });
+                          setQtyDrafts(d => { const { [idx]: _, ...rest } = d; return rest; });
+                        }
                       }}
                       keyboardType="decimal-pad"
                       placeholder="1"

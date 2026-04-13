@@ -181,7 +181,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       const scanResult = await scanBody(authToken, {
         image_base64: asset.base64!,
-        mime_type: asset.mimeType ?? 'image/jpeg',
+        mime_type: 'image/jpeg',
         gender: stats.gender,
         weight_lbs: stats.weightLbs,
         height_inches: heightInches > 0 ? heightInches : undefined,

@@ -73,7 +73,9 @@ export interface MetaData {
 
 // ── Cache key ─────────────────────────────────────────────────────────────────
 
-const CACHE_KEY = 'metaData_v1';
+// Bumped to v2 when `/foods` switched from per-100g to per-default-serving
+// macros. Old cached values would show 884 cal for a tbsp of olive oil.
+const CACHE_KEY = 'metaData_v2';
 
 // ── Defaults (used until fetch completes) ─────────────────────────────────────
 

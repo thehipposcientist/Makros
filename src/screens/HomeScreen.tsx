@@ -14,7 +14,7 @@ import {
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
-import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan } from '../utils/mealTracker';
+import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
 import { ensureItems } from '../utils/mealItems';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
@@ -819,6 +819,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     );
     return custom.length ? [...meta.allFoods, ...custom] : meta.allFoods;
   }, [meta.allFoods, userProfile?.customFoods]);
+
+  /** The food picker in MealEditModal should only show foods the user
+   *  actually has — their selected pantry (`foodsAvailable`) plus any
+   *  custom foods they've added. We rebuild the meta food categories
+   *  restricted to that set so the picker can't offer items the user
+   *  doesn't own. Custom foods land in a synthetic "My Custom Foods"
+   *  category so they're visible and easy to find. */
+  const userFoodCategories = useMemo(() => {
+    const available = new Set((userProfile?.foodsAvailable ?? []).map(n => n.toLowerCase()));
+    // Filter every seeded category down to only selected foods.
+    const filteredSeed = meta.foodCategories
+      .map(cat => ({
+        ...cat,
+        foods: cat.foods.filter(f => available.has(f.name.toLowerCase())),
+      }))
+      .filter(cat => cat.foods.length > 0);
+
+    // Synthetic custom-foods category so user-added items are visible
+    // even if they aren't in the pantry list yet.
+    const customs = userProfile?.customFoods ?? [];
+    if (customs.length === 0) return filteredSeed;
+    const customCat = {
+      key: 'custom',
+      label: 'My Custom Foods',
+      icon: '⭐',
+      foods: customs.map(cf => ({
+        name: cf.name,
+        category: 'custom',
+        unit: cf.unit ?? '1 serving',
+        calories: cf.calories ?? 0,
+        protein: cf.protein ?? 0,
+        carbs: cf.carbs ?? 0,
+        fat: cf.fat ?? 0,
+      })),
+    } as (typeof filteredSeed)[number];
+    return [customCat, ...filteredSeed];
+  }, [meta.foodCategories, userProfile?.foodsAvailable, userProfile?.customFoods]);
   const theme = getTheme(userProfile?.themePreference);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
@@ -1125,16 +1162,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
     setWorkoutPlan(baseWorkout);
 
-    // Load 3 rotating nutrition templates (A/B/C)
-    const [rawA, rawB, rawC] = await Promise.all([
-      AsyncStorage.getItem('aiNutritionPlanA'),
-      AsyncStorage.getItem('aiNutritionPlanB'),
-      AsyncStorage.getItem('aiNutritionPlanC'),
-    ]);
-    const templateA: DailyNutritionPlan | null = rawA ? JSON.parse(rawA) : null;
-    const templateB: DailyNutritionPlan | null = rawB ? JSON.parse(rawB) : null;
-    const templateC: DailyNutritionPlan | null = rawC ? JSON.parse(rawC) : null;
-    const rotatingTemplates = [templateA, templateB, templateC].filter(Boolean) as DailyNutritionPlan[];
+    // Load nutrition templates. The canonical storage is now a JSON
+    // array under `aiNutritionPlans` (dynamic length, matches the user's
+    // chosen meal variety). Legacy A/B/C keys are read as a fallback so
+    // users who haven't regenerated since the migration still see their
+    // plan.
+    const rawPlans = await AsyncStorage.getItem('aiNutritionPlans');
+    let rotatingTemplates: DailyNutritionPlan[] = [];
+    if (rawPlans) {
+      try {
+        const parsed = JSON.parse(rawPlans);
+        if (Array.isArray(parsed)) {
+          rotatingTemplates = parsed.filter(Boolean) as DailyNutritionPlan[];
+        }
+      } catch {}
+    }
+    if (rotatingTemplates.length === 0) {
+      const [rawA, rawB, rawC] = await Promise.all([
+        AsyncStorage.getItem('aiNutritionPlanA'),
+        AsyncStorage.getItem('aiNutritionPlanB'),
+        AsyncStorage.getItem('aiNutritionPlanC'),
+      ]);
+      rotatingTemplates = [
+        rawA ? JSON.parse(rawA) : null,
+        rawB ? JSON.parse(rawB) : null,
+        rawC ? JSON.parse(rawC) : null,
+      ].filter(Boolean) as DailyNutritionPlan[];
+    }
 
     const mealDays = getNextMealDays(7);
 
@@ -1147,34 +1201,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
     const localEntries = await Promise.all(
       mealDays.map(async (d, i) => {
+        let picked: DailyNutritionPlan | null = null;
         // 1. Try backend day-state — only trust it if macros are present
         if (authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
           if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan)) {
-            return [d.key, remote.nutrition_plan as DailyNutritionPlan] as const;
+            picked = remote.nutrition_plan as DailyNutritionPlan;
           }
         }
         // 2. Try locally saved plan (user's day-specific edits) — only if macros valid
-        const saved = await getSavedNutritionPlan(d.key);
-        if (saved && hasMealMacros(saved)) return [d.key, saved] as const;
-
-        // 3. Rotate through AI templates A→B→C (i % 3)
-        if (rotatingTemplates.length > 0) {
-          const template = rotatingTemplates[i % rotatingTemplates.length];
-          if (hasMealMacros(template)) return [d.key, template] as const;
+        if (!picked) {
+          const saved = await getSavedNutritionPlan(d.key);
+          if (saved && hasMealMacros(saved)) picked = saved;
         }
-
+        // 3. Rotate through AI templates. Length is user-controlled via
+        //    `mealVariety` — 1 means same plan every day, 7 means unique.
+        if (!picked && rotatingTemplates.length > 0) {
+          const template = rotatingTemplates[i % rotatingTemplates.length];
+          if (hasMealMacros(template)) picked = template;
+        }
         // 4. Local generator fallback
-        return [d.key, generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key)] as const;
+        if (!picked) {
+          picked = generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key);
+        }
+        // Overlay preserved meals. Any mealType the user has already checked
+        // as eaten gets its snapshot copied onto the picked plan verbatim —
+        // regenerating a plan never clobbers logged meals.
+        const preserved = await getPreservedMeals(d.key);
+        if (Object.keys(preserved).length > 0) {
+          picked = { ...picked, ...preserved } as DailyNutritionPlan;
+        }
+        return [d.key, picked] as const;
       })
     );
-    // Apply routines from storage — the single source of truth for "make
-    // this meal repeat every day". Every code path that writes a nutrition
-    // plan into state should go through `applyRoutines()` so a regeneration
-    // can't wipe out the user's pinned meals.
-    const routines = await loadMealRoutines();
     const raw: Record<string, DailyNutritionPlan> = Object.fromEntries(localEntries);
-    setNutritionPlansByDate(applyRoutinesToAll(raw, routines));
+    setNutritionPlansByDate(raw);
     } finally {
       loadPlansInFlightRef.current = false;
     }
@@ -1242,7 +1303,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setSuppAiNotFound(false);
     setSuppAiQuery('');
     try {
-      const res = await lookupSupplementFromPhoto(authToken, { image_base64: asset.base64!, mime_type: asset.mimeType ?? 'image/jpeg' });
+      const res = await lookupSupplementFromPhoto(authToken, { image_base64: asset.base64!, mime_type: 'image/jpeg' });
       applySuppResult(res, 'Unknown supplement');
     } catch (e: any) {
       Alert.alert('Photo lookup failed', e?.message ?? 'Could not identify supplement from photo.');
@@ -1796,11 +1857,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     const current = checkedMealsByDate[date] ?? {};
-    const next = { ...current, [mealType]: !current[mealType] };
+    const wasChecked = !!current[mealType];
+    const next = { ...current, [mealType]: !wasChecked };
     setCheckedMealsByDate(prev => ({ ...prev, [date]: next }));
     await saveMealChecks(date, next);
     await persistDayState(date, { meal_checks: next });
-  }, [checkedMealsByDate, persistDayState]);
+    // Snapshot the meal on check, clear on uncheck. Preserved meals survive
+    // plan regeneration — loadPlans overlays them after picking a template.
+    const plan = nutritionPlansByDate[date];
+    if (!wasChecked && plan) {
+      const m = (plan as any)[mealType];
+      if (m) await savePreservedMeal(date, mealType, m);
+    } else if (wasChecked) {
+      await clearPreservedMeal(date, mealType);
+    }
+  }, [checkedMealsByDate, persistDayState, nutritionPlansByDate]);
 
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
     let nextPlan: DailyNutritionPlan | null = null;
@@ -1951,14 +2022,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     await saveMealRoutines(nextRoutines);
 
-    // Re-apply routines to every plan currently in state. This gives us
-    // consistent `isRoutine` flags and meal content across all days without
-    // any per-day stamping races.
-    let appliedMap: Record<string, DailyNutritionPlan> = {};
-    setNutritionPlansByDate(prev => {
-      appliedMap = applyRoutinesToAll(prev, nextRoutines);
-      return appliedMap;
-    });
+    // Re-apply routines to every plan currently in state so every day —
+    // not just the one you pinned from — shows the routine meal. We
+    // compute `appliedMap` synchronously off the current `nutritionPlansByDate`
+    // (instead of inside a setState updater) because the updater function
+    // can run asynchronously in React 18, and our for-loop below needs the
+    // result right now to persist each day.
+    const appliedMap = applyRoutinesToAll(nutritionPlansByDate, nextRoutines);
+    setNutritionPlansByDate(appliedMap);
 
     // Persist each re-applied plan so it survives reloads.
     for (const [d, plan] of Object.entries(appliedMap)) {
@@ -2304,7 +2375,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onAddSnack={() => handleAddSnack(d.key)}
                       onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
                       onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
-                      onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                     />
                   )}
                 </View>
@@ -2330,12 +2400,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           meal={editingMeal.meal}
           nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
           allFoods={allFoodsWithCustom}
-          foodCategories={meta.foodCategories}
+          foodCategories={userFoodCategories}
           savedMeals={userProfile.savedMeals ?? []}
           authToken={authToken}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
           onClose={() => setEditingMeal(null)}
-          onToggleRoutine={() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type)}
           onAddCustomFood={(item) => {
             // Route through `onProfileUpdate` so the new food:
             //  1. Lands in React state (so `allFoodsWithCustom` picks it up
@@ -4042,7 +4111,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 10,
   },
-  libraryFilterRow: { gap: 8, paddingBottom: 10 },
+  libraryFilterRow: { gap: 8, paddingTop: 6, paddingBottom: 12 },
   libraryFilterChip: {
     paddingHorizontal: 12,
     paddingVertical: 8,

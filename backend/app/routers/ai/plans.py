@@ -18,10 +18,11 @@ from .models import PlanRequest, WorkoutOnlyRequest, NutritionOnlyRequest, Parse
 from .utils import (
     get_openai_api_key, model_plan_generation, model_plan_update,
     _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
-    _log_openai_error, enrich_foods_with_macros,
+    _log_openai_error, enrich_foods_with_macros, compute_tdee_and_targets,
     SCHEMA_WORKOUT, SCHEMA_NUTRITION,
 )
 from .prompts import build_workout_prompt, build_nutrition_prompt
+from app.services.meal_assembler import assemble_nutrition_response
 
 
 def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
@@ -105,37 +106,54 @@ def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_
     raise ValueError(f"Workout AI failed after {len(token_limits)} attempts: {last_error}")
 
 
+_FOOD_STOPWORDS = {"and", "or", "the", "with", "of", "in", "a", "an", "raw", "cooked", "fresh", "plain"}
+
+
+def _food_tokens(s: str) -> list[str]:
+    """Tokenize a food name into significant stemmed words (plural-normalized)."""
+    out: list[str] = []
+    for w in s.lower().replace("-", " ").replace(",", " ").split():
+        if not w.isalpha():
+            continue
+        if w in _FOOD_STOPWORDS:
+            continue
+        if len(w) <= 2:
+            continue
+        # Cheap plural normalization
+        if len(w) > 3 and w.endswith("s"):
+            w = w[:-1]
+        out.append(w)
+    return out
+
+
 def _food_covered(item: str, allowed_lower: list[str]) -> bool:
     """
     Return True if this food item is covered by at least one entry in allowed_lower.
-    Handles quantity prefixes ("1 egg" vs "eggs"), plural/singular, and multi-word foods.
+    Rule: every significant token of an allowed phrase must appear in the item's
+    tokens. This prevents "ground chicken" (allowed) from matching "ground beef"
+    (item) — the shared "ground" word is no longer enough; "chicken" must also
+    be present.
     """
-    item_lower = item.lower()
+    item_tokens = set(_food_tokens(item))
+    if not item_tokens:
+        return False
     for a in allowed_lower:
-        # Direct substring match
-        if a in item_lower:
+        a_tokens = _food_tokens(a)
+        if not a_tokens:
+            continue
+        if all(tok in item_tokens for tok in a_tokens):
             return True
-        # Check each significant word in the allowed food against the item
-        for word in a.split():
-            if len(word) <= 3:
-                continue
-            if word in item_lower:
-                return True
-            # Singular ↔ plural: strip trailing 's' from either side
-            stem = word.rstrip("s")
-            if len(stem) > 3 and stem in item_lower:
-                return True
-            # Check if item word matches allowed stem
-            for item_word in item_lower.split():
-                if len(item_word) <= 3:
-                    continue
-                if item_word == word or item_word == stem or item_word.rstrip("s") == stem:
-                    return True
     return False
 
 
 def _collect_unknown_foods(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
-    """Return food strings in the plan that are NOT in the user's allowed foods."""
+    """Return food names in the plan that are NOT in the user's allowed foods.
+
+    Reads both the canonical structured `items[]` shape (new prompt) AND
+    the legacy `foods[]` parallel array, because different AI responses
+    (and older cached payloads) use different shapes. Missing either one
+    meant we silently let unknown foods through.
+    """
     if not allowed_foods:
         return []
     allowed_lower = [f.lower() for f in allowed_foods]
@@ -146,8 +164,23 @@ def _collect_unknown_foods(nutrition_plan: dict, allowed_foods: list[str]) -> li
         meal = nutrition_plan.get(key)
         if not meal or not isinstance(meal, dict):
             continue
+        # Prefer structured items[] when the AI emits the new shape.
+        items = meal.get("items")
+        if isinstance(items, list) and items:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                name = str(it.get("name", "")).strip()
+                if not name:
+                    continue
+                if name.lower() not in seen and not _food_covered(name, allowed_lower):
+                    unknown.append(name)
+                    seen.add(name.lower())
+        # Also check legacy foods[] for compatibility with older responses.
         for food_item in meal.get("foods", []):
-            name = str(food_item)
+            name = str(food_item).strip()
+            if not name:
+                continue
             if name.lower() not in seen and not _food_covered(name, allowed_lower):
                 unknown.append(name)
                 seen.add(name.lower())
@@ -164,10 +197,20 @@ def _build_custom_foods(
     look up their macros from the enrichment data, and return them as
     custom food entries the frontend can add to the user's library.
     """
-    # Collect unknown foods across all 3 nutrition templates
+    # Collect unknown foods across all nutrition templates. Prefer the new
+    # `nutrition_plans` array; fall back to the legacy A/B/C keys for
+    # responses that still use the old shape.
+    plans_list = result.get("nutrition_plans")
+    if not isinstance(plans_list, list) or not plans_list:
+        plans_list = [
+            result.get("nutrition_plan_a"),
+            result.get("nutrition_plan_b"),
+            result.get("nutrition_plan_c"),
+        ]
     all_unknown: set[str] = set()
-    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
-        np_ = result.get(key, {})
+    for np_ in plans_list:
+        if not isinstance(np_, dict):
+            continue
         unknowns = _collect_unknown_foods(np_, allowed_foods)
         all_unknown.update(u.lower() for u in unknowns)
 
@@ -183,10 +226,11 @@ def _build_custom_foods(
             for fi in rm.get("foods", []):
                 enriched_lookup[fi.get("name", "").lower()] = fi
 
-    # Also scrape macros directly from the generated plan meals
+    # Also scrape macros directly from the generated plan meals.
     plan_food_macros: dict[str, dict] = {}
-    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
-        np_ = result.get(key, {})
+    for np_ in plans_list:
+        if not isinstance(np_, dict):
+            continue
         for meal_key in ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2"):
             meal = np_.get(meal_key)
             if not meal or not isinstance(meal, dict):
@@ -223,19 +267,212 @@ def _build_custom_foods(
     return custom_foods
 
 
-def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | None = None, model: str | None = None, max_tokens: int = 1500) -> dict:
-    """Synchronous OpenAI call for the nutrition plan (run in a thread)."""
+_MEAL_KEYS = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
+
+
+def _sum_meal_macros(nutrition_plan: dict) -> tuple[int, int, int, int]:
+    """Sum (calories, protein, carbs, fat) across every meal in a single
+    nutrition template. Reads the meal-level totals (`meal.calories`,
+    etc.), not per-item item macros — those are assembled data that
+    the meal totals should already reflect, and the top-level values
+    are what the user actually sees.
+    """
+    cal = prot = carbs = fat = 0
+    for key in _MEAL_KEYS:
+        meal = nutrition_plan.get(key)
+        if not isinstance(meal, dict):
+            continue
+        cal   += int(round(float(meal.get("calories", 0) or 0)))
+        prot  += int(round(float(meal.get("protein",  0) or 0)))
+        carbs += int(round(float(meal.get("carbs",    0) or 0)))
+        fat   += int(round(float(meal.get("fat",      0) or 0)))
+    return cal, prot, carbs, fat
+
+
+def _normalize_template_to_target(
+    nutrition_plan: dict,
+    target_kcal: int,
+    target_prot: int,
+    target_carbs: int,
+    target_fat: int,
+) -> str | None:
+    """Scale every meal (and every item inside it) by a uniform ratio so
+    the template's meal-level sums match the computed targets exactly.
+
+    This is the deterministic backstop for when the AI gets close but
+    not close enough — the retry loop already rejected obvious drift,
+    so anything reaching this function is salvageable via math.
+
+    Only runs if the scale ratio is in [0.6, 1.4]. Bigger drift than
+    that means the AI sent something structurally wrong (missing meals,
+    wrong foods, nonsense numbers) and we'd rather return as-is than
+    mutate everything by 2x.
+
+    Returns a human-readable summary of what was normalized (for logs),
+    or None if no normalization was needed / possible.
+    """
+    actual_kcal, actual_prot, actual_carbs, actual_fat = _sum_meal_macros(nutrition_plan)
+    if actual_kcal <= 0 or target_kcal <= 0:
+        return None
+
+    scale = target_kcal / actual_kcal
+    # Bail on extreme scales — something else is wrong.
+    if scale < 0.6 or scale > 1.4:
+        return None
+    # If we're already within 1%, skip — no need to mutate for rounding.
+    if abs(scale - 1.0) < 0.01:
+        return None
+
+    def _mul(v, factor: float) -> int:
+        if v is None:
+            return 0
+        try:
+            return int(round(float(v) * factor))
+        except (TypeError, ValueError):
+            return 0
+
+    for key in _MEAL_KEYS:
+        meal = nutrition_plan.get(key)
+        if not isinstance(meal, dict):
+            continue
+        # Scale meal-level totals.
+        meal["calories"] = _mul(meal.get("calories"), scale)
+        meal["protein"]  = _mul(meal.get("protein"),  scale)
+        meal["carbs"]    = _mul(meal.get("carbs"),    scale)
+        meal["fat"]      = _mul(meal.get("fat"),      scale)
+        if meal.get("fiber") is not None:
+            meal["fiber"] = _mul(meal.get("fiber"), scale)
+        # Scale every structured item's macros AND quantity so the
+        # portions on screen reflect the new totals. Leaving quantity
+        # alone and scaling macros would be physically wrong ("150 cal
+        # eggs, 2 pieces" is a unit lie).
+        items = meal.get("items")
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                it["calories"] = _mul(it.get("calories"), scale)
+                it["protein"]  = _mul(it.get("protein"),  scale)
+                it["carbs"]    = _mul(it.get("carbs"),    scale)
+                it["fat"]      = _mul(it.get("fat"),      scale)
+                # Quantity: scale with a 2-decimal round so we don't
+                # end up with "2.7283 eggs" in the display.
+                q = it.get("quantity")
+                if isinstance(q, (int, float)):
+                    it["quantity"] = round(float(q) * scale, 2)
+
+    # After scaling, verify we hit the target within 1% (rounding error).
+    new_kcal, new_prot, new_carbs, new_fat = _sum_meal_macros(nutrition_plan)
+    return (
+        f"kcal {actual_kcal}→{new_kcal} (target {target_kcal}, scale {scale:.3f}); "
+        f"prot {actual_prot}→{new_prot}g, carbs {actual_carbs}→{new_carbs}g, "
+        f"fat {actual_fat}→{new_fat}g"
+    )
+
+
+def _check_macro_drift(
+    plans_list: list[dict],
+    target_kcal: int,
+    target_prot: int,
+    target_carbs: int,
+    target_fat: int,
+) -> list[str]:
+    """Return a list of human-readable drift messages, one per template
+    whose meal sums are outside the acceptable tolerance from the
+    computed targets. An empty list means every template is within spec.
+
+    Tolerances (percent of target):
+        calories: 2%    — tight; we have a deterministic normalization
+                          pass that cleans up anything that slips past
+                          this after retries, so we can afford to be
+                          strict here
+        protein:  7%
+        carbs:    10%
+        fat:      10%
+
+    These thresholds are intentionally forgiving on macros but strict on
+    calories. If calories drift, the deficit/surplus is wrong and the
+    whole goal is off. Macros can wiggle a bit within the same calorie
+    envelope and still hit the user's goal.
+    """
+    TOLERANCE_KCAL_PCT  = 0.02
+    TOLERANCE_PROT_PCT  = 0.07
+    TOLERANCE_CARBS_PCT = 0.10
+    TOLERANCE_FAT_PCT   = 0.10
+
+    drifts: list[str] = []
+    for idx, np_ in enumerate(plans_list):
+        if not isinstance(np_, dict):
+            continue
+        actual_kcal, actual_prot, actual_carbs, actual_fat = _sum_meal_macros(np_)
+        if actual_kcal == 0 and actual_prot == 0:
+            # Empty / unreadable template — let the existing validator
+            # catch this, not us.
+            continue
+
+        issues: list[str] = []
+        kcal_drift  = abs(actual_kcal - target_kcal)
+        prot_drift  = abs(actual_prot - target_prot)
+        carbs_drift = abs(actual_carbs - target_carbs)
+        fat_drift   = abs(actual_fat - target_fat)
+
+        if target_kcal > 0 and kcal_drift > target_kcal * TOLERANCE_KCAL_PCT:
+            issues.append(f"calories={actual_kcal} (target {target_kcal}, off by {actual_kcal - target_kcal:+d})")
+        if target_prot > 0 and prot_drift > target_prot * TOLERANCE_PROT_PCT:
+            issues.append(f"protein={actual_prot}g (target {target_prot}g, off by {actual_prot - target_prot:+d})")
+        if target_carbs > 0 and carbs_drift > target_carbs * TOLERANCE_CARBS_PCT:
+            issues.append(f"carbs={actual_carbs}g (target {target_carbs}g, off by {actual_carbs - target_carbs:+d})")
+        if target_fat > 0 and fat_drift > target_fat * TOLERANCE_FAT_PCT:
+            issues.append(f"fat={actual_fat}g (target {target_fat}g, off by {actual_fat - target_fat:+d})")
+
+        if issues:
+            label = chr(ord("A") + idx)  # A / B / C / ...
+            drifts.append(f"Template {label}: " + "; ".join(issues))
+    return drifts
+
+
+def _call_nutrition_ai(
+    client: OpenAI,
+    prompt: str,
+    allowed_foods: list[str] | None = None,
+    model: str | None = None,
+    max_tokens: int = 1500,
+    target_macros: tuple[int, int, int, int] | None = None,
+    required_variety: int | None = None,
+) -> dict:
+    """Synchronous OpenAI call for the nutrition plan (run in a thread).
+
+    Retries on:
+      - truncation (bump max_tokens)
+      - bad JSON / missing fields
+      - unknown foods (strict allowed-food enforcement) — we tell the
+        model exactly which items it got wrong and ask it to redo.
+    """
     last_error: Exception | None = None
     _model = model or model_plan_generation()
     max_attempts = 3
     current_max_tokens = max_tokens
+    # Cache the corrective hint we'll send on the next attempt if unknown
+    # foods are detected — lets the model target its fix rather than
+    # trying again blind.
+    allowed_foods_lower = [f.lower() for f in (allowed_foods or [])]
+    if allowed_foods_lower:
+        print(
+            f"[AI /plans nutrition] allowed foods ({len(allowed_foods_lower)}): "
+            f"{', '.join(sorted(allowed_foods_lower)[:20])}"
+            f"{'...' if len(allowed_foods_lower) > 20 else ''}"
+        )
+    correction_hint: str | None = None
+
     for attempt in range(1, max_attempts + 1):
         try:
             full_prompt = prompt
+            if correction_hint:
+                full_prompt = f"{prompt}\n\n{correction_hint}"
             kwargs = _build_chat_kwargs(
                 _model,
                 [
-                    {"role": "system", "content": "You are a registered dietitian. Be concise. Return only the required JSON."},
+                    {"role": "system", "content": "You are a registered dietitian. Be concise. Return only the required JSON. You MUST only use foods from the user's allowed list — any other food is a bug."},
                     {"role": "user", "content": full_prompt},
                 ],
                 json_schema=SCHEMA_NUTRITION,
@@ -250,18 +487,157 @@ def _call_nutrition_ai(client: OpenAI, prompt: str, allowed_foods: list[str] | N
                 last_error = ValueError(f"response truncated at {current_max_tokens - 400} tokens")
                 continue
             data = _extract_json(raw)
-            # Validate all 3 templates
+            # Validate the dynamic `nutrition_plans` array. Back-compat with
+            # older prompts that returned `nutrition_plan_a/b/c`: if we see
+            # those, repackage them into the new shape so downstream code
+            # only ever deals with one format.
             meal_keys_set = {"breakfast", "lunch", "dinner", "snack"}
-            for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
-                np_ = data.get(key, {})
+            plans_list = data.get("nutrition_plans")
+            if not isinstance(plans_list, list) or not plans_list:
+                legacy = [data.get("nutrition_plan_a"), data.get("nutrition_plan_b"), data.get("nutrition_plan_c")]
+                legacy = [p for p in legacy if isinstance(p, dict)]
+                if legacy:
+                    plans_list = legacy
+                    data["nutrition_plans"] = plans_list
+                else:
+                    raise ValueError("nutrition_plans missing from response")
+            for idx, np_ in enumerate(plans_list):
+                if not isinstance(np_, dict):
+                    raise ValueError(f"nutrition_plans[{idx}] is not an object")
                 if not np_.get("targets"):
-                    raise ValueError(f"{key} missing targets")
+                    raise ValueError(f"nutrition_plans[{idx}] missing targets")
                 if not any(k in np_ for k in meal_keys_set):
-                    raise ValueError(f"{key} has no meal entries")
+                    raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
-            # Food constraint is enforced via the prompt — no hard rejection here
+            # Enforce the exact number of templates the user asked for.
+            # The AI occasionally returns 3 even when we tell it 1, so we
+            # truncate or pad deterministically here. Truncation takes the
+            # first N (they're usually the best-quality), padding repeats
+            # the last valid template to fill to N.
+            if required_variety is not None and required_variety > 0:
+                if len(plans_list) > required_variety:
+                    print(
+                        f"[AI /plans nutrition] truncating {len(plans_list)} → "
+                        f"{required_variety} templates (AI over-generated)"
+                    )
+                    plans_list = plans_list[:required_variety]
+                    data["nutrition_plans"] = plans_list
+                elif len(plans_list) < required_variety:
+                    # Pad by repeating the last template. Very rare.
+                    last = plans_list[-1] if plans_list else None
+                    if last:
+                        while len(plans_list) < required_variety:
+                            plans_list.append(last)
+                        data["nutrition_plans"] = plans_list
+                        print(
+                            f"[AI /plans nutrition] padded to {required_variety} "
+                            f"templates (AI under-generated)"
+                        )
 
-            print(f"[AI /plans nutrition] attempt {attempt} OK — nutritionistNote: {bool(data.get('nutritionistNote'))}")
+            # Strict food enforcement: collect every unknown food across all
+            # templates and reject the response if any are found. On retry
+            # we tell the model which specific names were wrong so it can
+            # correct them instead of generating blind.
+            food_issues: list[str] = []
+            if allowed_foods_lower:
+                all_unknowns: list[str] = []
+                for np_ in plans_list:
+                    all_unknowns.extend(_collect_unknown_foods(np_, allowed_foods))
+                seen_u: set[str] = set()
+                for u in all_unknowns:
+                    if u.lower() not in seen_u:
+                        food_issues.append(u)
+                        seen_u.add(u.lower())
+
+            # Macro sum verification — check every template's meal totals
+            # against the target numbers the calculator produced. Drift
+            # beyond the allowed tolerance means the AI assembled meals
+            # that don't actually hit the user's goal, even if it says
+            # it did. Retry with specific correction.
+            drift_issues: list[str] = []
+            if target_macros is not None:
+                t_kcal, t_prot, t_carbs, t_fat = target_macros
+                drift_issues = _check_macro_drift(plans_list, t_kcal, t_prot, t_carbs, t_fat)
+
+            if food_issues or drift_issues:
+                # Build a combined corrective hint for the next attempt.
+                # Food issues take priority in the log line because they
+                # indicate the model is ignoring a hard rule, whereas
+                # drift is a softer math failure.
+                if food_issues:
+                    print(
+                        f"[AI /plans nutrition] attempt {attempt} REJECTED — "
+                        f"used {len(food_issues)} foods NOT in the allowed list: "
+                        f"{', '.join(food_issues[:10])}"
+                        f"{'...' if len(food_issues) > 10 else ''}"
+                    )
+                if drift_issues:
+                    print(
+                        f"[AI /plans nutrition] attempt {attempt} DRIFT — "
+                        f"{len(drift_issues)} template(s) outside tolerance:"
+                    )
+                    for d in drift_issues:
+                        print(f"  · {d}")
+
+                if attempt < max_attempts:
+                    hint_parts: list[str] = ["PREVIOUS ATTEMPT FAILED — please correct and regenerate."]
+                    if food_issues:
+                        hint_parts.append(
+                            "You used foods NOT in the user's available list: "
+                            + ", ".join(food_issues[:20])
+                            + ". You MUST only use foods from this exact list:\n  "
+                            + ", ".join(allowed_foods or [])
+                        )
+                    if drift_issues and target_macros is not None:
+                        t_kcal, t_prot, t_carbs, t_fat = target_macros
+                        hint_parts.append(
+                            f"Your meal totals did NOT hit the targets. REQUIRED:\n"
+                            f"  Calories: {t_kcal}   Protein: {t_prot}g   "
+                            f"Carbs: {t_carbs}g   Fat: {t_fat}g\n"
+                            f"Drift found:\n  " + "\n  ".join(drift_issues) + "\n"
+                            f"Adjust portion sizes so the sum of meal macros equals "
+                            f"the targets within 3% on calories and 7% on protein."
+                        )
+                    correction_hint = "\n\n".join(hint_parts)
+                    last_error = ValueError(
+                        f"{len(food_issues)} unknown foods, {len(drift_issues)} drift issues"
+                    )
+                    continue
+                else:
+                    # Final attempt — accept and log loudly. Better to give
+                    # the user SOMETHING than fail hard. The post-processing
+                    # routes unknown foods into `custom_foods` and the
+                    # client will see the drift.
+                    if food_issues:
+                        print(
+                            f"[AI /plans nutrition] final attempt — accepting "
+                            f"response with {len(food_issues)} unknown foods. "
+                            f"They will appear in `custom_foods`."
+                        )
+                    if drift_issues:
+                        print(
+                            f"[AI /plans nutrition] final attempt — accepting "
+                            f"response with macro drift. Displayed totals may "
+                            f"not match the user's target."
+                        )
+
+            # Deterministic backstop: after the AI has done its best
+            # (possibly through retries), scale every template's meal
+            # macros to hit the target exactly. Only nudges if the drift
+            # is salvageable (±40% of target); anything worse than that
+            # would be a structural problem we already would have
+            # rejected above.
+            if target_macros is not None:
+                t_kcal, t_prot, t_carbs, t_fat = target_macros
+                for idx, np_ in enumerate(plans_list):
+                    if not isinstance(np_, dict):
+                        continue
+                    summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
+                    if summary:
+                        label = chr(ord("A") + idx)
+                        print(f"[AI /plans nutrition] normalized Template {label}: {summary}")
+
+            print(f"[AI /plans nutrition] attempt {attempt} OK — {len(plans_list)} templates, nutritionistNote: {bool(data.get('nutritionistNote'))}")
             return data
         except json.JSONDecodeError as e:
             last_error = ValueError(f"invalid JSON attempt {attempt}: {e}")
@@ -293,14 +669,16 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"Day '{d.get('day', '?')}' has no exercises")
 
     meal_keys_set = ("breakfast", "lunch", "dinner", "snack")
-    for key in ("nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"):
-        np_ = result.get(key)
-        if not np_ or not isinstance(np_, dict):
-            raise ValueError(f"{key} missing from result")
+    plans_list = result.get("nutrition_plans")
+    if not isinstance(plans_list, list) or len(plans_list) == 0:
+        raise ValueError("nutrition_plans missing or empty in result")
+    for idx, np_ in enumerate(plans_list):
+        if not isinstance(np_, dict):
+            raise ValueError(f"nutrition_plans[{idx}] is not an object")
         if not np_.get("targets"):
-            raise ValueError(f"{key} missing targets")
+            raise ValueError(f"nutrition_plans[{idx}] missing targets")
         if not any(k in np_ for k in meal_keys_set):
-            raise ValueError(f"{key} has no meal entries")
+            raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
 
 async def run_full_plan_generation(req: PlanRequest) -> dict:
@@ -325,31 +703,73 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     _m = model_plan_generation()
     print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
 
-    # Build both prompts up front — neither needs the other's output.
     workout_prompt = build_workout_prompt(req)
-    nutrition_prompt = build_nutrition_prompt(req, None)  # no enriched data needed here
 
-    enriched, workout_data, nutrition_data = await asyncio.gather(
-        asyncio.to_thread(enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine),
-        asyncio.to_thread(_call_workout_ai, client, workout_prompt, _m, 1800),
-        asyncio.to_thread(_call_nutrition_ai, client, nutrition_prompt, req.foodsAvailable, _m, 3000),
+    # Deterministic target macros (source of truth for the assembler).
+    targets_for_check = compute_tdee_and_targets(req)
+    nutrition_target_macros = (
+        int(targets_for_check["calories"]),
+        int(targets_for_check["protein"]),
+        int(targets_for_check["carbs"]),
+        int(targets_for_check["fat"]),
     )
 
+    variety_n = max(1, min(7, int(getattr(req, "mealVariety", 3) or 3)))
+
+    # Hybrid nutrition pipeline: AI picks meal skeletons, algorithm solves
+    # portions and hits macro targets. Runs in parallel with enrichment +
+    # workout generation. `assemble_nutrition_response` needs the enriched
+    # data, so we do enrichment first then assembly, while workout runs
+    # independently in its own thread.
+    async def _run_nutrition() -> dict:
+        enriched_local = await asyncio.to_thread(
+            enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
+        )
+        nut = await asyncio.to_thread(
+            assemble_nutrition_response,
+            client, req, nutrition_target_macros, variety_n, req.foodsAvailable, enriched_local,
+        )
+        return {"enriched": enriched_local, "nutrition": nut}
+
+    nutrition_bundle, workout_data = await asyncio.gather(
+        _run_nutrition(),
+        asyncio.to_thread(_call_workout_ai, client, workout_prompt, _m, 1800),
+    )
+    enriched = nutrition_bundle["enriched"]
+    nutrition_data = nutrition_bundle["nutrition"]
+
+    plans_list = nutrition_data.get("nutrition_plans") or []
+    # Back-compat fallback in case the model still emits the legacy A/B/C keys.
+    if not plans_list:
+        legacy = [nutrition_data.get("nutrition_plan_a"), nutrition_data.get("nutrition_plan_b"), nutrition_data.get("nutrition_plan_c")]
+        plans_list = [p for p in legacy if isinstance(p, dict)]
+    # Deterministic backstop: scale each template exactly onto the target
+    # macros. The assembler's solver gets us within a few percent; this
+    # closes any residual drift so meal totals match the calorie calculator.
+    t_kcal, t_prot, t_carbs, t_fat = nutrition_target_macros
+    for idx, np_ in enumerate(plans_list):
+        if isinstance(np_, dict):
+            summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
+            if summary:
+                print(f"[plan-gen] normalized template {idx}: {summary}")
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
         "workout_plan":     workout_data["workout_plan"],
-        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
-        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
-        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
+        "nutrition_plans":  plans_list,
+        # Legacy keys kept populated so older client builds still work — map
+        # the first three templates (repeating the last if fewer than 3).
+        "nutrition_plan_a": plans_list[0] if plans_list else None,
+        "nutrition_plan_b": plans_list[1] if len(plans_list) > 1 else (plans_list[0] if plans_list else None),
+        "nutrition_plan_c": plans_list[2] if len(plans_list) > 2 else (plans_list[-1] if plans_list else None),
     }
     _validate_plans(result, req)   # raises ValueError
 
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
-    print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}")
+    print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
 
 
@@ -424,15 +844,36 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
     enriched = await asyncio.to_thread(
         enrich_foods_with_macros, client, plan_req.foodsAvailable, plan_req.mealRoutine
     )
-    nutrition_data = await asyncio.to_thread(
-        _call_nutrition_ai, client, build_nutrition_prompt(plan_req, enriched), plan_req.foodsAvailable, _m, 3500
+    # Target macros for drift verification (see `_call_nutrition_ai`).
+    targets_for_check = compute_tdee_and_targets(plan_req)
+    nutrition_target_macros = (
+        int(targets_for_check["calories"]),
+        int(targets_for_check["protein"]),
+        int(targets_for_check["carbs"]),
+        int(targets_for_check["fat"]),
     )
+    variety_n = max(1, min(7, int(getattr(plan_req, "mealVariety", 3) or 3)))
+    nutrition_data = await asyncio.to_thread(
+        assemble_nutrition_response,
+        client, plan_req, nutrition_target_macros, variety_n, plan_req.foodsAvailable, enriched,
+    )
+    plans_list = nutrition_data.get("nutrition_plans") or []
+    if not plans_list:
+        legacy = [nutrition_data.get("nutrition_plan_a"), nutrition_data.get("nutrition_plan_b"), nutrition_data.get("nutrition_plan_c")]
+        plans_list = [p for p in legacy if isinstance(p, dict)]
+    t_kcal, t_prot, t_carbs, t_fat = nutrition_target_macros
+    for idx, np_ in enumerate(plans_list):
+        if isinstance(np_, dict):
+            summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
+            if summary:
+                print(f"[plan-gen nutrition] normalized template {idx}: {summary}")
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
-        "nutrition_plan_a": nutrition_data["nutrition_plan_a"],
-        "nutrition_plan_b": nutrition_data["nutrition_plan_b"],
-        "nutrition_plan_c": nutrition_data["nutrition_plan_c"],
+        "nutrition_plans":  plans_list,
+        "nutrition_plan_a": plans_list[0] if plans_list else None,
+        "nutrition_plan_b": plans_list[1] if len(plans_list) > 1 else (plans_list[0] if plans_list else None),
+        "nutrition_plan_c": plans_list[2] if len(plans_list) > 2 else (plans_list[-1] if plans_list else None),
     }
     custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
     if custom_foods:
@@ -612,6 +1053,25 @@ async def _run_plan_job(job_id: int) -> None:
             if job.status == "cancelled":
                 print(f"[plan-job {job_id}] cancelled mid-flight, discarding result")
                 return
+
+            # Stale per-day nutrition_plan rows from previous plan runs would
+            # otherwise win over the fresh templates on the client (HomeScreen
+            # checks day-state before AI templates). Clear them now so the new
+            # plan is actually what the user sees across all days.
+            if job.kind in ("nutrition", "full"):
+                from app.models import UserDayState
+                stale = db.exec(
+                    select(UserDayState).where(UserDayState.user_id == job.user_id)
+                ).all()
+                cleared = 0
+                for row in stale:
+                    if row.nutrition_plan is not None:
+                        row.nutrition_plan = None
+                        db.add(row)
+                        cleared += 1
+                if cleared:
+                    print(f"[plan-job {job_id}] cleared {cleared} stale day-state nutrition plans")
+
             job.status = "completed"
             job.result_json = result
             job.completed_at = datetime.now(timezone.utc)

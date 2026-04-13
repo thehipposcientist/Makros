@@ -56,14 +56,55 @@ def get_exercise(exercise_id: int, db: Session = Depends(get_session)):
 @router.get("/foods")
 def list_foods(category: str | None = None, db: Session = Depends(get_session)):
     """
-    Returns the food library. Optionally filterable by category.
-    Used to populate food picker in EditProfileScreen.
+    Returns the food library with macros scaled to each food's DEFAULT SERVING,
+    not per-100g. The frontend treats `calories`/`protein`/... as "what one
+    unit of this food costs", so returning per-100g values was causing
+    wildly wrong numbers (e.g. 1 tbsp olive oil showing 884 cal).
+
+    Now joins `FoodServing` and returns the default serving's precomputed
+    macros plus its human-readable label as `unit`.
     """
+    from app.models import FoodServing
     query = select(Food)
     if category:
         query = query.where(Food.category == category)
     foods = db.exec(query.order_by(Food.category, Food.name)).all()
-    return foods
+    if not foods:
+        return []
+
+    # Batch-fetch default servings for every food we're returning.
+    food_ids = [f.id for f in foods if f.id is not None]
+    servings = db.exec(
+        select(FoodServing).where(FoodServing.food_id.in_(food_ids))
+    ).all()
+    # Group by food_id; pick is_default, or fall back to first.
+    by_food: dict[int, list[FoodServing]] = {}
+    for s in servings:
+        by_food.setdefault(s.food_id, []).append(s)
+
+    result = []
+    for f in foods:
+        entry = {
+            "id": f.id,
+            "name": f.name,
+            "category": f.category,
+            "unit": f.unit,
+            "calories": f.calories,
+            "protein": f.protein,
+            "carbs": f.carbs,
+            "fat": f.fat,
+            "is_custom": f.is_custom,
+        }
+        rows = by_food.get(f.id or -1, [])
+        default_row = next((r for r in rows if r.is_default), rows[0] if rows else None)
+        if default_row is not None:
+            entry["unit"] = default_row.label
+            entry["calories"] = default_row.calories
+            entry["protein"] = default_row.protein
+            entry["carbs"] = default_row.carbs
+            entry["fat"] = default_row.fat
+        result.append(entry)
+    return result
 
 
 @router.get("/food-categories")

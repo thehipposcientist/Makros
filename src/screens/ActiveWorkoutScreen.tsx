@@ -1119,7 +1119,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (!imageBase64) return;
       const response = await analyzeWorkoutFormPhoto(authToken, {
         image_base64: imageBase64,
-        mime_type: asset.mimeType ?? 'image/jpeg',
+        mime_type: 'image/jpeg',   // expo transcodes HEIC→JPEG with base64:true
         exercise_name: active?.name,
         question: prompt || undefined,
       });

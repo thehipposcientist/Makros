@@ -117,7 +117,7 @@ const LAST_USER_ID_KEY = 'last_user_id';
  *  excluded from sync via SYNCED_STATE_KEYS below. */
 const USER_SCOPED_KEYS = [
   'userProfile', 'aiWorkoutPlan',
-  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
   'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1',
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
@@ -131,7 +131,7 @@ const USER_SCOPED_KEYS = [
 const SYNCED_STATE_KEYS = [
   'userProfile',
   'aiWorkoutPlan',
-  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC',
+  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
   'trainerNote', 'nutritionistNote', 'supplementStack',
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
@@ -375,12 +375,26 @@ export default function Index() {
       const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
       if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
     }
-    if (aiPlans?.nutrition_plan_a) {
-      await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-      await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
+    // Canonical nutrition shape: `nutrition_plans` as a dynamic-length array.
+    // Fall back to the legacy A/B/C keys if the server still uses the old
+    // shape (either because it's an old server build or a cached payload
+    // being re-applied after backgrounding).
+    const plansList: any[] = Array.isArray(aiPlans?.nutrition_plans)
+      ? aiPlans.nutrition_plans
+      : [aiPlans?.nutrition_plan_a, aiPlans?.nutrition_plan_b, aiPlans?.nutrition_plan_c].filter(Boolean);
+    if (plansList.length > 0) {
+      // New canonical key — an array of N templates. HomeScreen's loadPlans
+      // rotates across these regardless of length.
+      await AsyncStorage.setItem('aiNutritionPlans', JSON.stringify(plansList));
+      // Legacy keys preserved so any code path that still reads them
+      // (older HomeScreen builds, app-state sync) keeps working.
+      await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(plansList[0]));
+      await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(plansList[0]));
+      if (plansList[1]) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(plansList[1]));
+      else await AsyncStorage.removeItem('aiNutritionPlanB');
+      if (plansList[2]) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(plansList[2]));
+      else await AsyncStorage.removeItem('aiNutritionPlanC');
     }
-    if (aiPlans?.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-    if (aiPlans?.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
     if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
     if (aiPlans?.supplementStack?.length) {
       await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));

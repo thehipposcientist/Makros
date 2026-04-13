@@ -14,6 +14,56 @@ from app.auth import get_current_user
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 
+@router.get("/calorie-ranges")
+def get_calorie_ranges(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Return the cut / maintain / bulk calorie + protein ranges for the
+    signed-in user, calculated from their profile body stats and training
+    volume. Used by the EditProfileScreen macros card to show users what
+    their three reference ranges look like at a glance.
+
+    Returns 404 if the user hasn't completed onboarding yet (no profile).
+    """
+    from app.services.calorie_calculator import (
+        CalorieInputs,
+        calculate_reference_ranges,
+    )
+
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not set up yet")
+
+    prefs = session.exec(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    ).first()
+
+    gender_value = profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender)
+    inputs = CalorieInputs(
+        weight_lbs=profile.weight_lbs,
+        height_feet=profile.height_feet,
+        height_inches=profile.height_inches,
+        age=profile.age,
+        gender=gender_value,
+        training_days_per_week=prefs.days_per_week if prefs else 3,
+        session_minutes=60,
+    )
+    card = calculate_reference_ranges(inputs)
+    return {
+        "bmr": card.bmr,
+        "activity_multiplier": card.activity_multiplier,
+        "maintenance_calories": card.maintenance_calories,
+        "cut_calories": card.cut_calories,
+        "bulk_calories": card.bulk_calories,
+        "cut_protein_g": card.cut_protein_g,
+        "maintain_protein_g": card.maintain_protein_g,
+        "bulk_protein_g": card.bulk_protein_g,
+    }
+
+
 def _active_goal(session: Session, user_id: int) -> UserGoal | None:
     return session.exec(
         select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)

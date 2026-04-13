@@ -133,6 +133,11 @@ export interface UserProfile {
   supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
   customExercises?: CustomExerciseItem[]; // AI-found exercises the user saved to their library
+  /** How many distinct daily meal templates the AI generates. The client
+   *  rotates these across 7 days (e.g. variety=2 → ABABABA, variety=7 → all
+   *  unique). Lower = faster plan generation; higher = more variety.
+   *  Default 3 matches the old hardcoded A/B/C behaviour. */
+  mealVariety?: number;
   savedMeals?: SavedMealTemplate[];
   mealRoutine?: string;          // user's fixed meal habits
   injuries?: string;             // legacy: free-text injuries
