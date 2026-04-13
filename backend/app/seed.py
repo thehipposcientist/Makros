@@ -69,7 +69,16 @@ def seed_exercises(session: Session) -> None:
     - New exercises: created.
     - ExerciseEquipment: replaced to match current seed data.
     """
-    from app.seed_exercises_data import SEED_EXERCISES
+    from app.seed_exercises_data import SEED_EXERCISES, SEED_EQUIPMENT
+    from app.seed_exercises_validation import (
+        validate_exercise_seed, validate_equipment_seed,
+    )
+
+    validate_equipment_seed(SEED_EQUIPMENT)
+    validate_exercise_seed(
+        SEED_EXERCISES,
+        equipment_slugs={eq["slug"] for eq in SEED_EQUIPMENT},
+    )
 
     # Build equipment slug -> id lookup
     equip_by_slug: dict[str, int] = {}
@@ -199,8 +208,13 @@ def seed_foods(session: Session) -> None:
     - New foods: created with all related rows.
     - Existing foods (by normalized_name, source=seed): nutrition updated,
       servings replaced, aliases synced.
+    - Runs `validate_seed` at start to surface data-quality issues. Warnings
+      are logged but do not block seeding.
     """
     from app.seed_foods_data import SEED_FOODS
+    from app.seed_validation import validate_seed
+
+    validate_seed(SEED_FOODS)
 
     # Index existing seed foods by normalized_name
     existing_foods: dict[str, Food] = {}

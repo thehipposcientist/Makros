@@ -111,6 +111,13 @@ class FoodCategory(str, Enum):
     FRUITS          = "fruits"
     DAIRY           = "dairy"
     FATS_OILS       = "fats_oils"
+    # 2026-04-13: added three categories for items that were previously
+    # shoehorned into the closest food group. This prevents the meal
+    # assembler's slot-aware fallback logic from picking coffee as a
+    # "vegetable" for a lunch plate, etc.
+    CONDIMENTS      = "condiments"   # sauces, dressings, hot sauce, salsa
+    BEVERAGES       = "beverages"    # coffee, juice, sports drinks
+    SUPPLEMENTS     = "supplements"  # creatine, pre-workout, vitamins
 
 
 class FoodSource(str, Enum):

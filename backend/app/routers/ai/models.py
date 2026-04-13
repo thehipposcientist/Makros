@@ -209,6 +209,21 @@ class BodyScanRequest(BaseModel):
     age: int | None = None
 
 
+class MealInstructionsRequest(BaseModel):
+    """Generate prep instructions / quick recipe for a single meal on demand."""
+    meal_name: str
+    items: list[dict] = []        # [{name, quantity, unit}, ...]
+    cooking_skill: str | None = None
+    prep_time_minutes: int | None = None
+    dietary_preference: str | None = None
+    allergies: list[str] = []
+    # Optional: previous recipe(s) the user has already seen for this meal.
+    # When populated, we tell the AI to return a DIFFERENT preparation
+    # (different technique / flavor / cuisine) while using the same
+    # ingredient list. Powers the "Try another way" button.
+    previous_variants: list[str] = []
+
+
 class ParseWorkoutsRequest(BaseModel):
     """Parse natural language workout descriptions into structured sessions."""
     text: str                   # e.g. "I did legs yesterday and recovery today"

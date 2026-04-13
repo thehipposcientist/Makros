@@ -139,6 +139,45 @@ class CalorieTargets:
     override_applied: bool            # True if user custom macros were used
     min_calories_enforced: bool       # True if we clamped up to MIN_SAFE_CALORIES
 
+    # Extra diagnostics populated after step 8 (partial-override recalc).
+    # Default values preserve backward compat for any construction site
+    # that doesn't pass them explicitly.
+    consistency_kcal_delta: int = 0   # |calories − (P*4 + C*4 + F*9)|; 0 when consistent
+    override_inconsistent: bool = False   # True if user pinned values whose sum != stated calories
+    override_fat_below_floor: bool = False  # True if user override drove fat below physiological floor
+
+    # Pre-override snapshot. Populated whenever step 8 actually mutates
+    # something so callers / UIs can show "you pinned calories; original
+    # calculated values were X/Y/Z". Left None when no override was applied.
+    calculated_calories: int | None = None
+    calculated_protein_g: int | None = None
+    calculated_carbs_g: int | None = None
+    calculated_fat_g: int | None = None
+
+
+# ─── Consistency check helper ────────────────────────────────────────────────
+#
+# Exposed so the meal assembler and tests can call it too. Returns the
+# signed delta in kcal between the stated `calories` field and the actual
+# sum implied by protein/carbs/fat totals. Zero means the macro breakdown
+# is internally consistent; a positive value means stated calories exceed
+# the sum (user said "2000 cal" but macros only add to 1900).
+
+def macro_consistency_delta(calories: int, protein_g: int, carbs_g: int, fat_g: int) -> int:
+    """Signed drift between stated calories and macro-sum calories, in kcal.
+
+    Useful for catching override inconsistencies or assembler drift. The
+    calculator guarantees |delta| ≤ 1-2 kcal for calculated targets (pure
+    rounding error); anything larger came from manual overrides or a
+    buggy downstream step.
+    """
+    macro_kcal = (
+        protein_g * CALORIES_PER_GRAM_PROTEIN
+        + carbs_g * CALORIES_PER_GRAM_CARB
+        + fat_g * CALORIES_PER_GRAM_FAT
+    )
+    return int(calories) - int(macro_kcal)
+
 
 # ─── Step 1 — BMR (Mifflin-St Jeor) ──────────────────────────────────────────
 
@@ -390,17 +429,36 @@ def step_7_calculate_carbs_g(
 
 # ─── Step 8 — Manual overrides ───────────────────────────────────────────────
 
-def step_8_apply_custom_overrides(targets: CalorieTargets, overrides: CustomMacroOverrides | None) -> CalorieTargets:
-    """Replace any fields the user manually pinned.
+def step_8_apply_custom_overrides(
+    targets: CalorieTargets,
+    overrides: CustomMacroOverrides | None,
+    *,
+    bucket: GoalBucketParams | None = None,
+    weight_lbs: float | None = None,
+) -> CalorieTargets:
+    """Apply any fields the user manually pinned and recompute the rest.
 
-    Overrides ALWAYS win over calculated values. If the user wrote a
-    number in the custom-macros section of their profile, that's what
-    we show — the whole point of exposing manual macros is trust. The
-    calculator's numbers are still available via the debug fields so
-    the user can see "you overrode protein from 170 → 200".
+    Rules (run top-to-bottom, each independent):
 
-    Does NOT re-validate against MIN_SAFE_CALORIES — we assume the user
-    knows what they're doing when they manually set a calorie target.
+      * Pinned fields are always kept as-is.
+      * Calories pinned but macros left blank → recompute fat and carbs
+        from the new calorie count (protein already comes from bodyweight
+        so it doesn't move unless pinned).
+      * Protein pinned → keep protein, recompute carbs/fat from remaining
+        calories.
+      * Fat pinned → keep fat, recompute carbs.
+      * Carbs pinned → keep carbs, recompute fat.
+      * Any combination: only fields that weren't pinned get recomputed.
+      * All four pinned → use as-is, no recomputation.
+
+    Requires `bucket` and `weight_lbs` for recomputation. If either is
+    missing we fall back to the old swap-only behavior (kept so legacy
+    callers that don't pass bucket don't crash) and flag the result
+    `override_inconsistent` if the sum drifts.
+
+    Does NOT re-clamp calories against MIN_SAFE_CALORIES — when the user
+    manually pins calories we trust them and let the debug flags surface
+    any inconsistency.
     """
     if not overrides:
         return targets
@@ -411,11 +469,83 @@ def step_8_apply_custom_overrides(targets: CalorieTargets, overrides: CustomMacr
     if not any_override:
         return targets
 
+    # Snapshot calculated values so the UI can show "original → override".
+    calc_cal  = targets.calories
+    calc_prot = targets.protein_g
+    calc_carb = targets.carbs_g
+    calc_fat  = targets.fat_g
+
+    pinned_cal  = overrides.calories  # int | None
+    pinned_prot = overrides.protein
+    pinned_carb = overrides.carbs
+    pinned_fat  = overrides.fat
+
+    # ── Recompute path ─────────────────────────────────────────────────────
+    # We recompute whenever we have enough context (bucket + weight) AND at
+    # least one of protein/carbs/fat is NOT pinned. If all three macros are
+    # pinned, there's nothing to recompute and we just swap values in.
+    can_recompute = bucket is not None and weight_lbs is not None
+    all_three_pinned = (
+        pinned_prot is not None and pinned_carb is not None and pinned_fat is not None
+    )
+
+    if can_recompute and not all_three_pinned:
+        final_cal = pinned_cal if pinned_cal is not None else calc_cal
+
+        # Protein: pinned wins, else keep calculated (bodyweight-driven,
+        # independent of calorie changes).
+        final_prot = pinned_prot if pinned_prot is not None else calc_prot
+
+        # Fat: pinned wins, else recompute from final calories using bucket %.
+        if pinned_fat is not None:
+            final_fat = pinned_fat
+        else:
+            final_fat = step_6_calculate_fat_g(final_cal, weight_lbs, bucket)  # type: ignore[arg-type]
+
+        # Carbs: pinned wins, else whatever calories are left after P + F,
+        # with the bucket's carb floor / fat floor honored (step 7 handles
+        # both). When carbs are NOT pinned but fat IS, we still run step 7
+        # but the fat input is the user's pinned value; the floor-transfer
+        # logic inside step 7 will respect that fat is fixed IF carbs end
+        # up in-range, otherwise it may adjust fat. We only preserve the
+        # pinned fat if step 7 didn't move it.
+        if pinned_carb is not None:
+            final_carb = pinned_carb
+            # Macros may now disagree with stated calories — that's the
+            # user's call. Debug flag below will surface it.
+        else:
+            recomputed_carb, recomputed_fat = step_7_calculate_carbs_g(
+                final_cal, final_prot, final_fat, weight_lbs, bucket,  # type: ignore[arg-type]
+            )
+            final_carb = recomputed_carb
+            # Only let step 7 move fat if the user didn't pin it.
+            if pinned_fat is None:
+                final_fat = recomputed_fat
+    else:
+        # Legacy fall-through: swap pinned, keep calculated for the rest.
+        final_cal  = pinned_cal  if pinned_cal  is not None else calc_cal
+        final_prot = pinned_prot if pinned_prot is not None else calc_prot
+        final_carb = pinned_carb if pinned_carb is not None else calc_carb
+        final_fat  = pinned_fat  if pinned_fat  is not None else calc_fat
+
+    # ── Diagnostics ────────────────────────────────────────────────────────
+    drift = macro_consistency_delta(final_cal, final_prot, final_carb, final_fat)
+    # 3 kcal tolerance absorbs rounding jitter (each macro is rounded to
+    # int, so the sum can legitimately differ from stated calories by a
+    # couple kcal even when everything was recomputed cleanly).
+    inconsistent = abs(drift) > 3
+
+    below_floor = False
+    if weight_lbs is not None:
+        fat_floor = math.ceil(weight_lbs * FAT_FLOOR_G_PER_LB)
+        if final_fat < fat_floor:
+            below_floor = True
+
     return CalorieTargets(
-        calories=overrides.calories if overrides.calories is not None else targets.calories,
-        protein_g=overrides.protein if overrides.protein is not None else targets.protein_g,
-        carbs_g=overrides.carbs if overrides.carbs is not None else targets.carbs_g,
-        fat_g=overrides.fat if overrides.fat is not None else targets.fat_g,
+        calories=final_cal,
+        protein_g=final_prot,
+        carbs_g=final_carb,
+        fat_g=final_fat,
         bmr=targets.bmr,
         activity_multiplier=targets.activity_multiplier,
         tdee=targets.tdee,
@@ -426,6 +556,13 @@ def step_8_apply_custom_overrides(targets: CalorieTargets, overrides: CustomMacr
         ),
         override_applied=True,
         min_calories_enforced=targets.min_calories_enforced,
+        consistency_kcal_delta=drift,
+        override_inconsistent=inconsistent,
+        override_fat_below_floor=below_floor,
+        calculated_calories=calc_cal,
+        calculated_protein_g=calc_prot,
+        calculated_carbs_g=calc_carb,
+        calculated_fat_g=calc_fat,
     )
 
 
@@ -475,12 +612,20 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
         rate_summary=rate_summary,
         override_applied=False,
         min_calories_enforced=min_enforced,
+        consistency_kcal_delta=macro_consistency_delta(calories, protein_g, carbs_g, fat_g),
     )
 
     # Step 8: apply manual overrides (if any). Last step so the user
     # always sees what WOULD have been calculated in the debug fields
-    # even when they pin a manual value.
-    return step_8_apply_custom_overrides(calculated, inputs.custom_overrides)
+    # even when they pin a manual value. Passes bucket + weight so
+    # partial overrides can recompute the non-pinned macros instead of
+    # producing an internally inconsistent target.
+    return step_8_apply_custom_overrides(
+        calculated,
+        inputs.custom_overrides,
+        bucket=bucket,
+        weight_lbs=inputs.weight_lbs,
+    )
 
 
 # ─── Cut / bulk / maintain reference card ────────────────────────────────────

@@ -13,6 +13,7 @@ from .router import router
 from .models import (
     FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
     SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
+    MealInstructionsRequest,
 )
 from .utils import (
     get_openai_api_key, model_meal_parsing, model_chat,
@@ -271,6 +272,100 @@ def exercise_ai_search(
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Exercise search failed: {str(e)}")
+
+
+@router.post("/meal-instructions")
+def generate_meal_instructions(
+    body: MealInstructionsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """On-demand prep instructions for a single meal. Cheap, single AI call,
+    returned as a short plain-text recipe. The client caches the result per
+    meal so this only fires the first time the user taps "How to make this"."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.meal_name.strip():
+        raise HTTPException(status_code=400, detail="meal_name is required")
+
+    # Build a compact ingredient line. We keep this tight on purpose — the
+    # prompt is ~150 input tokens so the call is a couple hundredths of a
+    # cent per tap.
+    ingredient_lines: list[str] = []
+    for it in body.items or []:
+        name = str(it.get("name") or "").strip()
+        if not name:
+            continue
+        qty = it.get("quantity")
+        unit = str(it.get("unit") or "").strip()
+        if qty is not None and unit:
+            ingredient_lines.append(f"- {qty} {unit} {name}")
+        elif qty is not None:
+            ingredient_lines.append(f"- {qty} {name}")
+        else:
+            ingredient_lines.append(f"- {name}")
+    ingredients_block = "\n".join(ingredient_lines) if ingredient_lines else "(no ingredient list provided)"
+
+    context_bits: list[str] = []
+    if body.cooking_skill:
+        context_bits.append(f"Cooking skill: {body.cooking_skill}")
+    if body.prep_time_minutes:
+        context_bits.append(f"Max prep time: {body.prep_time_minutes} minutes")
+    if body.dietary_preference:
+        context_bits.append(f"Diet: {body.dietary_preference}")
+    if body.allergies:
+        context_bits.append(f"Allergies (avoid): {', '.join(body.allergies)}")
+    context_block = "\n".join(f"- {b}" for b in context_bits) if context_bits else "- No special constraints"
+
+    variation_block = ""
+    if body.previous_variants:
+        # Give the AI the earlier recipes so it can deliberately vary from
+        # them. Kept short (first 300 chars each) so the prompt stays cheap.
+        previews = "\n\n".join(
+            f"VARIATION {i+1}:\n{v[:300]}" for i, v in enumerate(body.previous_variants)
+        )
+        variation_block = (
+            "\nTHE USER HAS ALREADY SEEN THESE PREPARATIONS — produce a "
+            "DIFFERENT one using the same ingredients. Change cuisine, "
+            "cooking technique, or flavor profile. Don't repeat the same "
+            "approach:\n"
+            f"{previews}\n"
+        )
+
+    prompt = (
+        f"Give quick prep instructions for this meal:\n\n"
+        f"MEAL: {body.meal_name}\n\n"
+        f"INGREDIENTS:\n{ingredients_block}\n\n"
+        f"USER CONTEXT:\n{context_block}\n"
+        f"{variation_block}\n"
+        "Return a short, practical recipe:\n"
+        "  - 2-4 sentence intro describing the dish.\n"
+        "  - Numbered steps (3-8 steps). Keep each step on one line.\n"
+        "  - Total time estimate and 1 simple swap suggestion at the bottom.\n"
+        "  - Plain text, no markdown headers, no bullet characters.\n"
+        "Match the user's cooking skill — basic terms for beginners, more "
+        "technique for advanced. Stay under 200 words total."
+    )
+
+    try:
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model_meal_parsing(),
+            messages=[
+                {"role": "system", "content": "You are a practical home cook. Return plain text only."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=400,
+            timeout=20,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            raise ValueError("empty response")
+        print(f"[meal-instructions] generated for '{body.meal_name}' ({len(text)} chars)")
+        return {"instructions": text}
+    except Exception as e:
+        diag = _log_openai_error("meal-instructions", 1, model_meal_parsing(), e) if isinstance(e, (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError)) else str(e)
+        raise HTTPException(status_code=502, detail=f"Failed to generate instructions: {diag}")
 
 
 @router.post("/supplement-info")

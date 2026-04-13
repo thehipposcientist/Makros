@@ -14,7 +14,9 @@ interface NutritionCardProps {
   onAddSnack?: () => void;
   onRemoveMeal?: (mealType: string) => void;
   onRestoreMeal?: (mealType: string) => void;
+  onHardDeleteMeal?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
+  onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
 }
 
 export default function NutritionCard({
@@ -27,7 +29,9 @@ export default function NutritionCard({
   onAddSnack,
   onRemoveMeal,
   onRestoreMeal,
+  onHardDeleteMeal,
   onToggleRoutine,
+  onShowRecipe,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
   const theme = getTheme(themeName);
@@ -205,7 +209,9 @@ export default function NutritionCard({
                   onToggle={onToggleMeal}
                   onEdit={onEditMeal}
                   onRemove={onRemoveMeal}
+                  onHardDelete={onHardDeleteMeal}
                   onToggleRoutine={onToggleRoutine}
+                  onShowRecipe={onShowRecipe}
                   colors={colors}
                   styles={styles}
                   mealAccent={section}
@@ -229,7 +235,9 @@ export default function NutritionCard({
               onToggle={onToggleMeal}
               onEdit={onEditMeal}
               onRemove={onRemoveMeal}
+              onHardDelete={onHardDeleteMeal}
               onToggleRoutine={onToggleRoutine}
+              onShowRecipe={onShowRecipe}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -245,7 +253,9 @@ export default function NutritionCard({
               onToggle={onToggleMeal}
               onEdit={onEditMeal}
               onRemove={onRemoveMeal}
+              onHardDelete={onHardDeleteMeal}
               onToggleRoutine={onToggleRoutine}
+              onShowRecipe={onShowRecipe}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -308,7 +318,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, onToggleRoutine, colors, styles, mealAccent }: {
+function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, colors, styles, mealAccent }: {
   emoji: string;
   mealType: string;
   meal: MealSuggestion;
@@ -316,7 +326,9 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
   onToggle?: (mealType: string) => void;
   onEdit?:   (mealType: string, meal: MealSuggestion) => void;
   onRemove?: (mealType: string) => void;
+  onHardDelete?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
+  onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
@@ -341,33 +353,60 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
         </Text>
       </View>
 
-      {(onToggleRoutine || onEdit || onRemove) && (
+      {/* Routine pin gets its own row as a compact pill so the action
+          buttons below have predictable widths and don't get pushed off
+          screen by long pin labels. */}
+      {onToggleRoutine && (
+        <View style={styles.mealPinRow}>
+          <TouchableOpacity
+            onPress={() => onToggleRoutine(mealType)}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            activeOpacity={0.7}
+            style={[
+              styles.pinPill,
+              meal.isRoutine
+                ? { backgroundColor: mealAccent.strong + '22', borderColor: mealAccent.strong + '66' }
+                : { backgroundColor: 'transparent',             borderColor: colors.border },
+            ]}>
+            <Text style={[
+              styles.pinPillText,
+              { color: meal.isRoutine ? mealAccent.strong : colors.textMuted },
+            ]}>
+              {meal.isRoutine ? '📌 Routine' : '＋ Pin as Routine'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {(onShowRecipe || onEdit || onRemove) && (
         <View style={styles.mealActionRow}>
-          {onToggleRoutine && !mealType.startsWith('extra_') && (
+          {onShowRecipe && (
             <TouchableOpacity
-              onPress={() => onToggleRoutine(mealType)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              style={styles.routineBtn}>
-              <Text style={[styles.routineBtnText, meal.isRoutine ? { color: mealAccent.strong } : { color: colors.textMuted }]}>
-                {meal.isRoutine ? '📌 Routine' : '○ Pin as Routine'}
-              </Text>
+              onPress={() => onShowRecipe(mealType, meal)}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              activeOpacity={0.7}
+              style={styles.actionBtn}>
+              <Text style={styles.actionBtnText}>🍳 Recipe</Text>
             </TouchableOpacity>
           )}
-          <View style={{ flex: 1 }} />
           {onEdit && (
             <TouchableOpacity
               onPress={() => onEdit(mealType, meal)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              style={styles.editBtn}>
-              <Text style={styles.editBtnText}>Edit ›</Text>
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              activeOpacity={0.7}
+              style={styles.actionBtn}>
+              <Text style={styles.actionBtnText}>✎ Edit</Text>
             </TouchableOpacity>
           )}
           {onRemove && (
             <TouchableOpacity
               onPress={() => onRemove(mealType)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              style={styles.removeMealBtn}>
-              <Text style={styles.removeMealBtnText}>Remove</Text>
+              onLongPress={() => onHardDelete?.(mealType)}
+              delayLongPress={500}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              activeOpacity={0.7}
+              style={styles.actionBtn}>
+              <Text style={[styles.actionBtnText, { color: colors.error }]}>✕ Remove</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -557,7 +596,49 @@ const createStyles = (
   mealItemDone: { opacity: 0.62, borderColor: colors.success },
 
   mealHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  mealActionRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 30 },
+  // Pin as Routine sits on its own row directly under the meal name as a
+  // compact pill. Action buttons get their own equally-spaced row below.
+  mealPinRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    paddingLeft: 30,
+  },
+  pinPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  pinPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  mealActionRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 6,
+    marginTop: 8,
+    paddingLeft: 30,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: section.strong,
+    letterSpacing: 0.2,
+  },
   checkbox: {
     width: 22, height: 22, borderRadius: 6,
     borderWidth: 2, borderColor: colors.border,
@@ -571,6 +652,8 @@ const createStyles = (
 
   editBtn:           { paddingHorizontal: 6 },
   editBtnText:       { fontSize: 12, color: section.strong, fontWeight: '700' },
+  recipeBtn:         { paddingHorizontal: 6 },
+  recipeBtnText:     { fontSize: 12, color: section.strong, fontWeight: '700' },
   removeMealBtn:     { paddingHorizontal: 6 },
   removeMealBtnText: { fontSize: 12, color: colors.error, fontWeight: '600' },
   routineBtn:        { paddingHorizontal: 4 },

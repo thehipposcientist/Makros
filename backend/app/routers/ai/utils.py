@@ -61,6 +61,101 @@ def model_food_enrichment() -> str:
     return os.getenv("MODEL_FOOD_ENRICHMENT", "gpt-4o-mini")
 
 
+def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]]:
+    """Look up each food name in the local Food DB. Returns (hydrated, unknowns).
+
+    For every name we find (by normalized name or alias), pull its default
+    serving's precomputed macros — no AI call needed. Names we can't match
+    are returned as `unknowns` so the caller can decide whether to ask an
+    LLM about them.
+
+    This is the first half of the meal-planning refactor: enrichment used
+    to be 100% AI regardless of whether we already knew every food in the
+    list. In practice users pick ~99% of their foods from the DB-backed
+    picker, so the AI call was pure waste.
+    """
+    from sqlmodel import Session, select
+    from app.database import engine
+    from app.models import Food, FoodAlias, FoodServing, FoodNutrition
+
+    hydrated: list[dict] = []
+    unknowns: list[str] = []
+    if not food_names:
+        return hydrated, unknowns
+
+    def _norm(s: str) -> str:
+        return " ".join(s.lower().strip().split())
+
+    with Session(engine) as session:
+        for raw in food_names:
+            name = raw.strip()
+            if not name:
+                continue
+            norm = _norm(name)
+
+            # Try normalized_name exact match first, then alias, then
+            # case-insensitive name match as a last resort.
+            food = session.exec(
+                select(Food).where(Food.normalized_name == norm)
+            ).first()
+            if not food:
+                alias = session.exec(
+                    select(FoodAlias).where(FoodAlias.alias_normalized == norm)
+                ).first()
+                if alias:
+                    food = session.exec(
+                        select(Food).where(Food.id == alias.food_id)
+                    ).first()
+            if not food:
+                # Final fuzzy: startswith match. Cheap and catches minor typos.
+                food = session.exec(
+                    select(Food).where(Food.normalized_name.like(f"{norm}%"))
+                ).first()
+            if not food:
+                unknowns.append(name)
+                continue
+
+            # Prefer the default serving's precomputed macros. Fall back to
+            # FoodNutrition (per-100g) if servings aren't populated.
+            servings = session.exec(
+                select(FoodServing).where(FoodServing.food_id == food.id)
+            ).all()
+            default_serving = next((s for s in servings if s.is_default), servings[0] if servings else None)
+
+            if default_serving is not None:
+                hydrated.append({
+                    "name": food.name,
+                    "quantity": None,  # label already has the number
+                    "unit": None,      # label already has the unit
+                    "serving": default_serving.label,
+                    "calories": default_serving.calories,
+                    "protein": default_serving.protein,
+                    "carbs": default_serving.carbs,
+                    "fat": default_serving.fat,
+                })
+                continue
+
+            nutrition = session.exec(
+                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
+            ).first()
+            if nutrition is not None:
+                # Scale per-100g to a reasonable default serving.
+                hydrated.append({
+                    "name": food.name,
+                    "serving": "100 g",
+                    "calories": nutrition.calories,
+                    "protein": nutrition.protein,
+                    "carbs": nutrition.carbs,
+                    "fat": nutrition.fat,
+                })
+                continue
+
+            # Food row exists but has no nutrition data — treat as unknown.
+            unknowns.append(name)
+
+    return hydrated, unknowns
+
+
 def enrich_foods_with_macros(
     client: OpenAI,
     foods: list[str],
@@ -69,8 +164,45 @@ def enrich_foods_with_macros(
     """
     Convert raw food names and meal routine text into structured macro data.
     Returns {"foods": [{name, serving, calories, protein, carbs, fat}], "routine_meals": [...]}.
-    Uses a fast/cheap model (gpt-5-mini or gpt-4o-mini) for speed.
+
+    Resolution order:
+      1. Hydrate every food we can from the local DB (zero AI cost).
+      2. If there's a `meal_routine` free-text OR any unknown foods, make
+         a SINGLE AI call for just those — not the whole list.
+      3. Merge DB + AI results before returning.
+
+    Before this refactor, this function always made an AI call regardless of
+    whether the foods were already in the seed DB. That was the biggest piece
+    of pointless AI cost in the plan pipeline.
     """
+    if not foods and not meal_routine:
+        return {"foods": [], "routine_meals": []}
+
+    hydrated, unknowns = _hydrate_foods_from_db(foods or [])
+    if hydrated:
+        print(f"[enrich_foods] hydrated {len(hydrated)} foods from DB, {len(unknowns)} unknowns")
+
+    # Fast path: if everything resolved from DB AND there's no free-text
+    # routine, we're done — no AI call at all.
+    if not unknowns and not meal_routine:
+        return {"foods": hydrated, "routine_meals": []}
+
+    # Slow path: AI call for just the unknowns + the routine text. Same prompt
+    # structure as before but with a much smaller food list.
+    ai_result = _enrich_via_ai(client, unknowns, meal_routine)
+    return {
+        "foods": hydrated + ai_result.get("foods", []),
+        "routine_meals": ai_result.get("routine_meals", []),
+    }
+
+
+def _enrich_via_ai(
+    client: OpenAI,
+    foods: list[str],
+    meal_routine: str | None = None,
+) -> dict:
+    """AI fallback for foods we couldn't hydrate from the DB. Same prompt as
+    the original `enrich_foods_with_macros`, kept as a private helper."""
     if not foods and not meal_routine:
         return {"foods": [], "routine_meals": []}
 
@@ -671,40 +803,6 @@ SCHEMA_WORKOUT = {
         },
         "required": ["trainerNote", "workout_plan"],
         "additionalProperties": False,
-    },
-}
-
-# Nutrition: strict=False because meal keys vary (breakfast/lunch/dinner/snack/snack_1/snack_2)
-_NUTRITION_PLAN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "targets": {
-            "type": "object",
-            "properties": {
-                "calories": {"type": "integer"},
-                "protein": {"type": "integer"},
-                "carbs": {"type": "integer"},
-                "fat": {"type": "integer"},
-            },
-            "required": ["calories", "protein", "carbs", "fat"],
-        },
-    },
-    "required": ["targets"],
-}
-
-SCHEMA_NUTRITION = {
-    "name": "nutrition_response",
-    "strict": False,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "nutritionistNote": {"type": "string"},
-            "supplementStack": {"type": "array", "items": {"type": "object"}},
-            "nutrition_plan_a": _NUTRITION_PLAN_SCHEMA,
-            "nutrition_plan_b": _NUTRITION_PLAN_SCHEMA,
-            "nutrition_plan_c": _NUTRITION_PLAN_SCHEMA,
-        },
-        "required": ["nutritionistNote", "nutrition_plan_a", "nutrition_plan_b", "nutrition_plan_c"],
     },
 }
 

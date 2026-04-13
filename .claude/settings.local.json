@@ -94,7 +94,9 @@
       "Bash(grep -rn \"401\\\\|Unauthorized\\\\|sign.*out\\\\|clearAuth\\\\|logout\" /Users/sawyerhannel/Documents/GitHub/Makros/src/screens/*.tsx)",
       "Bash(grep -A 10 \"AppState\\\\|background\\\\|resume\\\\|foreground\" /Users/sawyerhannel/Documents/GitHub/Makros/app/index.tsx /Users/sawyerhannel/Documents/GitHub/Makros/src/**/*.tsx)",
       "Bash(grep -n \"searchFoodNutrition\\\\|/ai/food-search\\\\|food_search\" /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/routers/ai/*.py)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(python3.12 --version)",
+      "Bash(python3.11 --version)"
     ]
   }
 }

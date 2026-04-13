@@ -1006,6 +1006,25 @@ export async function analyzeFoodPhoto(
   });
 }
 
+export async function getMealInstructions(
+  token: string,
+  payload: {
+    meal_name: string;
+    items?: Array<{ name: string; quantity?: number; unit?: string }>;
+    cooking_skill?: string;
+    prep_time_minutes?: number;
+    dietary_preference?: string;
+    allergies?: string[];
+    previous_variants?: string[];
+  },
+): Promise<{ instructions: string }> {
+  return request('/ai/meal-instructions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 30000);
+}
+
 export async function scanFoodsPhoto(
   token: string,
   payload: {

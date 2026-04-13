@@ -1,4 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session
+from sqlalchemy import text
 from dotenv import load_dotenv
 import os
 
@@ -17,11 +18,43 @@ engine = create_engine(
 )
 
 
+def _ensure_food_category_enum_values() -> None:
+    """Idempotent migration helper for FoodCategory enum growth.
+
+    `SQLModel.metadata.create_all` creates tables but does NOT alter an
+    existing Postgres enum type when the Python enum gains values. This
+    adds any missing values in-place so existing databases don't need a
+    wipe when we expand FoodCategory. No-op on SQLite.
+
+    IMPORTANT: SAEnum serializes using the enum MEMBER NAME (uppercase),
+    not the lowercase string value. So the Postgres type holds values
+    like 'PROTEINS', 'DAIRY', etc. We must add new members using `.name`
+    to match — if you add the `.value` instead, inserts will fail with
+    "invalid input value for enum foodcategory: 'CONDIMENTS'".
+    """
+    from app.enums import FoodCategory
+
+    if engine.dialect.name != "postgresql":
+        return
+    # `ALTER TYPE ... ADD VALUE IF NOT EXISTS` must run in autocommit mode
+    # on Postgres < 12; harmless on >= 12.
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for member in FoodCategory:
+                # `name` = SAEnum default serialization form (uppercase).
+                conn.execute(
+                    text(f"ALTER TYPE foodcategory ADD VALUE IF NOT EXISTS '{member.name}'")
+                )
+    except Exception as e:
+        print(f"[migration] food category enum expand failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState
-    
+
     SQLModel.metadata.create_all(engine)
+    _ensure_food_category_enum_values()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:
         seed_equipment(session)   # must run before exercises (FK dependency)

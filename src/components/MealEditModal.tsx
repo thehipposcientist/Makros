@@ -10,7 +10,7 @@ import {
 } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
-import { scanFoodsPhoto, searchFoodNutrition } from '../services/api';
+import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString } from '../utils/mealItems';
 
 interface Props {
@@ -26,6 +26,10 @@ interface Props {
   onClose: () => void;
   onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
   onToggleRoutine?: () => void;
+  cookingSkill?: string;
+  prepTimeMinutes?: number;
+  dietaryPreference?: string;
+  allergies?: string[];
 }
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
@@ -86,7 +90,7 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   return total;
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies }: Props) {
   // Structured items are the source of truth. Legacy foods[] / amounts[]
   // shapes are migrated via `ensureItems()` on open so downstream code only
   // has to handle the structured form. Each item gets a baseline rate
@@ -110,6 +114,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   // intermediate states like "0." or "" without the parent state clobbering
   // the field. Committed back to `items` on blur / when parse is valid.
   const [qtyDrafts, setQtyDrafts] = useState<Record<number, string>>({});
+  // On-demand recipe/prep instructions. Populated from `meal.instructions`
+  // if already cached, otherwise fetched lazily from the AI endpoint on tap.
+  const [instructions, setInstructions] = useState<string | null>(meal.instructions ?? null);
+  const [instructionsLoading, setInstructionsLoading] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -117,8 +126,36 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setSearch('');
       setAiResults([]);
       setUnitPickerIdx(null);
+      setInstructions(meal.instructions ?? null);
+      setShowInstructions(false);
     }
   }, [visible, meal]);
+
+  const fetchInstructions = async () => {
+    if (!authToken) return;
+    // If we already have cached instructions, just show them.
+    if (instructions) {
+      setShowInstructions(true);
+      return;
+    }
+    setInstructionsLoading(true);
+    try {
+      const res = await getMealInstructions(authToken, {
+        meal_name: meal.meal,
+        items: items.map(it => ({ name: it.name, quantity: it.quantity, unit: it.unit })),
+        cooking_skill: cookingSkill,
+        prep_time_minutes: prepTimeMinutes,
+        dietary_preference: dietaryPreference,
+        allergies,
+      });
+      setInstructions(res.instructions);
+      setShowInstructions(true);
+    } catch (e: any) {
+      Alert.alert('Could not load instructions', e?.message ?? 'Try again in a moment.');
+    } finally {
+      setInstructionsLoading(false);
+    }
+  };
 
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
@@ -310,8 +347,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const handleSave = () => {
     // Keep legacy foods[]/amounts[] in sync with items[] on save so older
     // readers (backend, other screens) still see correct data until the full
-    // schema migration lands.
-    const withItems: MealSuggestion = { ...meal, items };
+    // schema migration lands. Also persist any fetched prep instructions on
+    // the meal so we don't re-pay the AI call next open.
+    const withItems: MealSuggestion = { ...meal, items, ...(instructions ? { instructions } : {}) };
     const synced = syncLegacyFieldsFromItems(withItems);
     onSave(synced);
     onClose();
@@ -342,6 +380,54 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={s.saveText}>Save</Text>
           </TouchableOpacity>
         </View>
+
+        {/* How to make this — on-demand AI recipe, cached on the meal */}
+        <TouchableOpacity
+          onPress={fetchInstructions}
+          disabled={instructionsLoading}
+          style={{
+            marginHorizontal: 16,
+            marginTop: 8,
+            paddingVertical: 10,
+            paddingHorizontal: 14,
+            borderRadius: 12,
+            backgroundColor: colors.surfaceRaised,
+            borderWidth: 1,
+            borderColor: colors.border,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+          }}>
+          {instructionsLoading ? (
+            <ActivityIndicator size="small" color={colors.accent} />
+          ) : (
+            <Text style={{ color: colors.textPrimary, fontWeight: '700', fontSize: 14 }}>
+              🍳  {instructions ? 'View recipe' : 'How to make this'}
+            </Text>
+          )}
+        </TouchableOpacity>
+
+        {showInstructions && instructions && (
+          <View
+            style={{
+              marginHorizontal: 16,
+              marginTop: 8,
+              padding: 14,
+              borderRadius: 12,
+              backgroundColor: colors.surface,
+              borderWidth: 1,
+              borderColor: colors.border,
+            }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 }}>RECIPE</Text>
+              <TouchableOpacity onPress={() => setShowInstructions(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={{ fontSize: 13, color: colors.textMuted }}>Hide</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 13, color: colors.textPrimary, lineHeight: 19 }}>{instructions}</Text>
+          </View>
+        )}
 
         {/* Live macro totals panel */}
         <View style={s.totalsPanel}>

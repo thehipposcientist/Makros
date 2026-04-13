@@ -290,10 +290,20 @@ export function applyRoutines(
   plan: DailyNutritionPlan,
   routines: MealRoutineEntry[],
 ): DailyNutritionPlan {
+  // Fixed slots: pinned by `mealType === 'breakfast' | 'lunch' | 'dinner' | 'snack'`.
+  // These replace the plan's slot with the routine's meal verbatim.
   const byType = new Map<string, MealRoutineEntry>();
+  // Extras: routines with `mealType === 'extra'`. Each is keyed by routine.id
+  // so the same extra doesn't get appended twice across reloads. They flow
+  // into `plan.extraMeals` and carry their routine id on the `_routineId`
+  // field so we can dedupe on subsequent passes and support hard-delete.
+  const extraRoutines: MealRoutineEntry[] = [];
   for (const r of routines) {
-    if (r.mealType) byType.set(r.mealType, r);
+    if (!r.mealType) continue;
+    if (r.mealType === 'extra') extraRoutines.push(r);
+    else byType.set(r.mealType, r);
   }
+
   const next: DailyNutritionPlan = { ...plan };
   for (const k of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
     const routine = byType.get(k);
@@ -303,6 +313,71 @@ export function applyRoutines(
     } else if (existing) {
       (next as any)[k] = { ...existing, isRoutine: false };
     }
+  }
+
+  // Build the next extraMeals array. Three cases to handle — the
+  // historical bugs all came from conflating them:
+  //
+  //   (1) A one-off extra the user created (no _routineId) that has
+  //       just been pinned as a routine. The freshly-built routine
+  //       copy below has the same content; we must NOT also keep the
+  //       original, or we'd end up with two copies ("pin made 3 copies"
+  //       bug).
+  //   (2) An extra already tagged with a _routineId whose routine is
+  //       still active — drop it; the routine build below will re-add
+  //       it fresh so content edits propagate.
+  //   (3) An extra tagged with a _routineId whose routine has been
+  //       REMOVED (the user just unpinned it). We must keep the extra
+  //       as a one-off ("unpin made it disappear" bug) — strip the
+  //       _routineId so it behaves like a regular extra from now on.
+  //   (4) A genuine one-off extra unrelated to any routine — keep.
+  const activeRoutineIds = new Set(extraRoutines.map(r => r.id));
+  // Match "just pinned" extras by name + calories (rounded) against
+  // active routines. This catches the case where the source extra
+  // hasn't been tagged yet at the moment applyRoutines runs.
+  const activeRoutineSignatures = new Set(
+    extraRoutines.map(r => `${r.name}__${Math.round(r.calories ?? 0)}`),
+  );
+
+  const carriedOverExtras: MealSuggestion[] = [];
+  // Track which signatures have already been carried over so we don't
+  // end up with two one-offs of the same meal.
+  const carriedSignatures = new Set<string>();
+  for (const m of plan.extraMeals ?? []) {
+    const rid = (m as any)._routineId as string | undefined;
+    const sig = `${m.meal}__${Math.round(m.calories ?? 0)}`;
+    if (rid) {
+      if (activeRoutineIds.has(rid)) {
+        // Case (2): active routine-backed — drop; rebuilt below.
+        continue;
+      }
+      // Case (3): stale routine id — demote to a one-off.
+      if (carriedSignatures.has(sig)) continue;
+      const { _routineId: _drop, ...rest } = m as any;
+      carriedOverExtras.push({ ...rest, isRoutine: false } as MealSuggestion);
+      carriedSignatures.add(sig);
+      continue;
+    }
+    // Untagged extra. Drop if it matches an active routine (case 1:
+    // just pinned OR brought in via preserved overlay) or if we've
+    // already carried over the same signature this pass.
+    if (activeRoutineSignatures.has(sig)) continue;
+    if (carriedSignatures.has(sig)) continue;
+    carriedOverExtras.push(m);
+    carriedSignatures.add(sig);
+  }
+
+  const extrasFromRoutines: MealSuggestion[] = extraRoutines.map(r => ({
+    ...mealFromRoutine(r),
+    _routineId: r.id,
+  }) as MealSuggestion);
+
+  if (carriedOverExtras.length > 0 || extrasFromRoutines.length > 0) {
+    next.extraMeals = [...carriedOverExtras, ...extrasFromRoutines];
+  } else if (plan.extraMeals !== undefined) {
+    // Preserve the empty array so downstream doesn't flip between
+    // `extraMeals: []` and the key being absent.
+    next.extraMeals = [];
   }
   return next;
 }

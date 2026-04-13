@@ -1,7 +1,7 @@
 """
 Structured exercise seed data with equipment mappings.
 
-Each exercise is a dict:
+REQUIRED fields per exercise entry:
   slug:              Stable unique identifier (snake_case, never changes)
   name:              Display name
   primary_muscle:    MuscleGroup enum value
@@ -11,18 +11,93 @@ Each exercise is a dict:
   exercise_type:     ExerciseType enum value (strength | cardio | mobility)
   is_compound:       bool
   is_machine:        bool
-  is_unilateral:     bool
+  is_unilateral:     bool  (legacy — keep in sync with `laterality` if provided)
   description:       Short text
   equipment:         List of {slug, role, required} dicts mapping to Equipment slugs
 
 Equipment roles:
   primary  — the main implement (barbell, dumbbell, machine)
-  support  — needed surface or rack (bench, squat rack)
-  optional — helpful but exercise works without it (e.g. squat rack for bench press spotting)
+  support  — needed surface or rack (bench, squat rack, plyo box). Mark
+             `required: True` when the exercise physically can't be done
+             without it (box for box jump, bench for bench press).
+  optional — helpful but exercise works without it (e.g. squat rack for
+             bench press spotting)
+
+OPTIONAL metadata fields (new 2026-04-13). Ignored by the DB seeder but
+consumed by the workout planner, substitution logic, and validator.
+Every field has a safe default in `hydrated_exercise`, so existing
+entries keep working without update.
+
+  laterality:          "bilateral" | "unilateral" | "alternating" | "either"
+                       More expressive than `is_unilateral`. "alternating"
+                       means the user switches sides per rep (alt DB curl).
+                       "either" means the movement supports both modes
+                       depending on setup (DB bench press, standing shoulder
+                       press). `is_unilateral` stays in sync via
+                       `_derive_is_unilateral` for backward compat.
+  power_type:          "strength" | "power" | "plyometric" | "conditioning"
+                     | "endurance" | "mobility"
+                       Finer than `exercise_type`. Lets the planner pick
+                       true plyos (box jump), explosive-hinge power work
+                       (KB swing), MetCon (burpees), slow strength (squat),
+                       and steady cardio (jogging) separately.
+  difficulty:          "beginner" | "intermediate" | "advanced"
+                       Defaults to "intermediate".
+  default_tracking_mode: "reps" | "time" | "distance" | "calories"
+                       Default derived from exercise_type. Cardio →
+                       "time", mobility → "time", strength → "reps".
+                       Set explicitly for holds (plank → "time"),
+                       carries ("distance"), etc.
+  track_per_side:      bool — log each side independently. Defaults to
+                       True for laterality in {unilateral, alternating}.
+  substitution_group:  short key shared across exercises that swap cleanly
+                       (e.g. "horizontal_press_bilateral"). Used by the
+                       planner's replace-exercise flow. Optional.
 
 To add exercises: append to the appropriate section list.
 To add a new category: create the list and include it in SEED_EXERCISES at the bottom.
 """
+
+
+# ─── Metadata defaults + hydration ───────────────────────────────────────────
+
+_TRACKING_DEFAULTS = {
+    "strength": "reps",
+    "cardio":   "time",
+    "mobility": "time",
+}
+
+_UNILATERAL_LATERALITIES = {"unilateral", "alternating"}
+
+
+def _derive_is_unilateral(entry: dict) -> bool:
+    """Keep the legacy `is_unilateral` bool in sync with a richer
+    `laterality` field when both are present."""
+    lat = entry.get("laterality")
+    if lat in _UNILATERAL_LATERALITIES:
+        return True
+    if lat in ("bilateral", "either"):
+        return False
+    return entry.get("is_unilateral", False)
+
+
+def hydrated_exercise(entry: dict) -> dict:
+    """Return a copy of an exercise entry with optional metadata defaults
+    applied. Consumers that need richer metadata (planner, validator,
+    substitution logic) should go through this helper so they always
+    see the full picture."""
+    out = dict(entry)
+    out.setdefault("laterality", "unilateral" if entry.get("is_unilateral") else "bilateral")
+    ex_type = entry.get("exercise_type", "strength")
+    # power_type defaults: strength → strength, cardio → endurance,
+    # mobility → mobility. Explicit power/plyometric/conditioning is
+    # opt-in per entry (see POWER section).
+    default_power = {"cardio": "endurance", "mobility": "mobility"}.get(ex_type, "strength")
+    out.setdefault("power_type", default_power)
+    out.setdefault("difficulty", "intermediate")
+    out.setdefault("default_tracking_mode", _TRACKING_DEFAULTS.get(ex_type, "reps"))
+    out.setdefault("track_per_side", out["laterality"] in _UNILATERAL_LATERALITIES)
+    return out
 
 # ─── Chest ───────────────────────────────────────────────────────────────────
 
@@ -90,9 +165,11 @@ CHEST = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "either",  # commonly done both-arms OR single-arm
+        "substitution_group": "horizontal_press_dumbbell",
         "description": "Greater range of motion than barbell",
         "equipment": [
-            {"slug": "dumbbells", "role": "primary", "required": True},
+            {"slug": "dumbbells",  "role": "primary", "required": True},
             {"slug": "flat_bench", "role": "support", "required": True},
         ],
     },
@@ -124,8 +201,15 @@ CHEST = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "horizontal_press_bodyweight",
         "description": "Harder push-up variation emphasizing upper chest",
-        "equipment": [],
+        "equipment": [
+            # Needs a raised surface for the feet. Box is the canonical
+            # option; bench or plyo box both work.
+            {"slug": "plyo_box",   "role": "support", "required": True},
+            {"slug": "flat_bench", "role": "support", "required": False},
+        ],
     },
     {
         "slug": "pushups",
@@ -245,9 +329,12 @@ CHEST = [
         "is_compound": False,
         "is_machine": True,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "chest_fly",
         "description": "Machine chest fly isolation",
         "equipment": [
-            {"slug": "leverage_machines", "role": "primary", "required": True},
+            {"slug": "pec_deck_machine", "role": "primary", "required": True},
         ],
     },
     {
@@ -525,9 +612,20 @@ BACK = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
-        "description": "Horizontal bodyweight pull from a low bar",
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "horizontal_pull_bodyweight",
+        "description": "Horizontal bodyweight pull from a low bar or rack",
         "equipment": [
-            {"slug": "pull_up_bar", "role": "primary", "required": False},
+            # Requires SOMETHING to pull from: a fixed low bar, a barbell
+            # in a squat rack, or a suspension trainer. None of them are
+            # individually required, but at least one must be present —
+            # modeled by marking each as optional but the movement as
+            # `home` bucket so planner skips it when the user has zero
+            # of these.
+            {"slug": "pull_up_bar",        "role": "primary", "required": False},
+            {"slug": "squat_rack",         "role": "primary", "required": False},
+            {"slug": "suspension_trainer", "role": "primary", "required": False},
         ],
     },
     {
@@ -569,9 +667,11 @@ BACK = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "hyperextension",
         "description": "45-degree hyperextension bench — neutral spine targets spinal erectors",
         "equipment": [
-            {"slug": "leverage_machines", "role": "primary", "required": True},
+            {"slug": "hyperextension_bench", "role": "primary", "required": True},
         ],
     },
     {
@@ -585,9 +685,11 @@ BACK = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "hyperextension",
         "description": "45-degree hyperextension bench — posterior pelvic tilt maximises glute activation",
         "equipment": [
-            {"slug": "leverage_machines", "role": "primary", "required": True},
+            {"slug": "hyperextension_bench", "role": "primary", "required": True},
         ],
     },
 ]
@@ -930,10 +1032,15 @@ BICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "either",   # EZ bar bilateral OR single DB unilateral
+        "substitution_group": "bicep_curl_supported",
         "description": "Isolates biceps with preacher bench support",
         "equipment": [
-            {"slug": "ez_curl_bar", "role": "primary", "required": True},
-            {"slug": "leverage_machines", "role": "support", "required": True},
+            {"slug": "preacher_bench", "role": "support", "required": True},
+            # Either an EZ bar OR dumbbells — model both as primary so the
+            # planner picks whichever the user has.
+            {"slug": "ez_curl_bar", "role": "primary", "required": False},
+            {"slug": "dumbbells",   "role": "primary", "required": False},
         ],
     },
     {
@@ -1050,8 +1157,15 @@ TRICEPS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "tricep_bodyweight",
         "description": "Bodyweight tricep dip using a bench or chair",
-        "equipment": [],
+        "equipment": [
+            # A bench or equivalent stable surface is non-negotiable — the
+            # movement IS "dip off a bench". No surface = no exercise.
+            {"slug": "flat_bench", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "kickbacks",
@@ -1183,9 +1297,15 @@ QUADS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": True,
-        "description": "Unilateral leg exercise with rear foot elevated",
+        "laterality": "unilateral",
+        "difficulty": "advanced",
+        "substitution_group": "single_leg_quad",
+        "description": "Unilateral leg exercise with rear foot elevated on a bench",
         "equipment": [
-            {"slug": "dumbbells", "role": "primary", "required": False},
+            # The rear-foot elevation surface is what makes it a Bulgarian
+            # split squat — without it, it's just a split squat.
+            {"slug": "flat_bench", "role": "support", "required": True},
+            {"slug": "dumbbells",  "role": "primary", "required": False},
         ],
     },
     {
@@ -1199,6 +1319,8 @@ QUADS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": True,
+        "laterality": "alternating",  # switches sides each step
+        "substitution_group": "single_leg_quad",
         "description": "Dynamic forward lunge for strength and coordination",
         "equipment": [
             {"slug": "dumbbells", "role": "optional", "required": False},
@@ -1215,6 +1337,9 @@ QUADS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "substitution_group": "single_leg_quad",
         "description": "Knee-friendly lunge variation stepping backward",
         "equipment": [
             {"slug": "dumbbells", "role": "optional", "required": False},
@@ -1247,10 +1372,14 @@ QUADS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": True,
-        "description": "Single-leg step-up with dumbbells for strength",
+        "laterality": "unilateral",
+        "substitution_group": "single_leg_quad",
+        "description": "Single-leg step-up onto an elevated surface",
         "equipment": [
-            {"slug": "dumbbells", "role": "primary", "required": False},
-            {"slug": "plyo_box", "role": "support", "required": False},
+            # Box / bench required — without it there is no step-up.
+            {"slug": "plyo_box",   "role": "support", "required": True},
+            {"slug": "flat_bench", "role": "support", "required": False},
+            {"slug": "dumbbells",  "role": "primary", "required": False},
         ],
     },
     {
@@ -1588,9 +1717,11 @@ CALVES = [
         "is_compound": False,
         "is_machine": True,
         "is_unilateral": False,
-        "description": "Bilateral calf raise on machine or loaded step",
+        "laterality": "bilateral",
+        "substitution_group": "calf_raise_gastroc",
+        "description": "Bilateral calf raise on dedicated machine",
         "equipment": [
-            {"slug": "leverage_machines", "role": "primary", "required": True},
+            {"slug": "standing_calf_raise_machine", "role": "primary", "required": True},
         ],
     },
     {
@@ -1604,9 +1735,11 @@ CALVES = [
         "is_compound": False,
         "is_machine": True,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "calf_raise_soleus",
         "description": "Soleus focus with knee bent on seated calf machine",
         "equipment": [
-            {"slug": "leverage_machines", "role": "primary", "required": True},
+            {"slug": "seated_calf_raise_machine", "role": "primary", "required": True},
         ],
     },
     {
@@ -2305,6 +2438,12 @@ CARDIO_OUTDOOR = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        # Both arms work the whole set even if waves alternate — not
+        # logged per side.
+        "laterality": "bilateral",
+        "power_type": "conditioning",
+        "default_tracking_mode": "time",
+        "substitution_group": "metcon_upper",
         "description": "Wave and slam conditioning with battle ropes",
         "equipment": [
             {"slug": "battle_ropes", "role": "primary", "required": True},
@@ -2326,6 +2465,10 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "either",          # one-handed or two-handed
+        "power_type": "power",           # speed-strength hinge
+        "default_tracking_mode": "reps",
+        "substitution_group": "explosive_hinge",
         "description": "Hip-hinge power movement with kettlebell",
         "equipment": [
             {"slug": "kettlebell", "role": "primary", "required": True},
@@ -2342,6 +2485,10 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "conditioning",    # MetCon, not pure plyo
+        "default_tracking_mode": "reps",
+        "substitution_group": "metcon_bodyweight",
         "description": "High-intensity full body conditioning movement",
         "equipment": [],
     },
@@ -2356,6 +2503,10 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "difficulty": "intermediate",
+        "substitution_group": "vertical_jump",
         "description": "Plyometric lower body power onto a plyo box",
         "equipment": [
             {"slug": "plyo_box", "role": "primary", "required": True},
@@ -2372,6 +2523,9 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "substitution_group": "horizontal_jump",
         "description": "Horizontal plyometric power jump",
         "equipment": [],
     },
@@ -2386,6 +2540,10 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "difficulty": "beginner",
+        "substitution_group": "vertical_jump",
         "description": "Explosive squat with a jump at the top",
         "equipment": [],
     },
@@ -2432,6 +2590,10 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "conditioning",
+        "default_tracking_mode": "distance",
+        "substitution_group": "loaded_carry_push",
         "description": "Sled drive for power, conditioning, and leg strength",
         "equipment": [
             {"slug": "sled", "role": "primary", "required": True},
@@ -2448,6 +2610,9 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "power",
+        "substitution_group": "explosive_throw",
         "description": "Explosive overhead slam with a medicine ball",
         "equipment": [
             {"slug": "medicine_ball", "role": "primary", "required": True},
@@ -2509,13 +2674,20 @@ POWER = [
 SEED_EQUIPMENT = [
     # Bodyweight & Home
     {"slug": "pull_up_bar",        "name": "Pull-up bar",              "category": "Bodyweight & Home", "icon": "\U0001f529"},
-    {"slug": "resistance_bands",   "name": "Resistance bands",         "category": "Bodyweight & Home", "icon": "\U0001f517"},
+    {"slug": "resistance_bands",   "name": "Resistance bands (tube)",  "category": "Bodyweight & Home", "icon": "\U0001f517"},
     {"slug": "yoga_mat",           "name": "Yoga mat",                 "category": "Bodyweight & Home", "icon": "\U0001f9d8"},
     {"slug": "jump_rope",          "name": "Jump rope",                "category": "Bodyweight & Home", "icon": "\u26a1"},
     {"slug": "foam_roller",        "name": "Foam roller",              "category": "Bodyweight & Home", "icon": "\U0001f6e2\ufe0f"},
     {"slug": "ab_wheel",           "name": "Ab wheel",                 "category": "Bodyweight & Home", "icon": "\u2b55"},
     {"slug": "dip_bars",           "name": "Dip bars",                 "category": "Bodyweight & Home", "icon": "\U0001f938"},
     {"slug": "suspension_trainer", "name": "Suspension trainer",       "category": "Bodyweight & Home", "icon": "\U0001faa2"},
+    # ── Pass 3 (2026-04-13) — equipment-only additions ──────────────────
+    # mini_band is distinct from `resistance_bands` (tube + handles).
+    # Loop bands drive glute activation, lateral walks, banded RDLs, etc.
+    {"slug": "mini_band",          "name": "Mini band (loop)",         "category": "Bodyweight & Home", "icon": "\U0001f535"},
+    # Stability / swiss ball — unlocks ball plank, ball hamstring curl,
+    # dead bug variants, ball pike. Common in commercial gyms and home.
+    {"slug": "swiss_ball",         "name": "Swiss / stability ball",   "category": "Bodyweight & Home", "icon": "\u26bd"},
 
     # Free Weights
     {"slug": "dumbbells",          "name": "Dumbbells",                "category": "Free Weights", "icon": "\U0001f3cb\ufe0f"},
@@ -2530,6 +2702,10 @@ SEED_EQUIPMENT = [
     {"slug": "flat_bench",         "name": "Flat bench",               "category": "Benches & Racks", "icon": "\U0001fa91"},
     {"slug": "adjustable_bench",   "name": "Adjustable bench",         "category": "Benches & Racks", "icon": "\U0001f4d0"},
     {"slug": "incline_bench",      "name": "Incline bench",            "category": "Benches & Racks", "icon": "\U0001f4d0"},
+    # Pass 3: dedicated decline bench is a real distinct piece. Most
+    # commercial gyms have one. Falls back to adjustable_bench when
+    # absent (the planner can model that via optional support flags).
+    {"slug": "decline_bench",      "name": "Decline bench",            "category": "Benches & Racks", "icon": "\U0001f4d0"},
     {"slug": "squat_rack",         "name": "Squat rack",               "category": "Benches & Racks", "icon": "\U0001f3d7\ufe0f"},
     {"slug": "power_rack",         "name": "Power rack",               "category": "Benches & Racks", "icon": "\U0001f3d7\ufe0f"},
     {"slug": "landmine_attachment","name": "Landmine attachment",       "category": "Benches & Racks", "icon": "\U0001f527"},
@@ -2549,6 +2725,29 @@ SEED_EQUIPMENT = [
     {"slug": "hack_squat_machine",     "name": "Hack squat machine",       "category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "assisted_pullup_machine","name": "Assisted pull-up machine", "category": "Gym Machines", "icon": "\U0001f91d"},
     {"slug": "leverage_machines",      "name": "Leverage machines",        "category": "Gym Machines", "icon": "\u2699\ufe0f"},
+    # 2026-04-13: specific machine slugs. `leverage_machines` was being
+    # used as a catch-all for pec deck, preacher bench, hyperextension,
+    # and calf machines — four physically distinct pieces of equipment
+    # that a gym may or may not have independently.
+    {"slug": "preacher_bench",             "name": "Preacher curl bench",      "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "pec_deck_machine",           "name": "Pec deck machine",         "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "hyperextension_bench",       "name": "Hyperextension bench",     "category": "Gym Machines", "icon": "\U0001f4d0"},
+    {"slug": "standing_calf_raise_machine","name": "Standing calf raise machine","category": "Gym Machines", "icon": "\U0001f9b5"},
+    {"slug": "seated_calf_raise_machine",  "name": "Seated calf raise machine","category": "Gym Machines", "icon": "\U0001f9b5"},
+    # ── Pass 2 (2026-04-13) — cable attachments + missing stations ──────
+    # Cable attachments are modeled as separate equipment so the planner
+    # can require a specific handle ("rope for tricep pushdown", "D-handle
+    # for single-arm row") instead of a generic `cable_machine` reference.
+    {"slug": "rope_attachment",            "name": "Cable rope attachment",    "category": "Gym Machines", "icon": "\U0001f517"},
+    {"slug": "straight_bar_attachment",    "name": "Cable straight bar",       "category": "Gym Machines", "icon": "\U0001f4cf"},
+    {"slug": "d_handle",                   "name": "Cable D-handle",           "category": "Gym Machines", "icon": "\U0001f3f9"},
+    {"slug": "v_bar_attachment",           "name": "Cable V-bar / triangle",   "category": "Gym Machines", "icon": "\U0001f53b"},
+    {"slug": "ankle_strap",                "name": "Cable ankle strap",        "category": "Gym Machines", "icon": "\U0001f9b5"},
+    {"slug": "captain_chair",              "name": "Captain's chair",          "category": "Gym Machines", "icon": "\U0001fa91"},
+    {"slug": "ghd",                        "name": "Glute-ham developer",      "category": "Gym Machines", "icon": "\U0001f9b5"},
+    {"slug": "machine_row_station",        "name": "Plate-loaded row machine", "category": "Gym Machines", "icon": "\U0001f519"},
+    {"slug": "lateral_raise_machine",      "name": "Lateral raise machine",    "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "weighted_vest",              "name": "Weighted vest",            "category": "Athletic / Functional", "icon": "\U0001f9ba"},
 
     # Cardio
     {"slug": "treadmill",          "name": "Treadmill",                "category": "Cardio", "icon": "\U0001f3c3"},
@@ -2561,12 +2760,1032 @@ SEED_EQUIPMENT = [
     {"slug": "battle_ropes",       "name": "Battle ropes",             "category": "Cardio", "icon": "\U0001faa2"},
 
     # Athletic / Functional
-    {"slug": "plyo_box",           "name": "Plyo box",                 "category": "Athletic / Functional", "icon": "\U0001f4e6"},
+    {"slug": "plyo_box",           "name": "Plyo box (24\"+)",          "category": "Athletic / Functional", "icon": "\U0001f4e6"},
+    # Pass 3: step platform is the LOW (4-12") aerobic-step style box.
+    # Used for step-ups, low-box plyos, calf-raise elevation. Distinct
+    # mental model from a tall plyo box.
+    {"slug": "step_platform",      "name": "Step platform (low)",      "category": "Athletic / Functional", "icon": "\U0001fa9c"},
     {"slug": "sled",               "name": "Sled",                     "category": "Athletic / Functional", "icon": "\U0001f6f7"},
 ]
 
 
 # ─── Master list ─────────────────────────────────────────────────────────────
+
+# ─── Additions 2026-04-13 ────────────────────────────────────────────────────
+# High-value variants that were missing from the original library, kept in
+# one block for review. Each entry's `primary_muscle` still routes it to the
+# right body part for planner / search; this list is purely for organization.
+
+_NEW_2026_04_13 = [
+    {
+        "slug": "single_arm_dumbbell_bench_press",
+        "name": "Single-Arm Dumbbell Bench Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders", "core"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "horizontal_press_dumbbell",
+        "description": "Press one dumbbell at a time — anti-rotation core demand and bigger ROM",
+        "equipment": [
+            {"slug": "dumbbells",  "role": "primary", "required": True},
+            {"slug": "flat_bench", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "single_arm_db_shoulder_press",
+        "name": "Single-Arm Dumbbell Shoulder Press",
+        "primary_muscle": "shoulders",
+        "secondary_muscles": ["triceps", "core"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "vertical_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "vertical_press_dumbbell",
+        "description": "One-arm overhead press — challenges core anti-lateral flexion",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "single_arm_cable_row",
+        "name": "Single-Arm Cable Row",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_pull",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "horizontal_pull_cable",
+        "description": "Strict unilateral cable row with full scapular ROM",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "single_arm_cable_press",
+        "name": "Single-Arm Cable Chest Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders", "core"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "horizontal_press_cable",
+        "description": "Standing cable press, one side at a time — adds anti-rotation core demand",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "alternating_dumbbell_curl",
+        "name": "Alternating Dumbbell Curl",
+        "primary_muscle": "biceps",
+        "secondary_muscles": [],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "substitution_group": "bicep_curl_free",
+        "description": "Curl one dumbbell at a time, alternating sides every rep",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "split_squat",
+        "name": "Split Squat",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "hamstrings"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "lunge",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "difficulty": "beginner",
+        "substitution_group": "single_leg_quad",
+        "description": "Stationary split-stance squat — easier regression of the Bulgarian variant",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "trap_bar_jump",
+        "name": "Trap Bar Jump",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "hamstrings"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "power",
+        "difficulty": "advanced",
+        "substitution_group": "vertical_jump",
+        "description": "Loaded vertical jump with trap bar — true power development",
+        "equipment": [
+            {"slug": "trap_bar", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "depth_jump",
+        "name": "Depth Jump",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "difficulty": "advanced",
+        "substitution_group": "reactive_jump",
+        "description": "Step off a box and rebound vertically — reactive plyometric for elite athletes",
+        "equipment": [
+            {"slug": "plyo_box", "role": "primary", "required": True},
+        ],
+    },
+]
+
+
+# ─── Additions 2026-04-13 — Pass 2 ───────────────────────────────────────────
+# Strictly additive. Targets the Pass-1 audit gaps in:
+#   - cable specificity (fly variants, rope tricep, ankle-strap glute work)
+#   - lat pulldown grip variants
+#   - unilateral leg coverage (lateral lunge, lateral step-up, single-leg curl)
+#   - hinge / posterior chain (DB RDL, cable pull-through, GHR)
+#   - plyometric ladder (pogo, tuck, split squat jump, lateral bound)
+#   - rotational / chest-pass power throws
+#   - hanging core (knee raise, toes-to-bar, reverse crunch)
+#   - home gym (suspension, band) substitutes
+#
+# Every entry carries laterality, substitution_group, and (where the default
+# is wrong) power_type / difficulty / default_tracking_mode.
+
+_NEW_2026_04_13_PASS_2 = [
+    # ───── CHEST ─────────────────────────────────────────────────────────
+    {
+        "slug": "weighted_pushup",
+        "name": "Weighted Push-up",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "intermediate",
+        "substitution_group": "horizontal_press_bodyweight",
+        "description": "Push-up with a weighted vest or plate on the upper back",
+        "equipment": [
+            {"slug": "weighted_vest", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "machine_chest_fly",
+        "name": "Machine Chest Fly",
+        "primary_muscle": "chest",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "chest_fly",
+        "description": "Plate-loaded or selectorized chest fly machine",
+        "equipment": [
+            {"slug": "pec_deck_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "low_to_high_cable_fly",
+        "name": "Low-to-High Cable Fly",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["shoulders"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "chest_fly_cable",
+        "description": "Cable fly arcing from low pulley to upper chest height",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle",      "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "high_to_low_cable_fly",
+        "name": "High-to-Low Cable Fly",
+        "primary_muscle": "chest",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "chest_fly_cable",
+        "description": "Cable fly arcing from high pulley down to belt height — lower chest emphasis",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle",      "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "single_arm_cable_fly",
+        "name": "Single-Arm Cable Fly",
+        "primary_muscle": "chest",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "chest_fly_cable",
+        "description": "One-arm cable fly with full ROM and anti-rotation core demand",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle",      "role": "support", "required": True},
+        ],
+    },
+
+    # ───── BACK ──────────────────────────────────────────────────────────
+    {
+        "slug": "wide_grip_lat_pulldown",
+        "name": "Wide-Grip Lat Pulldown",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "vertical_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "vertical_pull_machine",
+        "description": "Pulldown with wide overhand grip — lat width emphasis",
+        "equipment": [
+            {"slug": "lat_pulldown_machine",   "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment","role": "support", "required": False},
+        ],
+    },
+    {
+        "slug": "neutral_grip_lat_pulldown",
+        "name": "Neutral-Grip Lat Pulldown",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "vertical_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "vertical_pull_machine",
+        "description": "Pulldown with palms facing each other — lat thickness and bicep emphasis",
+        "equipment": [
+            {"slug": "lat_pulldown_machine", "role": "primary", "required": True},
+            {"slug": "v_bar_attachment",     "role": "support", "required": False},
+        ],
+    },
+    {
+        "slug": "close_grip_lat_pulldown",
+        "name": "Close-Grip Lat Pulldown",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "vertical_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "vertical_pull_machine",
+        "description": "Pulldown with V-bar — lower-lat and bicep emphasis",
+        "equipment": [
+            {"slug": "lat_pulldown_machine", "role": "primary", "required": True},
+            {"slug": "v_bar_attachment",     "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "machine_row",
+        "name": "Plate-Loaded Machine Row",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": True, "is_unilateral": False,
+        "laterality": "either",  # most plate-loaded rows can be done one side at a time
+        "substitution_group": "horizontal_pull_machine",
+        "description": "Chest-supported plate-loaded row machine — strict back work",
+        "equipment": [
+            {"slug": "machine_row_station", "role": "primary", "required": True},
+        ],
+    },
+
+    # ───── SHOULDERS ─────────────────────────────────────────────────────
+    {
+        "slug": "cable_rear_delt_fly",
+        "name": "Cable Rear Delt Fly",
+        "primary_muscle": "shoulders",
+        "secondary_muscles": ["back"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "rear_delt",
+        "description": "Cable cross-body rear delt fly with D-handles",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle",      "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "reverse_pec_deck",
+        "name": "Reverse Pec Deck",
+        "primary_muscle": "shoulders",
+        "secondary_muscles": ["back"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "rear_delt",
+        "description": "Pec deck reversed for rear delts — strict isolation",
+        "equipment": [
+            {"slug": "pec_deck_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "machine_lateral_raise",
+        "name": "Machine Lateral Raise",
+        "primary_muscle": "shoulders",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": False,
+        "laterality": "either",
+        "substitution_group": "lateral_raise",
+        "description": "Selectorized lateral raise machine — constant tension",
+        "equipment": [
+            {"slug": "lateral_raise_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "y_raise",
+        "name": "Y-Raise",
+        "primary_muscle": "shoulders",
+        "secondary_muscles": ["back"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "shoulder_prehab",
+        "description": "Light dumbbell or band Y-pattern raise for lower-trap and rear-delt prehab",
+        "equipment": [
+            {"slug": "dumbbells",        "role": "primary", "required": False},
+            {"slug": "resistance_bands", "role": "primary", "required": False},
+        ],
+    },
+
+    # ───── ARMS ──────────────────────────────────────────────────────────
+    {
+        "slug": "incline_hammer_curl",
+        "name": "Incline Hammer Curl",
+        "primary_muscle": "biceps",
+        "secondary_muscles": ["forearms"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "either",
+        "substitution_group": "bicep_curl_free",
+        "description": "Hammer curl from an incline bench — long-head stretch + brachialis",
+        "equipment": [
+            {"slug": "dumbbells",        "role": "primary", "required": True},
+            {"slug": "adjustable_bench", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "reverse_curl",
+        "name": "Reverse Curl",
+        "primary_muscle": "biceps",
+        "secondary_muscles": ["forearms"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "bicep_curl_free",
+        "description": "Overhand grip curl — brachialis and forearm extensor focus",
+        "equipment": [
+            {"slug": "ez_curl_bar", "role": "primary", "required": False},
+            {"slug": "dumbbells",   "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "cross_body_hammer_curl",
+        "name": "Cross-Body Hammer Curl",
+        "primary_muscle": "biceps",
+        "secondary_muscles": ["forearms"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "substitution_group": "bicep_curl_free",
+        "description": "Hammer curl driving the dumbbell across the body — brachialis emphasis",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "cable_overhead_tricep_extension",
+        "name": "Cable Overhead Tricep Extension",
+        "primary_muscle": "triceps",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "tricep_overhead",
+        "description": "Long-head emphasis overhead extension with cable rope",
+        "equipment": [
+            {"slug": "cable_machine",   "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "single_arm_pushdown",
+        "name": "Single-Arm Cable Pushdown",
+        "primary_muscle": "triceps",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "tricep_pushdown",
+        "description": "One-arm reverse-grip cable pushdown — strict tricep isolation",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle",      "role": "support", "required": True},
+        ],
+    },
+
+    # ───── LEGS — biggest priority ───────────────────────────────────────
+    {
+        "slug": "dumbbell_rdl",
+        "name": "Dumbbell Romanian Deadlift",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["glutes", "back"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "hinge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "hinge_bilateral",
+        "description": "Hip hinge with dumbbells held at the sides — entry-level RDL",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "cable_pull_through",
+        "name": "Cable Pull-Through",
+        "primary_muscle": "glutes",
+        "secondary_muscles": ["hamstrings"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "hinge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "hinge_bilateral",
+        "description": "Standing cable hip hinge using rope attachment between the legs",
+        "equipment": [
+            {"slug": "cable_machine",   "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "heel_elevated_goblet_squat",
+        "name": "Heel-Elevated Goblet Squat",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "squat",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "squat_quad_dominant",
+        "description": "Goblet squat with heels on plates for deeper knee flexion and quad emphasis",
+        "equipment": [
+            {"slug": "dumbbells",     "role": "primary", "required": True},
+            {"slug": "weight_plates", "role": "support", "required": False},
+        ],
+    },
+    {
+        "slug": "lateral_lunge",
+        "name": "Lateral Lunge",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "adductors"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "lunge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "substitution_group": "frontal_plane_lunge",
+        "description": "Side-step lunge for adductor and frontal-plane strength",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "curtsy_lunge",
+        "name": "Curtsy Lunge",
+        "primary_muscle": "glutes",
+        "secondary_muscles": ["quads", "adductors"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "lunge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "substitution_group": "frontal_plane_lunge",
+        "description": "Cross-behind lunge — glute medius and hip stability emphasis",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "lateral_step_up",
+        "name": "Lateral Step-up",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "lunge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "single_leg_quad",
+        "description": "Step-up sideways onto a box — frontal-plane unilateral knee work",
+        "equipment": [
+            {"slug": "plyo_box",   "role": "support", "required": True},
+            {"slug": "flat_bench", "role": "support", "required": False},
+            {"slug": "dumbbells",  "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "single_leg_leg_curl",
+        "name": "Single-Leg Lying Leg Curl",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "hamstring_curl",
+        "description": "One-leg machine curl — addresses leg asymmetries",
+        "equipment": [
+            {"slug": "leg_curl_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "glute_ham_raise",
+        "name": "Glute Ham Raise",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["glutes", "back"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "hinge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "advanced",
+        "substitution_group": "hamstring_curl",
+        "description": "Knee-flexion hamstring curl on a GHD — bodyweight or loaded",
+        "equipment": [
+            {"slug": "ghd", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "donkey_calf_raise",
+        "name": "Donkey Calf Raise",
+        "primary_muscle": "calves",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "calf_raise_gastroc",
+        "description": "Bent-over calf raise — modern gyms do this on the standing calf machine",
+        "equipment": [
+            {"slug": "standing_calf_raise_machine", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "calf_raise_on_leg_press",
+        "name": "Calf Raise on Leg Press",
+        "primary_muscle": "calves",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "isolation",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": True, "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "calf_raise_gastroc",
+        "description": "Calf press on the leg press footplate — heavy gastroc loading",
+        "equipment": [
+            {"slug": "leg_press_machine", "role": "primary", "required": True},
+        ],
+    },
+
+    # ───── POWER / ATHLETICS ─────────────────────────────────────────────
+    {
+        "slug": "single_leg_box_jump",
+        "name": "Single-Leg Box Jump",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "power_type": "plyometric",
+        "difficulty": "advanced",
+        "substitution_group": "vertical_jump_unilateral",
+        "description": "Single-leg jump onto a box — unilateral reactive power",
+        "equipment": [
+            {"slug": "plyo_box", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "lateral_bound",
+        "name": "Lateral Bound",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "adductors"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "power_type": "plyometric",
+        "substitution_group": "lateral_jump",
+        "description": "Side-to-side bound — frontal-plane reactive power and ankle stability",
+        "equipment": [],
+    },
+    {
+        "slug": "split_squat_jump",
+        "name": "Split Squat Jump",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "power_type": "plyometric",
+        "substitution_group": "vertical_jump_unilateral",
+        "description": "Explosive split squat jumping and switching legs in mid-air",
+        "equipment": [],
+    },
+    {
+        "slug": "tuck_jump",
+        "name": "Tuck Jump",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "core"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "substitution_group": "vertical_jump",
+        "description": "Vertical jump pulling knees toward chest — shock absorption + power",
+        "equipment": [],
+    },
+    {
+        "slug": "pogo_jumps",
+        "name": "Pogo Jumps",
+        "primary_muscle": "calves",
+        "secondary_muscles": ["quads"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "plyometric",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "plyometric",
+        "difficulty": "beginner",
+        "substitution_group": "plyo_on_ramp",
+        "description": "Stiff-leg ankle pogos — entry-level reactive plyometric for foot/ankle stiffness",
+        "equipment": [],
+    },
+    {
+        "slug": "med_ball_rotational_throw",
+        "name": "Med Ball Rotational Throw",
+        "primary_muscle": "core",
+        "secondary_muscles": ["full_body"],
+        "equipment_bucket": "other",
+        "movement_pattern": "rotation",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "power_type": "power",
+        "substitution_group": "rotational_power",
+        "description": "Rotational throw against a wall — transverse-plane power",
+        "equipment": [
+            {"slug": "medicine_ball", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "med_ball_chest_pass",
+        "name": "Med Ball Chest Pass",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders"],
+        "equipment_bucket": "other",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "power",
+        "substitution_group": "explosive_throw",
+        "description": "Explosive two-handed chest pass against a wall — upper-body power",
+        "equipment": [
+            {"slug": "medicine_ball", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "dumbbell_snatch",
+        "name": "Dumbbell Snatch",
+        "primary_muscle": "full_body",
+        "secondary_muscles": ["shoulders", "glutes", "back"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "hinge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "power_type": "power",
+        "difficulty": "advanced",
+        "substitution_group": "explosive_hinge",
+        "description": "One-arm hip-snap from floor to overhead with a dumbbell",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+
+    # ───── CORE ──────────────────────────────────────────────────────────
+    {
+        "slug": "hanging_knee_raise",
+        "name": "Hanging Knee Raise",
+        "primary_muscle": "core",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "anti_extension",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "intermediate",
+        "substitution_group": "core_anti_extension",
+        "description": "Hang from bar or captain's chair, raise knees to chest",
+        "equipment": [
+            {"slug": "pull_up_bar",   "role": "primary", "required": False},
+            {"slug": "captain_chair", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "toes_to_bar",
+        "name": "Toes-to-Bar",
+        "primary_muscle": "core",
+        "secondary_muscles": ["back"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "anti_extension",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "advanced",
+        "substitution_group": "core_anti_extension",
+        "description": "Hang from a bar and bring toes up to touch — full hip flexion + lat drive",
+        "equipment": [
+            {"slug": "pull_up_bar", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "reverse_crunch",
+        "name": "Reverse Crunch",
+        "primary_muscle": "core",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "anti_extension",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "core_anti_extension",
+        "description": "Lying knee-to-chest crunch — lower-abs emphasis",
+        "equipment": [],
+    },
+    {
+        "slug": "weighted_plank",
+        "name": "Weighted Plank",
+        "primary_muscle": "core",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "anti_extension",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "default_tracking_mode": "time",
+        "substitution_group": "core_anti_extension",
+        "description": "Plank with a plate or weighted vest on the upper back",
+        "equipment": [
+            {"slug": "weight_plates", "role": "primary", "required": False},
+            {"slug": "weighted_vest", "role": "primary", "required": False},
+        ],
+    },
+    {
+        "slug": "hollow_body_hold",
+        "name": "Hollow Body Hold",
+        "primary_muscle": "core",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "anti_extension",
+        "exercise_type": "strength",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "default_tracking_mode": "time",
+        "difficulty": "intermediate",
+        "substitution_group": "core_anti_extension",
+        "description": "Lying isometric hollow-body position — gymnastic core control",
+        "equipment": [],
+    },
+
+    # ───── HOME GYM / LIMITED EQUIPMENT ──────────────────────────────────
+    {
+        "slug": "suspension_row",
+        "name": "Suspension Trainer Row",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "home",
+        "movement_pattern": "horizontal_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "horizontal_pull_bodyweight",
+        "description": "Horizontal row from a suspension trainer — load adjusted by foot position",
+        "equipment": [
+            {"slug": "suspension_trainer", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "band_row",
+        "name": "Band Row",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "home",
+        "movement_pattern": "horizontal_pull",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "either",
+        "substitution_group": "horizontal_pull_band",
+        "description": "Resistance band row anchored at chest height",
+        "equipment": [
+            {"slug": "resistance_bands", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "band_chest_press",
+        "name": "Band Chest Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders"],
+        "equipment_bucket": "home",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": False,
+        "laterality": "either",
+        "substitution_group": "horizontal_press_band",
+        "description": "Resistance band chest press — anchored behind the user",
+        "equipment": [
+            {"slug": "resistance_bands", "role": "primary", "required": True},
+        ],
+    },
+    {
+        "slug": "chair_step_up",
+        "name": "Chair Step-up",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "home",
+        "movement_pattern": "lunge",
+        "exercise_type": "strength",
+        "is_compound": True, "is_machine": False, "is_unilateral": True,
+        "laterality": "unilateral",
+        "difficulty": "beginner",
+        "substitution_group": "single_leg_quad",
+        "description": "Bodyweight step-up onto a sturdy chair or low surface",
+        "equipment": [],
+    },
+]
+
+
+# ─── Substitution-group backfill for foundational lifts ─────────────────────
+#
+# Pass 2 added a validator check requiring every compound / plyometric entry
+# to declare a `substitution_group` so the planner's swap logic has families
+# to pull from. Most pre-existing entries never had one, and editing 47 of
+# them by hand is pure churn — so we keep them in this dict and apply it
+# in a single post-processing pass below. Adding `substitution_group`
+# directly to the entry overrides the dict.
+
+_LEGACY_SUBSTITUTION_GROUPS: dict[str, str] = {
+    # ── Hinge ─────────────────────────────────────────────────────────────
+    "deadlift":               "hinge_bilateral",
+    "romanian_deadlift":      "hinge_bilateral",
+    "rack_pull":              "hinge_bilateral",
+    "trap_bar_deadlift":      "hinge_bilateral",
+    "smith_machine_rdl":      "hinge_bilateral",
+    "good_morning":           "hinge_bilateral",
+    "single_leg_rdl":         "hinge_unilateral",
+    # ── Hip extension ─────────────────────────────────────────────────────
+    "hip_thrust":              "hip_extension",
+    "glute_bridge":            "hip_extension",
+    "single_leg_glute_bridge": "hip_extension",
+    # ── Horizontal pull ───────────────────────────────────────────────────
+    "barbell_row":         "horizontal_pull_barbell",
+    "pendlay_row":         "horizontal_pull_barbell",
+    "t_bar_row":           "horizontal_pull_barbell",
+    "dumbbell_row":        "horizontal_pull_dumbbell",
+    "chest_supported_row": "horizontal_pull_machine",
+    "seated_cable_row":    "horizontal_pull_cable",
+    "face_pull":           "rear_delt",
+    "band_pull_apart":     "rear_delt",
+    "upright_row":         "lateral_raise",
+    # ── Squat ─────────────────────────────────────────────────────────────
+    "barbell_squat":      "squat_barbell",
+    "front_squat":        "squat_barbell",
+    "smith_machine_squat":"squat_barbell",
+    "leg_press":          "squat_machine",
+    "hack_squat":         "squat_machine",
+    "goblet_squat":       "squat_quad_dominant",
+    "bodyweight_squat":   "squat_bodyweight",
+    "wall_sit":           "squat_isometric",
+    "landmine_squat":     "squat_quad_dominant",
+    "sumo_squat":         "squat_quad_dominant",
+    # ── Vertical pull ─────────────────────────────────────────────────────
+    "pullups":         "vertical_pull_bodyweight",
+    "chinups":         "vertical_pull_bodyweight",
+    "assisted_pullup": "vertical_pull_assisted",
+    "lat_pulldown":    "vertical_pull_machine",
+    # ── Vertical press ────────────────────────────────────────────────────
+    "overhead_press":          "vertical_press_barbell",
+    "push_press":              "vertical_press_barbell",
+    "dumbbell_shoulder_press": "vertical_press_dumbbell",
+    "arnold_press":            "vertical_press_dumbbell",
+    "machine_shoulder_press":  "vertical_press_machine",
+    "landmine_press":          "vertical_press_landmine",
+    "pike_pushups":            "vertical_press_bodyweight",
+    # ── Horizontal press ──────────────────────────────────────────────────
+    "barbell_bench_press":    "horizontal_press_barbell",
+    "incline_barbell_press":  "horizontal_press_barbell",
+    "decline_bench_press":    "horizontal_press_barbell",
+    "incline_dumbbell_press": "horizontal_press_dumbbell",
+    "pushups":                "horizontal_press_bodyweight",
+    "close_grip_bench_press": "horizontal_press_barbell",
+    "machine_chest_press":    "horizontal_press_machine",
+    "wide_pushups":           "horizontal_press_bodyweight",
+    "diamond_pushups":        "horizontal_press_bodyweight",
+    "chest_dips":             "horizontal_press_bodyweight",
+    # ── Other compound families ───────────────────────────────────────────
+    "thrusters":      "squat_to_press",
+    "farmer_carry":   "loaded_carry",
+    "suitcase_carry": "loaded_carry_unilateral",
+}
+
 
 SEED_EXERCISES: list[dict] = (
     CHEST
@@ -2585,4 +3804,17 @@ SEED_EXERCISES: list[dict] = (
     + CARDIO_MACHINE
     + CARDIO_OUTDOOR
     + POWER
+    + _NEW_2026_04_13
+    + _NEW_2026_04_13_PASS_2
 )
+
+# Apply the legacy substitution-group backfill in-place. Done as a single
+# post-processing pass at module load so we don't have to thread the field
+# through ~50 pre-existing entries by hand. An entry that already declares
+# `substitution_group` is left untouched.
+for _ex in SEED_EXERCISES:
+    if "substitution_group" not in _ex:
+        _grp = _LEGACY_SUBSTITUTION_GROUPS.get(_ex.get("slug", ""))
+        if _grp:
+            _ex["substitution_group"] = _grp
+del _ex  # don't leak loop var into module namespace

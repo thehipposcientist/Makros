@@ -19,6 +19,10 @@ from app.services.calorie_calculator import (
     CustomMacroOverrides,
     calculate_reference_ranges,
     compute_targets,
+    macro_consistency_delta,
+    CALORIES_PER_GRAM_PROTEIN,
+    CALORIES_PER_GRAM_CARB,
+    CALORIES_PER_GRAM_FAT,
 )
 
 
@@ -71,16 +75,17 @@ def test_male_fat_loss_moderate() -> None:
 def test_female_muscle_gain_aggressive() -> None:
     """25yo female, 140 lb, 5'5", training 5 days/wk, muscle gain aggressive.
 
-    Expected chain:
+    Expected chain (post-2026-04-13 bucket tune — aggressive surplus
+    dropped from 500 → 375 to keep lean-gain rate in check):
         BMR    = 10*(140/2.205) + 6.25*65*2.54 - 5*25 - 161
                ≈ 635 + 1032 - 125 - 161
                ≈ 1381
         TDEE   = 1381 * 1.55 ≈ 2140
-        bulk   = 2140 + 500 ≈ 2640
+        bulk   = 2140 + 375 ≈ 2515
 
         Protein = 140 * 1.0 = 140g
-        Fat     = max(0.3*140=42, 0.25*2640/9=73) = 73g
-        Carbs   ≈ (2640 - 140*4 - 73*9) / 4 = (2640 - 560 - 657) / 4 ≈ 356g
+        Fat     = max(0.3*140=42, 0.25*2515/9=70) = 70g
+        Carbs   ≈ (2515 - 140*4 - 70*9) / 4 ≈ 331g
     """
     print("\n[test] 25yo F, 140lb, 5'5\", 5d/wk, muscle_gain, aggressive")
     targets = compute_targets(CalorieInputs(
@@ -91,10 +96,10 @@ def test_female_muscle_gain_aggressive() -> None:
     ))
     _assert_near(targets.bmr,      1381, 10,  "BMR")
     _assert_near(targets.tdee,     2140, 15,  "TDEE")
-    _assert_near(targets.calories, 2640, 15,  "calories")
+    _assert_near(targets.calories, 2515, 15,  "calories")
     _assert_near(targets.protein_g, 140, 2,   "protein_g")
-    _assert_near(targets.fat_g,      73, 5,   "fat_g")
-    _assert_near(targets.carbs_g,   356, 15,  "carbs_g")
+    _assert_near(targets.fat_g,      70, 5,   "fat_g")
+    _assert_near(targets.carbs_g,   331, 15,  "carbs_g")
     assert targets.bucket_name == "muscle_gain"
 
 
@@ -150,6 +155,141 @@ def test_reference_ranges_card() -> None:
     print(f"    protein: cut={card.cut_protein_g}g / maintain={card.maintain_protein_g}g / bulk={card.bulk_protein_g}g")
 
 
+# ─── Partial override recalculation ──────────────────────────────────────────
+# These tests cover the fix to `step_8_apply_custom_overrides`. The old
+# implementation just swapped pinned fields; the new one recomputes the
+# non-pinned macros so totals stay internally consistent.
+
+
+def _base_inputs(**overrides) -> CalorieInputs:
+    """Standard profile used by every override test unless told otherwise."""
+    defaults = dict(
+        weight_lbs=180, height_feet=5, height_inches=10,
+        age=30, gender="male",
+        training_days_per_week=4,
+        goal_id="muscle_gain", pace="moderate",
+    )
+    defaults.update(overrides)
+    return CalorieInputs(**defaults)
+
+
+def test_override_calories_only_recomputes_fat_and_carbs() -> None:
+    """User pins calories only. Expectation: protein stays on calculated
+    value, fat is recomputed from the new calorie total, carbs absorb the
+    remainder. The macro sum must equal the new calorie target within
+    rounding noise."""
+    print("\n[test] override calories only (recomputes fat + carbs)")
+    baseline = compute_targets(_base_inputs())
+    pinned_cal = baseline.calories - 500  # user wants a deficit
+    overridden = compute_targets(_base_inputs(
+        custom_overrides=CustomMacroOverrides(calories=pinned_cal),
+    ))
+    assert overridden.calories == pinned_cal, f"calories not pinned: {overridden.calories}"
+    assert overridden.protein_g == baseline.protein_g, (
+        f"protein changed when only calories were pinned: "
+        f"{baseline.protein_g} → {overridden.protein_g}"
+    )
+    # Sum must match stated calories within 3 kcal (int rounding tolerance).
+    delta = macro_consistency_delta(
+        overridden.calories, overridden.protein_g, overridden.carbs_g, overridden.fat_g,
+    )
+    assert abs(delta) <= 3, f"macro sum inconsistent: delta={delta} kcal"
+    assert overridden.override_applied
+    assert not overridden.override_inconsistent, (
+        f"unexpectedly flagged inconsistent: delta={delta}"
+    )
+    assert overridden.calculated_calories == baseline.calories
+    print(f"  ✓ cal pinned={pinned_cal}, prot={overridden.protein_g}, "
+          f"carbs={overridden.carbs_g}, fat={overridden.fat_g}, delta={delta}")
+
+
+def test_override_protein_only_recomputes_carbs_fat() -> None:
+    """Pinning protein keeps the override and lets carbs/fat absorb the
+    calorie budget. Protein override must not cascade into calories."""
+    print("\n[test] override protein only (recomputes carbs + fat)")
+    targets = compute_targets(_base_inputs(
+        custom_overrides=CustomMacroOverrides(protein=250),
+    ))
+    assert targets.protein_g == 250
+    # Calories stay on the calculated value.
+    assert targets.calculated_calories == targets.calories
+    delta = macro_consistency_delta(
+        targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
+    )
+    assert abs(delta) <= 3, f"protein-only override drift: {delta}"
+    print(f"  ✓ prot pinned=250, cal={targets.calories}, "
+          f"carbs={targets.carbs_g}, fat={targets.fat_g}, delta={delta}")
+
+
+def test_override_fat_only_recomputes_carbs() -> None:
+    """Pinning fat keeps it; carbs absorb the leftover calories."""
+    print("\n[test] override fat only (recomputes carbs)")
+    targets = compute_targets(_base_inputs(
+        custom_overrides=CustomMacroOverrides(fat=80),
+    ))
+    assert targets.fat_g == 80, f"fat not pinned: {targets.fat_g}"
+    delta = macro_consistency_delta(
+        targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
+    )
+    assert abs(delta) <= 3, f"fat-only override drift: {delta}"
+    print(f"  ✓ fat pinned=80, cal={targets.calories}, "
+          f"prot={targets.protein_g}, carbs={targets.carbs_g}, delta={delta}")
+
+
+def test_override_all_four_uses_verbatim() -> None:
+    """If the user pins every field, the calculator uses them verbatim and
+    flags `override_inconsistent` when the totals don't add up."""
+    print("\n[test] override all four (verbatim, inconsistency flagged)")
+    # Intentionally inconsistent: 2000 cal but only 1600 kcal in macros.
+    targets = compute_targets(_base_inputs(
+        custom_overrides=CustomMacroOverrides(
+            calories=2000, protein=150, carbs=150, fat=50,
+        ),
+    ))
+    assert targets.calories == 2000
+    assert targets.protein_g == 150
+    assert targets.carbs_g == 150
+    assert targets.fat_g == 50
+    delta = macro_consistency_delta(2000, 150, 150, 50)
+    assert delta == 2000 - (150 * 4 + 150 * 4 + 50 * 9), "delta formula wrong"
+    assert targets.override_inconsistent, (
+        f"expected inconsistency flag, got delta={targets.consistency_kcal_delta}"
+    )
+    print(f"  ✓ pinned verbatim, inconsistency delta={targets.consistency_kcal_delta}")
+
+
+def test_override_fat_below_floor_flag() -> None:
+    """Pinning fat below the 0.3 g/lb physiological floor should preserve
+    the user's value but raise the `override_fat_below_floor` diagnostic
+    so the UI can warn them."""
+    print("\n[test] override fat below floor (diagnostic flagged)")
+    targets = compute_targets(_base_inputs(
+        weight_lbs=200,
+        custom_overrides=CustomMacroOverrides(fat=30),  # 30 < 0.3*200=60
+    ))
+    assert targets.fat_g == 30
+    assert targets.override_fat_below_floor, (
+        "expected override_fat_below_floor=True for 30g fat at 200lb"
+    )
+    print(f"  ✓ fat=30g flagged below floor for 200lb user")
+
+
+def test_calculated_target_is_internally_consistent() -> None:
+    """A plain calculated target (no overrides) should always satisfy the
+    consistency check within a handful of kcal. This is a regression
+    guard — step 7's fat-floor/carb-floor logic must never leave the
+    three macros summing to something wildly different from calories."""
+    print("\n[test] calculated targets stay internally consistent")
+    for goal in ("fat_loss", "muscle_gain", "body_recomp", "strength",
+                 "endurance", "athletic_performance", "general_health"):
+        targets = compute_targets(_base_inputs(goal_id=goal))
+        delta = macro_consistency_delta(
+            targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
+        )
+        assert abs(delta) <= 10, f"goal={goal} drift={delta}"
+    print(f"  ✓ all 7 buckets consistent within 10 kcal")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -163,6 +303,12 @@ if __name__ == "__main__":
         test_minimum_calorie_floor,
         test_custom_override_pins_value,
         test_reference_ranges_card,
+        test_override_calories_only_recomputes_fat_and_carbs,
+        test_override_protein_only_recomputes_carbs_fat,
+        test_override_fat_only_recomputes_carbs,
+        test_override_all_four_uses_verbatim,
+        test_override_fat_below_floor_flag,
+        test_calculated_target_is_internally_consistent,
     ]
 
     failures = 0

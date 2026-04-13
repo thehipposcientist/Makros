@@ -55,21 +55,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 import openai
 from openai import OpenAI
 
-from app.routers.ai.models import PlanRequest
-from app.routers.ai.utils import (
-    _build_chat_kwargs,
-    _chat_create,
-    _extract_json,
-    _log_openai_error,
-    _looks_truncated,
-    compute_tdee_and_targets,
-    model_plan_generation,
-)
+# Imports from `app.routers.ai` are lazy because that package's __init__
+# loads the full router chain, which itself imports this file — a direct
+# eager import deadlocks. Test files and other service modules that pull
+# in `meal_assembler` hit the cycle immediately. `TYPE_CHECKING` keeps the
+# type hint for editors without touching the runtime, and the AI-specific
+# helpers are imported inside `call_skeleton_ai` where they're actually
+# needed.
+if TYPE_CHECKING:
+    from app.routers.ai.models import PlanRequest
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +87,11 @@ class FoodMacros:
     protein: float
     carbs: float
     fat: float
+    # True when these macros are fabricated because enrichment didn't
+    # know this food. Meals containing stubs are flagged `confidence:
+    # "low"` on the output so callers don't treat the numbers as
+    # trustworthy. Defaults to False so existing callers don't break.
+    is_stub: bool = False
 
 
 @dataclass
@@ -170,7 +174,7 @@ def _slot_fractions(meals_per_day: int) -> dict[str, float]:
 
 
 def build_skeleton_prompt(
-    req: PlanRequest,
+    req: "PlanRequest",
     target_macros: tuple[int, int, int, int],
     variety_n: int,
     allowed_foods: list[str],
@@ -262,7 +266,7 @@ Do NOT include calories, protein, carbs, fat, grams, or quantities anywhere.
 
 def call_skeleton_ai(
     client: OpenAI,
-    req: PlanRequest,
+    req: "PlanRequest",
     target_macros: tuple[int, int, int, int],
     variety_n: int,
     allowed_foods: list[str],
@@ -273,6 +277,11 @@ def call_skeleton_ai(
     Returns (templates, nutritionistNote, supplementStack). Raises ValueError
     on repeated AI failures — the caller can decide whether to fall back.
     """
+    # Lazy imports to break the circular dependency with app.routers.ai.
+    from app.routers.ai.utils import (
+        _build_chat_kwargs, _chat_create, _extract_json, _log_openai_error,
+        _looks_truncated, model_plan_generation,
+    )
     prompt = build_skeleton_prompt(req, target_macros, variety_n, allowed_foods)
     _model = model or model_plan_generation()
     last_error: Exception | None = None
@@ -377,34 +386,191 @@ def _tokens(s: str) -> list[str]:
 def _best_allowed_match(ref: str, allowed_token_map: dict[str, list[str]]) -> str | None:
     """Return the allowed food name that best matches `ref`, or None.
 
-    Match rule: every significant token of the allowed food must appear in
-    the ref's tokens. This is the same rule `_food_covered` uses in plans.py,
-    which means nothing can slip through here that would fail there later.
+    Ranking (in order):
+      1. Exact normalized name match.
+      2. Among token-subset hits (every significant token of the allowed
+         food appears in the ref's tokens), pick the MOST SPECIFIC one —
+         i.e. the allowed name with the highest token count. This makes
+         "white rice" beat "rice" and "chicken breast" beat "chicken"
+         when both exist in the allowed list.
+      3. Tie-break on the longest lowercased name string.
     """
+    ref_lower = ref.lower().strip()
     ref_tokens = set(_tokens(ref))
     if not ref_tokens:
         return None
-    for allowed_name, a_tokens in allowed_token_map.items():
-        if a_tokens and all(tok in ref_tokens for tok in a_tokens):
+
+    # 1. Exact match against any allowed food's lowercased name.
+    for allowed_name in allowed_token_map.keys():
+        if allowed_name.lower().strip() == ref_lower:
             return allowed_name
-    return None
+
+    # 2. Token-subset candidates, ranked by specificity.
+    candidates: list[tuple[int, int, str]] = []   # (token_count, name_len, name)
+    for allowed_name, a_tokens in allowed_token_map.items():
+        if not a_tokens:
+            continue
+        if all(tok in ref_tokens for tok in a_tokens):
+            candidates.append((len(a_tokens), len(allowed_name), allowed_name))
+    if not candidates:
+        return None
+    # More tokens = more specific. On ties, longer name wins. Sort
+    # descending and return the winner.
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+# ─── Slot-aware food classification ──────────────────────────────────────────
+#
+# No real tag system yet (Phase 2 of the bigger refactor adds that). Until
+# then we use keyword heuristics on food names to pick slot-appropriate
+# fallback items. The keyword lists are intentionally conservative — we'd
+# rather miss a valid breakfast food than accidentally stick oatmeal on a
+# dinner card.
+
+_BREAKFAST_KEYWORDS = {
+    "oat", "oats", "oatmeal", "egg", "eggs", "yogurt", "granola", "cereal",
+    "pancake", "waffle", "bagel", "toast", "muffin", "banana", "berry",
+    "berries", "blueberry", "strawberry", "milk", "butter", "peanut",
+    "almond butter", "cottage cheese",
+}
+
+_PROTEIN_KEYWORDS = {
+    "chicken", "beef", "steak", "turkey", "pork", "fish", "salmon", "tuna",
+    "shrimp", "tilapia", "cod", "tofu", "tempeh", "seitan", "eggs", "egg",
+    "greek yogurt", "cottage cheese", "protein powder", "whey", "lentil",
+    "lentils", "chickpea", "chickpeas", "black bean", "edamame",
+}
+
+_CARB_KEYWORDS = {
+    "rice", "pasta", "noodle", "potato", "sweet potato", "quinoa", "oats",
+    "oatmeal", "bread", "tortilla", "wrap", "bagel", "couscous", "barley",
+    "bulgur",
+}
+
+_VEG_KEYWORDS = {
+    "broccoli", "spinach", "kale", "lettuce", "tomato", "cucumber", "carrot",
+    "pepper", "onion", "zucchini", "asparagus", "green bean", "mushroom",
+    "cauliflower", "cabbage", "salad",
+}
+
+_SNACK_KEYWORDS = {
+    "apple", "banana", "orange", "grape", "berry", "berries", "nut", "nuts",
+    "almond", "cashew", "walnut", "peanut", "jerky", "protein bar",
+    "greek yogurt", "cottage cheese", "cheese", "rice cake", "hummus",
+    "carrot", "celery",
+}
+
+
+def _food_matches_keywords(name: str, keywords: set[str]) -> bool:
+    n = name.lower()
+    return any(k in n for k in keywords)
+
+
+def _slot_aware_fallback(
+    slot: str,
+    allowed_foods: list[str],
+    used: set[str] | None = None,
+) -> list[str]:
+    """Pick a small realistic food combination for `slot` from `allowed_foods`.
+
+    Rules:
+      - breakfast: prefer 2-3 breakfast-tagged foods (e.g. oats + eggs +
+        berries). If none match, fall through to generic protein + carb.
+      - lunch/dinner: require at least one protein, prefer protein + carb
+        + vegetable.
+      - snack: prefer protein + fruit, or protein + fat.
+      - If there aren't enough slot-specific candidates, degrade to the
+        first 2-3 allowed foods not already in `used`. We still never
+        return an empty list — the solver must have something to work on.
+
+    `used` is an optional set of already-chosen foods from other meals in
+    the same template; we try to avoid them so templates feel varied.
+    """
+    if not allowed_foods:
+        return []
+    used = used or set()
+    available = [f for f in allowed_foods if f not in used] or list(allowed_foods)
+
+    def pick_one(keywords: set[str], pool: list[str]) -> str | None:
+        for f in pool:
+            if _food_matches_keywords(f, keywords):
+                return f
+        return None
+
+    def pick_many(keywords: set[str], pool: list[str], n: int) -> list[str]:
+        out: list[str] = []
+        for f in pool:
+            if len(out) >= n:
+                break
+            if _food_matches_keywords(f, keywords):
+                out.append(f)
+        return out
+
+    slot = (slot or "").lower()
+
+    if slot == "breakfast":
+        picks = pick_many(_BREAKFAST_KEYWORDS, available, 3)
+        if len(picks) >= 2:
+            return picks
+        # Degrade: protein + carb.
+        prot = pick_one(_PROTEIN_KEYWORDS, available)
+        carb = pick_one(_CARB_KEYWORDS, available)
+        picks = [x for x in (prot, carb) if x]
+        if picks:
+            return picks
+
+    if slot in ("lunch", "dinner"):
+        prot = pick_one(_PROTEIN_KEYWORDS, available)
+        # Lunch/dinner REQUIRES a protein source. If the unused pool has
+        # none, re-pick from the full allowed list — repeating a food
+        # across meals is better than shipping a proteinless dinner.
+        if not prot:
+            prot = pick_one(_PROTEIN_KEYWORDS, list(allowed_foods))
+        carb = pick_one(_CARB_KEYWORDS, available)
+        veg  = pick_one(_VEG_KEYWORDS,  available)
+        picks = [x for x in (prot, carb, veg) if x]
+        if picks:
+            return picks
+
+    if slot == "snack":
+        prot = pick_one(_PROTEIN_KEYWORDS, available)
+        other = pick_one(_SNACK_KEYWORDS, [f for f in available if f != prot])
+        picks = [x for x in (prot, other) if x]
+        if picks:
+            return picks
+
+    # Last resort: first two available foods.
+    return available[:2]
 
 
 def validate_and_repair_skeletons(
     templates: list[TemplateSkeleton],
     allowed_foods: list[str],
+    required_slots: list[str] | None = None,
 ) -> list[TemplateSkeleton]:
-    """Drop any food_ref that isn't in the allowed list. Replace dropped
-    refs with a best-match from allowed_foods when possible. If a meal ends
-    up with zero valid foods, fill it with the first 2 allowed foods so the
-    downstream solver always has something to work with."""
+    """Drop any food_ref not in the allowed list; pick a slot-aware
+    fallback when a meal ends up empty; guarantee every required slot
+    exists on every template.
+
+    `required_slots` comes from `_slot_order(mealsPerDay)` and is the set
+    of slot names the user's plan must cover (e.g. `["breakfast", "lunch",
+    "dinner"]` for 3 meals). Any template missing a required slot gets a
+    repaired meal appended using `_slot_aware_fallback`. This enforces the
+    prompt's "every template covers every slot" instruction that used to
+    be advisory.
+    """
     if not allowed_foods:
         return templates
 
     allowed_token_map = {name: _tokens(name) for name in allowed_foods}
-    fallback_foods = allowed_foods[:2] if len(allowed_foods) >= 2 else allowed_foods[:]
 
     for tpl in templates:
+        # Track which foods this template already uses so fallback picks
+        # can bias away from repetition when possible.
+        used_in_template: set[str] = set()
+
+        # 1. Clean every existing meal.
         for meal in tpl.meals:
             cleaned: list[str] = []
             seen: set[str] = set()
@@ -414,13 +580,48 @@ def validate_and_repair_skeletons(
                     cleaned.append(match)
                     seen.add(match.lower())
             if not cleaned:
+                fallback = _slot_aware_fallback(meal.slot, allowed_foods, used_in_template)
                 print(
-                    f"[meal_assembler] meal '{meal.name}' had no valid foods — "
-                    f"falling back to {fallback_foods}"
+                    f"[meal_assembler] meal '{meal.name}' ({meal.slot}) had no "
+                    f"valid foods — slot-aware fallback: {fallback}"
                 )
-                cleaned = list(fallback_foods)
+                cleaned = fallback
             meal.food_refs = cleaned
+            used_in_template.update(f.lower() for f in cleaned)
+
+        # 2. Guarantee every required slot exists on this template.
+        if required_slots:
+            present_slots = {m.slot for m in tpl.meals}
+            fractions = _slot_fractions(len(required_slots) if len(required_slots) in (2, 3, 4) else 3)
+            for slot in required_slots:
+                if slot in present_slots:
+                    continue
+                fallback = _slot_aware_fallback(slot, allowed_foods, used_in_template)
+                if not fallback:
+                    # Nothing to build a meal from — skip silently rather
+                    # than appending a ghost meal. Downstream will treat
+                    # the template as slot-deficient.
+                    print(f"[meal_assembler] could not repair missing slot '{slot}' — no allowed foods")
+                    continue
+                print(f"[meal_assembler] template missing '{slot}' slot — repaired with {fallback}")
+                tpl.meals.append(MealSkeleton(
+                    name=_slot_default_name(slot),
+                    slot=slot,
+                    food_refs=fallback,
+                    target_fraction=fractions.get(slot, 0.0),
+                ))
+                used_in_template.update(f.lower() for f in fallback)
     return templates
+
+
+def _slot_default_name(slot: str) -> str:
+    """Human-readable default name when we auto-repair a missing slot."""
+    return {
+        "breakfast": "Morning plate",
+        "lunch":     "Midday plate",
+        "dinner":    "Evening plate",
+        "snack":     "Snack plate",
+    }.get(slot, slot.capitalize())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -579,9 +780,15 @@ def _get_macros(name: str, lookup: dict[str, FoodMacros]) -> FoodMacros:
                 return food
 
     qty, unit = _guess_unit_for_food(name)
+    print(
+        f"[meal_assembler] LOW-CONFIDENCE STUB for food '{name}' — not found "
+        f"in enrichment; fabricating macros (150 cal / 10P / 15C / 5F). This "
+        f"should be rare; loud log so callers can spot degraded quality."
+    )
     return FoodMacros(
         name=name, serving_label=f"{qty:g} {unit}", serving_quantity=qty,
         serving_unit=unit, calories=150, protein=10, carbs=15, fat=5,
+        is_stub=True,
     )
 
 
@@ -681,6 +888,56 @@ def _round_to_nice_quantity(q: float) -> float:
     return round(q * 2) / 2
 
 
+# Residual tolerance thresholds for solver quality checks. Anything past
+# these is considered a meal that the food list can't physically hit —
+# we log and mark the meal `confidence: low` rather than silently pass a
+# bad result to the client.
+#
+# Calories are the anchor and get the tightest threshold. Protein is
+# muscle-preserving and gets the next-tightest. Carbs and fat are allowed
+# more slack because they absorb drift from the solver's compromise.
+_SOLVER_ACCEPT_CAL  = 0.25   # ±25% of meal calorie target
+_SOLVER_ACCEPT_PROT = 0.30   # ±30% of meal protein target
+_SOLVER_ACCEPT_CARB = 0.40
+_SOLVER_ACCEPT_FAT  = 0.40
+
+
+def _solver_residual(
+    foods: list[FoodMacros],
+    multipliers: list[float],
+    target_cal: float,
+    target_prot: float,
+    target_carb: float,
+    target_fat: float,
+) -> dict[str, float]:
+    """Compute the relative residual of the solver result vs meal target.
+
+    Returned as a dict of relative errors (current - target) / target for
+    each macro. Used both for accept/reject decisions and for the debug
+    line that gets logged on low-confidence meals.
+    """
+    cur_cal = sum(m * f.calories for f, m in zip(foods, multipliers))
+    cur_pro = sum(m * f.protein  for f, m in zip(foods, multipliers))
+    cur_cb  = sum(m * f.carbs    for f, m in zip(foods, multipliers))
+    cur_ft  = sum(m * f.fat      for f, m in zip(foods, multipliers))
+    return {
+        "cal":  (cur_cal - target_cal)  / max(target_cal, 1.0),
+        "prot": (cur_pro - target_prot) / max(target_prot, 1.0),
+        "carb": (cur_cb  - target_carb) / max(target_carb, 1.0),
+        "fat":  (cur_ft  - target_fat)  / max(target_fat, 1.0),
+    }
+
+
+def _solver_accepts(residual: dict[str, float]) -> bool:
+    """True if residuals fall within tolerance — meal is good enough to ship."""
+    return (
+        abs(residual["cal"])  <= _SOLVER_ACCEPT_CAL
+        and abs(residual["prot"]) <= _SOLVER_ACCEPT_PROT
+        and abs(residual["carb"]) <= _SOLVER_ACCEPT_CARB
+        and abs(residual["fat"])  <= _SOLVER_ACCEPT_FAT
+    )
+
+
 def assemble_meal(
     skeleton: MealSkeleton,
     food_lookup: dict[str, FoodMacros],
@@ -689,10 +946,29 @@ def assemble_meal(
     target_carb: float,
     target_fat: float,
 ) -> dict:
-    """Turn one skeleton meal into the canonical meal dict the frontend reads."""
+    """Turn one skeleton meal into the canonical meal dict the frontend reads.
+
+    Adds two quality gates on top of the old solver→assemble flow:
+      * Stub detection — any food whose macros were fabricated marks the
+        meal as low-confidence.
+      * Residual checks — before and after rounding, we compute the
+        relative error vs target. If either breaches the thresholds, the
+        meal is still returned (we never ship an empty slot) but flagged
+        `confidence: "low"` with the residual in `quality_debug` so the
+        caller can show a warning or attempt repair.
+    """
     foods = [_get_macros(r, food_lookup) for r in skeleton.food_refs]
-    multipliers = solve_portions(foods, target_cal, target_prot, target_carb, target_fat)
-    multipliers = [_round_to_nice_quantity(m) for m in multipliers]
+    stub_names = [f.name for f in foods if f.is_stub]
+
+    raw_multipliers = solve_portions(foods, target_cal, target_prot, target_carb, target_fat)
+    pre_round_residual = _solver_residual(
+        foods, raw_multipliers, target_cal, target_prot, target_carb, target_fat,
+    )
+
+    multipliers = [_round_to_nice_quantity(m) for m in raw_multipliers]
+    post_round_residual = _solver_residual(
+        foods, multipliers, target_cal, target_prot, target_carb, target_fat,
+    )
 
     items: list[dict] = []
     total_cal = total_pro = total_cb = total_ft = 0.0
@@ -715,6 +991,22 @@ def assemble_meal(
         total_cb  += item_cb
         total_ft  += item_ft
 
+    # Quality flag: stubs or residual-out-of-bounds both degrade confidence.
+    solver_ok = _solver_accepts(post_round_residual)
+    confidence: str
+    if stub_names or not solver_ok:
+        confidence = "low"
+        print(
+            f"[meal_assembler] LOW-CONFIDENCE meal '{skeleton.name}' ({skeleton.slot}): "
+            f"stubs={stub_names or '-'} "
+            f"residual_cal={post_round_residual['cal']:+.2f} "
+            f"residual_prot={post_round_residual['prot']:+.2f} "
+            f"residual_carb={post_round_residual['carb']:+.2f} "
+            f"residual_fat={post_round_residual['fat']:+.2f}"
+        )
+    else:
+        confidence = "high"
+
     return {
         "meal": skeleton.name,
         "items": items,
@@ -730,6 +1022,12 @@ def assemble_meal(
         },
         "estimated_alignment": "balanced",
         "isRoutine": False,
+        "confidence": confidence,
+        "quality_debug": {
+            "stub_foods": stub_names,
+            "pre_round_residual": {k: round(v, 3) for k, v in pre_round_residual.items()},
+            "post_round_residual": {k: round(v, 3) for k, v in post_round_residual.items()},
+        },
     }
 
 
@@ -770,7 +1068,7 @@ def assemble_template(
 
 def assemble_nutrition_response(
     client: OpenAI,
-    req: PlanRequest,
+    req: "PlanRequest",
     target_macros: tuple[int, int, int, int],
     variety_n: int,
     allowed_foods: list[str],
@@ -797,8 +1095,13 @@ def assemble_nutrition_response(
         client, req, target_macros, variety_n, allowed_foods
     )
 
-    # Step 2 — strict food validation and repair
-    templates = validate_and_repair_skeletons(templates, allowed_foods)
+    # Step 2 — strict food validation + slot completeness repair.
+    # `required_slots` forces every template to cover every slot the
+    # user's mealsPerDay dictates, even if the AI dropped one.
+    required_slots = _slot_order(
+        req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
+    )
+    templates = validate_and_repair_skeletons(templates, allowed_foods, required_slots)
 
     # Step 3 — food lookup
     food_lookup = build_food_lookup(enriched)

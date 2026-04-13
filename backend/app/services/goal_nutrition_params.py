@@ -131,10 +131,15 @@ MUSCLE_GAIN = GoalBucketParams(
     name="muscle_gain",
     # Lean-bulk surplus. 300 cal/day ≈ ~0.5 lb/wk gain, the accepted
     # upper bound for minimizing fat accrual in trained lifters.
+    # 2026-04-13: aggressive dropped from 500 → 375. 500 cal/day pushes
+    # past the lean-gain ceiling (~0.5 lb/wk) and produces visible fat
+    # gain for most users, which isn't the default-app experience we
+    # want. 375 still exceeds the moderate bucket while keeping the
+    # weekly rate inside the safety clamp.
     calorie_adjustment_by_pace={
         "conservative": 150,
         "moderate":     300,
-        "aggressive":   500,
+        "aggressive":   375,
     },
     # Top of the ISSN range — plenty of substrate for muscle protein
     # synthesis. Research doesn't show benefit above ~1.0 g/lb.
@@ -164,10 +169,14 @@ STRENGTH = GoalBucketParams(
     # Strength progress generally benefits from a mild surplus —
     # recovery between heavy sessions improves with adequate calories.
     # Less than muscle-gain because we don't prioritize hypertrophy mass.
+    # 2026-04-13: aggressive dropped from 500 → 350. Strength goals
+    # don't need a real bulk — the old 500 was borrowed from muscle
+    # gain and produced unnecessary fat gain for lifters who just
+    # want their 1RM up.
     calorie_adjustment_by_pace={
         "conservative": 150,
         "moderate":     300,
-        "aggressive":   500,
+        "aggressive":   350,
     },
     protein_per_lb=1.0,
     fat_percent_of_calories=0.28,
@@ -204,7 +213,11 @@ ATHLETIC = GoalBucketParams(
         "moderate":     250,
         "aggressive":   400,
     },
-    protein_per_lb=0.9,
+    # 2026-04-13: bumped 0.9 → 1.0 g/lb. Power/speed/agility work has
+    # the same fiber recruitment demands as strength training, and the
+    # ISSN 2017 stand supports 1.0 g/lb across the board for trained
+    # athletes with explosive demands.
+    protein_per_lb=1.0,
     fat_percent_of_calories=0.28,
     min_carbs_g=120,
 )
@@ -219,7 +232,11 @@ GENERAL_HEALTH = GoalBucketParams(
         "moderate":        0,
         "aggressive":    100,
     },
-    protein_per_lb=0.75,
+    # 2026-04-13: bumped 0.75 → 0.8 g/lb. 0.75 sat below the ISSN 2017
+    # floor for physically active adults (0.8 g/lb ≈ 1.8 g/kg). Even
+    # sedentary older adults benefit from ≥0.8 g/lb for lean-mass
+    # preservation, so this is the right default for "unknown goal".
+    protein_per_lb=0.8,
     fat_percent_of_calories=0.30,
     min_carbs_g=90,
 )

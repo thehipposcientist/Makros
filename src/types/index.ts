@@ -267,9 +267,18 @@ export interface MealSuggestion {
   fat?: number;
   fiber?: number;       // grams — top-level shortcut for display
   micronutrients?: MealMicronutrients;
-  instructions?: string; // brief recipe/cooking notes
+  instructions?: string; // brief recipe/cooking notes (first variation)
+  // Additional recipe variations fetched via the "Try another way" button
+  // in the recipe modal. Index 0 mirrors `instructions` when set; later
+  // entries are alternate preparations of the same ingredient list.
+  instructionVariants?: string[];
   isRoutine?: boolean;   // user eats this meal every day — AI keeps it fixed
   estimated_alignment?: string;
+  // Stable client-side IDs used for extra meals. `_localId` identifies a
+  // preserved (user-checked) extra so it survives plan regeneration.
+  // `_routineId` identifies an extra pinned as a routine.
+  _localId?: string;
+  _routineId?: string;
 }
 
 export interface SupplementItem {
