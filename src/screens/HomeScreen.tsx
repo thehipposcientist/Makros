@@ -16,7 +16,7 @@ import {
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
-import { ensureItems } from '../utils/mealItems';
+import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -92,6 +92,13 @@ interface ExerciseLibraryItem {
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Meal-side today accent. Hardcoded (not theme-derived) so the meal
+// accordion's today highlight is guaranteed visually distinct from the
+// workout tab regardless of which theme the user picks. The workout
+// side stays palette-driven (`workoutPalette.strong`) so its highlight
+// matches the rest of the workout tab in whatever theme is active.
+const MEALS_ACCENT = '#35C46A';
 
 // ── Supplement Library Data ───────────────────────────────────────────────────
 interface SupplementEntry {
@@ -1092,6 +1099,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { mounted = false; };
   }, [todayDone, workoutPlan]);
 
+  // Reload the preserved-completed-workouts overlay whenever the plan
+  // changes or today's completion flag flips. Without this, trainer-chat
+  // plan updates that call `setWorkoutPlan` directly (without bumping
+  // `planRefreshKey`) leave the overlay stale — the new plan's today
+  // rotation is displayed even though the user already completed a
+  // different workout this morning.
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const fresh = await loadPreservedCompletedWorkouts();
+      if (mounted) setPreservedWorkouts(fresh);
+    })();
+    return () => { mounted = false; };
+  }, [workoutPlan, todayDone]);
+
   useEffect(() => {
     const timer = setInterval(() => {
       const nowKey = todayKey();
@@ -1204,7 +1226,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     /** Returns true if the plan has at least one meal with real calorie data. */
     const hasMealMacros = (plan: DailyNutritionPlan | null | undefined): boolean => {
       if (!plan) return false;
-      const meals = [plan.breakfast, plan.lunch, plan.dinner].filter(Boolean);
+      const migrated = migrateNutritionPlanShape(plan) as DailyNutritionPlan;
+      const meals = migrated.meals ?? [];
       return meals.length > 0 && meals.some(m => (m?.calories ?? 0) > 0);
     };
 
@@ -1216,27 +1239,47 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const localEntries = await Promise.all(
       mealDays.map(async (d, i) => {
         let picked: DailyNutritionPlan | null = null;
-        // 1. Try backend day-state — only trust it if macros are present
-        if (authToken) {
+        // Precedence: locally saved per-day plan > remote day state >
+        // rotating template > local fallback. Per-day saves win so user
+        // edits (renames, added meals) persist across reloads. The
+        // saves are explicitly wiped on regen via `clearAllSavedNutritionPlans`
+        // so a fresh regen still rotates the new templates.
+        // Templates carry a `_templatesVersion` stamp set on regen. Per-day
+        // saves and remote day-state copy that stamp at write time so we can
+        // detect stale data after a fresh regen and reject it. Without this,
+        // the remote `day_state.nutrition_plan` from yesterday's plan keeps
+        // overriding today's freshly-rotated template and variety=1 looks
+        // like 7 different days.
+        const currentVersion = (rotatingTemplates[0] as any)?._templatesVersion ?? null;
+        const stampOk = (p: any) =>
+          currentVersion == null || p?._templatesVersion === currentVersion;
+
+        const normalize = (p: any): DailyNutritionPlan =>
+          normalizeServingUnitsInPlan(migrateNutritionPlanShape(p)) as DailyNutritionPlan;
+
+        const saved = await getSavedNutritionPlan(d.key);
+        if (saved && hasMealMacros(saved) && stampOk(saved)) {
+          picked = normalize(saved);
+        }
+        if (!picked && authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
-          if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan)) {
-            picked = remote.nutrition_plan as DailyNutritionPlan;
+          if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan)) {
+            picked = normalize(remote.nutrition_plan);
           }
         }
-        // 2. Try locally saved plan (user's day-specific edits) — only if macros valid
-        if (!picked) {
-          const saved = await getSavedNutritionPlan(d.key);
-          if (saved && hasMealMacros(saved)) picked = saved;
-        }
-        // 3. Rotate through AI templates. Length is user-controlled via
-        //    `mealVariety` — 1 means same plan every day, 7 means unique.
         if (!picked && rotatingTemplates.length > 0) {
           const template = rotatingTemplates[i % rotatingTemplates.length];
-          if (hasMealMacros(template)) picked = template;
+          if (hasMealMacros(template)) picked = normalize(template);
         }
-        // 4. Local generator fallback
         if (!picked) {
-          picked = generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key);
+          picked = normalize(generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key));
+        }
+        // Stamp picked with the current templates version so subsequent
+        // edits (rename, reorder, add meal) carry it forward into the
+        // per-day save and remote day-state. Without the stamp, the
+        // version check above would reject the user's own edits next load.
+        if (picked && currentVersion != null) {
+          (picked as any)._templatesVersion = currentVersion;
         }
         // Order of layering:
         //   1. Routines first — they're the "every day" template and set
@@ -1251,38 +1294,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           picked = applyRoutines(picked, routines);
         }
         const preserved = await getPreservedMeals(d.key);
-        const hasFixed = Object.keys(preserved.fixed).length > 0;
-        const hasExtras = preserved.extras.length > 0;
-        if (hasFixed || hasExtras) {
-          const currentExtras = picked.extraMeals ?? [];
+        if (preserved.length > 0) {
+          // Merge preserved checked meals into the unified meals[] list,
+          // deduping by _localId, _routineId, or content signature.
+          const currentMeals = picked.meals ?? [];
           const currentSigs = new Set(
-            currentExtras.map(m => `${m.meal}__${Math.round(m.calories ?? 0)}`),
+            currentMeals.map(m => `${m.meal}__${Math.round(m.calories ?? 0)}`),
           );
           const currentRoutineIds = new Set(
-            currentExtras.map(m => (m as any)._routineId).filter(Boolean),
+            currentMeals.map(m => (m as any)._routineId).filter(Boolean),
           );
           const currentLocalIds = new Set(
-            currentExtras.map(m => (m as any)._localId).filter(Boolean),
+            currentMeals.map(m => (m as any)._localId).filter(Boolean),
           );
-          const preservedExtrasToAdd = preserved.extras.filter(p => {
+          const toAdd = preserved.filter(p => {
             const pLocal = (p as any)._localId;
             const pRoutine = (p as any)._routineId;
             const pSig = `${p.meal}__${Math.round(p.calories ?? 0)}`;
-            // Skip if already represented by id, routine, or content sig.
             if (pLocal && currentLocalIds.has(pLocal)) return false;
             if (pRoutine && currentRoutineIds.has(pRoutine)) return false;
             if (currentSigs.has(pSig)) return false;
             return true;
           });
-          picked = {
-            ...picked,
-            ...preserved.fixed,
-            extraMeals: [...currentExtras, ...preservedExtrasToAdd],
-          } as DailyNutritionPlan;
-          // Re-apply routines so applyRoutines' dedup catches anything the
-          // preserved overlay brought in that matches an active routine.
-          if (routines.length > 0) {
-            picked = applyRoutines(picked, routines);
+          if (toAdd.length > 0) {
+            picked = { ...picked, meals: [...currentMeals, ...toAdd] };
+            if (routines.length > 0) picked = applyRoutines(picked, routines);
           }
         }
         return [d.key, picked] as const;
@@ -1620,12 +1656,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           exercises: (d.exercises ?? []).map(e => ({ name: e.name, sets: e.sets, reps: e.reps })),
         })),
         todayMeals: todayPlan
-          ? (['breakfast', 'lunch', 'dinner', 'snack'] as const)
-              .map(type => {
-                const m = todayPlan[type];
-                return m ? { type, meal: m.meal, foods: m.foods ?? [], calories: m.calories ?? 0, protein: m.protein ?? 0 } : null;
-              })
-              .filter(Boolean) as Array<{ type: string; meal: string; foods: string[]; calories: number; protein: number }>
+          ? (todayPlan.meals ?? []).map((m, idx) => ({
+              type: `meal_${idx}`,
+              meal: m.meal,
+              foods: m.foods ?? [],
+              calories: m.calories ?? 0,
+              protein: m.protein ?? 0,
+            }))
           : [],
         mealRoutine: userProfile.mealRoutine,
       };
@@ -1921,16 +1958,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const plan = nutritionPlansByDate[date];
     if (!plan) return;
 
-    // Resolve the meal: fixed slots live on plan[mealType]; extras live in
-    // plan.extraMeals[idx] and are tracked by `_localId` in the preserved
-    // store so checks survive regeneration identically to slot meals.
-    let meal: MealSuggestion | undefined;
-    if (mealType.startsWith('extra_')) {
-      const idx = parseInt(mealType.slice(6), 10);
-      meal = (plan.extraMeals ?? [])[idx];
-    } else {
-      meal = (plan as any)[mealType] as MealSuggestion | undefined;
-    }
+    // Every meal lives in plan.meals[idx]. mealType is "meal_<idx>".
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    const meal = idx >= 0 ? (plan.meals ?? [])[idx] : undefined;
     if (!meal) return;
 
     if (!wasChecked) {
@@ -1952,195 +1982,139 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setNutritionPlansByDate(prev => {
       const current = prev[date];
       if (!current) return prev;
-      if (mealType === 'new_extra') {
-        nextPlan = { ...current, extraMeals: [...(current.extraMeals ?? []), updated] };
-      } else if (mealType.startsWith('extra_')) {
-        const idx = parseInt(mealType.slice(6), 10);
-        const extras = [...(current.extraMeals ?? [])];
-        extras[idx] = updated;
-        nextPlan = { ...current, extraMeals: extras };
-      } else {
-        nextPlan = { ...current, [mealType]: updated } as DailyNutritionPlan;
+      const meals = [...(current.meals ?? [])];
+      if (mealType === 'new_meal' || mealType === 'new_extra') {
+        meals.push(updated);
+      } else if (mealType.startsWith('meal_')) {
+        const idx = parseInt(mealType.slice(5), 10);
+        if (idx >= 0 && idx < meals.length) meals[idx] = updated;
+        else meals.push(updated);
       }
+      nextPlan = { ...current, meals };
       return { ...prev, [date]: nextPlan as DailyNutritionPlan };
     });
     if (nextPlan) await saveNutritionPlan(date, nextPlan);
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
 
-    // Routine meal edits must also flow back to `mealRoutines` storage —
-    // otherwise the next plan reload re-applies the stale routine content
-    // and silently undoes the user's edit.
-    if (updated.isRoutine && !mealType.startsWith('extra_') && mealType !== 'new_extra') {
+    // Routine-backed meal edits must propagate to `mealRoutines` storage.
+    // Identified by `_routineId` on the saved meal — the user just edited
+    // a meal that was pinned, so we update the routine snapshot in place.
+    const routineId = (updated as any)._routineId;
+    if (routineId) {
       const routines = await loadMealRoutines();
-      const withItems = ensureItems(updated);
-      const snapItems = withItems.items ?? [];
-      const foods: MealRoutineFood[] = snapItems.length > 0
-        ? snapItems.map((it, i) => ({
-            id: `${Date.now()}_${i}`,
-            name: it.name,
-            quantity: it.unit === 'piece' ? String(it.quantity) : `${it.quantity} ${it.unit}`,
-          }))
-        : (updated.foods ?? []).map((f, i) => ({
-            id: `${Date.now()}_${i}`,
-            name: f,
-            quantity: updated.amounts?.[i],
-          }));
-      const existing = routines.find(r => r.mealType === mealType);
-      const refreshed: MealRoutineEntry = {
-        id: existing?.id ?? `routine_${mealType}_${Date.now()}`,
-        name: updated.meal,
-        mealType,
-        foods,
-        items: snapItems.length > 0 ? snapItems : undefined,
-        notes: existing?.notes,
-        photoUri: existing?.photoUri,
-        createdAt: existing?.createdAt ?? new Date().toISOString(),
-        calories: updated.calories,
-        protein:  updated.protein,
-        carbs:    updated.carbs,
-        fat:      updated.fat,
-      };
-      const nextRoutines = [
-        ...routines.filter(r => r.mealType !== mealType),
-        refreshed,
-      ];
-      await saveMealRoutines(nextRoutines);
+      const existing = routines.find(r => r.id === routineId);
+      if (existing) {
+        const withItems = ensureItems(updated);
+        const snapItems = withItems.items ?? [];
+        const foods: MealRoutineFood[] = snapItems.length > 0
+          ? snapItems.map((it, i) => ({
+              id: `${Date.now()}_${i}`,
+              name: it.name,
+              quantity: it.unit === 'piece' ? String(it.quantity) : `${it.quantity} ${it.unit}`,
+            }))
+          : (updated.foods ?? []).map((f, i) => ({
+              id: `${Date.now()}_${i}`,
+              name: f,
+              quantity: updated.amounts?.[i],
+            }));
+        const refreshed: MealRoutineEntry = {
+          ...existing,
+          name: updated.meal,
+          foods,
+          items: snapItems.length > 0 ? snapItems : undefined,
+          calories: updated.calories,
+          protein:  updated.protein,
+          carbs:    updated.carbs,
+          fat:      updated.fat,
+        };
+        const nextRoutines = routines.map(r => r.id === routineId ? refreshed : r);
+        await saveMealRoutines(nextRoutines);
+      }
     }
   }, [persistDayState]);
 
   const handleAddSnack = useCallback((date: string) => {
-    const emptyMeal: MealSuggestion = { meal: 'Extra Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };
-    setEditingMeal({ dateKey: date, type: 'new_extra', meal: emptyMeal });
+    const emptyMeal: MealSuggestion = { meal: 'New Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };
+    setEditingMeal({ dateKey: date, type: 'new_meal', meal: emptyMeal });
   }, []);
 
   const handleRemoveMeal = useCallback(async (date: string, mealType: string) => {
-    // If the meal is currently pinned as a routine, removing it should
-    // un-pin it and clear it from every day. Otherwise the user removes
-    // it from today, then the next loadPlans re-applies the routine and
-    // it pops back. Detect the routine pin BEFORE we mutate state.
+    // Soft-remove a meal from a single day. If the meal was pinned as a
+    // routine, also unpin it and re-apply across every day so it doesn't
+    // pop back on the next load.
     const currentPlan = nutritionPlansByDate[date];
-    let routineIdToClear: string | null = null;
-    let slotRoutineToClear: string | null = null;
-    let preservedLocalIdToClear: string | null = null;
-    if (currentPlan) {
-      if (mealType.startsWith('extra_')) {
-        const idx = parseInt(mealType.slice(6), 10);
-        const extra = (currentPlan.extraMeals ?? [])[idx] as any;
-        if (extra?._routineId) routineIdToClear = extra._routineId;
-        if (extra?._localId) preservedLocalIdToClear = extra._localId;
-      } else {
-        const m = (currentPlan as any)[mealType] as MealSuggestion | undefined;
-        if (m?.isRoutine) slotRoutineToClear = mealType;
-      }
-    }
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    const target = idx >= 0 ? (currentPlan?.meals ?? [])[idx] : undefined;
+    const routineIdToClear: string | null = (target as any)?._routineId ?? null;
+    const preservedLocalIdToClear: string | null = (target as any)?._localId ?? null;
 
     let nextPlan: DailyNutritionPlan | null = null;
     setNutritionPlansByDate(prev => {
       const current = prev[date];
-      if (!current) return prev;
-      if (mealType.startsWith('extra_')) {
-        const idx = parseInt(mealType.slice(6), 10);
-        const extras = (current.extraMeals ?? []).filter((_, i) => i !== idx);
-        nextPlan = { ...current, extraMeals: extras };
-      } else {
-        const removed = new Set(current.removedMeals ?? []);
-        removed.add(mealType);
-        nextPlan = { ...current, removedMeals: Array.from(removed) };
-      }
+      if (!current || idx < 0) return prev;
+      // Remove by index from the meals[] list. We don't soft-hide via
+      // removedMealIds when the user explicitly removes a meal from
+      // today's plan — that would leave a "Removed: X" row floating
+      // around forever. Soft-hide is only used by `removedMealIds`
+      // (e.g. a future "hide template meal" action).
+      const meals = (current.meals ?? []).filter((_, i) => i !== idx);
+      nextPlan = { ...current, meals };
       return { ...prev, [date]: nextPlan as DailyNutritionPlan };
     });
     if (nextPlan) await saveNutritionPlan(date, nextPlan);
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
 
-    // Auto-unpin: if this meal was a routine, drop it from the routines
-    // file and re-apply across every day so it disappears everywhere.
-    if (routineIdToClear || slotRoutineToClear) {
+    if (routineIdToClear) {
       const currentRoutines = await loadMealRoutines();
-      const filtered = currentRoutines.filter(r =>
-        routineIdToClear ? r.id !== routineIdToClear : r.mealType !== slotRoutineToClear
-      );
+      const filtered = currentRoutines.filter(r => r.id !== routineIdToClear);
       if (filtered.length !== currentRoutines.length) {
         await saveMealRoutines(filtered);
+        // Routines are derive-on-read — update in-memory state so the
+        // unpinned routine vanishes immediately, but do NOT persist the
+        // re-applied plans. A later loadPlans re-derives fresh.
         const appliedMap = applyRoutinesToAll(nutritionPlansByDate, filtered);
         setNutritionPlansByDate(appliedMap);
-        for (const [d, plan] of Object.entries(appliedMap)) {
-          await saveNutritionPlan(d, plan);
-          await persistDayState(d, { nutrition_plan: plan });
-        }
       }
     }
-    // Also clear any preserved (checked) snapshot for an extra so it
-    // doesn't get re-overlaid on the next loadPlans.
     if (preservedLocalIdToClear) {
       await clearPreservedMeal(date, mealType, preservedLocalIdToClear);
     }
   }, [persistDayState, nutritionPlansByDate]);
 
-  // Hard delete: fully removes the meal from the plan with no "restore"
-  // affordance. Contrast with `handleRemoveMeal` which soft-deletes via
-  // `removedMeals[]`. Routine pins and preserved snapshots for this meal
-  // are also cleared so it doesn't reappear on the next load.
+  // Hard delete: now that there's no soft-hide branch (every "remove"
+  // splices the meal out of meals[]), this is just an alias for
+  // `handleRemoveMeal`. Kept as a separate symbol so the NutritionCard
+  // long-press path can stay distinct from the row-level remove.
   const handleHardDeleteMeal = useCallback(async (date: string, mealType: string) => {
+    return handleRemoveMeal(date, mealType);
+  }, [handleRemoveMeal]);
+
+  const handleRestoreMeal = useCallback(async (date: string, mealType: string) => {
+    // Soft-hide is no longer used (handleRemoveMeal splices the meal out
+    // entirely), so there's nothing to restore. Kept as a no-op so the
+    // NutritionCard prop signature stays stable.
+    void date; void mealType;
+  }, []);
+
+  /** Reorder a meal within plan.meals[]. `direction` is -1 (up) / +1 (down). */
+  const handleMoveMeal = useCallback(async (date: string, mealType: string, direction: -1 | 1) => {
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    if (idx < 0) return;
     let nextPlan: DailyNutritionPlan | null = null;
     setNutritionPlansByDate(prev => {
       const current = prev[date];
       if (!current) return prev;
-      if (mealType.startsWith('extra_')) {
-        const idx = parseInt(mealType.slice(6), 10);
-        const extras = (current.extraMeals ?? []).filter((_, i) => i !== idx);
-        nextPlan = { ...current, extraMeals: extras };
-      } else {
-        const { [mealType]: _dropped, ...rest } = current as any;
-        const removed = (current.removedMeals ?? []).filter(m => m !== mealType);
-        nextPlan = { ...rest, removedMeals: removed } as DailyNutritionPlan;
-      }
+      const meals = (current.meals ?? []).slice();
+      const target = idx + direction;
+      if (target < 0 || target >= meals.length) return prev;
+      [meals[idx], meals[target]] = [meals[target], meals[idx]];
+      nextPlan = { ...current, meals };
       return { ...prev, [date]: nextPlan as DailyNutritionPlan };
     });
     if (nextPlan) {
       await saveNutritionPlan(date, nextPlan);
       await persistDayState(date, { nutrition_plan: nextPlan });
     }
-    // Also clear any routine pin + preserved snapshot so this meal can't
-    // re-appear on the next loadPlans pass. Handles both slot routines
-    // (keyed by mealType) and extra routines (keyed by id carried on the
-    // MealSuggestion as `_routineId`).
-    if (mealType.startsWith('extra_')) {
-      const idx = parseInt(mealType.slice(6), 10);
-      const current = nutritionPlansByDate[date];
-      const extra = current?.extraMeals?.[idx] as any;
-      const routineId: string | undefined = extra?._routineId;
-      const localId: string | undefined = extra?._localId;
-      if (routineId) {
-        const currentRoutines = await loadMealRoutines();
-        const filtered = currentRoutines.filter(r => r.id !== routineId);
-        if (filtered.length !== currentRoutines.length) {
-          await saveMealRoutines(filtered);
-        }
-      }
-      if (localId) {
-        await clearPreservedMeal(date, mealType, localId);
-      }
-    } else {
-      const currentRoutines = await loadMealRoutines();
-      const filtered = currentRoutines.filter(r => r.mealType !== mealType);
-      if (filtered.length !== currentRoutines.length) {
-        await saveMealRoutines(filtered);
-      }
-      await clearPreservedMeal(date, mealType);
-    }
-  }, [persistDayState, nutritionPlansByDate]);
-
-  const handleRestoreMeal = useCallback(async (date: string, mealType: string) => {
-    let nextPlan: DailyNutritionPlan | null = null;
-    setNutritionPlansByDate(prev => {
-      const current = prev[date];
-      if (!current) return prev;
-      const removed = (current.removedMeals ?? []).filter(m => m !== mealType);
-      nextPlan = { ...current, removedMeals: removed };
-      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
-    });
-    if (nextPlan) await saveNutritionPlan(date, nextPlan);
-    if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
   }, [persistDayState]);
 
 
@@ -2151,27 +2125,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const current = nutritionPlansByDate[date];
     if (!current) return;
 
-    // Resolve the source meal. Fixed slots live on plan[mealType]; extras
-    // live in plan.extraMeals[idx]. Both paths must produce a MealSuggestion.
-    let meal: MealSuggestion | undefined;
-    let isExtra = false;
-    let existingRoutineId: string | null = null;
-    if (mealType.startsWith('extra_')) {
-      const idx = parseInt(mealType.slice(6), 10);
-      meal = (current.extraMeals ?? [])[idx];
-      isExtra = true;
-      existingRoutineId = (meal as any)?._routineId ?? null;
-    } else {
-      meal = (current as any)[mealType] as MealSuggestion | undefined;
-    }
+    // Every meal lives in plan.meals[idx]. Resolve it.
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    const meal: MealSuggestion | undefined = idx >= 0 ? (current.meals ?? [])[idx] : undefined;
     if (!meal) return;
+    const existingRoutineId: string | null = (meal as any)?._routineId ?? null;
 
     const routines = await loadMealRoutines();
-    // For extras, active-state is tracked by routine id (multiple extras
-    // can be pinned simultaneously). For fixed slots, by mealType.
-    const alreadyActive = isExtra
-      ? !!existingRoutineId && routines.some(r => r.id === existingRoutineId)
-      : routines.some(r => r.mealType === mealType);
+    const alreadyActive = !!existingRoutineId && routines.some(r => r.id === existingRoutineId);
     const turningOn = !alreadyActive;
 
     let nextRoutines: MealRoutineEntry[];
@@ -2192,16 +2153,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             name: f,
             quantity: meal.amounts?.[i],
           }));
-      // Extras share a single mealType bucket (`extra`) and are distinguished
-      // by `id`. Fixed slots keep their slot mealType so only one routine can
-      // exist per slot at a time.
-      const routineId = isExtra && existingRoutineId
-        ? existingRoutineId
-        : `routine_${isExtra ? 'extra' : mealType}_${Date.now()}`;
+      // Every routine is now keyed by id. mealType on the routine entry
+      // is kept for legacy storage (set to 'custom') but isn't read by
+      // applyRoutines anymore.
+      const routineId = existingRoutineId ?? `routine_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const entry: MealRoutineEntry = {
         id: routineId,
         name: meal.meal,
-        mealType: isExtra ? 'extra' : mealType,
+        mealType: 'custom',
         foods,
         items: snapItems.length > 0 ? snapItems : undefined,
         createdAt: new Date().toISOString(),
@@ -2210,43 +2169,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         carbs:    meal.carbs,
         fat:      meal.fat,
       };
-      nextRoutines = isExtra
-        ? [...routines.filter(r => r.id !== routineId), entry]
-        : [...routines.filter(r => r.mealType !== mealType), entry];
+      nextRoutines = [...routines.filter(r => r.id !== routineId), entry];
 
-      // Clear any preserved-meal entry that matches the meal being pinned.
-      // Otherwise the next loadPlans overlay would re-inject the old
-      // checked copy alongside the new routine-backed one.
-      if (isExtra) {
-        const localId = (meal as any)._localId;
-        if (localId) {
-          await clearPreservedMeal(date, mealType, localId);
-        }
-      } else {
-        await clearPreservedMeal(date, mealType);
+      // Clear any preserved-meal entry for this meal so the next loadPlans
+      // overlay doesn't re-inject the old checked copy alongside the new
+      // routine-backed one.
+      const localId = (meal as any)._localId;
+      if (localId) {
+        await clearPreservedMeal(date, mealType, localId);
       }
     } else {
-      nextRoutines = isExtra && existingRoutineId
+      nextRoutines = existingRoutineId
         ? routines.filter(r => r.id !== existingRoutineId)
-        : routines.filter(r => r.mealType !== mealType);
+        : routines;
     }
     await saveMealRoutines(nextRoutines);
 
-    // Re-apply routines to every plan currently in state so every day —
-    // not just the one you pinned from — shows the routine meal. We
-    // compute `appliedMap` synchronously off the current `nutritionPlansByDate`
-    // (instead of inside a setState updater) because the updater function
-    // can run asynchronously in React 18, and our for-loop below needs the
-    // result right now to persist each day.
+    // Re-apply routines to every plan in state so every day reflects the
+    // pin/unpin immediately. CRITICAL: do NOT persist the result. Routines
+    // are derive-on-read — they're stored once in `mealRoutines` and
+    // re-applied by every loadPlans call. Writing the routine-overlaid
+    // plan to per-day storage would freeze that day's meals[] in place,
+    // so a later regen wouldn't refresh it (the version-check survives
+    // because the persisted plan inherits the current templatesVersion).
     const appliedMap = applyRoutinesToAll(nutritionPlansByDate, nextRoutines);
     setNutritionPlansByDate(appliedMap);
-
-    // Persist each re-applied plan so it survives reloads.
-    for (const [d, plan] of Object.entries(appliedMap)) {
-      await saveNutritionPlan(d, plan);
-      await persistDayState(d, { nutrition_plan: plan });
-    }
-  }, [nutritionPlansByDate, persistDayState]);
+  }, [nutritionPlansByDate]);
 
   const handleSkipToday = useCallback((focus: string) => {
     setSelectedSkipReason('');
@@ -2557,18 +2505,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const plan = nutritionPlansByDate[d.key];
               if (!plan) return null;
               const isExpanded = expandedMealDays.has(d.key);
-              const meals = [plan.breakfast, plan.lunch, plan.dinner, plan.snack].filter(Boolean) as MealSuggestion[];
+              const isToday = idx === 0;
+              const removedSet = new Set(plan.removedMealIds ?? []);
+              const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
               const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
-              const mealPreview = [
-                plan.breakfast ? '🌅' : null,
-                plan.lunch     ? '🥗' : null,
-                plan.dinner    ? '🍽️' : null,
-                plan.snack     ? '🥜' : null,
-              ].filter(Boolean).join('  ');
+              const totalProtein  = meals.reduce((sum, m) => sum + (m.protein ?? 0), 0);
+              const totalCarbs    = meals.reduce((sum, m) => sum + (m.carbs ?? 0), 0);
+              const totalFat      = meals.reduce((sum, m) => sum + (m.fat ?? 0), 0);
+              const t = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+              // Today highlight uses the hardcoded MEALS_ACCENT (green)
+              // so it's guaranteed distinct from the workout side's
+              // hardcoded WORKOUT_ACCENT (blue) regardless of which
+              // theme the user has selected. Some themes had nearly
+              // identical palettes for the two sections which made the
+              // two cards look like siblings of the same color.
+              const cardBg = isToday ? themeColors.surfaceRaised : themeColors.surface;
+              const cardBorder = isToday ? MEALS_ACCENT + '88' : themeColors.border;
               return (
-                <View key={d.key} style={[styles.mealAccordionCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                <View key={d.key} style={[styles.mealAccordionCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+                  {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: MEALS_ACCENT, marginBottom: 0 }]} />}
                   <TouchableOpacity
-                    style={[styles.mealAccordionHeader, { backgroundColor: mealPalette.soft, borderBottomColor: mealPalette.strong + '30' }]}
+                    style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
                     onPress={() => setExpandedMealDays(prev => {
                       const next = new Set(prev);
                       if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
@@ -2577,9 +2534,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     activeOpacity={0.8}
                   >
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.mealAccordionTitle, { color: themeColors.textPrimary }]}>{mealDayLabel(d.date, idx)}</Text>
+                      <Text style={[styles.mealAccordionTitle, { color: isToday ? MEALS_ACCENT : themeColors.textPrimary }]}>
+                        {mealDayLabel(d.date, idx)}
+                      </Text>
+                      {/* Compact macro readout under the day label. */}
                       <Text style={[styles.mealAccordionMeta, { color: themeColors.textSecondary }]}>
-                        {Math.round(totalCalories)} cal  ·  {mealPreview}
+                        <Text style={{ fontWeight: '700', color: mealPalette.strong }}>{Math.round(totalCalories)}</Text>
+                        <Text> / {t.calories} cal  ·  </Text>
+                        <Text style={{ fontWeight: '700' }}>{Math.round(totalProtein)}</Text>
+                        <Text>p  ·  </Text>
+                        <Text style={{ fontWeight: '700' }}>{Math.round(totalCarbs)}</Text>
+                        <Text>c  ·  </Text>
+                        <Text style={{ fontWeight: '700' }}>{Math.round(totalFat)}</Text>
+                        <Text>f</Text>
                       </Text>
                     </View>
                     <Text style={[styles.mealAccordionChevron, { color: themeColors.textMuted }]}>{isExpanded ? '▲' : '▼'}</Text>
@@ -2607,6 +2574,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }}
                       onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                       onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
+                      onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
                     />
                   )}
                 </View>
@@ -3932,14 +3900,17 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   const dow     = isToday ? 'Today' : DAY_NAMES[item.date.getDay()];
   const dateStr = `${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`;
 
-  // Rest day
+  // Rest day — uses `workoutPalette.strong` so the today highlight
+  // matches the rest of the workout tab in whatever theme the user picked.
+  // (The meal side uses a hardcoded green instead so the two day cards
+  // stay distinct even when a theme's workout/meal palettes are similar.)
   if (item.isRest) {
     return (
-      <View style={[styles.dayCard, { backgroundColor: tc.surface, borderColor: isToday ? tc.primary + '88' : tc.border }]}>
-        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: tc.primary }]} />}
+      <View style={[styles.dayCard, { backgroundColor: isToday ? tc.surfaceRaised : tc.surface, borderColor: isToday ? workoutPalette.strong + '88' : tc.border }]}>
+        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong }]} />}
         <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 14 }]}>
           <View style={styles.dayCardLeft}>
-            <Text style={[styles.dayCardDow, { color: isToday ? tc.primary : tc.textSecondary }]}>{dow}</Text>
+            <Text style={[styles.dayCardDow, { color: isToday ? workoutPalette.strong : tc.textSecondary }]}>{dow}</Text>
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
           </View>
           <View style={[styles.restBadge, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
@@ -3981,9 +3952,13 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
     );
   }
 
-  // Accent color for today vs completed
-  const accentColor = isCompleted ? tc.success : workoutPalette.strong;
-  const borderColor = isCompleted ? tc.success + '88' : isToday ? workoutPalette.strong + '88' : tc.border;
+  // Today AND completed both highlight in the workout palette so the
+  // entire workout tab uses one consistent accent color. The "Done" state
+  // is communicated by the green ✓ Done badge inside the card, not by
+  // the card border itself — that way users in any theme see their
+  // workout color light up regardless of whether the day is finished.
+  const accentColor = workoutPalette.strong;
+  const borderColor = (isToday || isCompleted) ? workoutPalette.strong + '88' : tc.border;
 
   return (
     <TouchableOpacity

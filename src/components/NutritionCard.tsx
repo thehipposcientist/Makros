@@ -17,6 +17,8 @@ interface NutritionCardProps {
   onHardDeleteMeal?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
+  /** Reorder the day's meals[]. `direction` is -1 (move up) or +1 (move down). */
+  onMoveMeal?: (mealType: string, direction: -1 | 1) => void;
 }
 
 export default function NutritionCard({
@@ -32,30 +34,32 @@ export default function NutritionCard({
   onHardDeleteMeal,
   onToggleRoutine,
   onShowRecipe,
+  onMoveMeal,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const section = theme.sections.meals;
   const styles = createStyles(colors, section);
-  const { breakfast, lunch, dinner, snack, extraMeals: extraMealsList, targets: rawTargets } = nutritionPlan;
-  const targets = rawTargets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const removed = new Set(nutritionPlan.removedMeals ?? []);
+  const targets = nutritionPlan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const removed = new Set(nutritionPlan.removedMealIds ?? []);
 
-  const allMeals: Array<{ key: string; emoji: string; meal: MealSuggestion | undefined }> = [
-    { key: 'breakfast', emoji: '🌅', meal: breakfast },
-    { key: 'lunch',     emoji: '🥗', meal: lunch },
-    { key: 'dinner',    emoji: '🍽️', meal: dinner },
-    { key: 'snack',     emoji: '🥜', meal: snack },
-  ];
-  const visibleMeals = allMeals.filter(m => m.meal && !removed.has(m.key)) as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
-  const hiddenMeals  = allMeals.filter(m => m.meal && removed.has(m.key))  as Array<{ key: string; emoji: string; meal: MealSuggestion }>;
-  const extraMealItems = (extraMealsList ?? []).map((meal, idx) => ({ key: `extra_${idx}`, emoji: '🍴', meal }));
-
-  const routineMeals    = visibleMeals.filter(m => m.meal.isRoutine);
-  const nonRoutineMeals = visibleMeals.filter(m => !m.meal.isRoutine);
-
-  const allVisible = [...visibleMeals, ...extraMealItems];
+  // Generic meals[] — no slot identity. Every meal is rendered uniformly
+  // and keyed by its index in the array. Routine meals carry _routineId
+  // and are surfaced under a "Routine" header; everything else lives
+  // under "Today's Plan".
+  const mealsArr = Array.isArray(nutritionPlan.meals) ? nutritionPlan.meals : [];
+  // No emoji prefix on meal rows — the meal name + routine pin pill below
+  // already carries the visual identity. Empty string keeps the prop API
+  // stable so MealRow callers don't all have to change.
+  const allMeals = mealsArr.map((meal, idx) => ({
+    key: `meal_${idx}`,
+    emoji: '',
+    meal,
+  }));
+  const visibleMeals = allMeals.filter(m => !removed.has(m.key));
+  const hiddenMeals  = allMeals.filter(m =>  removed.has(m.key));
+  const allVisible = visibleMeals;
   const actual = {
     calories: Math.round(allVisible.reduce((sum, m) => sum + m.meal.calories, 0)),
     protein:  Math.round(allVisible.reduce((sum, m) => sum + m.meal.protein, 0)),
@@ -76,26 +80,12 @@ export default function NutritionCard({
 
   return (
     <View style={styles.card}>
-      {/* Icon-based green section header */}
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionIcon}>🥗</Text>
-        <Text style={styles.sectionLabel}>NUTRITION</Text>
-        {title ? (
-          <>
-            <View style={styles.sectionDivider} />
-            <Text style={styles.sectionMeta}>{title}</Text>
-          </>
-        ) : (
-          <View style={{ flex: 1 }} />
-        )}
-        {onAddSnack && (
-          <TouchableOpacity style={styles.addSnackBtn} onPress={onAddSnack}>
-            <Text style={styles.addSnackBtnText}>+ Add Meal</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
+      {/* Header removed — the macro grid below acts as the hero. The
+          "+ Add Meal" affordance moved to the bottom of the meal list
+          so the card opens with the user's macros front-and-center,
+          matching the WorkoutCard hierarchy (hero → stats → list). */}
       <View style={styles.body}>
+        {title ? <Text style={styles.titleSubtle}>{title}</Text> : null}
         {/* Macro tracker grid */}
         <View style={styles.macrosGrid}>
           <MacroTracker label="Calories" actual={actual.calories} target={targets.calories} unit=""  color={section.strong}    colors={colors} styles={styles} />
@@ -191,41 +181,11 @@ export default function NutritionCard({
           </View>
         </Modal>
 
-        {/* Meal rows */}
+        {/* Meal rows — single unified list. Order is whatever the user
+            arranged with the up/down arrows. Routines are tagged with a
+            📌 emoji but are otherwise rendered identically to other meals. */}
         <View style={styles.meals}>
-          {/* Pinned routine meals */}
-          {routineMeals.length > 0 && (
-            <>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4, marginTop: 2 }}>
-                <Text style={{ fontSize: 11, fontWeight: '700', color: section.strong, letterSpacing: 0.5 }}>📌  ROUTINE</Text>
-              </View>
-              {routineMeals.map(({ key, emoji, meal }) => (
-                <MealRow
-                  key={key}
-                  emoji={emoji}
-                  mealType={key}
-                  meal={meal}
-                  checked={!!checkedMeals[key]}
-                  onToggle={onToggleMeal}
-                  onEdit={onEditMeal}
-                  onRemove={onRemoveMeal}
-                  onHardDelete={onHardDeleteMeal}
-                  onToggleRoutine={onToggleRoutine}
-                  onShowRecipe={onShowRecipe}
-                  colors={colors}
-                  styles={styles}
-                  mealAccent={section}
-                />
-              ))}
-              {nonRoutineMeals.length > 0 && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4, marginTop: 8 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 }}>TODAY'S PLAN</Text>
-                </View>
-              )}
-            </>
-          )}
-          {/* Non-routine meals */}
-          {nonRoutineMeals.map(({ key, emoji, meal }) => (
+          {visibleMeals.map(({ key, emoji, meal }, i) => (
             <MealRow
               key={key}
               emoji={emoji}
@@ -238,24 +198,8 @@ export default function NutritionCard({
               onHardDelete={onHardDeleteMeal}
               onToggleRoutine={onToggleRoutine}
               onShowRecipe={onShowRecipe}
-              colors={colors}
-              styles={styles}
-              mealAccent={section}
-            />
-          ))}
-          {extraMealItems.map(({ key, emoji, meal }) => (
-            <MealRow
-              key={key}
-              emoji={emoji}
-              mealType={key}
-              meal={meal}
-              checked={!!checkedMeals[key]}
-              onToggle={onToggleMeal}
-              onEdit={onEditMeal}
-              onRemove={onRemoveMeal}
-              onHardDelete={onHardDeleteMeal}
-              onToggleRoutine={onToggleRoutine}
-              onShowRecipe={onShowRecipe}
+              onMoveUp={i > 0 && onMoveMeal ? () => onMoveMeal(key, -1) : undefined}
+              onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -273,11 +217,15 @@ export default function NutritionCard({
               </View>
             </View>
           )}
+          {/* Inline "+ Add Meal" affordance at the bottom of the list,
+              replacing the old top-of-card header button. */}
+          {onAddSnack && (
+            <TouchableOpacity style={styles.addMealInline} onPress={onAddSnack} activeOpacity={0.7}>
+              <Text style={styles.addMealInlineText}>+ Add Meal</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>Stay hydrated · aim for 8 glasses daily</Text>
-        </View>
       </View>
     </View>
   );
@@ -309,17 +257,19 @@ function MacroTracker({
       <View style={styles.macroBarTrack}>
         <View style={[styles.macroBarFill, { width: `${Math.round(pct * 100)}%` as any, backgroundColor: barColor }]} />
       </View>
-      <Text style={[styles.macroRemaining, { color: over ? colors.error : colors.textMuted }]}>
-        {over ? `+${actual - target}${unit}` : `${target - actual}${unit} left`}
-      </Text>
+      {over && (
+        <Text style={[styles.macroRemaining, { color: colors.error }]}>
+          +{actual - target}{unit}
+        </Text>
+      )}
     </View>
   );
 }
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, colors, styles, mealAccent }: {
-  emoji: string;
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onMoveUp, onMoveDown, colors, styles, mealAccent }: {
+  emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
   checked: boolean;
@@ -329,15 +279,31 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
   onHardDelete?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
+  // Build the structured item list once — used both for display and
+  // implicit "is there detail to show".
+  const withItems = ensureItems(meal);
+  const itemRows = withItems.items && withItems.items.length > 0
+    ? withItems.items.map((it, i) => ({
+        key: `${it.name}-${i}`,
+        name: it.name,
+        amount: formatItemAmount(it),
+      }))
+    : meal.foods.map((f, i) => ({
+        key: `${f}-${i}`,
+        name: f,
+        amount: meal.amounts?.[i] ?? '',
+      }));
+
   return (
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
-      {/* Title row: checkbox + meal name. The action buttons live on their
-          own row below so long meal names ("Lean Turkey + Sweet Potato
-          Bowl") don't collide with the Routine / Edit / Remove labels. */}
+      {/* Title row — checkbox + meal name + inline pin badge + actions.
+          Everything in one line, no wrapping action bar. */}
       <View style={styles.mealHeader}>
         <TouchableOpacity
           style={[styles.checkbox, checked && styles.checkboxDone]}
@@ -345,57 +311,57 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           {checked && <Text style={styles.checkmark}>✓</Text>}
         </TouchableOpacity>
-        <Text
-          style={[styles.mealName, checked && styles.mealNameDone]}
-          numberOfLines={2}
-          ellipsizeMode="tail">
-          {emoji}  {meal.meal}
-        </Text>
-      </View>
-
-      {/* Routine pin gets its own row as a compact pill so the action
-          buttons below have predictable widths and don't get pushed off
-          screen by long pin labels. */}
-      {onToggleRoutine && (
-        <View style={styles.mealPinRow}>
-          <TouchableOpacity
-            onPress={() => onToggleRoutine(mealType)}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-            activeOpacity={0.7}
-            style={[
-              styles.pinPill,
-              meal.isRoutine
-                ? { backgroundColor: mealAccent.strong + '22', borderColor: mealAccent.strong + '66' }
-                : { backgroundColor: 'transparent',             borderColor: colors.border },
-            ]}>
-            <Text style={[
-              styles.pinPillText,
-              { color: meal.isRoutine ? mealAccent.strong : colors.textMuted },
-            ]}>
-              {meal.isRoutine ? '📌 Routine' : '＋ Pin as Routine'}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <Text
+              style={[styles.mealName, checked && styles.mealNameDone, { flexShrink: 1 }]}
+              numberOfLines={2}
+              ellipsizeMode="tail">
+              {meal.meal}
             </Text>
-          </TouchableOpacity>
+            {/* Inline routine badge — small, beside the title, taps to
+                toggle. No more dedicated row. */}
+            {onToggleRoutine && (
+              <TouchableOpacity
+                onPress={() => onToggleRoutine(mealType)}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                activeOpacity={0.7}
+                style={[
+                  styles.routineBadge,
+                  meal.isRoutine
+                    ? { backgroundColor: mealAccent.strong + '22', borderColor: mealAccent.strong + '66' }
+                    : { backgroundColor: 'transparent', borderColor: colors.border },
+                ]}>
+                <Text style={[
+                  styles.routineBadgeText,
+                  { color: meal.isRoutine ? mealAccent.strong : colors.textMuted },
+                ]}>
+                  {meal.isRoutine ? 'Routine' : '+ Pin'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
-      )}
-
-      {(onShowRecipe || onEdit || onRemove) && (
-        <View style={styles.mealActionRow}>
+        {/* Trailing icon strip — reorder + actions, all icon-only. */}
+        <View style={styles.iconStrip}>
+          {onMoveUp && (
+            <TouchableOpacity onPress={onMoveUp} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Text style={styles.iconBtnText}>↑</Text>
+            </TouchableOpacity>
+          )}
+          {onMoveDown && (
+            <TouchableOpacity onPress={onMoveDown} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Text style={styles.iconBtnText}>↓</Text>
+            </TouchableOpacity>
+          )}
           {onShowRecipe && (
-            <TouchableOpacity
-              onPress={() => onShowRecipe(mealType, meal)}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              activeOpacity={0.7}
-              style={styles.actionBtn}>
-              <Text style={styles.actionBtnText}>🍳 Recipe</Text>
+            <TouchableOpacity onPress={() => onShowRecipe(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Text style={styles.iconBtnText}>🍳</Text>
             </TouchableOpacity>
           )}
           {onEdit && (
-            <TouchableOpacity
-              onPress={() => onEdit(mealType, meal)}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              activeOpacity={0.7}
-              style={styles.actionBtn}>
-              <Text style={styles.actionBtnText}>✎ Edit</Text>
+            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Text style={[styles.iconBtnText, { color: mealAccent.strong }]}>✎</Text>
             </TouchableOpacity>
           )}
           {onRemove && (
@@ -403,56 +369,44 @@ function MealRow({ emoji, mealType, meal, checked, onToggle, onEdit, onRemove, o
               onPress={() => onRemove(mealType)}
               onLongPress={() => onHardDelete?.(mealType)}
               delayLongPress={500}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              activeOpacity={0.7}
-              style={styles.actionBtn}>
-              <Text style={[styles.actionBtnText, { color: colors.error }]}>✕ Remove</Text>
+              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+              style={styles.iconBtn}>
+              <Text style={[styles.iconBtnText, { color: colors.error }]}>✕</Text>
             </TouchableOpacity>
           )}
         </View>
-      )}
+      </View>
 
-      <View style={styles.mealFoodsDetail}>
-        {(() => {
-          // Prefer structured items — legacy parallel arrays are fallback.
-          const withItems = ensureItems(meal);
-          const rows = withItems.items && withItems.items.length > 0
-            ? withItems.items.map((it, i) => ({
-                key: `${it.name}-${i}`,
-                name: it.name,
-                amount: formatItemAmount(it),
-              }))
-            : meal.foods.map((f, i) => ({
-                key: `${f}-${i}`,
-                name: f,
-                amount: meal.amounts?.[i] ?? '',
-              }));
-          return rows.map(r => (
+      {/* Item list — indented under the title, more compact than before. */}
+      {itemRows.length > 0 && (
+        <View style={styles.mealFoodsDetail}>
+          {itemRows.map(r => (
             <View key={r.key} style={styles.mealFoodRow}>
-              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone]}>
+              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1 }]}>
                 {r.name}
               </Text>
               {r.amount ? (
                 <Text style={styles.mealFoodAmount}>{r.amount}</Text>
               ) : null}
             </View>
-          ));
-        })()}
-        {meal.instructions && (
-          <View style={styles.recipeBox}>
-            <Text style={styles.recipeLabel}>How to make it</Text>
-            <Text style={styles.recipeText}>{meal.instructions}</Text>
-          </View>
-        )}
-      </View>
+          ))}
+          {meal.instructions && (
+            <View style={styles.recipeBox}>
+              <Text style={styles.recipeLabel}>How to make it</Text>
+              <Text style={styles.recipeText}>{meal.instructions}</Text>
+            </View>
+          )}
+        </View>
+      )}
 
+      {/* Macro pills — compact strip at the bottom of the row. */}
       <View style={styles.mealBadges}>
-        <MacroPill label="cal"     value={Math.round(meal.calories)}   color={colors.accent}   styles={styles} />
-        <MacroPill label="protein" value={Math.round(meal.protein)}    color={colors.primary}  styles={styles} />
-        <MacroPill label="carbs"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
-        <MacroPill label="fat"     value={Math.round(meal.fat   ?? 0)} color="#A78BFA"         styles={styles} />
+        <MacroPill label="cal"     value={Math.round(meal.calories)}   color={mealAccent.strong} styles={styles} />
+        <MacroPill label="p"       value={Math.round(meal.protein)}    color={colors.primary}    styles={styles} />
+        <MacroPill label="c"       value={Math.round(meal.carbs ?? 0)} color="#F59E0B"           styles={styles} />
+        <MacroPill label="f"       value={Math.round(meal.fat ?? 0)}   color="#A78BFA"           styles={styles} />
         {(meal.fiber ?? meal.micronutrients?.fiber ?? 0) > 0 && (
-          <MacroPill label="fiber" value={Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0)} color="#10B981" styles={styles} />
+          <MacroPill label="fib" value={Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0)} color="#10B981" styles={styles} />
         )}
       </View>
     </View>
@@ -506,58 +460,44 @@ const createStyles = (
     borderColor: colors.border,
   },
 
-  // ── Section identity header ──────────────────────────────────────────────────
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: section.soft,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: section.strong + '30',
-  },
-  sectionIcon: { fontSize: 15 },
-  sectionLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: section.text,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  sectionDivider: {
-    width: 1,
-    height: 12,
-    backgroundColor: section.strong + '44',
-    marginHorizontal: 2,
-  },
-  sectionMeta: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: section.text,
-    flex: 1,
-  },
-  addSnackBtn: {
-    backgroundColor: section.strong + '18',
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: section.strong + '55',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  addSnackBtnText: { fontSize: 12, color: section.strong, fontWeight: '700' },
-
   // ── Body ─────────────────────────────────────────────────────────────────────
   body: { padding: 14 },
+
+  // Optional small subtitle when the parent passes a `title` prop
+  // (used by the day-card flow to label "Today" / "Tomorrow"). Replaces
+  // the old top-of-card header bar.
+  titleSubtle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 8,
+  },
+
+  // Inline "+ Add Meal" affordance at the bottom of the meal list,
+  // replacing the old top-of-card pill button. Dashed border keeps it
+  // visually distinct from real meal rows.
+  addMealInline: {
+    marginTop: 8,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: section.strong + '55',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    backgroundColor: section.soft,
+  },
+  addMealInlineText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: section.strong,
+  },
 
   // ── Macro grid ────────────────────────────────────────────────────────────────
   macrosGrid: {
     flexDirection: 'row',
-    backgroundColor: section.soft,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: section.strong + '40',
-    padding: 12,
+    paddingVertical: 6,
     marginBottom: 14,
     gap: 2,
   },
@@ -595,73 +535,56 @@ const createStyles = (
   },
   mealItemDone: { opacity: 0.62, borderColor: colors.success },
 
-  mealHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  // Pin as Routine sits on its own row directly under the meal name as a
-  // compact pill. Action buttons get their own equally-spaced row below.
-  mealPinRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 6,
-    paddingLeft: 30,
-  },
-  pinPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+  mealHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+
+  // Inline routine badge — small pill that sits next to the meal name
+  // instead of taking its own row. Toggles pin/unpin on tap.
+  routineBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
     borderRadius: 999,
     borderWidth: 1,
   },
-  pinPillText: {
-    fontSize: 11,
+  routineBadgeText: {
+    fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-  mealActionRow: {
+
+  // Trailing icon strip — reorder + actions, all icon-only, single row.
+  // Replaces the old separate "pin row" and "action row".
+  iconStrip: {
     flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: 6,
-    marginTop: 8,
-    paddingLeft: 30,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
+    alignItems: 'center',
+    gap: 4,
   },
-  actionBtn: {
-    flex: 1,
-    paddingVertical: 6,
+  iconBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  actionBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: section.strong,
-    letterSpacing: 0.2,
+  iconBtnText: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
+
   checkbox: {
-    width: 22, height: 22, borderRadius: 6,
+    width: 20, height: 20, borderRadius: 6,
     borderWidth: 2, borderColor: colors.border,
     alignItems: 'center', justifyContent: 'center',
   },
   checkboxDone: { backgroundColor: colors.success, borderColor: colors.success },
-  checkmark:    { fontSize: 13, color: colors.background, fontWeight: '800' },
+  checkmark:    { fontSize: 12, color: colors.background, fontWeight: '800' },
 
-  mealName:     { flex: 1, fontSize: 14, fontWeight: '600', color: colors.textPrimary },
+  mealName:     { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
 
-  editBtn:           { paddingHorizontal: 6 },
-  editBtnText:       { fontSize: 12, color: section.strong, fontWeight: '700' },
-  recipeBtn:         { paddingHorizontal: 6 },
-  recipeBtnText:     { fontSize: 12, color: section.strong, fontWeight: '700' },
-  removeMealBtn:     { paddingHorizontal: 6 },
-  removeMealBtnText: { fontSize: 12, color: colors.error, fontWeight: '600' },
-  routineBtn:        { paddingHorizontal: 4 },
-  routineBtnText:    { fontSize: 11, fontWeight: '700' },
-
-  mealFoodsDetail: { gap: 5, marginTop: 4 },
-  mealFoodRow:     { flexDirection: 'row', alignItems: 'center' },
-  mealFoodName:    { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
+  mealFoodsDetail: { gap: 3, marginTop: 6, paddingLeft: 30 },
+  mealFoodRow:     { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  mealFoodName:    { fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
   mealFoodsDone:   { color: colors.textMuted },
 
   recipeBox: {
@@ -709,22 +632,23 @@ const createStyles = (
   pillValue: { fontSize: 13, fontWeight: '700' },
   pillLabel: { fontSize: 9, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
 
-  // ── Micro details button ──────────────────────────────────────────────────────
+  // ── Micro details button (compact secondary action) ──────────────────────
   microBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: section.soft,
-    borderRadius: radius.md,
+    alignSelf: 'flex-start',
+    backgroundColor: 'transparent',
+    borderRadius: radius.full,
     borderWidth: 1,
-    borderColor: section.strong + '40',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginBottom: 14,
-    gap: 8,
+    borderColor: section.strong + '55',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 12,
+    gap: 5,
   },
-  microBtnIcon: { fontSize: 14 },
-  microBtnText: { flex: 1, fontSize: 13, fontWeight: '700', color: section.strong },
-  microBtnArrow: { fontSize: 18, fontWeight: '600', color: section.strong },
+  microBtnIcon: { fontSize: 11 },
+  microBtnText: { fontSize: 11, fontWeight: '700', color: section.strong },
+  microBtnArrow: { fontSize: 13, fontWeight: '600', color: section.strong, marginLeft: 1 },
 
   // ── Micro modal ──────────────────────────────────────────────────────────────
   modalOverlay: {
@@ -829,8 +753,9 @@ const createStyles = (
   footer:     { paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },
   footerText: { fontSize: 12, color: colors.textMuted, textAlign: 'center' },
 
-  // Unused kept for legacy compat
-  recipeToggle:     { paddingVertical: 2 },
-  recipeToggleText: { fontSize: 11, color: section.text, fontWeight: '700' },
-  mealFoodAmount:   { fontSize: 12, fontWeight: '800', color: section.strong, minWidth: 56 },
+  mealFoodAmount: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: section.strong,
+  },
 });

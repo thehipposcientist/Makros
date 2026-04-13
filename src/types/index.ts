@@ -138,6 +138,10 @@ export interface UserProfile {
    *  unique). Lower = faster plan generation; higher = more variety.
    *  Default 3 matches the old hardcoded A/B/C behaviour. */
   mealVariety?: number;
+  /** Number of meals the user eats per day (1-6). Drives both the
+   *  generic meals[] count the assembler produces and the local
+   *  `planGenerator` fallback. Default 3. */
+  mealsPerDay?: number;
   savedMeals?: SavedMealTemplate[];
   mealRoutine?: string;          // user's fixed meal habits
   injuries?: string;             // legacy: free-text injuries
@@ -187,40 +191,80 @@ export interface CustomMacros {
   fat?: number;
 }
 
+/** Per-meal micronutrient panel. Field names mirror the backend's
+ *  `MICRONUTRIENT_FIELDS` constant in `meal_assembler.py` so values flow
+ *  through unchanged. The backend always emits every key (defaulting to 0
+ *  when source data lacks a value) so the frontend can render "—" without
+ *  null-check noise.
+ *
+ *  The legacy camelCase aliases (`vitaminA`, `vitaminC`, ...) are kept
+ *  for back-compat with cached client plans that were generated before
+ *  the snake_case rename. New code should read the snake_case names. */
 export interface MealMicronutrients {
-  fiber?: number;       // grams
-  sugar?: number;       // grams
+  // Core / always-present
+  fiber?: number;       // g
+  sugar?: number;       // g
   sodium?: number;      // mg
   cholesterol?: number; // mg
-  vitaminA?: number;    // % DV
-  vitaminC?: number;    // % DV
-  vitaminD?: number;    // % DV
-  calcium?: number;     // % DV
-  iron?: number;        // % DV
+  // Fats panel
+  saturated_fat?: number;       // g
+  monounsaturated_fat?: number; // g
+  polyunsaturated_fat?: number; // g
+  omega_3?: number;             // g
+  omega_6?: number;             // g
+  // Vitamins
+  vitamin_a?: number;             // µg RAE
+  vitamin_c?: number;             // mg
+  vitamin_d?: number;             // µg
+  vitamin_e?: number;             // mg
+  vitamin_k?: number;             // µg
+  thiamin_b1?: number;            // mg
+  riboflavin_b2?: number;         // mg
+  niacin_b3?: number;             // mg
+  vitamin_b6?: number;            // mg
+  folate_b9?: number;             // µg
+  vitamin_b12?: number;           // µg
+  biotin_b7?: number;             // µg
+  pantothenic_acid_b5?: number;   // mg
+  // Minerals
+  calcium?: number;     // mg
+  iron?: number;        // mg
+  magnesium?: number;   // mg
+  phosphorus?: number;  // mg
   potassium?: number;   // mg
+  zinc?: number;        // mg
+  selenium?: number;    // µg
+  copper?: number;      // mg
+  manganese?: number;   // mg
+  // Legacy camelCase aliases — preserved so cached pre-refactor plans
+  // still display. New backend output does NOT populate these.
+  vitaminA?: number;
+  vitaminC?: number;
+  vitaminD?: number;
 }
 
 /** Canonical unit system for meal items. Kept as a string union so it
  *  serializes cleanly to AsyncStorage/JSON without enum mapping.
- *  - Weight:  g, oz, lb
- *  - Volume:  ml, fl_oz, cup, tbsp, tsp
+ *  - Weight:  g, kg, oz, lb
+ *  - Volume:  ml, l, fl_oz, cup, tbsp, tsp, pint, quart, gallon
  *  - Discrete: piece (eggs, apples), slice (bread), scoop (protein powder),
  *    serving (generic "as the label says") */
 export type FoodUnit =
-  | 'g' | 'oz' | 'lb'
-  | 'ml' | 'fl_oz' | 'cup' | 'tbsp' | 'tsp'
+  | 'g' | 'kg' | 'oz' | 'lb'
+  | 'ml' | 'l' | 'fl_oz' | 'cup' | 'tbsp' | 'tsp' | 'pint' | 'quart' | 'gallon'
   | 'piece' | 'slice' | 'scoop' | 'serving';
 
 /** Display labels for each unit, used in the MealEditModal unit picker. */
 export const FOOD_UNIT_LABELS: Record<FoodUnit, string> = {
-  g: 'g', oz: 'oz', lb: 'lb',
-  ml: 'ml', fl_oz: 'fl oz', cup: 'cup', tbsp: 'tbsp', tsp: 'tsp',
+  g: 'g', kg: 'kg', oz: 'oz', lb: 'lb',
+  ml: 'ml', l: 'L', fl_oz: 'fl oz', cup: 'cup', tbsp: 'tbsp', tsp: 'tsp',
+  pint: 'pint', quart: 'quart', gallon: 'gallon',
   piece: 'piece', slice: 'slice', scoop: 'scoop', serving: 'serving',
 };
 
 export const FOOD_UNIT_GROUPS: { label: string; units: FoodUnit[] }[] = [
-  { label: 'Weight', units: ['g', 'oz', 'lb'] },
-  { label: 'Volume', units: ['ml', 'fl_oz', 'cup', 'tbsp', 'tsp'] },
+  { label: 'Weight', units: ['g', 'kg', 'oz', 'lb'] },
+  { label: 'Volume', units: ['ml', 'l', 'fl_oz', 'cup', 'pint', 'quart', 'gallon', 'tbsp', 'tsp'] },
   { label: 'Count',  units: ['piece', 'slice', 'scoop', 'serving'] },
 ];
 
@@ -351,15 +395,17 @@ export interface MealRoutineEntry {
 }
 
 export interface DailyNutritionPlan {
-  breakfast: MealSuggestion;
-  lunch: MealSuggestion;
-  dinner: MealSuggestion;
-  snack?: MealSuggestion;
-  extraMeals?: MealSuggestion[];
-  removedMeals?: string[];
+  /** Generic flat list of meals for the day. There is no breakfast/lunch/
+   *  dinner concept anymore — every meal is equal. The list contains
+   *  generated meals, pinned routine meals, and user-added extras
+   *  interleaved in display order. Routine meals carry `_routineId`,
+   *  user-added one-offs carry `_localId`. */
+  meals: MealSuggestion[];
+  /** Indices into `meals[]` that the user has hidden for the day. */
+  removedMealIds?: string[];
   targets: NutritionTargets;
-  nutritionistNote?: string;   // AI explanation of why this plan was chosen
-  supplementStack?: SupplementItem[]; // recommended supplements
+  nutritionistNote?: string;
+  supplementStack?: SupplementItem[];
 }
 
 export interface DailyPlan {

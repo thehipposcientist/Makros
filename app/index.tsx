@@ -122,12 +122,24 @@ const USER_SCOPED_KEYS = [
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
   'mealRoutines', 'planChangeHistory', 'goalHistory',
+  // ── Per-user keys previously missing from sign-out wipe ─────────────
+  // Without these, signing out + signing into a different account on
+  // the same device left the prior user's workout summaries, checked
+  // meals, completed-workout snapshots, and health data visible to the
+  // new account. Every user-specific bucket must be in this list.
+  'workoutSummaries',
+  'preservedCompletedWorkouts',
+  'preservedCheckedMeals',
+  'healthSummary',
+  'healthScoreResult',
+  'appleHealthEnabled',
+  'pendingProfileChanges',
   'pending_plan_job',
 ];
 
 /** Keys that get pushed to the backend for cross-device sync. Subset of
  *  USER_SCOPED_KEYS that excludes device-only / transient state (meta
- *  cache, in-flight plan job id). */
+ *  cache, in-flight plan job id, device-specific health toggles). */
 const SYNCED_STATE_KEYS = [
   'userProfile',
   'aiWorkoutPlan',
@@ -136,6 +148,8 @@ const SYNCED_STATE_KEYS = [
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
   'mealRoutines', 'planChangeHistory', 'goalHistory',
+  'workoutSummaries', 'preservedCompletedWorkouts', 'preservedCheckedMeals',
+  'healthSummary', 'healthScoreResult',
 ];
 
 /** Push the local AsyncStorage state blob to the backend. Best-effort —
@@ -177,6 +191,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState } from '../src/services/api';
+import { clearAllSavedNutritionPlans } from '../src/utils/mealTracker';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -383,6 +398,17 @@ export default function Index() {
       ? aiPlans.nutrition_plans
       : [aiPlans?.nutrition_plan_a, aiPlans?.nutrition_plan_b, aiPlans?.nutrition_plan_c].filter(Boolean);
     if (plansList.length > 0) {
+      // Wipe per-day nutrition saves first. Otherwise stale day-specific
+      // edits from a previous regen shadow the new templates and the user
+      // sees yesterday's plan on every day (variety=1 looked like variety=N).
+      await clearAllSavedNutritionPlans();
+      // Stamp every template with a fresh version. HomeScreen rejects
+      // any per-day save / remote day-state whose stamp doesn't match,
+      // so stale data from a previous regen can't shadow these.
+      const templatesVersion = `v_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      for (const p of plansList) {
+        if (p && typeof p === 'object') (p as any)._templatesVersion = templatesVersion;
+      }
       // New canonical key — an array of N templates. HomeScreen's loadPlans
       // rotates across these regardless of length.
       await AsyncStorage.setItem('aiNutritionPlans', JSON.stringify(plansList));
@@ -476,6 +502,27 @@ export default function Index() {
     }
     if (!profile) return;
     setUserProfile(profile);
+
+    // Backfill the backend's UserProfile row if it's missing. A test user
+    // who signs in on top of a stale local profile, or whose original
+    // syncOnboarding fire-and-forget silently failed, will have no
+    // UserProfile row in the DB — which makes /profile/calorie-ranges
+    // return 404 forever and leaves the macros card stuck on "estimates
+    // unavailable". Sync is cheap, idempotent, and only runs at boot.
+    const ps = profile.physicalStats;
+    const hasRequiredFields = !!(
+      ps && ps.weightLbs && ps.heightFeet != null && ps.heightInches != null && ps.age && ps.gender
+    );
+    if (hasRequiredFields) {
+      syncOnboarding(token, profile).catch((e) =>
+        console.warn('[loadProfile] backend sync failed (non-fatal)', e?.message ?? e),
+      );
+    } else {
+      console.warn('[loadProfile] local profile missing required fields, skipping sync', {
+        weightLbs: ps?.weightLbs, heightFeet: ps?.heightFeet, heightInches: ps?.heightInches,
+        age: ps?.age, gender: ps?.gender,
+      });
+    }
 
     // Rehydrate in-memory caches that sign-out cleared — these live in
     // AsyncStorage persistently, but the React state got reset when the
@@ -574,27 +621,11 @@ export default function Index() {
 
     getAIPlans(authToken, stamped, stamped.lastWorkoutContext ? { extraContext: `Recent workout context from user: ${stamped.lastWorkoutContext}` } : undefined)
       .then(async (aiPlans) => {
-        if (aiPlans?.workout_plan) {
-          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-          const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
-          if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
-        }
-        // Store 3 rotating nutrition templates
-        if (aiPlans?.nutrition_plan_a) {
-          await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-          await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a)); // legacy compat
-        }
-        if (aiPlans?.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-        if (aiPlans?.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
-        if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
-        if (aiPlans?.supplementStack?.length) {
-          await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
-          setSupplementStack(aiPlans.supplementStack);
-        }
-        // Save any custom foods the AI used that weren't in the user's food list
-        if (aiPlans?.custom_foods?.length) {
-          await _mergeCustomFoods(aiPlans.custom_foods);
-        }
+        // Centralized handler: writes all storage keys, stamps the
+        // templates with a fresh version, and wipes per-day nutrition
+        // saves so the new rotation actually replaces the old days
+        // instead of being shadowed by stale per-day storage.
+        await applyPlanResult(aiPlans);
         // Track when this week's plan started
         await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
         await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
@@ -689,13 +720,25 @@ export default function Index() {
 
   const handleSaveProfile = async (updated: UserProfile) => {
     const stamped = stampGoalStart(updated, userProfile);
-    // Record goal history when goal or pace changes
-    const goalChanged = !userProfile || userProfile.goal !== updated.goal || userProfile.goalDetails.pace !== updated.goalDetails.pace;
+    // Record goal history only when the user actually used the GOAL
+    // edit screen AND the goal/pace changed. We used to compute this
+    // off a raw profile diff, which meant any unrelated field drift
+    // inside a workout-only edit (e.g. `goalDetails` normalization)
+    // silently flipped this true and triggered a full-plan regen +
+    // full-screen spinner.
+    const goalChanged =
+      editMode === 'goal' &&
+      !!userProfile &&
+      (
+        userProfile.goal !== updated.goal ||
+        userProfile.goalDetails?.pace !== updated.goalDetails?.pace
+      );
     if (goalChanged) {
       await recordGoalChange(updated.goal, updated.goalDetails.pace, updated.physicalStats.weightLbs);
     }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
+    const priorEditMode = editMode;
     setIsEditing(false);
     setEditMode('goal');
     // Sync to backend so the edit is available on other devices.
@@ -703,9 +746,11 @@ export default function Index() {
     if (authToken) {
       syncOnboarding(authToken, stamped).catch(() => null);
 
-      // Determine what to regenerate based on what was edited
-      const regenWorkout  = goalChanged || editMode === 'workout';
-      const regenNutrition = goalChanged || editMode === 'mealplan';
+      // Regen strictly by edit mode. Workout edits NEVER touch
+      // nutrition and vice versa. Goal edits regenerate both only if
+      // `goalChanged` is true.
+      const regenWorkout  = priorEditMode === 'workout' || (priorEditMode === 'goal' && goalChanged);
+      const regenNutrition = priorEditMode === 'mealplan' || (priorEditMode === 'goal' && goalChanged);
 
       if (regenWorkout || regenNutrition) {
         // Preserve today's logged meals when regenerating nutrition
@@ -763,40 +808,26 @@ export default function Index() {
 
         planCall
           .then(async (aiPlans: any) => {
-            // Save workout plan if returned
-            if (aiPlans.workout_plan) {
-              const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
-              await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-              if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
+            // Centralized handler — see applyPlanResult for what it does
+            // (storage writes, templates version stamp, per-day saves wipe).
+            await applyPlanResult(aiPlans);
+            // Only reset week timer on full regens, not single-side edits.
+            if (aiPlans.nutrition_plan_a && regenWorkout && regenNutrition) {
+              await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
             }
-
-            // Save nutrition plans if returned
+            // Push the freshly-rotated plan onto the next 3 days of remote
+            // day-state so cross-device reads don't briefly show the old
+            // plan before HomeScreen catches up.
             if (aiPlans.nutrition_plan_a) {
-              const nnNote = aiPlans.nutritionistNote || null;
-              await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-              await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
-              if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-              if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
-              if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
-              if (aiPlans.supplementStack?.length) {
-                await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
-                setSupplementStack(aiPlans.supplementStack);
-              }
-              // Only reset week timer on goal changes (both plans regenerated), not single-side edits
-              if (regenWorkout && regenNutrition) {
-                await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-              }
               const todayDate = new Date();
               const tok = authToken;
               for (let i = 0; i < 3; i++) {
                 const d = new Date(todayDate);
                 d.setDate(todayDate.getDate() + i);
                 const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                upsertDayState(tok, key, { nutrition_plan: aiPlans.nutrition_plan_a }).catch(() => null);
+                upsertDayState(tok, key, { nutrition_plan: null }).catch(() => null);
               }
             }
-
-            if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
             const what = (regenWorkout && regenNutrition) ? 'full plan' : regenWorkout ? 'workout plan' : 'nutrition plan';
             await appendUserLog({ type: 'plan_generated', summary: `${what} updated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
             setPlanRefreshKey(k => k + 1);
@@ -937,20 +968,7 @@ export default function Index() {
                 ? getAIWorkoutPlan(authToken, stamped, opts)
                 : getAINutritionPlan(authToken, stamped, opts);
             planCall.then(async (aiPlans: any) => {
-              if (aiPlans.workout_plan) {
-                await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-                const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
-                if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
-              }
-              if (aiPlans.nutrition_plan_a) {
-                await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-                await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
-                if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-                if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
-                const nnNote = aiPlans.nutritionistNote || null;
-                if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
-              }
-              if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
+              await applyPlanResult(aiPlans);
               setPlanRefreshKey(k => k + 1);
             }).then(() => clearPlanGenMarker().catch(() => null))
             .catch((err: any) => {
@@ -1000,24 +1018,7 @@ export default function Index() {
             weeklyReview: review,
           })
             .then(async (aiPlans) => {
-              if (aiPlans.workout_plan) {
-                const tnNote = aiPlans.trainerNote || aiPlans.workout_plan?.trainerNote || null;
-                await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-                if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
-              }
-              if (aiPlans.nutrition_plan_a) {
-                const nnNote = aiPlans.nutritionistNote || null;
-                await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(aiPlans.nutrition_plan_a));
-                await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(aiPlans.nutrition_plan_a));
-                if (aiPlans.nutrition_plan_b) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(aiPlans.nutrition_plan_b));
-                if (aiPlans.nutrition_plan_c) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(aiPlans.nutrition_plan_c));
-                if (nnNote) { await AsyncStorage.setItem('nutritionistNote', nnNote); setNutritionistNote(nnNote); }
-                if (aiPlans.supplementStack?.length) {
-                  await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
-                  setSupplementStack(aiPlans.supplementStack);
-                }
-              }
-              if (aiPlans.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
+              await applyPlanResult(aiPlans);
               await appendUserLog({ type: 'plan_generated', summary: `Weekly review plan refresh — adherence ${review.adherence}/5, energy ${review.energy}/5` });
               setPlanRefreshKey(k => k + 1);
             })

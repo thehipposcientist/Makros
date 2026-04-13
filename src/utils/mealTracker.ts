@@ -55,46 +55,65 @@ export async function saveNutritionPlan(date: string, plan: DailyNutritionPlan):
   } catch {}
 }
 
+/** Wipe every per-day nutrition save. Called after a successful plan
+ *  regeneration so the new rotating templates win on the next load
+ *  instead of being shadowed by stale day-specific edits. */
+export async function clearAllSavedNutritionPlans(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(EDITS_KEY);
+  } catch {}
+}
+
 // ── Preserved meals (survive plan regeneration) ───────────────────────────────
 // When the user checks a meal as eaten, we snapshot its exact content here.
-// On the next loadPlans, the snapshot is overlaid onto the new plan for that
-// date — regenerating a plan never clobbers meals the user has already logged.
+// On the next loadPlans, the snapshot is merged into the day's meals[] list
+// so regenerating a plan never clobbers meals the user has already logged.
 //
-// Shape:
+// New shape (no more fixed/extras split — meals are uniform now):
 //   {
-//     "2026-04-13": {
-//       fixed: { breakfast: {...}, dinner: {...} },
-//       extras: [
-//         { _localId: "xyz", meal: "Pre-workout shake", ... },
-//         ...
-//       ],
-//     },
+//     "2026-04-13": [
+//       { _localId: "xyz", meal: "Power bowl", ... },
+//       { _localId: "abc", meal: "Pre-workout shake", ... },
+//     ],
 //     ...
 //   }
 //
-// Fixed slots overwrite plan[slot] on load. Extras are appended to
-// plan.extraMeals, matched by `_localId` so a second check of the same
-// extra doesn't duplicate it.
+// Each preserved meal carries a stable `_localId` so a re-check (or a
+// regenerated plan) doesn't duplicate it.
 
-type PreservedDay = {
-  fixed: Record<string, MealSuggestion>;
-  extras: MealSuggestion[];
-};
-type PreservedMap = Record<string, PreservedDay>;
+type PreservedMap = Record<string, MealSuggestion[]>;
 
 async function _readPreserved(): Promise<PreservedMap> {
   try {
     const raw = await AsyncStorage.getItem(PRESERVED_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
-    // Lazy migration from the old flat-record shape. Old entries are
-    // `{ breakfast: {...}, lunch: {...} }`. New shape is wrapped.
+    // Lazy migration from older shapes:
+    //   v1: { breakfast: {...}, lunch: {...} }   (flat slot map)
+    //   v2: { fixed: {breakfast: {...}}, extras: [...] }
+    //   v3: [ {...}, {...} ]                      (current — flat list)
     const migrated: PreservedMap = {};
     for (const [date, value] of Object.entries(parsed as any)) {
-      if (value && typeof value === 'object' && 'fixed' in (value as any)) {
-        migrated[date] = value as PreservedDay;
-      } else {
-        migrated[date] = { fixed: (value as any) ?? {}, extras: [] };
+      if (Array.isArray(value)) {
+        migrated[date] = value as MealSuggestion[];
+        continue;
       }
+      const list: MealSuggestion[] = [];
+      if (value && typeof value === 'object') {
+        const v = value as any;
+        if (v.fixed && typeof v.fixed === 'object') {
+          for (const m of Object.values(v.fixed)) {
+            if (m) list.push(m as MealSuggestion);
+          }
+        }
+        if (Array.isArray(v.extras)) {
+          for (const m of v.extras) if (m) list.push(m as MealSuggestion);
+        }
+        // v1 flat-slot fallback
+        if (!v.fixed && !v.extras) {
+          for (const m of Object.values(v)) if (m && typeof m === 'object') list.push(m as MealSuggestion);
+        }
+      }
+      migrated[date] = list;
     }
     return migrated;
   } catch {
@@ -103,55 +122,38 @@ async function _readPreserved(): Promise<PreservedMap> {
 }
 
 async function _writePreserved(map: PreservedMap): Promise<void> {
-  // Keep only the last 14 days to bound storage.
   const keys = Object.keys(map).sort().reverse().slice(0, 14);
   const pruned: PreservedMap = {};
   keys.forEach(k => { pruned[k] = map[k]; });
   try { await AsyncStorage.setItem(PRESERVED_KEY, JSON.stringify(pruned)); } catch {}
 }
 
-export async function getPreservedMeals(date: string): Promise<PreservedDay> {
+export async function getPreservedMeals(date: string): Promise<MealSuggestion[]> {
   const all = await _readPreserved();
-  return all[date] ?? { fixed: {}, extras: [] };
+  return all[date] ?? [];
 }
 
-/** Snapshot a meal the user just checked off. Handles both fixed slots
- *  ("breakfast"/"lunch"/"dinner"/"snack") and extras (mealType starting
- *  with "extra_" or equal to "new_extra"). Extras get a stable `_localId`
- *  so they can be deduped on subsequent passes. */
-export async function savePreservedMeal(date: string, mealType: string, meal: MealSuggestion): Promise<void> {
+/** Snapshot a meal the user just checked off. Every meal gets (or already
+ *  has) a stable `_localId` so subsequent checks of the same meal dedupe. */
+export async function savePreservedMeal(date: string, _mealType: string, meal: MealSuggestion): Promise<void> {
   const all = await _readPreserved();
-  const day: PreservedDay = all[date] ?? { fixed: {}, extras: [] };
-  if (mealType.startsWith('extra_') || mealType === 'new_extra') {
-    const withId: MealSuggestion = (meal as any)._localId
-      ? meal
-      : { ...meal, _localId: `preserved_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` } as MealSuggestion;
-    // Dedupe by _localId so a re-check doesn't append a duplicate.
-    const existingIdx = day.extras.findIndex(e => (e as any)._localId === (withId as any)._localId);
-    if (existingIdx >= 0) day.extras[existingIdx] = withId;
-    else day.extras.push(withId);
-  } else {
-    day.fixed[mealType] = meal;
-  }
-  all[date] = day;
+  const list = all[date] ?? [];
+  const withId: MealSuggestion = (meal as any)._localId
+    ? meal
+    : { ...meal, _localId: `preserved_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` } as MealSuggestion;
+  const existingIdx = list.findIndex(e => (e as any)._localId === (withId as any)._localId);
+  if (existingIdx >= 0) list[existingIdx] = withId;
+  else list.push(withId);
+  all[date] = list;
   await _writePreserved(all);
 }
 
-/** Clear a preserved meal. For extras, pass the mealType of the extra in
- *  the currently-rendered plan (e.g. "extra_2") — we resolve it to a
- *  `_localId` using the caller-provided meal object. */
-export async function clearPreservedMeal(date: string, mealType: string, mealLocalId?: string): Promise<void> {
+/** Clear a preserved meal by `_localId`. */
+export async function clearPreservedMeal(date: string, _mealType: string, mealLocalId?: string): Promise<void> {
   const all = await _readPreserved();
   if (!all[date]) return;
-  const day = all[date];
-  if (mealType.startsWith('extra_') || mealType === 'new_extra') {
-    if (!mealLocalId) return;
-    day.extras = day.extras.filter(e => (e as any)._localId !== mealLocalId);
-  } else {
-    delete day.fixed[mealType];
-  }
-  if (Object.keys(day.fixed).length === 0 && day.extras.length === 0) {
-    delete all[date];
-  }
+  if (!mealLocalId) return;
+  all[date] = all[date].filter(e => (e as any)._localId !== mealLocalId);
+  if (all[date].length === 0) delete all[date];
   await _writePreserved(all);
 }

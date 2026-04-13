@@ -11,7 +11,7 @@ import {
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { colors, radius } from '../constants/theme';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
-import { ensureItems, syncLegacyFieldsFromItems, splitFoodString } from '../utils/mealItems';
+import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood } from '../utils/mealItems';
 
 interface Props {
   visible: boolean;
@@ -35,9 +35,14 @@ interface Props {
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
 
 /** Sum macros directly from the structured item list. Each item carries its
- *  own snapshotted macros so we don't need to look anything up here. */
-function calcMacrosFromItems(items: MealItem[]): Macros {
-  return items.reduce(
+ *  own snapshotted macros so we don't need to look anything up here.
+ *
+ *  When `items` is empty OR every item is zero-macro (which can happen
+ *  with AI-generated meals where only the meal-level totals are real),
+ *  fall back to the meal's top-level macros so the totals panel doesn't
+ *  show 0 cal for a meal that obviously has nutrition data. */
+function calcMacrosFromItems(items: MealItem[], fallback?: MealSuggestion): Macros {
+  const totals = items.reduce(
     (acc, it) => ({
       calories: acc.calories + (it.calories ?? 0),
       protein:  acc.protein  + (it.protein  ?? 0),
@@ -46,6 +51,16 @@ function calcMacrosFromItems(items: MealItem[]): Macros {
     }),
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
+  const hasItemMacros = totals.calories > 0 || totals.protein > 0 || totals.carbs > 0 || totals.fat > 0;
+  if (!hasItemMacros && fallback) {
+    return {
+      calories: Math.round(fallback.calories ?? 0),
+      protein:  Math.round(fallback.protein  ?? 0),
+      carbs:    Math.round(fallback.carbs    ?? 0),
+      fat:      Math.round(fallback.fat      ?? 0),
+    };
+  }
+  return totals;
 }
 
 function addMacros(a: Macros, b: Macros): Macros {
@@ -57,37 +72,21 @@ function addMacros(a: Macros, b: Macros): Macros {
   };
 }
 
-// Returns macros for all meals EXCEPT the one being edited
+// Returns macros for all meals EXCEPT the one being edited.
+// `editingType` is now `meal_<index>` or `new_meal` (for an unsaved
+// brand-new meal), so we just skip the matching index.
 function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros {
   const zero: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const fixed: Array<{ type: string; meal: MealSuggestion | undefined }> = [
-    { type: 'breakfast', meal: plan.breakfast },
-    { type: 'lunch',     meal: plan.lunch },
-    { type: 'dinner',    meal: plan.dinner },
-    { type: 'snack',     meal: plan.snack },
-  ];
-  let total = fixed
-    .filter(({ type, meal }) => !!meal && type !== editingType)
-    .reduce((acc, { meal }) => addMacros(acc, {
-      calories: Math.round(meal!.calories),
-      protein:  Math.round(meal!.protein),
-      carbs:    Math.round(meal!.carbs ?? 0),
-      fat:      Math.round(meal!.fat   ?? 0),
-    }), zero);
-
-  (plan.extraMeals ?? []).forEach((meal, idx) => {
-    // For 'new_extra', count all existing extra meals. For 'extra_N', skip that index.
-    if (`extra_${idx}` !== editingType) {
-      total = addMacros(total, {
-        calories: Math.round(meal.calories),
-        protein:  Math.round(meal.protein),
-        carbs:    Math.round(meal.carbs ?? 0),
-        fat:      Math.round(meal.fat   ?? 0),
-      });
-    }
-  });
-
-  return total;
+  const meals = Array.isArray(plan.meals) ? plan.meals : [];
+  return meals.reduce<Macros>((acc, meal, idx) => {
+    if (`meal_${idx}` === editingType) return acc;
+    return addMacros(acc, {
+      calories: Math.round(meal.calories ?? 0),
+      protein:  Math.round(meal.protein ?? 0),
+      carbs:    Math.round(meal.carbs ?? 0),
+      fat:      Math.round(meal.fat ?? 0),
+    });
+  }, zero);
 }
 
 export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies }: Props) {
@@ -119,6 +118,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [instructions, setInstructions] = useState<string | null>(meal.instructions ?? null);
   const [instructionsLoading, setInstructionsLoading] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
+  // Editable meal name. Every meal can be renamed — there are no fixed
+  // slots anymore, so the recipe name IS the meal's identity.
+  const [mealName, setMealName] = useState<string>(meal.meal ?? '');
+  // `new_meal` (legacy: `new_extra`) is the sentinel for an unsaved meal
+  // being created via the "Add Meal" button. Anything else is an existing
+  // meal at index N. The flag isn't read directly anymore — naming is
+  // controlled by `mealName` either way — but kept here for documentation.
+  void (mealType === 'new_meal' || mealType === 'new_extra');
 
   useEffect(() => {
     if (visible) {
@@ -128,6 +135,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setUnitPickerIdx(null);
       setInstructions(meal.instructions ?? null);
       setShowInstructions(false);
+      setMealName(meal.meal ?? '');
     }
   }, [visible, meal]);
 
@@ -219,7 +227,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const mealMacros = calcMacrosFromItems(items);
+  const mealMacros = calcMacrosFromItems(items, meal);
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
   const dayTotal    = addMacros(mealMacros, otherMacros);
 
@@ -236,11 +244,25 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     const lib = lookupFood(name, allFoods);
     const parsed = splitFoodString(name);
     const cleanName = parsed.name || name;
-    const qty = parsed.quantity ?? 1;
+
+    // Prefer the library entry's canonical serving over a generic default.
+    // `lib.unit` looks like "1 cup (244ml)" or "1 large (118g)". When neither
+    // the parsed string nor the library carries a usable unit, fall back to
+    // a food-type-aware guess (cup for liquids, oz for meat, etc.) so we
+    // never display the meaningless "1 serving" label.
+    const libParsed = lib?.unit ? parseAmountString(lib.unit) : null;
+    const guess = guessUnitForFood(cleanName);
+    let qty = parsed.quantity ?? libParsed?.quantity ?? guess.quantity;
+    let unit = parsed.unit ?? libParsed?.unit ?? guess.unit;
+    if ((unit as string) === 'serving') {
+      qty = guess.quantity;
+      unit = guess.unit;
+    }
+
     const newItem: MealItem = {
       name: cleanName,
       quantity: qty,
-      unit: parsed.unit ?? 'serving',
+      unit,
       calories: lib?.calories ?? 0,
       protein:  lib?.protein  ?? 0,
       carbs:    lib?.carbs    ?? 0,
@@ -258,11 +280,34 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       const next = prev.slice();
       const current = next[idx];
       if (!current) return prev;
-      // Quantity changes scale macros off the item's *baseline* rate
-      // (captured at add-time) rather than off the current macros. This
-      // way zero → N edits still work: if the user clears the input and
-      // retypes, macros come back up from the baseline instead of being
-      // permanently stuck at 0.
+
+      // 1. Unit-only change: convert the quantity to the new unit so
+      //    the physical amount is preserved. Macros stay the same
+      //    (1 cup of milk == 8 fl oz of milk == same calories). When
+      //    the conversion crosses systems (e.g. cup → piece), keep
+      //    the quantity unchanged and just relabel.
+      if (patch.unit != null && patch.unit !== current.unit && patch.quantity == null) {
+        const converted = convertQuantity(current.quantity, current.unit, patch.unit);
+        const newQty = converted ?? current.quantity;
+        // Roll the baseline forward too, so the next quantity edit
+        // scales off the same physical amount in the new unit.
+        const baseConverted = current.baseQuantity != null
+          ? (convertQuantity(current.baseQuantity, current.unit, patch.unit) ?? current.baseQuantity)
+          : current.baseQuantity;
+        next[idx] = {
+          ...current,
+          unit: patch.unit,
+          quantity: Math.round(newQty * 100) / 100,
+          baseQuantity: baseConverted != null ? Math.round(baseConverted * 100) / 100 : current.baseQuantity,
+        };
+        return next;
+      }
+
+      // 2. Quantity changes scale macros off the item's *baseline*
+      //    rate (captured at add-time) rather than off the current
+      //    macros. This way zero → N edits still work: if the user
+      //    clears the input and retypes, macros come back up from
+      //    the baseline instead of being permanently stuck at 0.
       if (patch.quantity != null && patch.quantity !== current.quantity) {
         const baseQty = current.baseQuantity && current.baseQuantity > 0 ? current.baseQuantity : 1;
         const ratio = patch.quantity / baseQty;
@@ -349,13 +394,17 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     // readers (backend, other screens) still see correct data until the full
     // schema migration lands. Also persist any fetched prep instructions on
     // the meal so we don't re-pay the AI call next open.
-    const withItems: MealSuggestion = { ...meal, items, ...(instructions ? { instructions } : {}) };
-    const synced = syncLegacyFieldsFromItems(withItems);
+    // Every meal can be renamed — the recipe name IS the meal's identity.
+    const finalMeal: MealSuggestion = {
+      ...meal,
+      meal: mealName.trim() || meal.meal || 'Meal',
+      items,
+      ...(instructions ? { instructions } : {}),
+    };
+    const synced = syncLegacyFieldsFromItems(finalMeal);
     onSave(synced);
     onClose();
   };
-
-  const titleMap: Record<string, string> = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snack', new_extra: 'Extra Meal' };
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -367,7 +416,19 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
           <View style={s.headerCenter}>
-            <Text style={s.title}>{titleMap[mealType] ?? (mealType.startsWith('extra_') ? 'Extra Meal' : mealType)}</Text>
+            {/* Meal name is editable for every meal (Breakfast slot can
+                be "Oatmeal Bowl" → "My Power Bowl"). For fixed slots we
+                show the slot label as a small subtitle below so the
+                user still knows which meal they're editing. */}
+            <TextInput
+              style={[s.title, { textAlign: 'center', minWidth: 180, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: colors.surfaceRaised }]}
+              value={mealName}
+              onChangeText={setMealName}
+              placeholder="Meal name"
+              placeholderTextColor={colors.textMuted}
+              returnKeyType="done"
+            />
+            {/* No slot subtitle — the meal name above is the only identity. */}
             {onToggleRoutine && (
               <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
                 <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
@@ -478,15 +539,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             {items.map((it, idx) => (
               <View key={`${it.name}-${idx}`} style={s.currentFoodRow}>
                 <View style={s.currentFoodInfo}>
-                  {/* Food name — editable so users can rename without deleting */}
-                  <TextInput
-                    style={s.foodNameInput}
-                    value={it.name}
-                    onChangeText={(t) => updateItem(idx, { name: t })}
-                    placeholder="Food name"
-                    placeholderTextColor={colors.textMuted}
-                    returnKeyType="done"
-                  />
+                  {/* Food name — read-only. Renaming a food breaks its
+                      identity link with the food library, so users
+                      should remove and re-add to swap a food. */}
+                  <Text style={s.foodNameInput} numberOfLines={1}>
+                    {it.name}
+                  </Text>
                   {/* Quantity + unit row */}
                   <View style={s.qtyRow}>
                     <TextInput

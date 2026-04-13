@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay } from '../types';
+import { migrateNutritionPlanShape } from './mealItems';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -31,6 +32,44 @@ export async function saveWorkoutSession(session: WorkoutSession): Promise<void>
     history.unshift(session);
   }
   await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
+}
+
+/** Delete a single workout session by id and also drop any stored summary
+ *  or preserved-completed-workout snapshot for the same date so the
+ *  dashboard doesn't keep showing it as "done". */
+export async function deleteWorkoutSession(sessionId: string): Promise<void> {
+  const history = await loadWorkoutHistory();
+  const target = history.find(s => s.id === sessionId);
+  const remaining = history.filter(s => s.id !== sessionId);
+  await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(remaining));
+
+  // Drop the per-date derived artifacts if no other session exists for
+  // that date. Keeps the progress screen, the dashboard "Done" badge,
+  // and the preserved-workout overlay consistent after a delete.
+  if (target) {
+    const date = target.date.split('T')[0];
+    const stillHasThatDate = remaining.some(s => s.date.startsWith(date));
+    if (!stillHasThatDate) {
+      // Workout summary (stats panel on today's card)
+      try {
+        const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
+        const summaries: StoredWorkoutSummary[] = raw ? JSON.parse(raw) : [];
+        const kept = summaries.filter(s => !s.date.startsWith(date));
+        if (kept.length !== summaries.length) {
+          await AsyncStorage.setItem(SUMMARIES_KEY, JSON.stringify(kept));
+        }
+      } catch {}
+      // Preserved completed-workout snapshot (HomeScreen schedule overlay)
+      try {
+        const raw = await AsyncStorage.getItem(PRESERVED_WORKOUTS_KEY);
+        const all = raw ? JSON.parse(raw) : {};
+        if (date in all) {
+          delete all[date];
+          await AsyncStorage.setItem(PRESERVED_WORKOUTS_KEY, JSON.stringify(all));
+        }
+      } catch {}
+    }
+  }
 }
 
 export async function loadWorkoutHistory(): Promise<WorkoutSession[]> {
@@ -281,105 +320,65 @@ function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSuggestion): 
   } as MealSuggestion;
 }
 
-/** Apply routines to a plan. For each mealType that has an active routine,
- *  replace the plan's slot with the routine's meal. For mealTypes without an
- *  active routine, clear `isRoutine` so stale flags don't linger.
+/** Apply routines to a plan.
+ *
+ *  All routines are now equal — there are no breakfast/lunch/dinner slots
+ *  anymore. Every routine becomes one entry in `plan.meals[]`, tagged with
+ *  `_routineId`. Existing routine-backed entries are replaced (so content
+ *  edits to the routine propagate); stale routine ids get demoted to
+ *  one-off entries so unpinning a routine doesn't make the meal vanish.
  *
  *  Pure function — returns a new plan object, doesn't mutate input. */
 export function applyRoutines(
   plan: DailyNutritionPlan,
   routines: MealRoutineEntry[],
 ): DailyNutritionPlan {
-  // Fixed slots: pinned by `mealType === 'breakfast' | 'lunch' | 'dinner' | 'snack'`.
-  // These replace the plan's slot with the routine's meal verbatim.
-  const byType = new Map<string, MealRoutineEntry>();
-  // Extras: routines with `mealType === 'extra'`. Each is keyed by routine.id
-  // so the same extra doesn't get appended twice across reloads. They flow
-  // into `plan.extraMeals` and carry their routine id on the `_routineId`
-  // field so we can dedupe on subsequent passes and support hard-delete.
-  const extraRoutines: MealRoutineEntry[] = [];
-  for (const r of routines) {
-    if (!r.mealType) continue;
-    if (r.mealType === 'extra') extraRoutines.push(r);
-    else byType.set(r.mealType, r);
-  }
+  const incoming = migrateNutritionPlanShape(plan) as DailyNutritionPlan;
+  const existingMeals = (incoming.meals ?? []).slice();
 
-  const next: DailyNutritionPlan = { ...plan };
-  for (const k of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
-    const routine = byType.get(k);
-    const existing = (plan as any)[k] as MealSuggestion | undefined;
-    if (routine) {
-      (next as any)[k] = mealFromRoutine(routine, existing);
-    } else if (existing) {
-      (next as any)[k] = { ...existing, isRoutine: false };
-    }
-  }
-
-  // Build the next extraMeals array. Three cases to handle — the
-  // historical bugs all came from conflating them:
-  //
-  //   (1) A one-off extra the user created (no _routineId) that has
-  //       just been pinned as a routine. The freshly-built routine
-  //       copy below has the same content; we must NOT also keep the
-  //       original, or we'd end up with two copies ("pin made 3 copies"
-  //       bug).
-  //   (2) An extra already tagged with a _routineId whose routine is
-  //       still active — drop it; the routine build below will re-add
-  //       it fresh so content edits propagate.
-  //   (3) An extra tagged with a _routineId whose routine has been
-  //       REMOVED (the user just unpinned it). We must keep the extra
-  //       as a one-off ("unpin made it disappear" bug) — strip the
-  //       _routineId so it behaves like a regular extra from now on.
-  //   (4) A genuine one-off extra unrelated to any routine — keep.
-  const activeRoutineIds = new Set(extraRoutines.map(r => r.id));
-  // Match "just pinned" extras by name + calories (rounded) against
-  // active routines. This catches the case where the source extra
-  // hasn't been tagged yet at the moment applyRoutines runs.
+  const activeRoutines = routines.filter(r => r && r.id);
+  const activeRoutineIds = new Set(activeRoutines.map(r => r.id));
   const activeRoutineSignatures = new Set(
-    extraRoutines.map(r => `${r.name}__${Math.round(r.calories ?? 0)}`),
+    activeRoutines.map(r => `${r.name}__${Math.round(r.calories ?? 0)}`),
   );
 
-  const carriedOverExtras: MealSuggestion[] = [];
-  // Track which signatures have already been carried over so we don't
-  // end up with two one-offs of the same meal.
+  // Walk current meals and decide what to keep:
+  //   (1) routine-backed (has _routineId) and routine still active → drop;
+  //       we'll rebuild fresh below so edits propagate.
+  //   (2) routine-backed but routine removed → demote to one-off (strip id).
+  //   (3) untagged meal whose name+cals matches an active routine → drop;
+  //       the rebuild below will replace it (avoids duplicating the same
+  //       meal once a routine is freshly pinned).
+  //   (4) any other meal → keep.
+  const kept: MealSuggestion[] = [];
   const carriedSignatures = new Set<string>();
-  for (const m of plan.extraMeals ?? []) {
+  for (const m of existingMeals) {
+    if (!m || typeof m !== 'object') continue;
     const rid = (m as any)._routineId as string | undefined;
     const sig = `${m.meal}__${Math.round(m.calories ?? 0)}`;
     if (rid) {
-      if (activeRoutineIds.has(rid)) {
-        // Case (2): active routine-backed — drop; rebuilt below.
-        continue;
-      }
-      // Case (3): stale routine id — demote to a one-off.
+      if (activeRoutineIds.has(rid)) continue; // case (1)
       if (carriedSignatures.has(sig)) continue;
       const { _routineId: _drop, ...rest } = m as any;
-      carriedOverExtras.push({ ...rest, isRoutine: false } as MealSuggestion);
+      kept.push({ ...rest, isRoutine: false } as MealSuggestion); // case (2)
       carriedSignatures.add(sig);
       continue;
     }
-    // Untagged extra. Drop if it matches an active routine (case 1:
-    // just pinned OR brought in via preserved overlay) or if we've
-    // already carried over the same signature this pass.
-    if (activeRoutineSignatures.has(sig)) continue;
+    if (activeRoutineSignatures.has(sig)) continue; // case (3)
     if (carriedSignatures.has(sig)) continue;
-    carriedOverExtras.push(m);
+    kept.push({ ...m, isRoutine: false });
     carriedSignatures.add(sig);
   }
 
-  const extrasFromRoutines: MealSuggestion[] = extraRoutines.map(r => ({
+  const fromRoutines: MealSuggestion[] = activeRoutines.map(r => ({
     ...mealFromRoutine(r),
     _routineId: r.id,
   }) as MealSuggestion);
 
-  if (carriedOverExtras.length > 0 || extrasFromRoutines.length > 0) {
-    next.extraMeals = [...carriedOverExtras, ...extrasFromRoutines];
-  } else if (plan.extraMeals !== undefined) {
-    // Preserve the empty array so downstream doesn't flip between
-    // `extraMeals: []` and the key being absent.
-    next.extraMeals = [];
-  }
-  return next;
+  return {
+    ...incoming,
+    meals: [...kept, ...fromRoutines],
+  };
 }
 
 /** Apply routines to a whole map of plans. Returns a new map. */

@@ -46,9 +46,9 @@ def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
     if "targets" not in np_:
         raise ValueError("nutrition_plan missing 'targets'")
 
-    # Require at least one meal key — don't hard-fail on missing snack etc.
-    meal_keys = {"breakfast", "lunch", "dinner", "snack"}
-    if not any(k in np_ for k in meal_keys):
+    # Require at least one meal — accept either the new `meals[]` shape or
+    # the legacy slot keys for backwards compat with cached responses.
+    if not _iter_meals(np_):
         raise ValueError("nutrition_plan has no meal entries")
 
     # Notes and supplementStack are logged but NOT blocking — the plan works without them
@@ -86,15 +86,36 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
     """
     from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
-    owned = {s for s in (equipment_slugs or []) if s}
+    # The frontend stores `UserProfile.equipment` as DISPLAY NAMES
+    # ("Dumbbells", "Flat bench") while the seed exercise library is keyed
+    # by SLUGS ("dumbbells", "flat_bench"). If we filter raw names against
+    # required-slug lists, NOTHING matches and the only exercises that
+    # survive are the bodyweight-bucket ones — so a fully-equipped recomp
+    # user ends up with an all-bodyweight plan even though they own a gym.
+    # Build a name → slug index from SEED_EQUIPMENT and translate the
+    # incoming list before any matching happens.
+    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    slug_to_name = {e["slug"]: e["name"] for e in SEED_EQUIPMENT}
+    valid_slugs = set(slug_to_name.keys())
+
+    owned: set[str] = set()
+    for raw in (equipment_slugs or []):
+        if not raw:
+            continue
+        if raw in valid_slugs:
+            owned.add(raw)
+            continue
+        # Try as a display name (case-insensitive)
+        slug = name_to_slug.get(raw.lower())
+        if slug:
+            owned.add(slug)
+
     # Also accept the legacy bucket strings so a user with `equipment:
     # ["bodyweight"]` still gets bodyweight exercises even though
     # "bodyweight" isn't an Equipment slug.
     owned_buckets = {"bodyweight", "home", "dumbbells", "gym", "other"} & set(equipment_slugs or [])
 
-    # Equipment slug → display name lookup (so the prompt can show humans
-    # something other than "leg_press_machine").
-    slug_to_name = {e["slug"]: e["name"] for e in SEED_EQUIPMENT}
+    print(f"[workout_library] resolved {len(owned)}/{len(equipment_slugs or [])} equipment entries → slugs: {sorted(owned)[:8]}{'...' if len(owned) > 8 else ''}")
 
     library: list[dict] = []
     for ex in SEED_EXERCISES:
@@ -339,6 +360,64 @@ def _food_covered(item: str, allowed_lower: list[str]) -> bool:
     return False
 
 
+_LEGACY_MEAL_KEYS = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
+
+
+def _adjusted_target_for_normalization(
+    req: PlanRequest,
+    full_target: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Return the macro target the normalizer should scale assembled meals to.
+
+    The assembler subtracts pinned-routine macros from the daily target
+    before sizing meals. The normalizer then re-scales meal totals onto
+    a target — and if that target is the FULL daily target, it cancels
+    out the assembler's routine subtraction and produces a plan that
+    overlays to double calories.
+
+    The right behavior:
+      * full_target → drives the calorie calculator + UI display
+      * adjusted target (= full_target − routine_macros) → drives the
+        normalizer math, so generated meals + routine overlay sums
+        back to full_target.
+    """
+    routine_macros = getattr(req, "routineMacros", None) or {}
+    if not isinstance(routine_macros, dict) or not routine_macros:
+        return full_target
+    t_cal, t_prot, t_carbs, t_fat = full_target
+    r_cal  = int(routine_macros.get("calories", 0) or 0)
+    r_prot = int(routine_macros.get("protein", 0) or 0)
+    r_carb = int(routine_macros.get("carbs", 0) or 0)
+    r_fat  = int(routine_macros.get("fat", 0) or 0)
+    return (
+        max(0, t_cal  - r_cal),
+        max(0, t_prot - r_prot),
+        max(0, t_carbs - r_carb),
+        max(0, t_fat  - r_fat),
+    )
+
+
+def _iter_meals(nutrition_plan: dict) -> list[dict]:
+    """Return the meal dicts for a nutrition template regardless of shape.
+
+    New shape:    {"meals": [ {...}, {...} ]}
+    Legacy shape: {"breakfast": {...}, "lunch": {...}, ...}
+
+    The migration to a generic meals[] list is one-way — new responses
+    always use the new shape — but the helpers in this module also run
+    over cached / replayed responses, so we tolerate both here.
+    """
+    meals = nutrition_plan.get("meals")
+    if isinstance(meals, list):
+        return [m for m in meals if isinstance(m, dict)]
+    out: list[dict] = []
+    for k in _LEGACY_MEAL_KEYS:
+        m = nutrition_plan.get(k)
+        if isinstance(m, dict):
+            out.append(m)
+    return out
+
+
 def _collect_unknown_foods(nutrition_plan: dict, allowed_foods: list[str]) -> list[str]:
     """Return food names in the plan that are NOT in the user's allowed foods.
 
@@ -350,13 +429,9 @@ def _collect_unknown_foods(nutrition_plan: dict, allowed_foods: list[str]) -> li
     if not allowed_foods:
         return []
     allowed_lower = [f.lower() for f in allowed_foods]
-    meal_keys = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
     unknown: list[str] = []
     seen: set[str] = set()
-    for key in meal_keys:
-        meal = nutrition_plan.get(key)
-        if not meal or not isinstance(meal, dict):
-            continue
+    for meal in _iter_meals(nutrition_plan):
         # Prefer structured items[] when the AI emits the new shape.
         items = meal.get("items")
         if isinstance(items, list) and items:
@@ -424,10 +499,7 @@ def _build_custom_foods(
     for np_ in plans_list:
         if not isinstance(np_, dict):
             continue
-        for meal_key in ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2"):
-            meal = np_.get(meal_key)
-            if not meal or not isinstance(meal, dict):
-                continue
+        for meal in _iter_meals(np_):
             foods_list = meal.get("foods", [])
             # If the meal has per-food macro breakdowns (some schemas do)
             per_food = meal.get("per_food_macros", [])
@@ -460,9 +532,6 @@ def _build_custom_foods(
     return custom_foods
 
 
-_MEAL_KEYS = ("breakfast", "lunch", "dinner", "snack", "snack_1", "snack_2")
-
-
 def _sum_meal_macros(nutrition_plan: dict) -> tuple[int, int, int, int]:
     """Sum (calories, protein, carbs, fat) across every meal in a single
     nutrition template. Reads the meal-level totals (`meal.calories`,
@@ -471,10 +540,7 @@ def _sum_meal_macros(nutrition_plan: dict) -> tuple[int, int, int, int]:
     are what the user actually sees.
     """
     cal = prot = carbs = fat = 0
-    for key in _MEAL_KEYS:
-        meal = nutrition_plan.get(key)
-        if not isinstance(meal, dict):
-            continue
+    for meal in _iter_meals(nutrition_plan):
         cal   += int(round(float(meal.get("calories", 0) or 0)))
         prot  += int(round(float(meal.get("protein",  0) or 0)))
         carbs += int(round(float(meal.get("carbs",    0) or 0)))
@@ -492,14 +558,11 @@ def _normalize_template_to_target(
     """Scale every meal (and every item inside it) by a uniform ratio so
     the template's meal-level sums match the computed targets exactly.
 
-    This is the deterministic backstop for when the AI gets close but
-    not close enough — the retry loop already rejected obvious drift,
-    so anything reaching this function is salvageable via math.
-
-    Only runs if the scale ratio is in [0.6, 1.4]. Bigger drift than
-    that means the AI sent something structurally wrong (missing meals,
-    wrong foods, nonsense numbers) and we'd rather return as-is than
-    mutate everything by 2x.
+    Runs whenever the assembled meals don't already hit the target. The
+    scale guard is wide ([0.3, 3.0]) because the deterministic variety=1
+    path may produce a meal that's significantly under-target when only
+    one or two foods cover a category — and we'd rather scale aggressively
+    than ship a meal that misses the calorie goal by 30%+.
 
     Returns a human-readable summary of what was normalized (for logs),
     or None if no normalization was needed / possible.
@@ -509,8 +572,10 @@ def _normalize_template_to_target(
         return None
 
     scale = target_kcal / actual_kcal
-    # Bail on extreme scales — something else is wrong.
-    if scale < 0.6 or scale > 1.4:
+    # Wide guard — only bail when the assembled meal is so wrong it
+    # almost certainly indicates a structural failure (missing meals,
+    # nonsense input).
+    if scale < 0.3 or scale > 3.0:
         return None
     # If we're already within 1%, skip — no need to mutate for rounding.
     if abs(scale - 1.0) < 0.01:
@@ -524,10 +589,7 @@ def _normalize_template_to_target(
         except (TypeError, ValueError):
             return 0
 
-    for key in _MEAL_KEYS:
-        meal = nutrition_plan.get(key)
-        if not isinstance(meal, dict):
-            continue
+    for meal in _iter_meals(nutrition_plan):
         # Scale meal-level totals.
         meal["calories"] = _mul(meal.get("calories"), scale)
         meal["protein"]  = _mul(meal.get("protein"),  scale)
@@ -598,10 +660,7 @@ def _round_items_to_nice_units(nutrition_plan: dict) -> None:
     so sub-percent precision isn't worth making meals read like a lab
     result.
     """
-    for key in _MEAL_KEYS:
-        meal = nutrition_plan.get(key)
-        if not isinstance(meal, dict):
-            continue
+    for meal in _iter_meals(nutrition_plan):
         items = meal.get("items")
         if not isinstance(items, list):
             continue
@@ -720,7 +779,6 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
         if not d.get("exercises"):
             raise ValueError(f"Day '{d.get('day', '?')}' has no exercises")
 
-    meal_keys_set = ("breakfast", "lunch", "dinner", "snack")
     plans_list = result.get("nutrition_plans")
     if not isinstance(plans_list, list) or len(plans_list) == 0:
         raise ValueError("nutrition_plans missing or empty in result")
@@ -729,7 +787,10 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"nutrition_plans[{idx}] is not an object")
         if not np_.get("targets"):
             raise ValueError(f"nutrition_plans[{idx}] missing targets")
-        if not any(k in np_ for k in meal_keys_set):
+        # An empty meals[] is allowed when every meal is a routine
+        # overlay handled by the client. We only reject the structural
+        # case where neither shape is present at all.
+        if "meals" not in np_ and not _iter_meals(np_):
             raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
 
@@ -811,7 +872,15 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     # Deterministic backstop: scale each template exactly onto the target
     # macros. The assembler's solver gets us within a few percent; this
     # closes any residual drift so meal totals match the calorie calculator.
-    t_kcal, t_prot, t_carbs, t_fat = nutrition_target_macros
+    #
+    # CRITICAL: when pinned routines exist, the assembler already sized the
+    # generated meals against `full_target − routine_macros`. The normalizer
+    # must use the SAME adjusted target — using the full target would scale
+    # the meals back UP and undo the routine subtraction. The full target is
+    # still used for the `targets` field on each template so the UI shows
+    # the user's actual daily goal.
+    norm_target = _adjusted_target_for_normalization(req, nutrition_target_macros)
+    t_kcal, t_prot, t_carbs, t_fat = norm_target
     for idx, np_ in enumerate(plans_list):
         if isinstance(np_, dict):
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
@@ -935,7 +1004,11 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
     if not plans_list:
         legacy = [nutrition_data.get("nutrition_plan_a"), nutrition_data.get("nutrition_plan_b"), nutrition_data.get("nutrition_plan_c")]
         plans_list = [p for p in legacy if isinstance(p, dict)]
-    t_kcal, t_prot, t_carbs, t_fat = nutrition_target_macros
+    # See `run_full_plan_generation` for the full explanation of why we use
+    # the adjusted target (full minus routine macros) here instead of the
+    # full daily target.
+    norm_target = _adjusted_target_for_normalization(plan_req, nutrition_target_macros)
+    t_kcal, t_prot, t_carbs, t_fat = norm_target
     for idx, np_ in enumerate(plans_list):
         if isinstance(np_, dict):
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
@@ -960,7 +1033,14 @@ async def generate_nutrition_plan(
     req: NutritionOnlyRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a nutrition plan only — called when foods change (sync legacy)."""
+    """Generate a nutrition plan only — called when foods change (sync legacy).
+
+    Forward every field the assembler uses for routine accounting and
+    variety. Previously `routineMacros`, `routineSlots`, and `mealVariety`
+    were silently dropped here, so the nutrition-only regen path entirely
+    lost pinned routines and the assembler built a full-target plan that
+    overlaid to double calories.
+    """
     plan_req = PlanRequest(
         goal=req.goal,
         goalDetails=req.goalDetails,
@@ -972,7 +1052,10 @@ async def generate_nutrition_plan(
         dietaryPreference=req.dietaryPreference,
         allergies=req.allergies,
         mealsPerDay=req.mealsPerDay,
+        mealVariety=getattr(req, "mealVariety", 3) or 3,
         mealRoutine=req.mealRoutine,
+        routineMacros=getattr(req, "routineMacros", None),
+        routineSlots=list(getattr(req, "routineSlots", None) or []),
         customMacros=req.customMacros,
         userContext=req.userContext,
     )

@@ -153,6 +153,81 @@ async function buildMealRoutineText(profile: import('../types').UserProfile): Pr
   return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
+/** Compute the total macros + count for every pinned routine meal.
+ *  Sent to the backend so the assembler can:
+ *    1. Subtract routine macros from the daily target.
+ *    2. Subtract routine count from mealsPerDay so the generated meals
+ *       plus pinned routines fit the user's meal budget.
+ *
+ *  `routineSlots` is sent as a synthetic list of length N (one entry
+ *  per pinned routine) — the backend only reads its length now, the
+ *  string contents are ignored. We keep the field name + shape for
+ *  back-compat with the existing PlanRequest schema.
+ *
+ *  Returns null when the user has no routines pinned. */
+async function buildRoutinePayload(): Promise<{
+  routineMacros: { calories: number; protein: number; carbs: number; fat: number };
+  routineSlots: string[];
+} | null> {
+  try {
+    const { loadMealRoutines } = await import('../utils/workoutHistory');
+    const routines = await loadMealRoutines();
+    if (!routines.length) return null;
+    // Some routines (older entries, or routines created before per-meal
+    // macros were captured) carry calories=0 at the top level. When that
+    // happens, fall back to summing the structured items[] so the backend
+    // sees the real load and can size the rest of the day correctly.
+    // Without this, a 1500-cal pinned routine looks like 0 cal and the
+    // backend builds a full-target plan that overlays to 4500 cal.
+    const macrosOf = (r: any): { calories: number; protein: number; carbs: number; fat: number } => {
+      const top = {
+        calories: r.calories ?? 0,
+        protein:  r.protein  ?? 0,
+        carbs:    r.carbs    ?? 0,
+        fat:      r.fat      ?? 0,
+      };
+      if (top.calories > 0) return top;
+      const items = Array.isArray(r.items) ? r.items : [];
+      return items.reduce(
+        (acc: any, it: any) => ({
+          calories: acc.calories + (it.calories ?? 0),
+          protein:  acc.protein  + (it.protein  ?? 0),
+          carbs:    acc.carbs    + (it.carbs    ?? 0),
+          fat:      acc.fat      + (it.fat      ?? 0),
+        }),
+        { calories: 0, protein: 0, carbs: 0, fat: 0 },
+      );
+    };
+    const totals = routines.reduce(
+      (acc, r) => {
+        const m = macrosOf(r);
+        return {
+          calories: acc.calories + m.calories,
+          protein:  acc.protein  + m.protein,
+          carbs:    acc.carbs    + m.carbs,
+          fat:      acc.fat      + m.fat,
+        };
+      },
+      { calories: 0, protein: 0, carbs: 0, fat: 0 },
+    );
+    console.log('[buildRoutinePayload]', routines.length, 'routines →', totals);
+    // One synthetic slot per pinned routine — the backend just reads
+    // the count.
+    const slots = routines.map((_, i) => `routine_${i}`);
+    return {
+      routineMacros: {
+        calories: Math.round(totals.calories),
+        protein:  Math.round(totals.protein),
+        carbs:    Math.round(totals.carbs),
+        fat:      Math.round(totals.fat),
+      },
+      routineSlots: slots,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function buildLogContext(
   profile: import('../types').UserProfile,
   userLog?: import('../types').UserLogEntry[],
@@ -339,6 +414,7 @@ export async function getAIPlans(
 ) {
   const injuriesOrLimitations = buildInjuries(profile);
   const mealRoutineText = await buildMealRoutineText(profile);
+  const routinePayload = await buildRoutinePayload();
   const payload: Record<string, any> = {
     goal:                   profile.goal,
     goalSelection:          profile.goalSelection ?? undefined,
@@ -354,6 +430,9 @@ export async function getAIPlans(
     experienceLevel:        profile.experienceLevel,
     injuriesOrLimitations,
     mealRoutine:            mealRoutineText,
+    routineMacros:          routinePayload?.routineMacros,
+    routineSlots:           routinePayload?.routineSlots ?? [],
+    mealsPerDay:            Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
     mealVariety:            Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
     customMacros:           profile.customMacros ?? undefined,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
@@ -435,6 +514,7 @@ export async function getAINutritionPlan(
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
 ) {
   const mealRoutineText = await buildMealRoutineText(profile);
+  const routinePayload = await buildRoutinePayload();
   const payload: Record<string, any> = {
     goal:                 profile.goal,
     goalDetails:          profile.goalDetails,
@@ -446,6 +526,9 @@ export async function getAINutritionPlan(
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            (profile as any).allergies ?? [],
     mealRoutine:          mealRoutineText,
+    routineMacros:        routinePayload?.routineMacros,
+    routineSlots:         routinePayload?.routineSlots ?? [],
+    mealsPerDay:          Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
     mealVariety:          Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
     customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),

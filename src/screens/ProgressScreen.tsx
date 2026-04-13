@@ -8,7 +8,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore } from '../utils/workoutHistory';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession } from '../utils/workoutHistory';
 import { RECOVERY_LABELS } from '../utils/healthScore';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
@@ -684,8 +684,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.sectionLabel}>{history.length} sessions logged</Text>
               {history.map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
+                const handleDeleteSession = () => {
+                  Alert.alert(
+                    'Delete this workout?',
+                    `${session.focus} — ${formatDate(session.date)}\n\nThis removes the session from your history. Usually you only need this if the AI logged it wrong.`,
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Delete',
+                        style: 'destructive',
+                        onPress: async () => {
+                          await deleteWorkoutSession(session.id);
+                          setHistory(prev => prev.filter(s => s.id !== session.id));
+                        },
+                      },
+                    ],
+                  );
+                };
                 return (
-                  <View key={i} style={styles.sessionCard}>
+                  <View key={session.id ?? i} style={styles.sessionCard}>
                     <View style={styles.sessionHeader}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.sessionFocus}>{session.focus}</Text>
@@ -694,6 +711,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={styles.sessionBadge}>
                         <Text style={styles.sessionBadgeText}>{formatDuration(session.durationSeconds)}</Text>
                       </View>
+                      <TouchableOpacity
+                        onPress={handleDeleteSession}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        style={{ marginLeft: 8, paddingHorizontal: 6, paddingVertical: 2 }}>
+                        <Text style={{ fontSize: 16, color: tc.error ?? '#EF4444' }}>✕</Text>
+                      </TouchableOpacity>
                     </View>
                     <View style={styles.sessionStats}>
                       <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>

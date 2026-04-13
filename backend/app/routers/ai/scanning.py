@@ -21,6 +21,7 @@ from .utils import (
     _log_openai_error,
     SCHEMA_FOOD_PHOTO, SCHEMA_SCAN_FOODS, SCHEMA_SUPPLEMENT_INFO,
     SCHEMA_SCAN_EQUIPMENT, SCHEMA_FORM_PHOTO,
+    MICRONUTRIENT_AI_FIELDS, MICRONUTRIENT_PROMPT_GUIDE,
 )
 
 
@@ -39,6 +40,10 @@ def analyze_food_photo(
     image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
     client = OpenAI(api_key=api_key)
 
+    # Build a concrete JSON example with two real micronutrient fields so
+    # the AI knows what shape to emit. Listing all 31 field names with no
+    # values produced "{ fiber, sugar, ... }" output that wasn't valid JSON.
+    micros_example = ", ".join(f'"{k}": 0' for k in MICRONUTRIENT_AI_FIELDS)
     _fp_messages = [
         {
             "role": "system",
@@ -54,13 +59,13 @@ def analyze_food_photo(
                     "type": "text",
                     "text": (
                         "Analyze this meal photo. Identify likely foods in plain English, "
-                        "estimate total macros and micronutrients, and provide a short meal name. "
-                        'Return exactly this JSON schema: '
-                        '{"meal_name": string, "items": [string], "calories": number, '
-                        '"protein": number, "carbs": number, "fat": number, "fiber": number, '
-                        '"micronutrients": {"fiber": number, "sugar": number, "sodium": number, '
-                        '"cholesterol": number, "vitaminA": number, "vitaminC": number, '
-                        '"vitaminD": number, "calcium": number, "iron": number, "potassium": number}}'
+                        "estimate total macros AND the full micronutrient panel, and provide a short meal name.\n\n"
+                        f"{MICRONUTRIENT_PROMPT_GUIDE}\n\n"
+                        "Return JSON in EXACTLY this shape (replace zeros with real values):\n"
+                        '{"meal_name": "Chicken bowl", '
+                        '"items": ["grilled chicken", "rice", "broccoli"], '
+                        '"calories": 0, "protein": 0, "carbs": 0, "fat": 0, '
+                        f'"micronutrients": {{{micros_example}}}}}'
                     ),
                 },
                 {"type": "image_url", "image_url": {"url": image_data_url}},
@@ -68,7 +73,7 @@ def analyze_food_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=200, timeout_secs=30)
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -94,16 +99,20 @@ def scan_foods_photo(
     context_hint = f"\nExtra context from the user: {body.context}" if body.context else ""
 
     # Build content blocks: text prompt first, then all images
+    micros_example = ", ".join(f'"{k}": 0' for k in MICRONUTRIENT_AI_FIELDS)
     user_content: list[dict] = [
         {
             "type": "text",
             "text": (
                 f"List every individual food item you can identify across all provided image(s). "
-                "For each one, provide a short common name, typical serving size, and estimated macros. "
+                "For each one, provide a short common name, typical serving size, estimated macros, "
+                "AND the full per-serving micronutrient panel.\n\n"
+                f"{MICRONUTRIENT_PROMPT_GUIDE}\n"
                 f"{context_hint}"
-                "Return exactly this JSON schema — no extra text: "
-                '{"foods": [{"name": string, "serving": string, "calories": number, '
-                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}'
+                "Return JSON in EXACTLY this shape (replace zeros with real values, one entry per food):\n"
+                '{"foods": [{"name": "chicken breast", "serving": "6 oz", '
+                '"calories": 0, "protein": 0, "carbs": 0, "fat": 0, '
+                f'"micronutrients": {{{micros_example}}}}}]}}'
             ),
         }
     ]
@@ -123,7 +132,10 @@ def scan_foods_photo(
         {"role": "user", "content": user_content},
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=500, timeout_secs=30)
+        # Bumped from 500 → 1500 to fit the full micronutrient panel for
+        # multiple foods. With ~31 fields per food and 3-5 foods per scan,
+        # 500 tokens truncated mid-object and produced invalid JSON.
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -145,11 +157,13 @@ def food_nutrition_search(
         raise HTTPException(status_code=400, detail="Query is required")
 
     client = OpenAI(api_key=api_key)
+    micros_example = ", ".join(f'"{k}": 0' for k in MICRONUTRIENT_AI_FIELDS)
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a nutrition database. Given a food query, return nutrition info. "
+                "You are a USDA-grade nutrition database. Given a food query, return nutrition info "
+                "INCLUDING the full micronutrient panel. "
                 "If the user specifies a quantity (e.g. '100g chicken'), use that. "
                 "If not, use a standard serving size. "
                 "Return valid JSON only."
@@ -159,9 +173,11 @@ def food_nutrition_search(
             "role": "user",
             "content": (
                 f'Food query: "{body.query}"\n\n'
-                "Return JSON with this exact schema:\n"
-                '{"results": [{"name": string, "serving": string, "calories": number, '
-                '"protein": number, "carbs": number, "fat": number, "fiber": number}]}\n\n'
+                f"{MICRONUTRIENT_PROMPT_GUIDE}\n\n"
+                "Return JSON in EXACTLY this shape (replace zeros with real values, one entry per result):\n"
+                '{"results": [{"name": "chicken breast", "serving": "6 oz", '
+                '"calories": 0, "protein": 0, "carbs": 0, "fat": 0, '
+                f'"micronutrients": {{{micros_example}}}}}]}}\n\n'
                 "Return 1-5 results. If the query is vague (e.g. 'chicken'), return common preparations. "
                 "If specific (e.g. '6oz grilled chicken breast'), return exactly that."
             ),
@@ -172,8 +188,11 @@ def food_nutrition_search(
             model=model_meal_parsing(),
             messages=messages,
             response_format={"type": "json_object"},
-            max_tokens=500,
-            timeout=15,
+            # Bumped from 500 → 1500 to fit the full micronutrient panel
+            # for up to 5 results. Old cap truncated mid-response and
+            # produced "invalid JSON" errors for users.
+            max_tokens=1500,
+            timeout=30,
         )
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])

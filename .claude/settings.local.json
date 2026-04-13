@@ -96,7 +96,13 @@
       "Bash(grep -n \"searchFoodNutrition\\\\|/ai/food-search\\\\|food_search\" /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/routers/ai/*.py)",
       "Bash(grep:*)",
       "Bash(python3.12 --version)",
-      "Bash(python3.11 --version)"
+      "Bash(python3.11 --version)",
+      "Bash(git mv:*)",
+      "Bash(make test:*)",
+      "Bash(/opt/homebrew/bin/npx tsc:*)",
+      "Read(//usr/local/bin/**)",
+      "Bash(find / -name node -type f)",
+      "Bash(git stash:*)"
     ]
   }
 }

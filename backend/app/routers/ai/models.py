@@ -69,6 +69,12 @@ class PlanRequest(BaseModel):
     budgetLevel: str | None = None
     supplementsAvailable: list[str] = []
     mealRoutine: str | None = None   # fixed meals/habits the user already follows
+    # Pinned-routine accounting for nutrition regen. The client overlays
+    # routine meals on top of generated plans, which would push the day
+    # over the calorie target unless the assembler subtracts the routine
+    # macros from the daily target before sizing the remaining slots.
+    routineMacros: dict | None = None   # {calories, protein, carbs, fat} — totals across all pinned routines
+    routineSlots: list[str] = []        # which slot keys are owned by routines: ["breakfast", "extra"]
     userContext: str | None = None
 
     # Weekly review (sent when regenerating after a weekly check-in)
@@ -105,7 +111,13 @@ class NutritionOnlyRequest(BaseModel):
     dietaryPreference: str | None = None
     allergies: list[str] = []
     mealsPerDay: int = 3
+    # Number of distinct daily meal templates (1-7). variety=1 takes the
+    # deterministic non-AI path in the assembler so regens land on the
+    # same template every time.
+    mealVariety: int = 3
     mealRoutine: str | None = None
+    routineMacros: dict | None = None
+    routineSlots: list[str] = []
     userContext: str | None = None
 
 

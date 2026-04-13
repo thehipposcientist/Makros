@@ -254,11 +254,30 @@ def build_workout_prompt(req: PlanRequest) -> str:
                 continue
             eq = ex.get("equipment", "")
             lib_lines.append(f"  - {name}" + (f" → {eq}" if eq else ""))
+        # Lift-focused goals get an extra hard rule on top of the library
+        # constraint. Without this the AI happily picks "Push-ups" for a
+        # recomp user who owns a barbell + bench because it's "simpler",
+        # which produces a circuit-style plan instead of a lifting plan.
+        goal_lower = (req.goal or "").lower()
+        is_lift_focused = any(t in goal_lower for t in ("muscle_gain", "muscle gain", "build_muscle", "recomp", "strength", "powerlifting", "1rm"))
+        load_rule = (
+            "\n\nLOAD PRIORITY (this user is training for size/strength):\n"
+            "  - Primary and secondary slots MUST use loaded exercises "
+            "(barbell, dumbbell, machine, or cable). Bodyweight is NOT "
+            "acceptable for primary or secondary slots when a loaded "
+            "alternative exists in the library above.\n"
+            "  - Bodyweight exercises (push-ups, pull-ups, dips, etc.) are "
+            "ONLY acceptable when (a) the user has no equipment for the "
+            "movement at all, or (b) the slot is core/abs.\n"
+            "  - Pull-ups and chin-ups DO count as loaded — they're a real "
+            "vertical pull. Push-ups and dips do not.\n"
+        ) if is_lift_focused else ""
         library_str = (
             "EXERCISE LIBRARY — you MUST choose exercises EXACTLY from this list. "
             "Use the name verbatim and do NOT invent variants. Each line shows the "
             "equipment that exercise requires:\n"
             + "\n".join(lib_lines)
+            + load_rule
         )
     else:
         library_str = (

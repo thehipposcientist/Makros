@@ -20,29 +20,15 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
 
   return (
     <View style={styles.card}>
-
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <View style={styles.header}>
-        <View style={[styles.headerIconCircle, { backgroundColor: s.strong + '1E' }]}>
-          <Ionicons name="barbell-outline" size={17} color={s.strong} />
-        </View>
-        <View style={styles.headerMid}>
-          <Text style={[styles.headerSection, { color: s.strong }]}>WORKOUT</Text>
-          <Text style={[styles.headerFocus, { color: c.textPrimary }]} numberOfLines={1}>
-            {workout.focus}
-          </Text>
-        </View>
-        <View style={[styles.headerCountBadge, { backgroundColor: s.strong + '18', borderColor: s.strong + '44' }]}>
-          <Text style={[styles.headerCountNum, { color: s.strong }]}>{workout.exercises.length}</Text>
-          <Text style={[styles.headerCountLabel, { color: s.strong + 'CC' }]}>ex</Text>
-        </View>
-      </View>
-
-      {/* ── Stats strip ────────────────────────────────────────────────── */}
-      <View style={[styles.statsStrip, { backgroundColor: s.soft, borderBottomColor: s.strong + '1E' }]}>
-        <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} c={c} />
-        <View style={[styles.statsDivider, { backgroundColor: s.strong + '30' }]} />
-        <StatItem icon="layers-outline" value={`${totalSets} sets total`} color={s.strong} c={c} />
+      {/* Header removed — the parent DayCard already shows day + focus.
+          Stats strip is now a plain inline row, no colored background,
+          matching the macros grid on the meal accordion. */}
+      <View style={styles.statsStrip}>
+        <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} />
+        <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
+        <StatItem icon="layers-outline" value={`${totalSets} sets`} color={s.strong} />
+        <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
+        <StatItem icon="barbell-outline" value={`${workout.exercises.length} exercises`} color={s.strong} />
       </View>
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}
@@ -61,25 +47,16 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
         ))}
       </View>
 
-      {/* ── Footer ─────────────────────────────────────────────────────── */}
-      <View style={[styles.footer, { borderTopColor: c.border }]}>
-        <Ionicons name="information-circle-outline" size={12} color={c.textMuted} />
-        <Text style={[styles.footerText, { color: c.textMuted }]}>
-          Focus on form · rest fully between sets
-        </Text>
-      </View>
-
     </View>
   );
 }
 
 // ── StatItem ──────────────────────────────────────────────────────────────────
 
-function StatItem({ icon, value, color, c }: {
+function StatItem({ icon, value, color }: {
   icon: keyof typeof Ionicons.glyphMap;
   value: string;
   color: string;
-  c: ReturnType<typeof getTheme>['colors'];
 }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
@@ -173,7 +150,7 @@ const chipStyles = StyleSheet.create({
 
 const createStyles = (
   c: ReturnType<typeof getTheme>['colors'],
-  s: ReturnType<typeof getTheme>['sections']['workout'],
+  _s: ReturnType<typeof getTheme>['sections']['workout'],
 ) => StyleSheet.create({
 
   card: {
@@ -185,44 +162,16 @@ const createStyles = (
     borderColor: c.border,
   },
 
-  // Header
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: s.soft,
-  },
-  headerIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  headerMid: { flex: 1, gap: 1 },
-  headerSection: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2, textTransform: 'uppercase' },
-  headerFocus:   { fontSize: 15, fontWeight: '700' },
-  headerCountBadge: {
-    borderRadius: radius.md,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  headerCountNum:   { fontSize: 16, fontWeight: '800' },
-  headerCountLabel: { fontSize: 9, fontWeight: '600', letterSpacing: 0.5 },
-
-  // Stats strip
+  // Stats strip — plain inline row, no colored background. Mirrors the
+  // macros grid on the meal accordion: just numbers + dividers, sitting
+  // flush at the top of the body.
   statsStrip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 14,
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
+    paddingTop: 14,
+    paddingBottom: 6,
   },
   statsDivider: { width: 1, height: 12 },
 
@@ -261,8 +210,4 @@ const createStyles = (
     paddingVertical: 4,
   },
   videoChipText: { fontSize: 11, fontWeight: '700' },
-
-  // Footer
-  footer:     { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: 1 },
-  footerText: { fontSize: 11 },
 });

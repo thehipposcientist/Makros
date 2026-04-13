@@ -253,7 +253,25 @@ def seed_foods(session: Session) -> None:
             food.fat = n["fat"]
             session.add(food)
 
-            # Upsert FoodNutrition
+            # Upsert FoodNutrition. Pull the canonical micronutrient panel
+            # from `seed_micronutrients_data` so existing seeded foods get
+            # backfilled on the next boot — no DB drop needed.
+            from app.seed_micronutrients_data import (
+                get_micronutrients_for, split_into_columns_and_extras,
+            )
+            micros_panel = get_micronutrients_for(name)
+            if micros_panel:
+                top_cols, extras = split_into_columns_and_extras(micros_panel)
+                fiber_v   = top_cols.get("fiber",   n.get("fiber"))
+                sugar_v   = top_cols.get("sugar",   n.get("sugar"))
+                sodium_v  = top_cols.get("sodium_mg", n.get("sodium_mg"))
+                extras_v  = extras or None
+            else:
+                fiber_v  = n.get("fiber")
+                sugar_v  = n.get("sugar")
+                sodium_v = n.get("sodium_mg")
+                extras_v = None
+
             fn = session.exec(
                 select(FoodNutrition).where(FoodNutrition.food_id == food.id)
             ).first()
@@ -264,9 +282,10 @@ def seed_foods(session: Session) -> None:
                 fn.protein = n["protein"]
                 fn.carbs = n["carbs"]
                 fn.fat = n["fat"]
-                fn.fiber = n.get("fiber")
-                fn.sugar = n.get("sugar")
-                fn.sodium_mg = n.get("sodium_mg")
+                fn.fiber = fiber_v
+                fn.sugar = sugar_v
+                fn.sodium_mg = sodium_v
+                fn.extra_nutrients = extras_v
                 session.add(fn)
             else:
                 session.add(FoodNutrition(
@@ -275,8 +294,8 @@ def seed_foods(session: Session) -> None:
                     reference_grams=ref_grams,
                     calories=n["calories"], protein=n["protein"],
                     carbs=n["carbs"], fat=n["fat"],
-                    fiber=n.get("fiber"), sugar=n.get("sugar"),
-                    sodium_mg=n.get("sodium_mg"),
+                    fiber=fiber_v, sugar=sugar_v, sodium_mg=sodium_v,
+                    extra_nutrients=extras_v,
                 ))
 
             # Replace servings — delete old, insert new
@@ -344,15 +363,35 @@ def seed_foods(session: Session) -> None:
         session.add(food)
         session.flush()  # get food.id
 
-        # FoodNutrition (per 100g)
+        # FoodNutrition (per 100g). Merge in the canonical micronutrient
+        # panel from `seed_micronutrients_data.py` if one exists for this
+        # food. The panel may override fiber/sugar/sodium_mg from the inline
+        # seed (which is sparse) AND populates the JSON `extra_nutrients`
+        # column with the full vitamin/mineral/fat panel. Foods without
+        # an entry in the lookup keep whatever the inline seed had.
+        from app.seed_micronutrients_data import (
+            get_micronutrients_for, split_into_columns_and_extras,
+        )
+        micros_panel = get_micronutrients_for(name)
+        if micros_panel:
+            top_cols, extras = split_into_columns_and_extras(micros_panel)
+            fiber_v   = top_cols.get("fiber",   n.get("fiber"))
+            sugar_v   = top_cols.get("sugar",   n.get("sugar"))
+            sodium_v  = top_cols.get("sodium_mg", n.get("sodium_mg"))
+            extras_v  = extras or None
+        else:
+            fiber_v  = n.get("fiber")
+            sugar_v  = n.get("sugar")
+            sodium_v = n.get("sodium_mg")
+            extras_v = None
         session.add(FoodNutrition(
             food_id=food.id,
             reference_unit="100g",
             reference_grams=ref_grams,
             calories=n["calories"], protein=n["protein"],
             carbs=n["carbs"], fat=n["fat"],
-            fiber=n.get("fiber"), sugar=n.get("sugar"),
-            sodium_mg=n.get("sodium_mg"),
+            fiber=fiber_v, sugar=sugar_v, sodium_mg=sodium_v,
+            extra_nutrients=extras_v,
         ))
 
         # FoodServings with pre-calculated macros

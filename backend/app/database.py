@@ -49,12 +49,32 @@ def _ensure_food_category_enum_values() -> None:
         print(f"[migration] food category enum expand failed (non-fatal): {e}")
 
 
+def _ensure_food_nutrition_extras_column() -> None:
+    """Idempotent migration: add the `extra_nutrients` JSON column to
+    `food_nutrition` if it doesn't exist. SQLModel.create_all only creates
+    *missing tables* — it never adds columns to existing tables. Without
+    this helper, deploying the new micronutrient model on top of an
+    existing prod DB would silently produce inserts that drop the JSON
+    column on the floor."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE food_nutrition "
+                "ADD COLUMN IF NOT EXISTS extra_nutrients JSONB"
+            ))
+    except Exception as e:
+        print(f"[migration] food_nutrition extras column add failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
+    _ensure_food_nutrition_extras_column()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:
         seed_equipment(session)   # must run before exercises (FK dependency)

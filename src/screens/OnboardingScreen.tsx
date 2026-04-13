@@ -37,8 +37,10 @@ const logo = require('../../assets/images/Fitness brand logo with apple symbol d
 type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
 
 function getSteps(): StepKey[] {
-  const base: StepKey[] = ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements', 'mealRoutine'];
-  // Only show Apple Health step on iOS
+  // Meal routine moved out of onboarding — users can pin meals as routines
+  // from the Home screen after the first plan generates, which gives a
+  // much better UX than typing prose at signup time.
+  const base: StepKey[] = ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements'];
   if (Platform.OS === 'ios') base.push('appleHealth');
   base.push('context');
   return base;

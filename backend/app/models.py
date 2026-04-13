@@ -310,7 +310,22 @@ class Food(SQLModel, table=True):
 
 
 class FoodNutrition(SQLModel, table=True):
-    """Canonical nutrition per 100 g (or per stated reference).  One row per food."""
+    """Canonical nutrition per 100 g (or per stated reference).  One row per food.
+
+    Top-level columns store the canonical macros + the legacy micronutrient
+    fields the seed data is most likely to populate. Everything else (full
+    vitamin/mineral panel, fatty-acid breakdown) lives in `extra_nutrients`
+    as a free-form dict keyed by the canonical field name. Adding a JSON
+    column instead of N typed columns means the schema can carry 30+ optional
+    fields without a 30-column ALTER per migration.
+
+    Canonical keys understood by the assembler (any subset may be present):
+      cholesterol, vitamin_a, vitamin_c, vitamin_d, vitamin_e, vitamin_k,
+      thiamin_b1, riboflavin_b2, niacin_b3, vitamin_b6, folate_b9,
+      vitamin_b12, biotin_b7, pantothenic_acid_b5, calcium, iron, magnesium,
+      phosphorus, potassium, zinc, selenium, copper, manganese,
+      saturated_fat, monounsaturated_fat, polyunsaturated_fat, omega_3, omega_6.
+    """
     __tablename__ = "food_nutrition"
     id: int | None = Field(default=None, primary_key=True)
     food_id: int = Field(foreign_key="foods.id", unique=True, index=True)
@@ -324,6 +339,7 @@ class FoodNutrition(SQLModel, table=True):
     fiber: float | None = Field(default=None)
     sugar: float | None = Field(default=None)
     sodium_mg: float | None = Field(default=None)
+    extra_nutrients: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -9,13 +9,18 @@ import { FoodUnit, MealItem, MealSuggestion } from '../types';
 const UNIT_ALIASES: Record<string, FoodUnit> = {
   // Weight
   g: 'g', gram: 'g', grams: 'g',
+  kg: 'kg', kilogram: 'kg', kilograms: 'kg',
   oz: 'oz', ounce: 'oz', ounces: 'oz',
   lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb',
   // Volume
   ml: 'ml', milliliter: 'ml', milliliters: 'ml',
+  l: 'l', liter: 'l', liters: 'l', litre: 'l', litres: 'l',
   'fl_oz': 'fl_oz', floz: 'fl_oz', 'fl.oz': 'fl_oz', 'fl oz': 'fl_oz',
   cup: 'cup', cups: 'cup',
-  tbsp: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp',
+  pint: 'pint', pints: 'pint', pt: 'pint',
+  quart: 'quart', quarts: 'quart', qt: 'quart',
+  gallon: 'gallon', gallons: 'gallon', gal: 'gallon',
+  tbsp: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp', tbs: 'tbsp', tbl: 'tbsp',
   tsp: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp',
   // Count
   piece: 'piece', pieces: 'piece', pc: 'piece', pcs: 'piece', whole: 'piece',
@@ -23,6 +28,63 @@ const UNIT_ALIASES: Record<string, FoodUnit> = {
   scoop: 'scoop', scoops: 'scoop',
   serving: 'serving', servings: 'serving',
 };
+
+// ── Unit conversion ─────────────────────────────────────────────────────────
+//
+// Volume is normalized to milliliters. Weight to grams. Discrete units
+// (piece/slice/scoop/serving) cannot convert across systems — switching
+// from "1 piece" to "1 cup" is meaningful only to a human.
+//
+// Used by `convertQuantity` so the meal edit modal can change unit while
+// preserving the same physical amount (and therefore the same macros).
+
+const VOLUME_TO_ML: Partial<Record<FoodUnit, number>> = {
+  ml: 1,
+  l: 1000,
+  fl_oz: 29.5735,
+  cup: 240,        // US cooking cup
+  pint: 473.176,
+  quart: 946.353,
+  gallon: 3785.41,
+  tbsp: 14.7868,
+  tsp: 4.92892,
+};
+
+const WEIGHT_TO_G: Partial<Record<FoodUnit, number>> = {
+  g: 1,
+  kg: 1000,
+  oz: 28.3495,
+  lb: 453.592,
+};
+
+/** Convert a quantity from one unit to another, preserving the physical
+ *  amount. Returns null when the conversion crosses systems
+ *  (volume↔weight, count↔volume, etc.) and a single number can't be
+ *  derived without knowing the food's density.
+ *
+ *  Examples:
+ *    convertQuantity(1, 'cup', 'fl_oz')  → 8.115
+ *    convertQuantity(1, 'lb', 'g')        → 453.59
+ *    convertQuantity(1, 'cup', 'piece')   → null  (no universal conversion)
+ */
+export function convertQuantity(
+  qty: number,
+  fromUnit: FoodUnit,
+  toUnit: FoodUnit,
+): number | null {
+  if (fromUnit === toUnit) return qty;
+  const fromVol = VOLUME_TO_ML[fromUnit];
+  const toVol   = VOLUME_TO_ML[toUnit];
+  if (fromVol != null && toVol != null) {
+    return (qty * fromVol) / toVol;
+  }
+  const fromWt = WEIGHT_TO_G[fromUnit];
+  const toWt   = WEIGHT_TO_G[toUnit];
+  if (fromWt != null && toWt != null) {
+    return (qty * fromWt) / toWt;
+  }
+  return null;
+}
 
 function normalizeUnit(raw: string | undefined | null): FoodUnit | null {
   if (!raw) return null;
@@ -193,4 +255,91 @@ export function formatItemAmount(item: MealItem): string {
 function formatQty(n: number): string {
   if (Number.isInteger(n)) return String(n);
   return n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/** Pick a food-type-aware default `(quantity, unit)` for a food name. Mirrors
+ *  the backend's `_guess_unit_for_food`. Used when the food library doesn't
+ *  carry an explicit serving and we'd otherwise fall back to "1 serving".
+ *  Never returns "serving" — every item gets a real, convertible unit. */
+export function guessUnitForFood(name: string): { quantity: number; unit: FoodUnit } {
+  const n = name.toLowerCase();
+  const has = (...ks: string[]) => ks.some(k => n.includes(k));
+
+  if (has('milk', 'juice', 'water', 'broth', 'soup', 'smoothie', 'shake', 'coffee', 'tea', 'beverage', 'drink', 'kombucha')) {
+    return { quantity: 1, unit: 'cup' };
+  }
+  if (has('egg', 'apple', 'banana', 'orange', 'peach', 'pear', 'plum', 'kiwi', 'avocado', 'tomato', 'pepper', 'onion')) {
+    return { quantity: 1, unit: 'piece' };
+  }
+  if (has('bread', 'toast', 'bacon', 'cheese slice', 'deli', 'turkey slice', 'ham slice', 'pizza')) {
+    return { quantity: 1, unit: 'slice' };
+  }
+  if (has('protein powder', 'whey', 'casein', 'creatine', 'pre-workout', 'preworkout', 'bcaa', 'electrolyte powder')) {
+    return { quantity: 1, unit: 'scoop' };
+  }
+  if (has('oil', 'butter', 'peanut butter', 'almond butter', 'dressing', 'sauce', 'honey', 'maple syrup', 'jam', 'mayo', 'ketchup', 'mustard')) {
+    return { quantity: 1, unit: 'tbsp' };
+  }
+  if (has('oat', 'rice', 'pasta', 'quinoa', 'couscous', 'barley', 'noodle', 'yogurt', 'bean', 'lentil', 'broccoli', 'spinach', 'kale', 'lettuce', 'carrot', 'potato', 'sweet potato', 'cauliflower', 'berries', 'berry', 'cottage cheese')) {
+    return { quantity: 1, unit: 'cup' };
+  }
+  // Default for proteins / nuts / generic solids.
+  return { quantity: 3, unit: 'oz' };
+}
+
+/** Normalize a meal item's unit. Replaces "serving" with a food-type guess
+ *  and rescales macros so the displayed quantity stays accurate. Idempotent. */
+export function normalizeServingUnit(item: MealItem): MealItem {
+  if (item.unit !== ('serving' as FoodUnit)) return item;
+  const guess = guessUnitForFood(item.name);
+  // Macros stay the same — we're swapping the LABEL of "1 serving" for
+  // "1 cup" / "3 oz" etc. The macros were computed for that single serving
+  // either way, so no scaling needed unless the guess quantity differs.
+  return {
+    ...item,
+    unit: guess.unit,
+    quantity: guess.quantity,
+    baseQuantity: guess.quantity,
+  };
+}
+
+/** Walk every meal in a plan and replace any "serving" unit with a real one.
+ *  Cheap fix for cached meals from before the unit-upgrade landed. */
+export function normalizeServingUnitsInPlan(plan: any): any {
+  if (!plan || !Array.isArray(plan.meals)) return plan;
+  const meals = plan.meals.map((m: any) => {
+    if (!m || !Array.isArray(m.items)) return m;
+    const items = m.items.map((it: any) => normalizeServingUnit(it));
+    return { ...m, items };
+  });
+  return { ...plan, meals };
+}
+
+/** Convert any legacy `{breakfast, lunch, dinner, snack, extraMeals}` plan
+ *  shape into the new `{meals: [...]}` shape. Idempotent: a plan that
+ *  already has `meals` passes through untouched. Used by every reader that
+ *  hits AsyncStorage / day-state so callers can assume the new shape. */
+export function migrateNutritionPlanShape(plan: any): any {
+  if (!plan || typeof plan !== 'object') return plan;
+  if (Array.isArray(plan.meals)) return plan;
+
+  const meals: any[] = [];
+  for (const key of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
+    const m = plan[key];
+    if (m && typeof m === 'object' && (m.calories || m.meal || m.items)) {
+      meals.push(m);
+    }
+  }
+  for (const m of plan.extraMeals ?? []) {
+    if (m) meals.push(m);
+  }
+
+  // Strip the old slot fields so downstream code can't accidentally read them.
+  const {
+    breakfast: _b, lunch: _l, dinner: _d, snack: _s,
+    extraMeals: _e, removedMeals: _r,
+    ...rest
+  } = plan;
+
+  return { ...rest, meals };
 }

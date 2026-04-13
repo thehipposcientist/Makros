@@ -1,4 +1,4 @@
-.PHONY: start tunnel stop reset-db wait-backend
+.PHONY: start tunnel stop reset-db wait-backend test
 
 # Run recipes in a login zsh so ~/.zprofile (brew shellenv, etc.) is sourced
 # and tools like `npx` / `node` are on PATH.
@@ -87,3 +87,9 @@ reset-db:
 
 wait-backend:
 	@until curl -sf http://localhost:8000/health >/dev/null 2>&1; do sleep 2; done
+
+test:
+	@echo ""
+	@echo "Running backend test suites..."
+	@echo ""
+	@docker exec makros-backend python -m tests.run_all

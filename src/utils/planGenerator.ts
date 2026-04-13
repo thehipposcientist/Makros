@@ -378,17 +378,21 @@ export function generateDailyNutrition(
   for (const f of availableFoods) foodMap[f.name.toLowerCase()] = f;
   for (const f of (profile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as FoodItem;
 
-  const breakfastCalories = targets.calories * 0.25;
-  const lunchCalories     = targets.calories * 0.35;
-  const dinnerCalories    = targets.calories * 0.4;
   const baseSeed = seedKey ?? `random-${Date.now()}-${Math.random()}`;
+  const mealCount = Math.max(1, Math.min(10, profile.mealsPerDay ?? 3));
+  const perCal = targets.calories / mealCount;
 
-  return {
-    breakfast: generateMealSuggestion('Breakfast', breakfastCalories, profile.foodsAvailable, foodMap, `${baseSeed}|Breakfast|${profile.goal}|${profile.goalDetails.pace}`),
-    lunch:     generateMealSuggestion('Lunch',     lunchCalories,     profile.foodsAvailable, foodMap, `${baseSeed}|Lunch|${profile.goal}|${profile.goalDetails.pace}`),
-    dinner:    generateMealSuggestion('Dinner',    dinnerCalories,    profile.foodsAvailable, foodMap, `${baseSeed}|Dinner|${profile.goal}|${profile.goalDetails.pace}`),
-    targets,
-  };
+  const meals = Array.from({ length: mealCount }, (_, i) =>
+    generateMealSuggestion(
+      `Meal ${i + 1}`,
+      perCal,
+      profile.foodsAvailable,
+      foodMap,
+      `${baseSeed}|Meal${i + 1}|${profile.goal}|${profile.goalDetails.pace}`,
+    ),
+  );
+
+  return { meals, targets };
 }
 
 export function generateDailyNutritionForDate(

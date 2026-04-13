@@ -1,0 +1,436 @@
+"""
+History-aware helpers for the workout planner.
+
+Two responsibilities, both intentionally small:
+
+  1. CONTINUITY  — `build_history_familiarity` reads the user's recent
+     completed sessions and returns a `{slug: appearances}` map. The
+     planner's `score_candidate` already accepts this dict and adds a
+     small bonus to candidates the user has done recently, so successful
+     plans keep their core exercises across regenerations.
+
+  2. SESSION-TO-SESSION TARGETS  — `propagate_session_targets` walks a
+     freshly generated plan, finds the user's most recent completed
+     performance for each exercise, and uses the existing
+     `WorkoutProgressionEngine` math to set the next session's
+     `_target_weight_lbs` / progression action / reason.
+
+The data access layer is a `HistoryLookup` callable so tests can inject
+fake history and so `workout_planner.py` itself doesn't need to import
+anything DB-related. Production callers pass `db_history_lookup(user_id,
+db_session)` from this module.
+
+Where historical workout data is read:
+    - `WorkoutSession`   (table `workout_sessions`)  — gives `user_id`,
+      `completed_at`, `workout_date`
+    - `WorkoutExercise`  (table `workout_exercises`) — joins session →
+      exercise via `exercise_id`
+    - `ExerciseSet`      (table `exercise_sets`)     — `set_number`,
+      `actual_reps`, `actual_weight_lbs`, `rpe`, `completed`
+    - `Exercise`         (table `exercises`)         — joins on `slug`
+      so the planner's `_slug` field can resolve to a `WorkoutExercise`.
+
+Where it influences the new targets:
+    - `recommend_next_session_load` reads the prior session's working
+      sets, classifies each via `engine.score_set_against_target`, and
+      applies a session-level double-progression rule (all sets at top
+      of range → +increment, majority missed → −increment, otherwise
+      hold). The output is mutated onto each exercise dict in the plan
+      under `_target_weight_lbs`, `_progression_action`, `_progression_reason`.
+"""
+from __future__ import annotations
+
+from datetime import date, timedelta
+from typing import Callable, Optional
+
+from app.workout_progression import (
+    EffortFeedback,
+    ExerciseCategory,
+    ExercisePrescription,
+    PhaseType,
+    PlannedSet,
+    ProgressionPace,
+    ProgressionPriority,
+    SetResult,
+    SetTarget,
+    SetType,
+    UserTrainingProfile,
+    WorkoutContext,
+    WorkoutFocus,
+    WorkoutProgressionEngine,
+)
+
+
+# ─── Type aliases ────────────────────────────────────────────────────────────
+
+
+# A function that returns the prior session's working sets for one
+# exercise. Production passes `db_history_lookup(user_id, db_session)`;
+# tests pass an in-memory dict-backed callable. Returning an empty list
+# means "no history" and the propagator leaves the exercise untouched.
+HistoryLookup = Callable[[str], list[SetResult]]
+
+
+# ─── Layer 1 — Continuity (history familiarity) ──────────────────────────────
+
+
+def build_history_familiarity(
+    user_id: int,
+    db_session,
+    days: int = 21,
+) -> dict[str, int]:
+    """Return `{exercise_slug: appearances}` for the user's recent completed
+    workouts. Used by `workout_planner.score_candidate` to bias selection
+    toward continuity.
+
+    A 21-day window covers ~3 weeks of training, which is the sweet spot
+    for "recent enough that the user expects to keep doing this exercise"
+    without locking in a long-stale plan forever.
+
+    Reads from `WorkoutSession` joined to `WorkoutExercise` joined to
+    `Exercise.slug`. Sessions without `completed_at` are excluded so an
+    abandoned workout doesn't bias future plans.
+    """
+    # Lazy imports so this module can be imported by tests without
+    # spinning up the SQLModel metadata.
+    from sqlmodel import select
+
+    from app.models import Exercise, WorkoutExercise, WorkoutSession
+
+    cutoff = date.today() - timedelta(days=days)
+    rows = db_session.exec(
+        select(Exercise.slug)
+        .join(WorkoutExercise, WorkoutExercise.exercise_id == Exercise.id)
+        .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+        .where(WorkoutSession.user_id == user_id)
+        .where(WorkoutSession.completed_at.is_not(None))
+        .where(WorkoutSession.workout_date >= cutoff)
+    ).all()
+
+    counts: dict[str, int] = {}
+    for slug in rows:
+        if slug:
+            counts[slug] = counts.get(slug, 0) + 1
+    return counts
+
+
+# ─── Layer 2 — Last session lookup ───────────────────────────────────────────
+
+
+def db_history_lookup(user_id: int, db_session) -> HistoryLookup:
+    """Return a `HistoryLookup` callable that pulls from the live DB.
+
+    The returned closure caches per-user state (the user's most-recent
+    completed `WorkoutSession.completed_at` cutoff) and looks up each
+    exercise lazily.
+    """
+    from sqlmodel import select
+
+    from app.models import Exercise, ExerciseSet, WorkoutExercise, WorkoutSession
+
+    def lookup(slug: str) -> list[SetResult]:
+        if not slug:
+            return []
+        # 1. Resolve slug → Exercise.id
+        exercise = db_session.exec(
+            select(Exercise).where(Exercise.slug == slug)
+        ).first()
+        if exercise is None or exercise.id is None:
+            return []
+        # 2. Most-recent completed WorkoutExercise for this user + exercise
+        last_we = db_session.exec(
+            select(WorkoutExercise)
+            .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+            .where(WorkoutSession.user_id == user_id)
+            .where(WorkoutSession.completed_at.is_not(None))
+            .where(WorkoutExercise.exercise_id == exercise.id)
+            .order_by(WorkoutSession.completed_at.desc())
+        ).first()
+        if last_we is None:
+            return []
+        # 3. Read its completed sets in order
+        sets = db_session.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id == last_we.id)
+            .where(ExerciseSet.completed == True)  # noqa: E712
+            .order_by(ExerciseSet.set_number)
+        ).all()
+        results: list[SetResult] = []
+        for s in sets:
+            if s.actual_reps is None or s.actual_weight_lbs is None:
+                continue
+            results.append(SetResult(
+                set_number=s.set_number,
+                weight_lbs=float(s.actual_weight_lbs),
+                reps=int(s.actual_reps),
+                rir=s.rir_target,        # planned RIR — best signal we have
+                feedback=None,           # not persisted yet (Phase 2+ field)
+            ))
+        return results
+
+    return lookup
+
+
+# ─── Layer 3 — Session-to-session double progression ────────────────────────
+
+
+def _build_synthetic_prescription(plan_exercise: dict) -> ExercisePrescription:
+    """Translate one exercise dict from the planner output into the
+    `ExercisePrescription` shape the existing progression engine expects.
+
+    The planner's output already carries `_role`, `_rir_target`, `sets`,
+    and `reps`. We rebuild `planned_sets` from the set count and infer
+    `category` / `progression_priority` / `increment_lbs` from the role
+    and whether the underlying movement is a compound.
+
+    This keeps the same numbers across the live in-workout engine and the
+    between-session propagator — they share the helper.
+    """
+    role = plan_exercise.get("_role", "secondary")
+    is_compound = role in ("primary", "secondary")
+    is_machine = "machine" in (plan_exercise.get("equipment") or "").lower()
+
+    if is_machine:
+        category = ExerciseCategory.MACHINE
+    elif is_compound:
+        category = ExerciseCategory.COMPOUND
+    else:
+        category = ExerciseCategory.ISOLATION
+
+    sets_n = int(plan_exercise.get("sets", 3) or 3)
+    planned_sets = [
+        PlannedSet(set_number=i + 1, set_type=SetType.STRAIGHT)
+        for i in range(sets_n)
+    ]
+
+    if category == ExerciseCategory.COMPOUND:
+        increment_lbs = 5.0
+        priority = ProgressionPriority.LOAD_FIRST
+    elif category == ExerciseCategory.MACHINE:
+        increment_lbs = 5.0
+        priority = ProgressionPriority.HYBRID
+    else:
+        increment_lbs = 2.5
+        priority = ProgressionPriority.REPS_FIRST
+
+    return ExercisePrescription(
+        exercise_name=plan_exercise.get("name", ""),
+        category=category,
+        planned_sets=planned_sets,
+        increment_lbs=increment_lbs,
+        progression_priority=priority,
+        default_start_weight_lbs=None,
+    )
+
+
+def _focus_to_enum(focus: str) -> WorkoutFocus:
+    """Best-effort string → WorkoutFocus. Falls back to FULL_BODY."""
+    f = (focus or "").lower().split()[0]
+    table = {
+        "push": WorkoutFocus.PUSH,
+        "pull": WorkoutFocus.PULL,
+        "legs": WorkoutFocus.LEGS,
+        "upper": WorkoutFocus.UPPER,
+        "lower": WorkoutFocus.LOWER,
+    }
+    return table.get(f, WorkoutFocus.FULL_BODY)
+
+
+def parse_rep_range(reps_str: str) -> Optional[tuple[int, int]]:
+    """Parse the planner's `reps` string into an integer range.
+
+    Examples:
+        "6-8"   → (6, 8)
+        "10-15" → (10, 15)
+        "30-45s" → None    (time-based)
+        "5"     → (5, 5)
+        ""      → None
+    """
+    if not reps_str:
+        return None
+    s = reps_str.strip()
+    if s.endswith("s") or "yds" in s:
+        return None  # time- or distance-based
+    if "-" in s:
+        try:
+            lo_s, hi_s = s.split("-", 1)
+            return int(lo_s.strip()), int(hi_s.strip())
+        except (ValueError, TypeError):
+            return None
+    try:
+        n = int(s)
+        return n, n
+    except ValueError:
+        return None
+
+
+def recommend_next_session_load(
+    engine: WorkoutProgressionEngine,
+    profile: UserTrainingProfile,
+    workout_context: WorkoutContext,
+    prescription: ExercisePrescription,
+    last_session_working_sets: list[SetResult],
+    prescribed_rep_range: Optional[tuple[int, int]] = None,
+) -> tuple[Optional[float], str, str]:
+    """Apply session-level double progression to recommend next-session load.
+
+    Returns `(weight_lbs, action, reason)`. `weight_lbs` may be None when
+    we have no usable history.
+
+    `prescribed_rep_range` is the rep range the planner ACTUALLY assigned
+    for this exercise (parsed from the planner's `reps` string). When
+    present, it overrides the engine's default range so the classification
+    matches what the user was actually told to do. Without it the engine
+    derives its own range from goal/category/set_type which may not match
+    the planner's prescription, causing legitimate top-of-range sets to
+    read as mid-range.
+
+    Decision logic (kept simple and auditable):
+      1. Any set with PAIN / FORM_BREAKDOWN feedback  → -10% (safety override)
+      2. ALL working sets classified `top_of_range` or `underloaded_or_strong`
+         → INCREASE by `prescription.increment_lbs * pace_multiplier`
+      3. Majority of sets classified `too_heavy_or_fatigued`
+         → DECREASE by `prescription.increment_lbs`
+      4. Otherwise → HOLD
+
+    Pace multipliers match `WorkoutProgressionEngine`:
+      conservative 0.5x, moderate 1.0x, aggressive 1.5x.
+
+    The classifications come from `engine.score_set_against_target` so the
+    live in-workout logic and the between-session logic agree on what
+    counts as "top of range" vs "missed".
+    """
+    if not last_session_working_sets:
+        return None, "hold", "no history"
+
+    # Filter to working sets only (strip warmups). We didn't persist
+    # set_type to ExerciseSet in the data layer, so we use what we have:
+    # the prior session's `set_number` order. Warmups are typically logged
+    # as separate exercises in our flow today.
+    working_sets = list(last_session_working_sets)
+
+    # Build the rep-range target. Prefer the planner's explicitly-assigned
+    # range (so the user's "all sets at 8 on 6-8" reads as top-of-range),
+    # fall back to the engine's default goal/category/set_type derivation.
+    if prescribed_rep_range is not None:
+        target = SetTarget(
+            set_number=1,
+            set_type=SetType.STRAIGHT,
+            rep_min=prescribed_rep_range[0],
+            rep_max=prescribed_rep_range[1],
+            rir_min=1.0,
+            rir_max=2.5,
+        )
+    else:
+        target = engine.build_set_target(profile, workout_context, prescription, set_number=1)
+
+    # 1. Safety override
+    for s in working_sets:
+        if s.feedback in (EffortFeedback.PAIN, EffortFeedback.FORM_BREAKDOWN):
+            new_weight = round(s.weight_lbs * 0.9, 1)
+            return new_weight, "decrease", "Pain or form breakdown last session — reducing 10%"
+
+    # 2. Classify each working set
+    classifications: list[str] = []
+    for s in working_sets:
+        _score, classification = engine.score_set_against_target(s, target)
+        classifications.append(classification)
+
+    last_weight = working_sets[-1].weight_lbs
+    pace_mult = {
+        ProgressionPace.CONSERVATIVE: 0.5,
+        ProgressionPace.MODERATE: 1.0,
+        ProgressionPace.AGGRESSIVE: 1.5,
+    }.get(profile.progression_pace, 1.0)
+    increment = prescription.increment_lbs * pace_mult
+
+    top_set_count = sum(
+        1 for c in classifications if c in ("top_of_range", "underloaded_or_strong")
+    )
+    miss_count = sum(1 for c in classifications if c == "too_heavy_or_fatigued")
+
+    # 3. All sets at top of range → increase
+    if top_set_count == len(classifications):
+        new_weight = engine.round_to_increment(
+            last_weight + increment, prescription.increment_lbs,
+        )
+        reason = f"All {len(classifications)} sets hit top of range — adding {increment:g} lb"
+        return new_weight, "increase", reason
+
+    # 4. Majority missed → decrease
+    if miss_count >= (len(classifications) + 1) // 2:
+        new_weight = engine.round_to_increment(
+            last_weight - prescription.increment_lbs,
+            prescription.increment_lbs,
+        )
+        reason = f"{miss_count}/{len(classifications)} sets below target — reducing {prescription.increment_lbs:g} lb"
+        return new_weight, "decrease", reason
+
+    # 5. Otherwise hold
+    reason = "Performance was on target — keep load and try for more reps"
+    return last_weight, "hold", reason
+
+
+# ─── Layer 4 — Walk the plan and propagate ──────────────────────────────────
+
+
+def propagate_session_targets(
+    plan: dict,
+    profile: UserTrainingProfile,
+    history_lookup: HistoryLookup,
+    engine: Optional[WorkoutProgressionEngine] = None,
+    phase: PhaseType = PhaseType.ACCUMULATION,
+    week_number: int = 1,
+) -> dict:
+    """Mutate every exercise in the plan in place to add session-level
+    progression targets based on the user's prior performance.
+
+    Sets three new keys on each exercise dict:
+      * `_target_weight_lbs` — recommended next-session starting load
+      * `_progression_action` — "increase" | "hold" | "decrease"
+      * `_progression_reason` — human-readable explanation
+
+    Exercises with no history are left untouched (the live progression
+    engine will pick a starting weight from user input on day 1).
+    """
+    engine = engine or WorkoutProgressionEngine()
+
+    for day in plan.get("workout_plan", {}).get("days", []) or []:
+        focus = _focus_to_enum(day.get("focus", "Full Body"))
+        ctx = WorkoutContext(
+            workout_name=day.get("day", "Day"),
+            focus=focus,
+            phase=phase,
+            week_number=week_number,
+        )
+        for ex in day.get("exercises", []) or []:
+            slug = ex.get("_slug")
+            if not slug:
+                continue
+            history = history_lookup(slug)
+            if not history:
+                continue
+            prescription = _build_synthetic_prescription(ex)
+            # Carry the planner's prescribed rep range into the engine so
+            # classification reads the same range the user was told to hit.
+            rep_range = parse_rep_range(ex.get("reps", ""))
+            weight, action, reason = recommend_next_session_load(
+                engine, profile, ctx, prescription, history,
+                prescribed_rep_range=rep_range,
+            )
+            if weight is not None:
+                ex["_target_weight_lbs"] = round(weight, 1)
+            ex["_progression_action"] = action
+            ex["_progression_reason"] = reason
+    return plan
+
+
+# ─── Convenience: in-memory history lookup for tests ────────────────────────
+
+
+def make_dict_history_lookup(history: dict[str, list[SetResult]]) -> HistoryLookup:
+    """Wrap a dict in a `HistoryLookup` callable. Tests pass a fixed map
+    of `{slug: list[SetResult]}` so they don't need a real database."""
+    def lookup(slug: str) -> list[SetResult]:
+        return list(history.get(slug, []))
+    return lookup

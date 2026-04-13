@@ -76,9 +76,41 @@ if TYPE_CHECKING:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+#: Canonical micronutrient field names the assembler will round-trip from
+#: the food data into the meal output. Any subset may be present on a given
+#: food — missing fields default to 0. Adding a new field here automatically
+#: makes it flow through `build_food_lookup` → `assemble_meal` → the
+#: meal["micronutrients"] dict the frontend displays. Source data backed
+#: only by the seed/USDA today: fiber, sugar, sodium. Everything else is
+#: schema-supported via the FoodNutrition.extra_nutrients JSON column and
+#: will populate as the seed gets enriched.
+MICRONUTRIENT_FIELDS: tuple[str, ...] = (
+    # Always-present in the legacy contract — seed data covers these.
+    "fiber", "sugar", "sodium",
+    # Fats panel.
+    "cholesterol",
+    "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+    "omega_3", "omega_6",
+    # Vitamins.
+    "vitamin_a", "vitamin_c", "vitamin_d", "vitamin_e", "vitamin_k",
+    "thiamin_b1", "riboflavin_b2", "niacin_b3", "vitamin_b6",
+    "folate_b9", "vitamin_b12", "biotin_b7", "pantothenic_acid_b5",
+    # Minerals.
+    "calcium", "iron", "magnesium", "phosphorus", "potassium",
+    "zinc", "selenium", "copper", "manganese",
+)
+
+
 @dataclass
 class FoodMacros:
-    """Per-serving macros for one food, looked up from enrichment."""
+    """Per-serving macros + micronutrients for one food.
+
+    `micros` carries every key in `MICRONUTRIENT_FIELDS`, defaulting to 0
+    when the source data doesn't have a value. Keeping micros in a dict
+    (rather than ~30 dataclass fields) means the assembler can iterate
+    them generically and adding a new field is a one-line change to
+    `MICRONUTRIENT_FIELDS`.
+    """
     name: str
     serving_label: str        # human-readable: "6 oz (170g)"
     serving_quantity: float   # numeric: 6
@@ -87,20 +119,29 @@ class FoodMacros:
     protein: float
     carbs: float
     fat: float
+    # Per-serving micronutrient values. Keys must come from
+    # MICRONUTRIENT_FIELDS; missing keys are treated as 0 by the assembler.
+    micros: dict = field(default_factory=dict)
     # True when these macros are fabricated because enrichment didn't
     # know this food. Meals containing stubs are flagged `confidence:
     # "low"` on the output so callers don't treat the numbers as
-    # trustworthy. Defaults to False so existing callers don't break.
+    # trustworthy.
     is_stub: bool = False
 
 
 @dataclass
 class MealSkeleton:
-    """The AI's creative contribution — a meal concept, no math."""
+    """The AI's creative contribution — a meal concept, no math.
+
+    Meals are no longer tied to named slots (breakfast/lunch/dinner). Every
+    meal is equal; the only positional info is `index` within the template.
+    Keeping `index` around lets the validator dedupe and the solver split
+    the daily target evenly. `target_fraction` is computed as 1/N.
+    """
     name: str                 # "Grilled chicken rice bowl"
-    slot: str                 # "breakfast" | "lunch" | "dinner" | "snack"
+    index: int                # 0-based position in the template
     food_refs: list[str]      # ["chicken breast", "white rice", "broccoli"]
-    target_fraction: float    # 0.25 = this meal gets 25% of daily calories
+    target_fraction: float    # 1/N of daily calories
 
 
 @dataclass
@@ -136,13 +177,12 @@ _SKELETON_SCHEMA = {
                                 "type": "object",
                                 "properties": {
                                     "name": {"type": "string"},
-                                    "slot": {"type": "string"},
                                     "food_refs": {
                                         "type": "array",
                                         "items": {"type": "string"},
                                     },
                                 },
-                                "required": ["name", "slot", "food_refs"],
+                                "required": ["name", "food_refs"],
                             },
                         },
                     },
@@ -155,22 +195,19 @@ _SKELETON_SCHEMA = {
 }
 
 
-def _slot_order(meals_per_day: int) -> list[str]:
-    """Which slots are active for this user's meal count."""
-    if meals_per_day == 2:
-        return ["lunch", "dinner"]
-    if meals_per_day == 4:
-        return ["breakfast", "lunch", "dinner", "snack"]
-    return ["breakfast", "lunch", "dinner"]
-
-
-def _slot_fractions(meals_per_day: int) -> dict[str, float]:
-    """Fraction of daily calories each slot gets. Mirrors compute_tdee_and_targets."""
-    if meals_per_day == 2:
-        return {"lunch": 0.45, "dinner": 0.55}
-    if meals_per_day == 4:
-        return {"breakfast": 0.25, "lunch": 0.30, "dinner": 0.35, "snack": 0.10}
-    return {"breakfast": 0.25, "lunch": 0.35, "dinner": 0.40}
+def _clamp_meals_per_day(n: int) -> int:
+    """Clamp meals-per-day to a sane range. Users may pick 1-10. Anything
+    outside that almost certainly indicates a bug, not a real diet."""
+    if not isinstance(n, int):
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            return 3
+    if n < 1:
+        return 1
+    if n > 10:
+        return 10
+    return n
 
 
 def build_skeleton_prompt(
@@ -186,7 +223,7 @@ def build_skeleton_prompt(
     combinations from the user's allowed list.
     """
     t_cal, t_prot, t_carbs, t_fat = target_macros
-    slots = _slot_order(req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3)
+    meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     foods_str = ", ".join(allowed_foods) if allowed_foods else "general healthy foods"
 
     diet_lines: list[str] = []
@@ -230,13 +267,17 @@ USER:
 AVAILABLE FOODS — use ONLY these names, no substitutions, no additions:
 {foods_str}
 
-MEALS PER DAY: {slots}
+MEALS PER DAY: {meals_per_day}
+
+The user eats {meals_per_day} meal(s) per day. Do NOT assume breakfast / lunch / dinner structure —
+simply return {meals_per_day} well-balanced meals that together cover the day's macros. A goal like
+longevity may only want 2 meals; a muscle-gain goal may want 5. Respect the count and avoid
+naming meals after times of day unless the user asked for it.
 
 {variety_line}
 
 For every meal, return:
   - name: short recipe name (e.g. "Grilled chicken rice bowl")
-  - slot: one of {slots}
   - food_refs: 2-4 food names copied EXACTLY from the available-foods list above.
                Every string in food_refs MUST match a name in that list.
 
@@ -253,13 +294,13 @@ Return JSON shaped like:
   "templates": [
     {{
       "meals": [
-        {{"name": "Grilled chicken rice bowl", "slot": "lunch", "food_refs": ["chicken breast", "white rice", "broccoli"]}}
+        {{"name": "Grilled chicken rice bowl", "food_refs": ["chicken breast", "white rice", "broccoli"]}}
       ]
     }}
   ]
 }}
 
-Return {variety_n} template{'' if variety_n == 1 else 's'}. Each template must cover every slot: {slots}.
+Return {variety_n} template{'' if variety_n == 1 else 's'}. Each template must contain exactly {meals_per_day} meal(s).
 Do NOT include calories, protein, carbs, fat, grams, or quantities anywhere.
 """
 
@@ -321,21 +362,21 @@ def call_skeleton_ai(
                 templates_raw.append(templates_raw[-1])
 
             templates: list[TemplateSkeleton] = []
-            slot_fracs = _slot_fractions(
-                req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
-            )
+            target_count = _clamp_meals_per_day(req.mealsPerDay)
+            per_meal_fraction = 1.0 / target_count if target_count > 0 else 1.0
             for tpl_raw in templates_raw:
                 meals_raw = tpl_raw.get("meals") or []
+                # Truncate or pad to exactly `target_count` meals. The AI
+                # sometimes over- or under-shoots; we don't want templates
+                # to have mismatched lengths when variety > 1.
+                meals_raw = list(meals_raw)[:target_count]
                 meals: list[MealSkeleton] = []
-                for m in meals_raw:
-                    slot = str(m.get("slot", "")).lower().strip()
-                    if slot not in slot_fracs:
-                        continue
+                for i, m in enumerate(meals_raw):
                     meals.append(MealSkeleton(
-                        name=str(m.get("name", "Meal")).strip() or "Meal",
-                        slot=slot,
+                        name=str(m.get("name", "Meal")).strip() or f"Meal {i+1}",
+                        index=i,
                         food_refs=[str(f).strip() for f in (m.get("food_refs") or []) if f],
-                        target_fraction=slot_fracs[slot],
+                        target_fraction=per_meal_fraction,
                     ))
                 templates.append(TemplateSkeleton(meals=meals))
 
@@ -420,20 +461,9 @@ def _best_allowed_match(ref: str, allowed_token_map: dict[str, list[str]]) -> st
     return candidates[0][2]
 
 
-# ─── Slot-aware food classification ──────────────────────────────────────────
-#
-# No real tag system yet (Phase 2 of the bigger refactor adds that). Until
-# then we use keyword heuristics on food names to pick slot-appropriate
-# fallback items. The keyword lists are intentionally conservative — we'd
-# rather miss a valid breakfast food than accidentally stick oatmeal on a
-# dinner card.
-
-_BREAKFAST_KEYWORDS = {
-    "oat", "oats", "oatmeal", "egg", "eggs", "yogurt", "granola", "cereal",
-    "pancake", "waffle", "bagel", "toast", "muffin", "banana", "berry",
-    "berries", "blueberry", "strawberry", "milk", "butter", "peanut",
-    "almond butter", "cottage cheese",
-}
+# ─── Food category heuristics (protein / carb / vegetable) ──────────────────
+# Used only by the balanced-meal fallback when a skeleton meal loses all
+# its food_refs after validation and we need to synthesize a replacement.
 
 _PROTEIN_KEYWORDS = {
     "chicken", "beef", "steak", "turkey", "pork", "fish", "salmon", "tuna",
@@ -448,17 +478,31 @@ _CARB_KEYWORDS = {
     "bulgur",
 }
 
+# Preferred carbs — picked first by the balanced fallback when available.
+# Whole grains and high-fiber starches give meals real fiber numbers
+# (3-10x what white rice / white pasta provide), which matches what
+# users expect when they see "balanced meal" in their plan.
+_CARB_KEYWORDS_PREFERRED = {
+    "brown rice", "quinoa", "oats", "oatmeal", "whole wheat", "whole grain",
+    "sweet potato", "barley", "bulgur", "farro", "buckwheat", "wild rice",
+}
+
 _VEG_KEYWORDS = {
     "broccoli", "spinach", "kale", "lettuce", "tomato", "cucumber", "carrot",
     "pepper", "onion", "zucchini", "asparagus", "green bean", "mushroom",
     "cauliflower", "cabbage", "salad",
 }
 
-_SNACK_KEYWORDS = {
-    "apple", "banana", "orange", "grape", "berry", "berries", "nut", "nuts",
-    "almond", "cashew", "walnut", "peanut", "jerky", "protein bar",
-    "greek yogurt", "cottage cheese", "cheese", "rice cake", "hummus",
-    "carrot", "celery",
+# Fat sources — needed in the balanced fallback so the solver can hit
+# real-world fat targets. Without one, the picker returns lean protein +
+# carb + low-fat veg and the solver can't physically reach 50g+ fat
+# regardless of multipliers, so it backs off everything else and the
+# whole meal undershoots calories.
+_FAT_KEYWORDS = {
+    "olive oil", "oil", "butter", "ghee", "avocado", "almond", "almonds",
+    "cashew", "cashews", "walnut", "walnuts", "peanut", "peanut butter",
+    "almond butter", "cheese", "cheddar", "mozzarella", "parmesan",
+    "feta", "cream cheese", "coconut", "tahini", "mayo", "mayonnaise",
 }
 
 
@@ -467,110 +511,27 @@ def _food_matches_keywords(name: str, keywords: set[str]) -> bool:
     return any(k in n for k in keywords)
 
 
-def _slot_aware_fallback(
-    slot: str,
-    allowed_foods: list[str],
-    used: set[str] | None = None,
-) -> list[str]:
-    """Pick a small realistic food combination for `slot` from `allowed_foods`.
-
-    Rules:
-      - breakfast: prefer 2-3 breakfast-tagged foods (e.g. oats + eggs +
-        berries). If none match, fall through to generic protein + carb.
-      - lunch/dinner: require at least one protein, prefer protein + carb
-        + vegetable.
-      - snack: prefer protein + fruit, or protein + fat.
-      - If there aren't enough slot-specific candidates, degrade to the
-        first 2-3 allowed foods not already in `used`. We still never
-        return an empty list — the solver must have something to work on.
-
-    `used` is an optional set of already-chosen foods from other meals in
-    the same template; we try to avoid them so templates feel varied.
-    """
-    if not allowed_foods:
-        return []
-    used = used or set()
-    available = [f for f in allowed_foods if f not in used] or list(allowed_foods)
-
-    def pick_one(keywords: set[str], pool: list[str]) -> str | None:
-        for f in pool:
-            if _food_matches_keywords(f, keywords):
-                return f
-        return None
-
-    def pick_many(keywords: set[str], pool: list[str], n: int) -> list[str]:
-        out: list[str] = []
-        for f in pool:
-            if len(out) >= n:
-                break
-            if _food_matches_keywords(f, keywords):
-                out.append(f)
-        return out
-
-    slot = (slot or "").lower()
-
-    if slot == "breakfast":
-        picks = pick_many(_BREAKFAST_KEYWORDS, available, 3)
-        if len(picks) >= 2:
-            return picks
-        # Degrade: protein + carb.
-        prot = pick_one(_PROTEIN_KEYWORDS, available)
-        carb = pick_one(_CARB_KEYWORDS, available)
-        picks = [x for x in (prot, carb) if x]
-        if picks:
-            return picks
-
-    if slot in ("lunch", "dinner"):
-        prot = pick_one(_PROTEIN_KEYWORDS, available)
-        # Lunch/dinner REQUIRES a protein source. If the unused pool has
-        # none, re-pick from the full allowed list — repeating a food
-        # across meals is better than shipping a proteinless dinner.
-        if not prot:
-            prot = pick_one(_PROTEIN_KEYWORDS, list(allowed_foods))
-        carb = pick_one(_CARB_KEYWORDS, available)
-        veg  = pick_one(_VEG_KEYWORDS,  available)
-        picks = [x for x in (prot, carb, veg) if x]
-        if picks:
-            return picks
-
-    if slot == "snack":
-        prot = pick_one(_PROTEIN_KEYWORDS, available)
-        other = pick_one(_SNACK_KEYWORDS, [f for f in available if f != prot])
-        picks = [x for x in (prot, other) if x]
-        if picks:
-            return picks
-
-    # Last resort: first two available foods.
-    return available[:2]
-
-
 def validate_and_repair_skeletons(
     templates: list[TemplateSkeleton],
     allowed_foods: list[str],
-    required_slots: list[str] | None = None,
+    required_count: int,
 ) -> list[TemplateSkeleton]:
-    """Drop any food_ref not in the allowed list; pick a slot-aware
-    fallback when a meal ends up empty; guarantee every required slot
-    exists on every template.
+    """Drop any food_ref not in the allowed list; pad/truncate so every
+    template has exactly `required_count` meals.
 
-    `required_slots` comes from `_slot_order(mealsPerDay)` and is the set
-    of slot names the user's plan must cover (e.g. `["breakfast", "lunch",
-    "dinner"]` for 3 meals). Any template missing a required slot gets a
-    repaired meal appended using `_slot_aware_fallback`. This enforces the
-    prompt's "every template covers every slot" instruction that used to
-    be advisory.
+    Meals are no longer slot-typed — every meal is equal and balanced
+    (protein + carb + veg). If a template is short, we append a generic
+    balanced fallback. If long, we truncate.
     """
-    if not allowed_foods:
+    if not allowed_foods or required_count <= 0:
         return templates
 
     allowed_token_map = {name: _tokens(name) for name in allowed_foods}
 
     for tpl in templates:
-        # Track which foods this template already uses so fallback picks
-        # can bias away from repetition when possible.
         used_in_template: set[str] = set()
 
-        # 1. Clean every existing meal.
+        # 1. Clean every existing meal's food refs.
         for meal in tpl.meals:
             cleaned: list[str] = []
             seen: set[str] = set()
@@ -580,48 +541,95 @@ def validate_and_repair_skeletons(
                     cleaned.append(match)
                     seen.add(match.lower())
             if not cleaned:
-                fallback = _slot_aware_fallback(meal.slot, allowed_foods, used_in_template)
+                fallback = _balanced_meal_fallback(allowed_foods, used_in_template)
                 print(
-                    f"[meal_assembler] meal '{meal.name}' ({meal.slot}) had no "
-                    f"valid foods — slot-aware fallback: {fallback}"
+                    f"[meal_assembler] meal '{meal.name}' had no valid "
+                    f"foods — balanced fallback: {fallback}"
                 )
                 cleaned = fallback
             meal.food_refs = cleaned
             used_in_template.update(f.lower() for f in cleaned)
 
-        # 2. Guarantee every required slot exists on this template.
-        if required_slots:
-            present_slots = {m.slot for m in tpl.meals}
-            fractions = _slot_fractions(len(required_slots) if len(required_slots) in (2, 3, 4) else 3)
-            for slot in required_slots:
-                if slot in present_slots:
-                    continue
-                fallback = _slot_aware_fallback(slot, allowed_foods, used_in_template)
-                if not fallback:
-                    # Nothing to build a meal from — skip silently rather
-                    # than appending a ghost meal. Downstream will treat
-                    # the template as slot-deficient.
-                    print(f"[meal_assembler] could not repair missing slot '{slot}' — no allowed foods")
-                    continue
-                print(f"[meal_assembler] template missing '{slot}' slot — repaired with {fallback}")
-                tpl.meals.append(MealSkeleton(
-                    name=_slot_default_name(slot),
-                    slot=slot,
-                    food_refs=fallback,
-                    target_fraction=fractions.get(slot, 0.0),
-                ))
-                used_in_template.update(f.lower() for f in fallback)
+        # 2. Pad or truncate to required_count.
+        if len(tpl.meals) > required_count:
+            tpl.meals = tpl.meals[:required_count]
+        while len(tpl.meals) < required_count:
+            fallback = _balanced_meal_fallback(allowed_foods, used_in_template)
+            if not fallback:
+                print("[meal_assembler] cannot pad template — no allowed foods")
+                break
+            idx = len(tpl.meals)
+            tpl.meals.append(MealSkeleton(
+                name=f"Meal {idx+1}",
+                index=idx,
+                food_refs=fallback,
+                target_fraction=1.0 / required_count,
+            ))
+            used_in_template.update(f.lower() for f in fallback)
+
+        # 3. Reassign indices + fractions cleanly in case we truncated.
+        n = len(tpl.meals)
+        for i, m in enumerate(tpl.meals):
+            m.index = i
+            m.target_fraction = 1.0 / n if n > 0 else 0.0
+
     return templates
 
 
-def _slot_default_name(slot: str) -> str:
-    """Human-readable default name when we auto-repair a missing slot."""
-    return {
-        "breakfast": "Morning plate",
-        "lunch":     "Midday plate",
-        "dinner":    "Evening plate",
-        "snack":     "Snack plate",
-    }.get(slot, slot.capitalize())
+def _balanced_meal_fallback(
+    allowed_foods: list[str],
+    used: set[str] | None = None,
+) -> list[str]:
+    """Pick a protein + carb + vegetable + fat combo from allowed_foods.
+
+    Including a fat source is critical for the portion solver: without one,
+    the picker returns lean protein + carb + low-fat veg and the solver can
+    never reach realistic fat targets (50–80 g for a 1500–2000 cal meal),
+    which forces it to back off other macros and undershoot calories too.
+
+    If a category isn't present in the allowed list we degrade to whatever
+    is available, but we never return an empty list — the solver needs at
+    least something to work on.
+    """
+    if not allowed_foods:
+        return []
+    used = used or set()
+    available = [f for f in allowed_foods if f not in used] or list(allowed_foods)
+
+    def pick(keywords: set[str], excluded: set[str] | None = None) -> str | None:
+        excl = excluded or set()
+        for f in available:
+            if f in excl:
+                continue
+            if _food_matches_keywords(f, keywords):
+                return f
+        for f in allowed_foods:
+            if f in excl:
+                continue
+            if _food_matches_keywords(f, keywords):
+                return f
+        return None
+
+    prot = pick(_PROTEIN_KEYWORDS)
+    chosen = {prot} if prot else set()
+    # Prefer whole-grain / high-fiber carbs first (brown rice, oats,
+    # quinoa, sweet potato), fall back to refined grains (white rice,
+    # pasta, bread) only when none of the preferred ones are in the
+    # allowed list. White rice + broccoli gives ~3g fiber; brown rice +
+    # broccoli gives ~6g — same calorie cost, much better fiber profile.
+    carb = pick(_CARB_KEYWORDS_PREFERRED, excluded=chosen)
+    if not carb:
+        carb = pick(_CARB_KEYWORDS, excluded=chosen)
+    if carb:
+        chosen.add(carb)
+    veg = pick(_VEG_KEYWORDS, excluded=chosen)
+    if veg:
+        chosen.add(veg)
+    fat = pick(_FAT_KEYWORDS, excluded=chosen)
+    picks = [x for x in (prot, carb, veg, fat) if x]
+    if picks:
+        return picks
+    return available[:2]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -722,6 +730,24 @@ def build_food_lookup(enriched: dict | None) -> dict[str, FoodMacros]:
         else:
             label = str(f.get("serving", "1 serving"))
             qty, unit = _parse_serving(label)
+        # Never ship "serving" as a unit — it's meaningless to the user
+        # and pre-empts macro scaling. Upgrade to a food-type-aware default
+        # (cup for liquids, oz for meat, piece for whole items).
+        if unit == "serving":
+            qty, unit = _guess_unit_for_food(name)
+            label = f"{qty:g} {unit}"
+        # Map every supported micronutrient field. Hydrate flattens both
+        # legacy columns (fiber/sugar/sodium) and `extra_nutrients` into
+        # the same dict, so a single loop captures everything.
+        micros: dict[str, float] = {}
+        for k in MICRONUTRIENT_FIELDS:
+            v = f.get(k)
+            if v is None:
+                continue
+            try:
+                micros[k] = float(v)
+            except (TypeError, ValueError):
+                continue
         lookup[name.lower()] = FoodMacros(
             name=name,
             serving_label=label,
@@ -731,7 +757,17 @@ def build_food_lookup(enriched: dict | None) -> dict[str, FoodMacros]:
             protein=float(f.get("protein", 0) or 0),
             carbs=float(f.get("carbs", 0) or 0),
             fat=float(f.get("fat", 0) or 0),
+            micros=micros,
         )
+    # Coverage warning — flag when most foods have only the basic 4 macros.
+    # Helps spot a regression in the hydrate path or a thin seed file.
+    if lookup:
+        with_micros = sum(1 for fm in lookup.values() if any(v > 0 for v in fm.micros.values()))
+        if with_micros < len(lookup) // 4:
+            print(
+                f"[meal_assembler] LOW MICRO COVERAGE — only {with_micros}/{len(lookup)} "
+                f"foods carry any micronutrient data. Nutrition details will be sparse."
+            )
     return lookup
 
 
@@ -788,6 +824,7 @@ def _get_macros(name: str, lookup: dict[str, FoodMacros]) -> FoodMacros:
     return FoodMacros(
         name=name, serving_label=f"{qty:g} {unit}", serving_quantity=qty,
         serving_unit=unit, calories=150, protein=10, carbs=15, fat=5,
+        micros={},
         is_stub=True,
     )
 
@@ -808,12 +845,17 @@ def solve_portions(
 
     Approach: gradient descent on squared relative error across all four
     macros. 100 iterations, learning rate 0.1, multipliers clamped to
-    [0.25, 5.0] so we can't ask the user to eat 0.02 eggs or 12 cups of oats.
+    [0.1, 12.0]. The wide upper bound is intentional — when only one or
+    two foods cover a category (e.g. only one fat source on the user's
+    list and a 1500-cal solo meal that needs 50g+ fat), the solver has
+    to dial that food up significantly to satisfy the target. Capping at
+    5x silently prevented the meal from reaching its calorie target and
+    looked like a "max meal calories" bug.
 
     This is not globally optimal but it's transparent, dependency-free, and
     consistently lands within ~5% of target for realistic meals. The final
     plan-level normalizer (`_normalize_template_to_target` in plans.py)
-    closes any residual drift to exactly the daily target.
+    closes any residual drift to exactly the meal/day target.
     """
     if not foods:
         return []
@@ -867,11 +909,14 @@ def solve_portions(
               + weights["fat"]  * err["fat"]  * (foods[j].fat      / targets["fat"])
             )
             m[j] -= lr * g
-            # Clamp so no food goes to zero (= "remove it") or explodes.
-            if m[j] < 0.25:
-                m[j] = 0.25
-            elif m[j] > 5.0:
-                m[j] = 5.0
+            # Clamp: floor prevents a food from going to ~0 ("remove it"
+            # which the user wouldn't expect); ceiling prevents the
+            # solver from running away to absurd portions on a single food.
+            # The ceiling is generous on purpose — see docstring.
+            if m[j] < 0.1:
+                m[j] = 0.1
+            elif m[j] > 12.0:
+                m[j] = 12.0
     return m
 
 
@@ -972,6 +1017,10 @@ def assemble_meal(
 
     items: list[dict] = []
     total_cal = total_pro = total_cb = total_ft = 0.0
+    # Aggregate every supported micronutrient field. Initialised to zero
+    # for every key in MICRONUTRIENT_FIELDS so the output dict always has
+    # the full schema (frontend can show "—" instead of missing keys).
+    total_micros: dict[str, float] = {k: 0.0 for k in MICRONUTRIENT_FIELDS}
     for food, mult in zip(foods, multipliers):
         item_cal = food.calories * mult
         item_pro = food.protein * mult
@@ -990,6 +1039,9 @@ def assemble_meal(
         total_pro += item_pro
         total_cb  += item_cb
         total_ft  += item_ft
+        for k, v in (food.micros or {}).items():
+            if k in total_micros:
+                total_micros[k] += v * mult
 
     # Quality flag: stubs or residual-out-of-bounds both degrade confidence.
     solver_ok = _solver_accepts(post_round_residual)
@@ -997,7 +1049,7 @@ def assemble_meal(
     if stub_names or not solver_ok:
         confidence = "low"
         print(
-            f"[meal_assembler] LOW-CONFIDENCE meal '{skeleton.name}' ({skeleton.slot}): "
+            f"[meal_assembler] LOW-CONFIDENCE meal '{skeleton.name}' (#{skeleton.index+1}): "
             f"stubs={stub_names or '-'} "
             f"residual_cal={post_round_residual['cal']:+.2f} "
             f"residual_prot={post_round_residual['prot']:+.2f} "
@@ -1007,6 +1059,17 @@ def assemble_meal(
     else:
         confidence = "high"
 
+    # Round every micronutrient to 2 dp for display. Fiber/sugar use 1 dp
+    # to match the legacy frontend display; sodium goes to whole mg.
+    micros_out: dict[str, float] = {}
+    for k, v in total_micros.items():
+        if k == "fiber" or k == "sugar":
+            micros_out[k] = round(v, 1)
+        elif k == "sodium":
+            micros_out[k] = round(v)
+        else:
+            micros_out[k] = round(v, 2)
+
     return {
         "meal": skeleton.name,
         "items": items,
@@ -1014,12 +1077,14 @@ def assemble_meal(
         "protein": round(total_pro, 1),
         "carbs": round(total_cb, 1),
         "fat": round(total_ft, 1),
-        "fiber": 0,
-        "micronutrients": {
-            "fiber": 0, "sugar": 0, "sodium": 0, "cholesterol": 0,
-            "vitaminA": 0, "vitaminC": 0, "vitaminD": 0, "calcium": 0,
-            "iron": 0, "potassium": 0,
-        },
+        # Top-level fiber for the legacy display path that reads it
+        # without going through `micronutrients`.
+        "fiber": micros_out.get("fiber", 0),
+        # Full micronutrient panel — every key in MICRONUTRIENT_FIELDS is
+        # present, defaulting to 0 when the source food data didn't carry
+        # a value. Frontend can render "—" for zero entries instead of
+        # showing fabricated numbers.
+        "micronutrients": micros_out,
         "estimated_alignment": "balanced",
         "isRoutine": False,
         "confidence": confidence,
@@ -1039,31 +1104,67 @@ def assemble_template(
     target_carb: int,
     target_fat: int,
 ) -> dict:
-    """Turn one template's worth of skeletons into the canonical plan dict."""
-    plan: dict = {
-        "targets": {
-            "calories": target_cal,
-            "protein": target_prot,
-            "carbs": target_carb,
-            "fat": target_fat,
-        },
-    }
+    """Turn one template's worth of skeletons into the canonical plan dict.
+
+    Output shape:
+        {
+          "targets": {calories, protein, carbs, fat},
+          "meals": [ {name, items, calories, ...}, ... ]
+        }
+    No named slots — meals are just a flat list the client iterates.
+    """
+    meals_out: list[dict] = []
     for meal in skeleton.meals:
         frac = meal.target_fraction
-        plan[meal.slot] = assemble_meal(
+        meals_out.append(assemble_meal(
             meal,
             food_lookup,
             target_cal  * frac,
             target_prot * frac,
             target_carb * frac,
             target_fat  * frac,
-        )
-    return plan
+        ))
+    return {
+        "targets": {
+            "calories": target_cal,
+            "protein": target_prot,
+            "carbs": target_carb,
+            "fat": target_fat,
+        },
+        "meals": meals_out,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 6 — Top-level entry
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_deterministic_template(allowed_foods: list[str], meal_count: int) -> TemplateSkeleton:
+    """Build a `TemplateSkeleton` of `meal_count` balanced meals without any
+    AI involvement. Used by the variety=1 path so regenerating yields the
+    exact same template every time given the same `allowed_foods` list.
+
+    Each meal is a deterministic balanced pick (protein + carb + veg)
+    drawn from `_balanced_meal_fallback`. The food picker is biased away
+    from foods already used in the same template so meal N looks distinct
+    from meal N-1 even though the algorithm is fully deterministic.
+    """
+    meals: list[MealSkeleton] = []
+    used: set[str] = set()
+    frac = 1.0 / meal_count if meal_count > 0 else 0.0
+    for i in range(meal_count):
+        picks = _balanced_meal_fallback(allowed_foods, used)
+        if not picks:
+            picks = list(allowed_foods[:2])
+        used.update(p.lower() for p in picks)
+        meals.append(MealSkeleton(
+            name=f"Balanced meal {i + 1}",
+            index=i,
+            food_refs=picks,
+            target_fraction=frac,
+        ))
+    return TemplateSkeleton(meals=meals)
 
 
 def assemble_nutrition_response(
@@ -1076,47 +1177,140 @@ def assemble_nutrition_response(
 ) -> dict:
     """Build the full nutrition response using the hybrid pipeline.
 
-    Returns a dict in the same shape _call_nutrition_ai used to produce, so
-    plans.py doesn't need to care which pipeline ran:
-
+    Returns:
         {
           "nutritionistNote": "...",
           "supplementStack": [...],
           "nutrition_plans": [
-            {"targets": {...}, "breakfast": {...}, "lunch": {...}, ...},
+            {"targets": {...}, "meals": [ {...}, {...}, ... ]},
             ...
           ]
         }
+
+    Meals are no longer slot-typed. The client receives a flat `meals[]`
+    list and renders them uniformly. Routine meals are counted toward the
+    day's meal budget — if mealsPerDay=3 and the user has pinned 1 routine,
+    the backend only generates 2 meals so the overlay lands a 3-meal day.
     """
     t_cal, t_prot, t_carbs, t_fat = target_macros
 
-    # Step 1 — skeleton AI call
-    templates, note, supps = call_skeleton_ai(
-        client, req, target_macros, variety_n, allowed_foods
-    )
+    # ── Routine accounting ────────────────────────────────────────────────
+    # Pinned routines are overlaid on every day's plan by the client. Two
+    # things must be true for the day to land on target:
+    #   1. Macros subtracted from the daily target before we size the rest.
+    #   2. Count subtracted from mealsPerDay so the generated + pinned
+    #      meals fit the user's meal budget instead of stacking on top.
+    routine_macros = getattr(req, "routineMacros", None) or {}
+    routine_slots: list[str] = list(getattr(req, "routineSlots", None) or [])
+    routine_count = len(routine_slots)
+    r_cal  = int(routine_macros.get("calories", 0) or 0)
+    r_prot = int(routine_macros.get("protein", 0) or 0)
+    r_carb = int(routine_macros.get("carbs", 0) or 0)
+    r_fat  = int(routine_macros.get("fat", 0) or 0)
 
-    # Step 2 — strict food validation + slot completeness repair.
-    # `required_slots` forces every template to cover every slot the
-    # user's mealsPerDay dictates, even if the AI dropped one.
-    required_slots = _slot_order(
-        req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
-    )
-    templates = validate_and_repair_skeletons(templates, allowed_foods, required_slots)
+    adj_cal  = max(0, t_cal  - r_cal)
+    adj_prot = max(0, t_prot - r_prot)
+    adj_carb = max(0, t_carbs - r_carb)
+    adj_fat  = max(0, t_fat  - r_fat)
+    adjusted = (adj_cal, adj_prot, adj_carb, adj_fat)
+
+    meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
+    generate_count = max(0, meals_per_day - routine_count)
+
+    if r_cal > 0 or routine_count > 0:
+        print(
+            f"[meal_assembler] routine offset: -{r_cal} cal / -{r_prot}P / "
+            f"-{r_carb}C / -{r_fat}F, -{routine_count} meals → "
+            f"adjusted target {adjusted}, generate {generate_count} of "
+            f"{meals_per_day} meals"
+        )
+    elif getattr(req, "mealRoutine", None):
+        # The user typed routine prose into the profile but no structured
+        # routine macros / slots came through. Loud warning so the missing
+        # client → backend wiring is easy to spot in logs.
+        print(
+            "[meal_assembler] WARNING: req.mealRoutine is set but routineMacros "
+            "and routineSlots are empty — routine accounting WILL NOT happen. "
+            "Check that buildRoutinePayload() is being called by the client."
+        )
+
+    # Edge case: every meal is a pinned routine. Skip AI entirely and
+    # return an empty meals[] — the client overlays the routines on top.
+    if generate_count == 0:
+        note = ""
+        supps: list[dict] = []
+        plans_list = [{
+            "targets": {
+                "calories": t_cal,
+                "protein":  t_prot,
+                "carbs":    t_carbs,
+                "fat":      t_fat,
+            },
+            "meals": [],
+        } for _ in range(max(1, variety_n))]
+        return {
+            "nutritionistNote": note,
+            "supplementStack": supps,
+            "nutrition_plans": plans_list,
+        }
+
+    # Deterministic path for variety=1: skip the AI entirely and build the
+    # template from `_balanced_meal_fallback` so identical inputs produce
+    # identical output every regen. The AI is too inconsistent for the
+    # "same plan every day" use case, and its picks vary between calls
+    # even with temperature=0. variety>1 still goes through the AI for
+    # rotation diversity.
+    if variety_n == 1:
+        print(
+            f"[meal_assembler] deterministic variety=1 path — skipping skeleton AI, "
+            f"building {generate_count} balanced meals from {len(allowed_foods)} foods"
+        )
+        templates = [_build_deterministic_template(allowed_foods, generate_count)]
+        note = ""
+        supps = []
+    else:
+        # Temporarily override mealsPerDay on the request so the AI prompt +
+        # parser both target `generate_count` meals instead of the user's
+        # full meals-per-day value. Restore after the call so we don't mutate
+        # the caller's request object.
+        original_mpd = req.mealsPerDay
+        try:
+            req.mealsPerDay = generate_count
+            templates, note, supps = call_skeleton_ai(
+                client, req, adjusted, variety_n, allowed_foods
+            )
+        finally:
+            req.mealsPerDay = original_mpd
+
+    templates = validate_and_repair_skeletons(templates, allowed_foods, generate_count)
 
     # Step 3 — food lookup
     food_lookup = build_food_lookup(enriched)
 
-    # Step 4+5 — solve portions and assemble every template
-    plans_list: list[dict] = []
+    # Step 4+5 — solve portions and assemble every template against
+    # the ADJUSTED target so the math comes out right after overlay.
+    plans_list = []
     for tpl in templates:
         plans_list.append(
-            assemble_template(tpl, food_lookup, t_cal, t_prot, t_carbs, t_fat)
+            assemble_template(tpl, food_lookup, adj_cal, adj_prot, adj_carb, adj_fat)
         )
+
+    # The output keeps the FULL target (not the adjusted one) so the
+    # client's display of "X cal target" matches the user's actual goal.
+    # The routine's macros plus the assembled-meal macros will sum to
+    # roughly the full target after the client overlay runs.
+    for tpl_out in plans_list:
+        tpl_out["targets"] = {
+            "calories": t_cal,
+            "protein":  t_prot,
+            "carbs":    t_carbs,
+            "fat":      t_fat,
+        }
 
     print(
         f"[meal_assembler] assembled {len(plans_list)} template(s) "
         f"(variety_n={variety_n}, foods={len(food_lookup)}, "
-        f"allowed={len(allowed_foods)})"
+        f"allowed={len(allowed_foods)}, routine_count={routine_count})"
     )
 
     return {

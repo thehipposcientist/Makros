@@ -250,6 +250,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [daysPerWeek, setDaysPerWeek] = useState(profile.daysPerWeek);
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
   const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 3);
+  const [mealsPerDay, setMealsPerDay] = useState<number>(profile.mealsPerDay ?? 3);
   // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
   // macros tab is opened so the macros section isn't waiting on an extra
   // roundtrip every time EditProfileScreen mounts.
@@ -263,7 +264,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [customFoods, setCustomFoods] = useState<CustomFoodItem[]>(profile.customFoods ?? []);
   const [customExercises, setCustomExercises] = useState<import('../types').CustomExerciseItem[]>(profile.customExercises ?? []);
   const [savedMeals, setSavedMeals]   = useState<SavedMealTemplate[]>(profile.savedMeals ?? []);
-  const [mealRoutine, setMealRoutine] = useState(profile.mealRoutine ?? '');
+  // Free-form meal routine prose was removed from the macros tab. The
+  // value is still preserved in storage so existing users keep their text;
+  // the UI is just gone. Routines are now pinned per-meal from Home.
+  const mealRoutine = profile.mealRoutine ?? '';
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [injuryDesc, setInjuryDesc]   = useState('');
@@ -377,15 +381,40 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // Load calorie ranges when the macros tab is opened. Cached in
   // component state so switching tabs doesn't re-fetch.
+  //
+  // Self-healing: if the backend returns ANY error (typically 404 because
+  // a previous syncOnboarding fire-and-forget call failed silently and
+  // the local profile never landed in the DB), push the current profile
+  // and retry. This catches the test-user case where signup happened on
+  // top of a stale local profile and onboarding sync was never triggered.
   useEffect(() => {
     if (mode === 'mealplan' && mealplanTab === 'macros' && authToken && !calorieRanges && !calorieRangesLoading) {
       setCalorieRangesLoading(true);
-      getCalorieRanges(authToken)
+      const fetchOnce = () => getCalorieRanges(authToken);
+      const trySync = async () => {
+        const { syncOnboarding } = await import('../services/api');
+        try {
+          await syncOnboarding(authToken, profile);
+        } catch (e) {
+          console.warn('[calorie-ranges] sync retry failed', e);
+        }
+      };
+      fetchOnce()
         .then(setCalorieRanges)
-        .catch(() => setCalorieRanges(null))
+        .catch(async () => {
+          // First failure → push profile + retry once.
+          await trySync();
+          try {
+            const ranges = await fetchOnce();
+            setCalorieRanges(ranges);
+          } catch (e) {
+            console.warn('[calorie-ranges] still failing after sync retry', e);
+            setCalorieRanges(null);
+          }
+        })
         .finally(() => setCalorieRangesLoading(false));
     }
-  }, [mode, mealplanTab, authToken]);
+  }, [mode, mealplanTab, authToken, profile]);
 
   // Load exercise library when exercises tab is opened. Merges user's
   // AI-saved custom exercises on top of the seeded backend library so
@@ -590,26 +619,76 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const handleRoutineSave = async () => {
     const name = routineName.trim();
     if (!name) { Alert.alert('Name required', 'Give this routine a name.'); return; }
-    // mealType is required — `applyRoutines` in HomeScreen keys on it, so
-    // a routine with an empty mealType would be saved but never pinned to
-    // any meal slot on the plan. Force the user to pick one.
-    if (!routineMealType) {
-      Alert.alert('Meal type required', 'Pick whether this routine is breakfast, lunch, dinner, or a snack.');
-      return;
-    }
+    // mealType is no longer required — every meal is uniform now. We keep
+    // the field as a free-form tag for back-compat but don't gate save.
 
-    // Custom-food evaluation now happens inline in `handleRoutineAddFood`
-    // so the user sees macros populate the moment they add each food.
-    // Nothing to do here at save time.
+    // Resolve every routine food against the merged food library so we can
+    // capture per-item + total macros at pin time. Without this the routine
+    // ends up with calories=0 and the backend builds a full-target plan
+    // that overlays to double the user's intended calories.
+    const lookupName = (n: string) => {
+      const lower = n.toLowerCase();
+      return meta.allFoods.find(f => f.name.toLowerCase() === lower)
+          ?? customFoods.find(f => f.name.toLowerCase() === lower)
+          ?? null;
+    };
+
+    // Build structured items[]. Each item carries its own macros so the
+    // backend / frontend never have to look up the food again.
+    const { parseAmountString, guessUnitForFood } = await import('../utils/mealItems');
+    const items = routineFoods.map(rf => {
+      const lib: any = lookupName(rf.name);
+      const parsed = rf.quantity ? parseAmountString(rf.quantity) : null;
+      const libParsed = lib?.unit ? parseAmountString(lib.unit) : null;
+      const guess = guessUnitForFood(rf.name);
+      let qty = parsed?.quantity ?? libParsed?.quantity ?? guess.quantity;
+      let unit = parsed?.unit ?? libParsed?.unit ?? guess.unit;
+      if ((unit as string) === 'serving') {
+        qty = guess.quantity;
+        unit = guess.unit;
+      }
+      // Scale macros to the actual quantity. The library entry's macros
+      // are per its parsed serving (libParsed.quantity); if user typed a
+      // different amount, scale by the ratio so totals match the label.
+      const baseQty = libParsed?.quantity ?? 1;
+      const ratio = baseQty > 0 ? qty / baseQty : 1;
+      const cal = Math.round((lib?.calories ?? 0) * ratio);
+      const prot = Math.round((lib?.protein ?? 0) * ratio);
+      const carb = Math.round((lib?.carbs ?? 0) * ratio);
+      const fat = Math.round((lib?.fat ?? 0) * ratio);
+      return {
+        name: rf.name,
+        quantity: qty,
+        unit,
+        calories: cal,
+        protein: prot,
+        carbs: carb,
+        fat: fat,
+      };
+    });
+    const totals = items.reduce(
+      (acc, it) => ({
+        calories: acc.calories + it.calories,
+        protein:  acc.protein  + it.protein,
+        carbs:    acc.carbs    + it.carbs,
+        fat:      acc.fat      + it.fat,
+      }),
+      { calories: 0, protein: 0, carbs: 0, fat: 0 },
+    );
 
     const entry: MealRoutineEntry = {
       id: editingRoutine?.id ?? Date.now().toString(),
       name,
-      mealType: routineMealType || undefined,
+      mealType: routineMealType || 'custom',
       foods: routineFoods,
+      items: items as any,
       notes: routineNotes.trim() || undefined,
       photoUri: routinePhotoUri ?? undefined,
       createdAt: editingRoutine?.createdAt ?? new Date().toISOString(),
+      calories: totals.calories,
+      protein:  totals.protein,
+      carbs:    totals.carbs,
+      fat:      totals.fat,
     };
     const next = editingRoutine
       ? mealRoutines.map(r => r.id === editingRoutine.id ? entry : r)
@@ -846,6 +925,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
+      mealsPerDay: Math.min(10, Math.max(1, mealsPerDay)),
       equipment,
       foodsAvailable: actualFoods,
       customFoods,
@@ -1267,6 +1347,45 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {workoutTab === 'equipment' && (
         <View style={styles.section}>
+          {/* Settings (training days + session length) live at the TOP of
+              the Equipment tab so they mirror the Meals tab layout, where
+              "Meals per Day" and "Meal Variety" also sit at the top of
+              the Foods sub-tab. Previously these were at the bottom and
+              the inconsistency was confusing. */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>📅  Training Days / Week</Text>
+            <View style={[styles.daysRow, { marginTop: 8 }]}>
+              <TouchableOpacity
+                style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
+                onPress={() => setDaysPerWeek(d => Math.max(1, d - 1))}
+                disabled={daysPerWeek <= 1}>
+                <Text style={styles.daysBtnText}>−</Text>
+              </TouchableOpacity>
+              <Text style={styles.daysValue}>{daysPerWeek}</Text>
+              <TouchableOpacity
+                style={[styles.daysBtn, daysPerWeek >= 7 && styles.daysBtnDisabled]}
+                onPress={() => setDaysPerWeek(d => Math.min(7, d + 1))}
+                disabled={daysPerWeek >= 7}>
+                <Text style={styles.daysBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>⏱  Session Length</Text>
+            <View style={[styles.durationRow, { marginTop: 8 }]}>
+              {DURATION_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.durationBtn, duration === opt.value && styles.durationBtnActive]}
+                  onPress={() => setDuration(opt.value)}>
+                  <Text style={[styles.durationLabel, duration === opt.value && styles.durationLabelActive]}>{opt.label}</Text>
+                  <Text style={[styles.durationDesc,  duration === opt.value && styles.durationDescActive]}>{opt.desc}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
           <View style={styles.sectionTopRow}>
             <Text style={styles.sectionLabel}>
               Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
@@ -1314,39 +1433,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               )}
             </>
           )}
-          {/* Training days & session length */}
-          <View style={[styles.section, { marginTop: 24, marginBottom: 0 }]}>
-            <Text style={styles.sectionLabel}>Training Days / Week</Text>
-            <View style={styles.daysRow}>
-              <TouchableOpacity
-                style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
-                onPress={() => setDaysPerWeek(d => Math.max(1, d - 1))}
-                disabled={daysPerWeek <= 1}>
-                <Text style={styles.daysBtnText}>−</Text>
-              </TouchableOpacity>
-              <Text style={styles.daysValue}>{daysPerWeek}</Text>
-              <TouchableOpacity
-                style={[styles.daysBtn, daysPerWeek >= 7 && styles.daysBtnDisabled]}
-                onPress={() => setDaysPerWeek(d => Math.min(7, d + 1))}
-                disabled={daysPerWeek >= 7}>
-                <Text style={styles.daysBtnText}>+</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Session Length</Text>
-            <View style={styles.durationRow}>
-              {DURATION_OPTIONS.map(opt => (
-                <TouchableOpacity
-                  key={opt.value}
-                  style={[styles.durationBtn, duration === opt.value && styles.durationBtnActive]}
-                  onPress={() => setDuration(opt.value)}>
-                  <Text style={[styles.durationLabel, duration === opt.value && styles.durationLabelActive]}>{opt.label}</Text>
-                  <Text style={[styles.durationDesc,  duration === opt.value && styles.durationDescActive]}>{opt.desc}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
         </View>
         )}
 
@@ -1772,6 +1858,41 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mealplanTab === 'foods' && (
         <View style={styles.section}>
+          {/* ── Meals per day ─────────────────────────────────────────
+              How many distinct meals the user eats per day. Drives the
+              backend assembler's `mealsPerDay`, which in turn determines
+              how many meals the algorithm generates after subtracting
+              pinned routines. Range 1–10. */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>🍽  Meals per Day</Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
+              How many meals you actually eat in a day. The plan splits your
+              calories evenly across these. Pinned routines count toward this
+              total — pin 2 routines on a 4-meal day and the AI generates 2
+              new meals to fill the rest.
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <TouchableOpacity
+                style={[styles.daysBtn, mealsPerDay <= 1 && styles.daysBtnDisabled]}
+                onPress={() => setMealsPerDay(v => Math.max(1, v - 1))}
+                disabled={mealsPerDay <= 1}>
+                <Text style={styles.daysBtnText}>−</Text>
+              </TouchableOpacity>
+              <View style={{ alignItems: 'center', minWidth: 140 }}>
+                <Text style={styles.daysValue}>{mealsPerDay}</Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                  {mealsPerDay === 1 ? 'OMAD' : `${mealsPerDay} meals / day`}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.daysBtn, mealsPerDay >= 10 && styles.daysBtnDisabled]}
+                onPress={() => setMealsPerDay(v => Math.min(10, v + 1))}
+                disabled={mealsPerDay >= 10}>
+                <Text style={styles.daysBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
           {/* ── Meal variety ──────────────────────────────────────────
               How many distinct daily meal templates the AI builds. The
               app rotates these across your week. Lower = faster plan
@@ -2097,7 +2218,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               </Text>
             </View>
           ) : (
-            <Text style={[styles.sectionHint, { marginTop: 8 }]}>Finish onboarding to see your calorie ranges.</Text>
+            <Text style={[styles.sectionHint, { marginTop: 8 }]}>Couldn't load your calorie ranges. Open the Profile tab and re-save your stats to refresh.</Text>
           )}
         </View>
 
@@ -2161,22 +2282,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
         </View>
 
-        {/* ── Meal Routine ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>My Meal Routine</Text>
-          <Text style={styles.sectionHint}>
-            Describe any fixed eating habits. Your AI nutritionist will build around these.
-          </Text>
-          <TextInput
-            style={[styles.mealRoutineInput]}
-            value={mealRoutine}
-            onChangeText={setMealRoutine}
-            placeholder={'Example: I have a protein shake every morning. I meal prep chicken and rice for lunch on weekdays.'}
-            placeholderTextColor={tc.textMuted}
-            multiline
-            numberOfLines={4}
-          />
-        </View>
+        {/* Meal routine section removed from the macros tab. Pinning a meal
+            as a routine now happens directly from the Home screen meal card,
+            which keeps macro snapshots in sync automatically. */}
         </>
         )}
         </>

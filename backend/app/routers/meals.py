@@ -31,10 +31,16 @@ def grocery_list(
     counts: dict[str, int] = {}
     for s in states:
         plan = s.nutrition_plan or {}
-        for key in ["breakfast", "lunch", "dinner", "snack"]:
-            meal = plan.get(key)
-            if not meal:
-                continue
+        # New shape: plan["meals"] = [...]. Legacy: plan[breakfast/lunch/...].
+        meals_list: list[dict] = []
+        if isinstance(plan.get("meals"), list):
+            meals_list = [m for m in plan["meals"] if isinstance(m, dict)]
+        else:
+            for key in ("breakfast", "lunch", "dinner", "snack"):
+                meal = plan.get(key)
+                if isinstance(meal, dict):
+                    meals_list.append(meal)
+        for meal in meals_list:
             for food in meal.get("foods", []):
                 counts[food] = counts.get(food, 0) + 1
 

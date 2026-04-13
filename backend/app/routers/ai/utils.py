@@ -122,7 +122,40 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
             ).all()
             default_serving = next((s for s in servings if s.is_default), servings[0] if servings else None)
 
+            # FoodNutrition holds the full per-100g micronutrient data
+            # (fiber, sugar, sodium_mg). FoodServing only stores the
+            # basic four macros. We need both: the serving for portion
+            # info, the nutrition for micros — scaled by the serving's
+            # grams ratio.
+            nutrition = session.exec(
+                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
+            ).first()
+
+            def _scaled_micros(grams_in_serving: float) -> dict:
+                """Scale all micronutrient fields from per-`reference_grams`
+                values down to the actual serving grams. Returns a flat dict
+                of {canonical_field_name: float}. Includes the legacy
+                top-level columns (fiber/sugar/sodium) AND every key in the
+                free-form `extra_nutrients` JSON. Missing values default to 0."""
+                if nutrition is None or nutrition.reference_grams <= 0:
+                    return {"fiber": 0, "sugar": 0, "sodium": 0}
+                ratio = grams_in_serving / nutrition.reference_grams
+                out = {
+                    "fiber":  round((nutrition.fiber or 0) * ratio, 2),
+                    "sugar":  round((nutrition.sugar or 0) * ratio, 2),
+                    "sodium": round((nutrition.sodium_mg or 0) * ratio, 2),
+                }
+                extras = getattr(nutrition, "extra_nutrients", None) or {}
+                if isinstance(extras, dict):
+                    for k, v in extras.items():
+                        try:
+                            out[k] = round(float(v or 0) * ratio, 3)
+                        except (TypeError, ValueError):
+                            continue
+                return out
+
             if default_serving is not None:
+                micros = _scaled_micros(default_serving.grams)
                 hydrated.append({
                     "name": food.name,
                     "quantity": None,  # label already has the number
@@ -132,14 +165,14 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
                     "protein": default_serving.protein,
                     "carbs": default_serving.carbs,
                     "fat": default_serving.fat,
+                    **micros,
                 })
                 continue
 
-            nutrition = session.exec(
-                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
-            ).first()
             if nutrition is not None:
-                # Scale per-100g to a reasonable default serving.
+                # No FoodServing rows — fall back to 100g reference. Use
+                # the same scaling helper so extras flow through identically.
+                micros = _scaled_micros(nutrition.reference_grams)
                 hydrated.append({
                     "name": food.name,
                     "serving": "100 g",
@@ -147,6 +180,7 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
                     "protein": nutrition.protein,
                     "carbs": nutrition.carbs,
                     "fat": nutrition.fat,
+                    **micros,
                 })
                 continue
 
@@ -520,7 +554,15 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     goal_rate_summary = targets.rate_summary
 
     # ── Normalise mealsPerDay ────────────────────────────────────────────────
-    meals = req.mealsPerDay if req.mealsPerDay in {2, 3, 4} else 3
+    # Accept any value 1..10. Previously this silently snapped any value
+    # outside {2,3,4} back to 3, which made the user's actual setting
+    # invisible to the rest of the pipeline. The downstream meal-data dict
+    # only has slot keys for the 2/3/4-meal cases (legacy display), so we
+    # still pick one of those for those keys, but the canonical `meals`
+    # field carries the real number for the assembler.
+    raw_meals = int(req.mealsPerDay or 3)
+    meals = max(1, min(10, raw_meals))
+    legacy_meal_bucket = meals if meals in (2, 3, 4) else (4 if meals > 4 else 3)
 
     # ── Per-meal splits (practical, not perfectly even) ──────────────────────
     #   Ratios: 2-meal → lunch 45% / dinner 55%
@@ -535,7 +577,7 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
 
     meal_data: dict = {}
 
-    if meals == 2:
+    if legacy_meal_bucket == 2:
         cal_splits  = _split(calories, [0.45, 0.55])
         prot_splits = _split(protein,  [0.45, 0.55])
         carb_splits = _split(carbs,    [0.45, 0.55])
@@ -546,7 +588,7 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
             "dinner_cal":   cal_splits[1],  "dinner_prot":  prot_splits[1],
             "dinner_carbs": carb_splits[1], "dinner_fat":   fat_splits[1],
         }
-    elif meals == 4:
+    elif legacy_meal_bucket == 4:
         cal_splits  = _split(calories, [0.25, 0.30, 0.35, 0.10])
         prot_splits = _split(protein,  [0.25, 0.30, 0.35, 0.10])
         carb_splits = _split(carbs,    [0.25, 0.30, 0.35, 0.10])
@@ -892,9 +934,51 @@ SCHEMA_WORKOUT_SUMMARY = {
     },
 }
 
+# Canonical micronutrient field set the AI can return on any food-related
+# response. Mirrors `MICRONUTRIENT_FIELDS` in services/meal_assembler.py —
+# keep these in sync. Field name + unit guidance is duplicated in the
+# prompts that ask the AI to populate them.
+MICRONUTRIENT_AI_FIELDS: tuple[str, ...] = (
+    "fiber", "sugar", "sodium",
+    "cholesterol",
+    "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+    "omega_3", "omega_6",
+    "vitamin_a", "vitamin_c", "vitamin_d", "vitamin_e", "vitamin_k",
+    "thiamin_b1", "riboflavin_b2", "niacin_b3", "vitamin_b6",
+    "folate_b9", "vitamin_b12", "biotin_b7", "pantothenic_acid_b5",
+    "calcium", "iron", "magnesium", "phosphorus", "potassium",
+    "zinc", "selenium", "copper", "manganese",
+)
+
+
+def _micros_schema_props() -> dict:
+    """Return a JSON-schema `properties` dict mapping every canonical
+    micronutrient field to a number. Used by the strict schemas that
+    accept a `micronutrients` object on AI responses."""
+    return {k: {"type": "number"} for k in MICRONUTRIENT_AI_FIELDS}
+
+
+# Shared text fragment for AI prompts. Asks the AI to populate the full
+# panel using USDA per-serving values, with explicit unit guidance.
+MICRONUTRIENT_PROMPT_GUIDE = (
+    "Populate `micronutrients` with USDA-style values per the SAME serving "
+    "you reported in the macros. Units: fiber/sugar in grams; sodium, "
+    "cholesterol, calcium, iron, magnesium, phosphorus, potassium, zinc, "
+    "vitamin_c, vitamin_e, thiamin_b1, riboflavin_b2, niacin_b3, vitamin_b6, "
+    "pantothenic_acid_b5 in mg; vitamin_a, vitamin_d, vitamin_k, folate_b9, "
+    "biotin_b7, vitamin_b12, selenium in µg; saturated_fat, monounsaturated_fat, "
+    "polyunsaturated_fat, omega_3, omega_6 in grams; copper, manganese in mg. "
+    "Return 0 for any value you don't have data on. Never omit fields."
+)
+
+
 SCHEMA_FOOD_PHOTO = {
     "name": "food_photo_response",
-    "strict": True,
+    # `strict=False` because we want the AI to fill in micronutrients but
+    # OpenAI's strict mode requires every nested optional field to appear
+    # in `required`, which makes the schema brittle. Validation happens
+    # downstream when the assembler reads the dict.
+    "strict": False,
     "schema": {
         "type": "object",
         "properties": {
@@ -904,15 +988,18 @@ SCHEMA_FOOD_PHOTO = {
             "protein": {"type": "number"},
             "carbs": {"type": "number"},
             "fat": {"type": "number"},
+            "micronutrients": {
+                "type": "object",
+                "properties": _micros_schema_props(),
+            },
         },
         "required": ["meal_name", "items", "calories", "protein", "carbs", "fat"],
-        "additionalProperties": False,
     },
 }
 
 SCHEMA_SCAN_FOODS = {
     "name": "scan_foods_response",
-    "strict": True,
+    "strict": False,
     "schema": {
         "type": "object",
         "properties": {
@@ -927,14 +1014,16 @@ SCHEMA_SCAN_FOODS = {
                         "protein": {"type": "number"},
                         "carbs": {"type": "number"},
                         "fat": {"type": "number"},
+                        "micronutrients": {
+                            "type": "object",
+                            "properties": _micros_schema_props(),
+                        },
                     },
                     "required": ["name", "serving", "calories", "protein", "carbs", "fat"],
-                    "additionalProperties": False,
                 },
             },
         },
         "required": ["foods"],
-        "additionalProperties": False,
     },
 }
 
