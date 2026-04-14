@@ -347,6 +347,8 @@ export interface StoredWorkoutSummary extends WorkoutSummary {
   durationSeconds: number;
   totalSets: number;
   totalReps: number;
+  startedAt?: string;  // ISO — exact workout start time
+  endedAt?: string;    // ISO — exact workout end time
 }
 
 export interface GoalHistoryEntry {
@@ -440,6 +442,8 @@ export interface WorkoutSession {
   date: string;           // ISO date string
   focus: string;
   durationSeconds: number;
+  startedAt?: string;     // ISO — exact workout start time
+  endedAt?: string;       // ISO — exact workout end time
   exercises: SessionExercise[];
   completed: boolean;
   skipped?: boolean;      // true when the user skipped this day

@@ -589,10 +589,12 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
     goal_adjustment, rate_summary = step_4_calculate_goal_adjustment(inputs, bucket, tdee)
     calories_raw = tdee + goal_adjustment
 
-    # Enforce the safety floor. If the user's goal math drops below
-    # MIN_SAFE_CALORIES we clamp up and flag it.
-    min_enforced = calories_raw < MIN_SAFE_CALORIES
-    calories = max(MIN_SAFE_CALORIES, calories_raw)
+    # Safety floor removed per product decision — we now trust the
+    # user's goal + pace math end-to-end. The `min_calories_enforced`
+    # flag is preserved as a no-op (always False) so downstream readers
+    # and tests don't break.
+    min_enforced = False
+    calories = max(0, calories_raw)
 
     # Step 5-7: protein → fat → carbs
     protein_g = step_5_calculate_protein_g(inputs.weight_lbs, bucket)
@@ -677,7 +679,7 @@ def calculate_reference_ranges(inputs: CalorieInputs) -> CalorieRangeCard:
     def _run(bucket: GoalBucketParams) -> tuple[int, int]:
         """Return (calories, protein_g) for one bucket at moderate pace."""
         delta = bucket.calorie_adjustment_by_pace.get("moderate", 0)
-        cals = max(MIN_SAFE_CALORIES, tdee + delta)
+        cals = max(0, tdee + delta)
         protein = step_5_calculate_protein_g(inputs.weight_lbs, bucket)
         return cals, protein
 

@@ -9,7 +9,7 @@ import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
-  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, modifiersForGoal, targetFocusesForGoal, goalCategory,
+  LAUNCH_GOALS, GOAL_CATEGORIES, targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
@@ -27,6 +27,14 @@ interface EditProfileScreenProps {
   onSave: (updated: UserProfile) => void;
   onCancel: () => void;
   mode?: 'goal' | 'workout' | 'mealplan' | 'theme';
+  // Initial sub-tab when opening in mealplan mode. Lets callers jump
+  // straight to Foods / Supplements / Macros instead of the Foods default.
+  initialMealTab?: 'foods' | 'supplements' | 'macros';
+  // When true, hide the top "Cancel / TITLE / Save" header bar. Used by
+  // HomeScreen when this screen is rendered inline as tab content — the
+  // bottom nav already provides navigation, so the inner header is
+  // redundant. Auto-saves on profile changes via the parent's onSave.
+  noHeader?: boolean;
 }
 
 interface PhotoMealDraft {
@@ -216,7 +224,7 @@ function createAfmStyles(c: ReturnType<typeof getTheme>['colors']) { return Styl
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal', onRoutinesChanged }: EditProfileScreenProps) {
+export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal', onRoutinesChanged, initialMealTab, noHeader = false }: EditProfileScreenProps) {
   const tc = getTheme(profile.themePreference).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -225,11 +233,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
   const [selectedTargetFocus, setSelectedTargetFocus] = useState<string>(profile.goalSelection?.targetFocus ?? profile.focusedMuscleGroup ?? '');
-  // Auto-show advanced goals if current goal is not a launch goal
-  const currentGoalIsAdvanced = !LAUNCH_GOALS.some(g => g.id === (profile.goalSelection?.primaryGoal ?? profile.goal));
-  const currentGoalCategory = currentGoalIsAdvanced ? goalCategory(profile.goalSelection?.primaryGoal ?? profile.goal) : null;
-  const [showAdvancedGoals, setShowAdvancedGoals] = useState(currentGoalIsAdvanced);
-  const [expandedCategory, setExpandedCategory] = useState<string | null>(currentGoalCategory ?? null);
+  // Advanced-goal UI removed — only the 8 launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
@@ -314,7 +318,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // Tab state for combined modes
   const [workoutTab, setWorkoutTab] = useState<'equipment' | 'exercises'>('equipment');
-  const [mealplanTab, setMealplanTab] = useState<'foods' | 'supplements' | 'macros'>('foods');
+  const [mealplanTab, setMealplanTab] = useState<'foods' | 'supplements' | 'macros'>(initialMealTab ?? 'foods');
 
   // Exercise library
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
@@ -888,6 +892,19 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
 
   const handleSave = () => {
+    // Confirm before persisting — saving regenerates plans which can take
+    // 30-60s and the user might've tapped by accident.
+    Alert.alert(
+      'Save changes?',
+      'This will update your plan and regenerate it from your new settings. Existing plans for upcoming days will be replaced.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Save', style: 'default', onPress: () => doHandleSave() },
+      ],
+    );
+  };
+
+  const doHandleSave = () => {
     const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
     const goalSel: GoalSelection = {
       primaryGoal: selectedGoal,
@@ -949,14 +966,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const toggleModifier = (id: string) => {
-    setSelectedModifiers(prev =>
-      prev.includes(id) ? prev.filter(m => m !== id) : prev.length >= 2 ? prev : [...prev, id],
-    );
-  };
-
+  // toggleModifier + availableModifiers removed — modifiers are gone.
   const cat = goalCategory(selectedGoal);
-  const availableModifiers = modifiersForGoal(selectedGoal);
   const availableFocuses = targetFocusesForGoal(selectedGoal);
   const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
   const isWeightGoal   = weightGoalIds.has(selectedGoal);
@@ -1004,15 +1015,21 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={onCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Text style={styles.cancelText}>Cancel</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>{screenTitle}</Text>
-        <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Text style={styles.saveText}>Save</Text>
-        </TouchableOpacity>
-      </View>
+      {/* Top header bar (Cancel / TITLE / Save) is hidden when this screen
+          is rendered inline as tab content — the bottom nav handles
+          navigation, and changes auto-save via the parent's onSave when
+          the user navigates away. */}
+      {!noHeader && (
+        <View style={styles.header}>
+          <TouchableOpacity onPress={onCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Text style={styles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+          <Text style={styles.title}>{screenTitle}</Text>
+          <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Text style={styles.saveText}>Save</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
 
@@ -1039,82 +1056,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
         </View>
 
-        {/* ── Advanced goals (separate section for breathing room) ── */}
-        <View style={[styles.section, { marginBottom: 20 }]}>
-          <TouchableOpacity
-            style={{
-              alignItems: 'center',
-              paddingVertical: 12,
-              paddingHorizontal: 20,
-              backgroundColor: tc.primary + '15',
-              borderRadius: 12,
-              borderWidth: 1.5,
-              borderColor: tc.primary + '40',
-              flexDirection: 'row',
-              justifyContent: 'center',
-              gap: 8,
-            }}
-            onPress={() => setShowAdvancedGoals(prev => !prev)}
-            activeOpacity={0.7}>
-            <Text style={{ fontSize: 16 }}>{showAdvancedGoals ? '▾' : '▸'}</Text>
-            <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 15 }}>
-              {showAdvancedGoals ? 'Hide Advanced Goals' : 'Explore All Goals'}
-            </Text>
-          </TouchableOpacity>
+        {/* Advanced goals section removed — only the 8 launch goals are
+            exposed to users now. The full PRIMARY_GOALS list is still
+            defined in goalConfig.ts so profile values saved before the
+            cull still resolve correctly. */}
 
-          {showAdvancedGoals && GOAL_CATEGORIES.map(catItem => {
-            const catGoals = PRIMARY_GOALS.filter(g => g.category === catItem.id && !g.launch);
-            if (catGoals.length === 0) return null;
-            const hasActiveGoal = catGoals.some(g => g.id === selectedGoal);
-            return (
-              <View key={catItem.id} style={{ marginTop: 10 }}>
-                <TouchableOpacity
-                  onPress={() => setExpandedCategory(prev => prev === catItem.id ? null : catItem.id)}
-                  style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6 }}
-                  activeOpacity={0.7}>
-                  <Text style={{ fontSize: 15, marginRight: 8 }}>{catItem.icon}</Text>
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: hasActiveGoal ? tc.primary : tc.textSecondary, flex: 1 }}>{catItem.label}</Text>
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>{expandedCategory === catItem.id ? '▲' : '▼'}</Text>
-                </TouchableOpacity>
-                {expandedCategory === catItem.id && (
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingLeft: 4, marginBottom: 6 }}>
-                    {catGoals.map(g => {
-                      const active = selectedGoal === g.id;
-                      return (
-                        <TouchableOpacity
-                          key={g.id}
-                          style={[styles.chip, active && styles.chipActive]}
-                          onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setSelectedTargetFocus(''); setPace('moderate'); }}>
-                          <Text style={[styles.chipText, active && styles.chipTextActive]}>{g.label}</Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                )}
-              </View>
-            );
-          })}
-        </View>
-
-        {/* ── Modifiers ── */}
-        {availableModifiers.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Modifiers <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(up to 2)</Text></Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {availableModifiers.map(mod => {
-                const active = selectedModifiers.includes(mod.id);
-                return (
-                  <TouchableOpacity
-                    key={mod.id}
-                    style={[styles.chip, active && styles.chipActive]}
-                    onPress={() => toggleModifier(mod.id)}>
-                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{mod.label}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        )}
+        {/* Modifiers section removed — goals are now defined by the
+            primary goal + an optional muscle/target focus only. The
+            stored `selectedModifiers` array is kept on the saved profile
+            shape (always empty going forward) for back-compat. */}
 
         {/* ── Target Focus ── */}
         {availableFocuses.length > 0 && (
@@ -1334,6 +1284,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         {/* ── WORKOUT MODE (Equipment + Exercises tabs) ── */}
         {mode === 'workout' && (
         <>
+        {/* Inner sub-tab bar hidden when this screen is rendered inline
+            in HomeScreen — the bottom-tab sub-tabs already provide the
+            same navigation. */}
+        {!noHeader && (
         <View style={styles.tabBar}>
           {([
             { key: 'equipment' as const, label: 'Equipment & Schedule' },
@@ -1344,6 +1298,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </TouchableOpacity>
           ))}
         </View>
+        )}
 
         {workoutTab === 'equipment' && (
         <View style={styles.section}>
@@ -1844,6 +1799,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         {/* ── MEALPLAN MODE (Foods + Supplements + Macros tabs) ── */}
         {mode === 'mealplan' && (
         <>
+        {/* Inner sub-tab bar hidden when rendered inline — the bottom-tab
+            sub-tabs already provide the same Foods/Supplements/Macros nav. */}
+        {!noHeader && (
         <View style={styles.tabBar}>
           {([
             { key: 'foods' as const, label: 'Foods' },
@@ -1855,6 +1813,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </TouchableOpacity>
           ))}
         </View>
+        )}
 
         {mealplanTab === 'foods' && (
         <View style={styles.section}>

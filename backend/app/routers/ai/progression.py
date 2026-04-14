@@ -65,14 +65,20 @@ def recommend_weight(
             week_number=max(1, body.weekNumber or 1),
         )
         ex_category = infer_exercise_category(body.exerciseName)
-        # Sensible default if no prior sets exist
+        # Anchor the first set on what the user has actually hit before.
+        # Prefer last-session best, then all-time best, then a category default.
         if last_weight is None:
-            last_weight = {
-                ExerciseCategory.COMPOUND: 65.0,
-                ExerciseCategory.ISOLATION: 20.0,
-                ExerciseCategory.MACHINE: 80.0,
-                ExerciseCategory.BODYWEIGHT: 0.0,
-            }.get(ex_category, 45.0)
+            if body.lastSessionBestWeightLbs and body.lastSessionBestWeightLbs > 0:
+                last_weight = float(body.lastSessionBestWeightLbs)
+            elif body.allTimeBestWeightLbs and body.allTimeBestWeightLbs > 0:
+                last_weight = float(body.allTimeBestWeightLbs)
+            else:
+                last_weight = {
+                    ExerciseCategory.COMPOUND: 65.0,
+                    ExerciseCategory.ISOLATION: 20.0,
+                    ExerciseCategory.MACHINE: 80.0,
+                    ExerciseCategory.BODYWEIGHT: 0.0,
+                }.get(ex_category, 45.0)
         prescription = ExercisePrescription(
             exercise_name=body.exerciseName,
             category=ex_category,

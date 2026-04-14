@@ -21,6 +21,10 @@ from app.models import (
     FoodRead, FoodServingRead,
 )
 from app.enums import FoodSource, FoodCategory
+from app.seed_micronutrients_data import (
+    get_micronutrients_for,
+    split_into_columns_and_extras,
+)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -217,12 +221,29 @@ def create_food(
     db.add(food)
     db.flush()
 
+    # Look up the micronutrient panel by name. If we have USDA-accurate
+    # data for this food, merge it in — prefer caller-provided values for
+    # the legacy macro columns (fiber/sugar/sodium) but fill any gaps from
+    # the seed, and always populate `extra_nutrients` with the full panel
+    # so nutrition-details UI doesn't show blanks for custom foods.
+    panel = get_micronutrients_for(name)
+    extras_json: dict | None = None
+    if panel:
+        top, extras_json = split_into_columns_and_extras(panel)
+        if fiber == 0 and "fiber" in top:
+            fiber = top["fiber"]
+        if sugar == 0 and "sugar" in top:
+            sugar = top["sugar"]
+        if sodium_mg == 0 and "sodium_mg" in top:
+            sodium_mg = top["sodium_mg"]
+
     db.add(FoodNutrition(
         food_id=food.id,
         reference_unit=unit,
         reference_grams=serving_grams,
         calories=calories, protein=protein, carbs=carbs, fat=fat,
         fiber=fiber, sugar=sugar, sodium_mg=sodium_mg,
+        extra_nutrients=extras_json,
     ))
     db.add(FoodServing(
         food_id=food.id,

@@ -67,16 +67,34 @@ export default function NutritionCard({
     fat:      Math.round(allVisible.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
   };
 
-  // Aggregate micronutrients across all visible meals
-  const microKeys: (keyof MealMicronutrients)[] = ['fiber', 'sugar', 'sodium', 'cholesterol', 'vitaminA', 'vitaminC', 'vitaminD', 'calcium', 'iron', 'potassium'];
+  // Aggregate micronutrients across all visible meals. Each display
+  // field accepts multiple backend key spellings because the backend
+  // emits snake_case (`vitamin_a`) but the legacy type + old cached
+  // plans used camelCase (`vitaminA`). We sum whichever is present.
+  const microFieldSpec: Array<{ out: string; keys: string[] }> = [
+    { out: 'fiber',       keys: ['fiber'] },
+    { out: 'sugar',       keys: ['sugar'] },
+    { out: 'sodium',      keys: ['sodium'] },
+    { out: 'cholesterol', keys: ['cholesterol'] },
+    { out: 'vitaminA',    keys: ['vitamin_a', 'vitaminA'] },
+    { out: 'vitaminC',    keys: ['vitamin_c', 'vitaminC'] },
+    { out: 'vitaminD',    keys: ['vitamin_d', 'vitaminD'] },
+    { out: 'calcium',     keys: ['calcium'] },
+    { out: 'iron',        keys: ['iron'] },
+    { out: 'potassium',   keys: ['potassium'] },
+  ];
   const dailyMicros: Record<string, number> = {};
-  for (const k of microKeys) {
-    dailyMicros[k] = Math.round(allVisible.reduce((sum, m) => {
-      const micro = m.meal.micronutrients;
-      return sum + (micro?.[k] ?? (k === 'fiber' ? (m.meal.fiber ?? 0) : 0));
+  for (const spec of microFieldSpec) {
+    dailyMicros[spec.out] = Math.round(allVisible.reduce((sum, m) => {
+      const micro: any = m.meal.micronutrients;
+      if (!micro) return sum + (spec.out === 'fiber' ? (m.meal.fiber ?? 0) : 0);
+      for (const k of spec.keys) {
+        if (micro[k] != null) return sum + micro[k];
+      }
+      return sum + (spec.out === 'fiber' ? (m.meal.fiber ?? 0) : 0);
     }, 0));
   }
-  const hasMicros = microKeys.some(k => dailyMicros[k] > 0);
+  const hasMicros = microFieldSpec.some(s => dailyMicros[s.out] > 0);
 
   return (
     <View style={styles.card}>

@@ -213,6 +213,20 @@ export async function loadWorkoutSummaries(): Promise<StoredWorkoutSummary[]> {
   }
 }
 
+/** Delete a workout summary by id. Used by the Progress screen so users
+ *  can remove an AI-generated summary they don't want to keep. */
+export async function deleteWorkoutSummary(summaryId: string): Promise<void> {
+  if (!summaryId) return;
+  try {
+    const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
+    const existing: StoredWorkoutSummary[] = raw ? JSON.parse(raw) : [];
+    const next = existing.filter(s => s.id !== summaryId);
+    if (next.length !== existing.length) {
+      await AsyncStorage.setItem(SUMMARIES_KEY, JSON.stringify(next));
+    }
+  } catch {}
+}
+
 // ── Goal history ──────────────────────────────────────────────────────────────
 
 export async function loadGoalHistory(): Promise<GoalHistoryEntry[]> {
@@ -413,6 +427,20 @@ export async function loadPlanChanges(): Promise<PlanChangeEntry[]> {
   }
 }
 
+/** Delete a plan change history entry by id. Used by the Progress screen
+ *  so users can remove a plan-change record they don't want to keep. */
+export async function deletePlanChange(changeId: string): Promise<void> {
+  if (!changeId) return;
+  try {
+    const raw = await AsyncStorage.getItem(PLAN_CHANGES_KEY);
+    const existing: PlanChangeEntry[] = raw ? JSON.parse(raw) : [];
+    const next = existing.filter(c => c.id !== changeId);
+    if (next.length !== existing.length) {
+      await AsyncStorage.setItem(PLAN_CHANGES_KEY, JSON.stringify(next));
+    }
+  } catch {}
+}
+
 // ── Personal Records ──────────────────────────────────────────────────────────
 
 export interface PR {
@@ -421,6 +449,49 @@ export interface PR {
   reps: number;
   date: string;
   sessionFocus: string;
+}
+
+export interface ExerciseSessionBest {
+  weightLbs: number;
+  reps: number;
+  date: string;
+}
+
+export interface ExerciseBests {
+  allTime: ExerciseSessionBest | null;
+  lastSession: ExerciseSessionBest | null;
+  sessions: ExerciseSessionBest[];
+}
+
+/** Best set per session (by weight × reps) for a given exercise, plus
+ *  the all-time best and the most-recent session best. Derived from
+ *  workout history — no separate storage needed. */
+export async function getExerciseBests(exerciseName: string): Promise<ExerciseBests> {
+  const history = await loadWorkoutHistory();
+  const key = exerciseName.trim().toLowerCase();
+  const sessions: ExerciseSessionBest[] = [];
+  for (const session of history) {
+    for (const ex of session.exercises) {
+      if (ex.name.trim().toLowerCase() !== key) continue;
+      let top: ExerciseSessionBest | null = null;
+      for (const set of ex.sets) {
+        if (!set || !set.weightLbs) continue;
+        const score = set.weightLbs * (set.reps || 0);
+        const topScore = top ? top.weightLbs * top.reps : -1;
+        if (!top || score > topScore) {
+          top = { weightLbs: set.weightLbs, reps: set.reps, date: session.date };
+        }
+      }
+      if (top) sessions.push(top);
+    }
+  }
+  sessions.sort((a, b) => +new Date(a.date) - +new Date(b.date));
+  const allTime = sessions.reduce<ExerciseSessionBest | null>((best, s) => {
+    if (!best) return s;
+    return s.weightLbs * s.reps > best.weightLbs * best.reps ? s : best;
+  }, null);
+  const lastSession = sessions.length ? sessions[sessions.length - 1] : null;
+  return { allTime, lastSession, sessions };
 }
 
 /** Returns the best set (heaviest weight, tie-break by reps) per exercise across all history. */

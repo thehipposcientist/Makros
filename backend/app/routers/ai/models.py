@@ -148,6 +148,10 @@ class WeightRecommendRequest(BaseModel):
     soreness1to5: int | None = None
     stress1to5: int | None = None
     caloriesOnTargetRecently: bool | None = None
+    allTimeBestWeightLbs: float | None = None
+    allTimeBestReps: int | None = None
+    lastSessionBestWeightLbs: float | None = None
+    lastSessionBestReps: int | None = None
 
 
 class TrainerQuestionRequest(BaseModel):

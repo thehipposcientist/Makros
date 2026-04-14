@@ -8,8 +8,9 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession } from '../utils/workoutHistory';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange } from '../utils/workoutHistory';
 import { RECOVERY_LABELS } from '../utils/healthScore';
+import { computeDietConsistency, DietConsistencyScore } from '../utils/mealTracker';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
@@ -22,6 +23,10 @@ interface ProgressScreenProps {
   userProfile: UserProfile;
   onUpdateWeight?: (weightLbs: number) => void;
   themeName?: AppThemeName;
+  // When true, hide the top "← Back / Progress" header bar. Used when
+  // this screen is rendered inline as bottom-tab content — the bottom
+  // nav already provides navigation, so the inner header is redundant.
+  noHeader?: boolean;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -87,7 +92,7 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
     });
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -98,6 +103,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
   const [prs, setPrs] = useState<PR[]>([]);
+  const [prSearch, setPrSearch] = useState('');
+  const [prFocusFilter, setPrFocusFilter] = useState<string | null>(null);
   const [history, setHistory] = useState<WorkoutSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<any | null>(null);
@@ -114,6 +121,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
+  const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -141,7 +149,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     // Load Apple Health data
     loadHealthSummary().then(setHealthSummary);
     loadHealthScore().then(setHealthScore);
-  }, []);
+    computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
+  }, [userProfile.mealsPerDay]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -295,13 +304,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={onBack} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Text style={styles.backBtn}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Progress</Text>
-        <View style={{ width: 60 }} />
-      </View>
+      {/* Top "← Back / Progress" header is hidden when rendered inline
+          as a bottom-tab — the bottom nav handles navigation. */}
+      {!noHeader && (
+        <View style={styles.header}>
+          <TouchableOpacity onPress={onBack} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Text style={styles.backBtn}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.title}>Progress</Text>
+          <View style={{ width: 60 }} />
+        </View>
+      )}
 
       <View style={styles.tabs}>
         {([
@@ -538,6 +551,47 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </ViewShot>
           )}
 
+          {/* Diet Consistency Score — mirrors the fitness score card so
+              users treat diet adherence with the same weight as workouts. */}
+          {dietScore && (
+            <View style={styles.fitnessScoreCard}>
+              <View style={styles.fitnessScoreHeader}>
+                <View>
+                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY</Text>
+                  <Text style={styles.fitnessScoreSubtext}>Based on your last 14 days</Text>
+                </View>
+                <View style={styles.fitnessScoreCircle}>
+                  <Text style={styles.fitnessScoreValue}>{dietScore.total}</Text>
+                </View>
+              </View>
+              <Text style={styles.fitnessScoreRating}>
+                {dietScore.total >= 80 ? '🥗 Dialed In'
+                  : dietScore.total >= 60 ? '🍽️ On Track'
+                  : dietScore.total >= 40 ? '📊 Building'
+                  : dietScore.total >= 20 ? '🌱 Starting'
+                  : '🏁 Log a Meal'}
+              </Text>
+              <View style={styles.fitnessBreakdown}>
+                {([
+                  { label: 'Adherence',   value: dietScore.adherence, max: 60, detail: `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals` },
+                  { label: 'Active Days', value: dietScore.streak,    max: 25, detail: `${dietScore.daysTracked}/14 days` },
+                  { label: 'Evenness',    value: dietScore.spread,    max: 15, detail: dietScore.spread >= 10 ? 'Consistent' : dietScore.spread >= 5 ? 'Clustered' : 'Spotty' },
+                ] as const).map(item => (
+                  <View key={item.label} style={styles.fitnessBarRow}>
+                    <View style={styles.fitnessBarLabel}>
+                      <Text style={styles.fitnessBarLabelText}>{item.label}</Text>
+                      <Text style={styles.fitnessBarDetail}>{item.detail}</Text>
+                    </View>
+                    <View style={styles.fitnessBarTrack}>
+                      <View style={[styles.fitnessBarFill, { width: `${Math.round((item.value / item.max) * 100)}%` as any }]} />
+                    </View>
+                    <Text style={styles.fitnessBarScore}>{item.value}/{item.max}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
             <View style={styles.insightsCard}>
               <Text style={styles.insightsTitle}>Coach Insights</Text>
@@ -631,24 +685,75 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.emptyTitle}>No PRs yet</Text>
               <Text style={styles.emptyBody}>Complete a workout and log your sets to start tracking personal records.</Text>
             </View>
-          ) : (
-            <>
-              <Text style={styles.sectionLabel}>{prs.length} exercises tracked</Text>
-              {prs.map((pr, i) => (
-                <View key={i} style={styles.prCard}>
-                  <View style={styles.prLeft}>
-                    <Text style={styles.prName}>{pr.exerciseName}</Text>
-                    <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
+          ) : (() => {
+            const focusOptions = Array.from(new Set(prs.map(p => p.sessionFocus).filter(Boolean))).sort();
+            const q = prSearch.trim().toLowerCase();
+            const filteredPrs = prs.filter(pr => {
+              if (q && !pr.exerciseName.toLowerCase().includes(q)) return false;
+              if (prFocusFilter && pr.sessionFocus !== prFocusFilter) return false;
+              return true;
+            });
+            return (
+              <>
+                <TextInput
+                  style={styles.prSearchInput}
+                  value={prSearch}
+                  onChangeText={setPrSearch}
+                  placeholder="Search exercises..."
+                  placeholderTextColor={tc.textMuted}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                />
+                {focusOptions.length > 1 && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.prFilterRow}>
+                    <TouchableOpacity
+                      style={[styles.prFilterChip, prFocusFilter === null && styles.prFilterChipActive]}
+                      onPress={() => setPrFocusFilter(null)}>
+                      <Text style={[styles.prFilterChipText, prFocusFilter === null && styles.prFilterChipTextActive]}>
+                        All
+                      </Text>
+                    </TouchableOpacity>
+                    {focusOptions.map(focus => {
+                      const active = prFocusFilter === focus;
+                      return (
+                        <TouchableOpacity
+                          key={focus}
+                          style={[styles.prFilterChip, active && styles.prFilterChipActive]}
+                          onPress={() => setPrFocusFilter(active ? null : focus)}>
+                          <Text style={[styles.prFilterChipText, active && styles.prFilterChipTextActive]}>
+                            {focus}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+                <Text style={styles.sectionLabel}>
+                  {filteredPrs.length} of {prs.length} exercises tracked
+                </Text>
+                {filteredPrs.length === 0 ? (
+                  <View style={styles.emptyBox}>
+                    <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
-                  <View style={styles.prRight}>
-                    <Text style={styles.prWeight}>{pr.weightLbs}</Text>
-                    <Text style={styles.prUnit}>lbs</Text>
-                    <Text style={styles.prReps}>{pr.reps} reps</Text>
+                ) : filteredPrs.map((pr, i) => (
+                  <View key={i} style={styles.prCard}>
+                    <View style={styles.prLeft}>
+                      <Text style={styles.prName}>{pr.exerciseName}</Text>
+                      <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
+                    </View>
+                    <View style={styles.prRight}>
+                      <Text style={styles.prWeight}>{pr.weightLbs}</Text>
+                      <Text style={styles.prUnit}>lbs</Text>
+                      <Text style={styles.prReps}>{pr.reps} reps</Text>
+                    </View>
                   </View>
-                </View>
-              ))}
-            </>
-          )}
+                ))}
+              </>
+            );
+          })()}
         </ScrollView>
       ) : tab === 'history' ? (
         <ScrollView contentContainerStyle={styles.content}>
@@ -805,11 +910,36 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <View style={styles.sessionHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.sessionFocus}>{s.focus}</Text>
-                  <Text style={styles.sessionDate}>{formatDate(s.date)}</Text>
+                  <Text style={styles.sessionDate}>
+                    {formatDate(s.date)}
+                    {s.startedAt && s.endedAt
+                      ? ` · ${new Date(s.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} – ${new Date(s.endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+                      : ''}
+                  </Text>
                 </View>
                 <View style={styles.sessionBadge}>
                   <Text style={styles.sessionBadgeText}>{formatDuration(s.durationSeconds)}</Text>
                 </View>
+                {s.id && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      Alert.alert(
+                        'Delete this summary?',
+                        'Removes the AI-generated workout summary. The workout itself stays in your history.',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: 'Delete', style: 'destructive', onPress: async () => {
+                            await deleteWorkoutSummary(s.id!);
+                            setSummaries(prev => prev.filter(x => x.id !== s.id));
+                          }},
+                        ],
+                      );
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
+                    <Text style={{ fontSize: 18, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
+                  </TouchableOpacity>
+                )}
               </View>
               <View style={styles.sessionStats}>
                 <Text style={styles.sessionStat}>{s.totalSets} sets</Text>
@@ -847,6 +977,26 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={styles.sessionFocus}>{c.changedBy === 'trainer' ? 'Trainer Update' : 'Nutritionist Update'}</Text>
                     <Text style={styles.sessionDate}>{label}</Text>
                   </View>
+                  {c.id && (
+                    <TouchableOpacity
+                      onPress={() => {
+                        Alert.alert(
+                          'Delete this entry?',
+                          'Removes this plan change from your history. The plan itself stays unchanged.',
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Delete', style: 'destructive', onPress: async () => {
+                              await deletePlanChange(c.id!);
+                              setPlanChanges(prev => prev.filter(x => x.id !== c.id));
+                            }},
+                          ],
+                        );
+                      }}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
+                      <Text style={{ fontSize: 18, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
                 <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic', marginBottom: 2 }}>You asked: "{c.question.length > 80 ? c.question.slice(0, 80) + '…' : c.question}"</Text>
                 <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{c.summary}</Text>
@@ -1014,6 +1164,30 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   emptyIcon: { fontSize: 48 },
   emptyTitle:{ fontSize: 18, fontWeight: '700', color: colors.textPrimary },
   emptyBody: { fontSize: 14, color: colors.textSecondary, textAlign: 'center', lineHeight: 20, paddingHorizontal: 24 },
+
+  prSearchInput: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.textPrimary,
+    marginBottom: 10,
+  },
+  prFilterRow: { flexDirection: 'row', gap: 8, paddingBottom: 10 },
+  prFilterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  prFilterChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  prFilterChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  prFilterChipTextActive: { color: colors.background },
 
   prCard: {
     flexDirection: 'row', alignItems: 'center',

@@ -240,6 +240,9 @@ export default function Index() {
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme'>('goal');
+  // Optional sub-tab to pre-select when opening the EditProfileScreen in
+  // 'mealplan' mode. Lets HomeScreen jump straight into Foods/Supplements/Macros.
+  const [editInitialMealTab, setEditInitialMealTab] = useState<'foods' | 'supplements' | 'macros' | undefined>(undefined);
   const [planRefreshKey, setPlanRefreshKey] = useState(0);
   const [isWorkoutUpdating, setIsWorkoutUpdating] = useState(false);
   const [isNutritionUpdating, setIsNutritionUpdating] = useState(false);
@@ -718,7 +721,12 @@ export default function Index() {
     // re-populated from AsyncStorage by loadProfile anyway.
   };
 
-  const handleSaveProfile = async (updated: UserProfile) => {
+  // Optional explicit mode override — used by the inline tab editors in
+  // HomeScreen which don't go through the EditProfileScreen modal so
+  // `editMode` state would otherwise be stale and the wrong section
+  // would regenerate (or nothing would).
+  const handleSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
+    const effectiveMode = modeOverride ?? editMode;
     const stamped = stampGoalStart(updated, userProfile);
     // Record goal history only when the user actually used the GOAL
     // edit screen AND the goal/pace changed. We used to compute this
@@ -727,7 +735,7 @@ export default function Index() {
     // silently flipped this true and triggered a full-plan regen +
     // full-screen spinner.
     const goalChanged =
-      editMode === 'goal' &&
+      effectiveMode === 'goal' &&
       !!userProfile &&
       (
         userProfile.goal !== updated.goal ||
@@ -738,7 +746,7 @@ export default function Index() {
     }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
-    const priorEditMode = editMode;
+    const priorEditMode = effectiveMode;
     setIsEditing(false);
     setEditMode('goal');
     // Sync to backend so the edit is available on other devices.
@@ -924,11 +932,16 @@ export default function Index() {
         onSignOut={handleSignOut}
         onEditGoal={() => { setEditMode('goal'); setIsEditing(true); }}
         onEditWorkout={() => { setEditMode('workout'); setIsEditing(true); }}
-        onEditMealPlan={() => { setEditMode('mealplan'); setIsEditing(true); }}
+        onEditMealPlan={(initialTab?: 'foods' | 'supplements' | 'macros') => {
+          setEditMode('mealplan');
+          setEditInitialMealTab(initialTab);
+          setIsEditing(true);
+        }}
         onEditThemes={() => { setEditMode('theme'); setIsEditing(true); }}
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
+        onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
         onProfileUpdate={async (changes, skipRegen) => {
           if (!userProfile || !authToken) return;
           const updated = { ...userProfile, ...changes };
@@ -1058,8 +1071,9 @@ export default function Index() {
             authToken={authToken}
             profile={userProfile}
             mode={editMode}
+            initialMealTab={editInitialMealTab}
             onSave={handleSaveProfile}
-            onCancel={() => { setIsEditing(false); setEditMode('goal'); }}
+            onCancel={() => { setIsEditing(false); setEditMode('goal'); setEditInitialMealTab(undefined); }}
             onRoutinesChanged={() => setPlanRefreshKey(k => k + 1)}
           />
         )}

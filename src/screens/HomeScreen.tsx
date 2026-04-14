@@ -10,7 +10,7 @@ import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/pla
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
-  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries,
+  isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
   loadPreservedCompletedWorkouts,
 } from '../utils/workoutHistory';
@@ -28,6 +28,11 @@ import CoachCheckinModal from '../components/CoachCheckinModal';
 import { colors, getTheme, radius } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
+// Inline-rendered tab content. Goals and Progress used to be modal
+// overlays via parent callbacks; they now mount inside the tab body
+// so the bottom nav stays pinned and feels like a single-page app.
+import ProgressScreen from './ProgressScreen';
+import EditProfileScreen from './EditProfileScreen';
 
 interface HomeScreenProps {
   authToken: string;
@@ -41,7 +46,7 @@ interface HomeScreenProps {
   onSignOut: () => void;
   onEditGoal: () => void;
   onEditWorkout: () => void;
-  onEditMealPlan: () => void;
+  onEditMealPlan: (initialTab?: 'foods' | 'supplements' | 'macros') => void;
   onEditThemes: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
@@ -49,6 +54,11 @@ interface HomeScreenProps {
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
   onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
   onCancelPlanGen?: () => void;
+  // Wraps the parent's full profile-save handler so the inline tab
+  // editors can save without going through the modal flow. The optional
+  // `mode` argument tells the parent which section to regenerate so the
+  // right loading state fires (workout vs nutrition).
+  onSaveProfile?: (updated: UserProfile, mode?: 'goal' | 'workout' | 'mealplan' | 'theme') => void;
 }
 
 interface ScheduleItem {
@@ -818,7 +828,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal, onEditWorkout, onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress, onViewAccount, onProfileUpdate, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -874,8 +884,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
-  const [activeTab, setActiveTab]         = useState<'workout' | 'meals'>('workout');
-  const [menuOpen, setMenuOpen]           = useState(false);
+  // Bottom-tab navigation. All five tabs render inline content within
+  // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
+  // and never disappears no matter which tab is active.
+  const [activeTab, setActiveTab]         = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  // Sub-tab inside each main tab.
+  // Workouts: plan | exercises | muscles | equipment
+  // Meals:    plan | foods     | supplements | macros
+  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'exercises' | 'muscles' | 'equipment'>('plan');
+  const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
+  // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
+  // Cached health score for the Profile tab. Loaded once on mount;
+  // re-loaded when the user changes tabs to profile so a fresh scan
+  // shows up without a full reload.
+  const [profileHealthScore, setProfileHealthScore] = useState<import('../types').HealthScoreResult | null>(null);
+  useEffect(() => {
+    if (activeTab === 'profile') {
+      loadHealthScore().then(setProfileHealthScore).catch(() => setProfileHealthScore(null));
+    }
+    // Auto-close the inline exercise library when leaving the workout tab.
+    if (activeTab !== 'workout') {
+      setShowExerciseLibrary(false);
+    }
+  }, [activeTab]);
   const [showCheckin, setShowCheckin]     = useState(false);
   /** True while `loadPlans` is mid-flight. Prevents concurrent plan reads
       from clobbering each other if an effect re-fires rapidly. */
@@ -1037,6 +1068,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showNutritionistNote, setShowNutritionistNote] = useState(false);
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+  // Days until the next weekly AI check-in. Computed from `weekStartDate`
+  // on mount + whenever the plan refreshes. Negative means overdue. Null
+  // means the user hasn't generated a plan yet (nothing to check in on).
+  const [daysUntilCheckin, setDaysUntilCheckin] = useState<number | null>(null);
+  const [nextCheckinDate, setNextCheckinDate] = useState<Date | null>(null);
   const [checkinAdherence, setCheckinAdherence] = useState(3); // 1-5
   const [checkinEnergy, setCheckinEnergy] = useState(3);       // 1-5
   const [checkinNotes, setCheckinNotes] = useState('');
@@ -1063,8 +1099,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     loadDayStatus();
     // Check if a weekly review is due
     AsyncStorage.getItem('weekStartDate').then(async raw => {
-      if (!raw) return;
-      const daysSince = (Date.now() - new Date(raw).getTime()) / (1000 * 60 * 60 * 24);
+      if (!raw) {
+        setDaysUntilCheckin(null);
+        setNextCheckinDate(null);
+        return;
+      }
+      const startMs = new Date(raw).getTime();
+      const daysSince = (Date.now() - startMs) / (1000 * 60 * 60 * 24);
+      setDaysUntilCheckin(Math.max(0, Math.ceil(7 - daysSince)));
+      setNextCheckinDate(new Date(startMs + 7 * 24 * 60 * 60 * 1000));
       if (daysSince >= 7) {
         // Pre-populate injury statuses from current profile
         const profileRaw = await AsyncStorage.getItem('userProfile');
@@ -2277,10 +2320,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           />
         </View>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity style={styles.menuBtn} onPress={() => setMenuOpen(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
-          <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
-          <View style={[styles.menuBar, { backgroundColor: themeColors.textPrimary }]} />
+        {/* Ask AI button — solid filled pill, always visible against
+            the gradient header. Replaces the hamburger AND the floating
+            purple FAB from the previous design. */}
+        <TouchableOpacity
+          style={[styles.askAiBtn, { backgroundColor: aiPalette.strong }]}
+          onPress={() => setShowTrainerModal(true)}
+          activeOpacity={0.85}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Image
+            source={require('../../assets/images/Brain and speech bubble icon white.png')}
+            style={styles.askAiIcon}
+            resizeMode="contain"
+          />
+          <Text style={styles.askAiText}>Ask AI</Text>
         </TouchableOpacity>
       </LinearGradient>
 
@@ -2335,30 +2388,38 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       ) : null}
 
-      {/* Tab toggle — pill style. Always rendered now so the user can switch
-          tabs even while a plan is regenerating. */}
-      {<View style={[styles.tabs, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'workout' && [styles.tabActive, { backgroundColor: workoutPalette.strong }]]}
-          onPress={() => setActiveTab('workout')}
-          activeOpacity={0.8}>
-          <Text style={[styles.tabText, { color: activeTab === 'workout' ? '#FFFFFF' : themeColors.textMuted }]}>
-            Workout{workoutUpdateSummary ? '  •' : ''}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'meals' && [styles.tabActive, { backgroundColor: mealPalette.strong }]]}
-          onPress={() => setActiveTab('meals')}
-          activeOpacity={0.8}>
-          <Text style={[styles.tabText, { color: activeTab === 'meals' ? '#FFFFFF' : themeColors.textMuted }]}>
-            Meals{nutritionUpdateSummary ? '  •' : ''}
-          </Text>
-        </TouchableOpacity>
-      </View>}
+      {/* Top pill switcher removed — the bottom tab bar now owns
+          workout/meals navigation. */}
+
+      {/* Fixed workout sub-tab bar — pinned below the header so it stays
+          visible regardless of what content (day cards, library, editor)
+          is rendered underneath. Uses safe-area insets so it sits cleanly
+          below the gradient header on any device. */}
+      {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+          <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+          <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+          <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+          <SubTabBtn label="Equipment" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+        </View>
+      )}
+
+      {/* Fixed meals sub-tab bar — same pattern. */}
+      {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+          <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('plan')} />
+          <SubTabBtn label="Foods"       active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('foods')} />
+          <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('supplements')} />
+          <SubTabBtn label="Macros"      active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('macros')} />
+        </View>
+      )}
 
       {/* Tab content. Each tab gets its own loading placeholder so
-          section-specific regens don't block the other tab. */}
-      {<ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+          section-specific regens don't block the other tab.
+          Only the workout/meals tabs render the existing ScrollView body;
+          goals/progress/profile render their own inline pages below. */}
+      {(activeTab === 'workout' || activeTab === 'meals') && (
+      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContentBelowSubTab} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {activeTab === 'workout' ? (
           (isWorkoutUpdating && !isNutritionUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
@@ -2386,31 +2447,68 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           ) : (
           <>
-            <SectionBar
-              icon="🏋️"
-              label="This Week"
-              subtitle={`${schedule.filter(s => !s.isRest).length} workouts planned`}
-              palette={workoutPalette}
-            />
+            {/* Sub-tab bar moved to a fixed position above — see top of
+                file. The fixed bar stays visible regardless of scroll. */}
 
-            {/* Trainer plan note — only shown when a note exists */}
-            {trainerNote ? (
+            {/* Equipment sub-tab renders the workout editor inline */}
+            {workoutSubTab === 'equipment' && (
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110 }}>
+                <EditProfileScreen
+                  authToken={authToken}
+                  profile={userProfile}
+                  mode="workout"
+                  noHeader
+                  onSave={(updated) => { onSaveProfile?.(updated, 'workout'); setWorkoutSubTab('plan'); }}
+                  onCancel={() => setWorkoutSubTab('plan')}
+                  onRoutinesChanged={() => { /* no-op */ }}
+                />
+              </View>
+            )}
+
+            {/* Check-in countdown — shows when the next AI review is due.
+                Only on the Plan sub-tab so it doesn't clutter the library. */}
+            {workoutSubTab === 'plan' && daysUntilCheckin != null && (
               <TouchableOpacity
-                style={[styles.planNoteRow, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '55' }]}
+                style={[styles.checkinIndicator, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '55' }]}
+                onPress={() => setShowWeeklyCheckin(true)}
+                activeOpacity={0.7}>
+                <View style={[styles.checkinDot, { backgroundColor: daysUntilCheckin === 0 ? workoutPalette.strong : workoutPalette.strong + '88' }]} />
+                <Text style={[styles.checkinLabel, { color: workoutPalette.text }]}>
+                  {daysUntilCheckin === 0
+                    ? 'AI check-in ready — tap to review'
+                    : `Next check-in ${nextCheckinDate ? nextCheckinDate.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : ''} · in ${daysUntilCheckin}d`}
+                </Text>
+                {/* 7-day progress dots */}
+                <View style={styles.checkinDots}>
+                  {Array.from({ length: 7 }).map((_, i) => {
+                    const filled = i < (7 - daysUntilCheckin);
+                    return (
+                      <View
+                        key={i}
+                        style={[
+                          styles.checkinTick,
+                          { backgroundColor: filled ? workoutPalette.strong : workoutPalette.strong + '33' },
+                        ]}
+                      />
+                    );
+                  })}
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {/* Trainer plan note — only shows on the Plan sub-tab. */}
+            {workoutSubTab === 'plan' && trainerNote ? (
+              <TouchableOpacity
+                style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
                 onPress={() => setShowTrainerNote(true)}
-                activeOpacity={0.75}>
-                <View style={[styles.planNoteIconWrap, { backgroundColor: workoutPalette.strong + '22' }]}>
-                  <Text style={styles.planNoteIcon}>📋</Text>
-                </View>
-                <View style={styles.planNoteBody}>
-                  <Text style={[styles.planNoteTitle, { color: workoutPalette.text }]}>Trainer's Plan Explanation</Text>
-                  <Text style={[styles.planNoteSub, { color: workoutPalette.text + 'AA' }]}>Why your trainer built this workout structure</Text>
-                </View>
-                <Text style={[styles.planNoteChevron, { color: workoutPalette.strong }]}>›</Text>
+                activeOpacity={0.7}>
+                <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
+                  Why this plan? ›
+                </Text>
               </TouchableOpacity>
             ) : null}
 
-            {(availabilityItems.length > 0 || cardioProfile) && (
+            {workoutSubTab === 'plan' && (availabilityItems.length > 0 || cardioProfile) && (
               <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
                 <Text style={[styles.insightTitle, { color: themeColors.textPrimary }]}>Muscle Focus</Text>
                 {cardioProfile ? <Text style={[styles.insightSubtitle, { color: themeColors.textSecondary }]}>{cardioProfile}</Text> : null}
@@ -2423,7 +2521,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
               </View>
             )}
-            {schedule.map((item, i) => {
+            {workoutSubTab === 'plan' && schedule.map((item, i) => {
               const key = dateKey(item.date);
               const isToday     = i === 0;
               const isCompleted = isToday && todayDone;
@@ -2477,31 +2575,38 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           ) : (
           <>
-            <SectionBar
-              icon="🥗"
-              label="Meal Plan"
-              subtitle="7 days"
-              palette={mealPalette}
-            />
+            {/* Sub-tab bar moved to a fixed position above — see top of file. */}
 
-            {/* Nutritionist plan note — only shown when a note exists */}
-            {nutritionistNote ? (
+            {/* Non-Plan sub-tabs render EditProfileScreen mealplan inline */}
+            {mealsSubTab !== 'plan' && (
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110 }}>
+                <EditProfileScreen
+                  key={`meal-${mealsSubTab}`}
+                  authToken={authToken}
+                  profile={userProfile}
+                  mode="mealplan"
+                  initialMealTab={mealsSubTab}
+                  noHeader
+                  onSave={(updated) => { onSaveProfile?.(updated, 'mealplan'); setMealsSubTab('plan'); }}
+                  onCancel={() => setMealsSubTab('plan')}
+                  onRoutinesChanged={() => { /* no-op */ }}
+                />
+              </View>
+            )}
+
+            {/* Nutritionist plan note — only shows on the Plan sub-tab. */}
+            {mealsSubTab === 'plan' && nutritionistNote ? (
               <TouchableOpacity
-                style={[styles.planNoteRow, { backgroundColor: mealPalette.soft, borderColor: mealPalette.strong + '55' }]}
+                style={[styles.planNoteLink, { borderColor: mealPalette.strong + '55' }]}
                 onPress={() => setShowNutritionistNote(true)}
-                activeOpacity={0.75}>
-                <View style={[styles.planNoteIconWrap, { backgroundColor: mealPalette.strong + '22' }]}>
-                  <Text style={styles.planNoteIcon}>🥗</Text>
-                </View>
-                <View style={styles.planNoteBody}>
-                  <Text style={[styles.planNoteTitle, { color: mealPalette.text }]}>Nutritionist's Plan Explanation</Text>
-                  <Text style={[styles.planNoteSub, { color: mealPalette.text + 'AA' }]}>Why your nutritionist chose this calorie & macro strategy</Text>
-                </View>
-                <Text style={[styles.planNoteChevron, { color: mealPalette.strong }]}>›</Text>
+                activeOpacity={0.7}>
+                <Text style={[styles.planNoteLinkText, { color: mealPalette.strong }]}>
+                  Why this plan? ›
+                </Text>
               </TouchableOpacity>
             ) : null}
 
-            {mealDays.map((d, idx) => {
+            {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
               if (!plan) return null;
               const isExpanded = expandedMealDays.has(d.key);
@@ -2583,7 +2688,150 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           </>
           )
         )}
-      </ScrollView>}
+      </ScrollView>
+      )}
+
+      {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
+      {activeTab === 'goals' && (
+        <View style={{ flex: 1, paddingBottom: 88 }}>
+          <EditProfileScreen
+            authToken={authToken}
+            profile={userProfile}
+            mode="goal"
+            noHeader
+            onSave={(updated) => {
+              onSaveProfile?.(updated, 'goal');
+              setActiveTab('workout');
+            }}
+            onCancel={() => setActiveTab('workout')}
+            onRoutinesChanged={() => { /* no-op in inline mode */ }}
+          />
+        </View>
+      )}
+
+      {/* ── Progress tab — inline ProgressScreen ──────────────────── */}
+      {activeTab === 'progress' && (
+        <View style={{ flex: 1, paddingBottom: 88 }}>
+          <ProgressScreen
+            authToken={authToken}
+            userProfile={userProfile}
+            themeName={userProfile.themePreference}
+            noHeader
+            onBack={() => setActiveTab('workout')}
+            onUpdateWeight={(weightLbs) => onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true)}
+          />
+        </View>
+      )}
+
+      {/* ── Profile tab ─────────────────────────────────────────────── */}
+      {activeTab === 'profile' && (() => {
+        const ps = userProfile.physicalStats;
+        const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
+        const themeOptions: Array<{ key: import('../types').AppThemeName; label: string; swatch: string }> = [
+          { key: 'midnight', label: 'Midnight', swatch: '#15C7B8' },
+          { key: 'ocean',    label: 'Ocean',    swatch: '#00CCE8' },
+          { key: 'amethyst', label: 'Amethyst', swatch: '#A060FF' },
+          { key: 'ember',    label: 'Ember',    swatch: '#FF6018' },
+          { key: 'forest',   label: 'Forest',   swatch: '#3AA860' },
+          { key: 'wine',     label: 'Wine',     swatch: '#C82848' },
+          { key: 'arctic',   label: 'Arctic',   swatch: '#5BA3D9' },
+          { key: 'sunrise',  label: 'Sunrise',  swatch: '#F08020' },
+        ];
+        const currentTheme = userProfile.themePreference ?? 'midnight';
+        return (
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+          {/* User info header */}
+          <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
+              <Text style={[styles.profileAvatarText, { color: themeColors.primary }]}>
+                {(userProfile.goal?.[0] ?? 'U').toUpperCase()}
+              </Text>
+            </View>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
+                {(userProfile.goal ?? 'Your profile').replace(/_/g, ' ')}
+              </Text>
+              <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
+                {ps?.weightLbs ? `${ps.weightLbs} lb` : '—'}  ·  {heightStr}  ·  age {ps?.age ?? '—'}
+              </Text>
+            </View>
+          </View>
+
+          {/* Quick data references — fitness score, body scan, weight */}
+          <View style={styles.profileStatRow}>
+            <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+              <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>FITNESS SCORE</Text>
+              <Text style={[styles.profileStatValue, { color: themeColors.textPrimary }]}>
+                {profileHealthScore?.fitnessScore != null ? `${profileHealthScore.fitnessScore}` : '—'}
+              </Text>
+              <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>
+                {profileHealthScore?.fitnessScore != null ? '/ 100' : 'Run a scan'}
+              </Text>
+            </View>
+            <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+              <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>WEIGHT</Text>
+              <Text style={[styles.profileStatValue, { color: themeColors.textPrimary }]}>
+                {ps?.weightLbs ?? '—'}
+              </Text>
+              <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>lb</Text>
+            </View>
+            <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+              <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>GOAL PACE</Text>
+              <Text style={[styles.profileStatValue, { color: themeColors.textPrimary, fontSize: 14 }]}>
+                {userProfile.goalDetails?.pace ?? '—'}
+              </Text>
+              <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>
+                {userProfile.goalDetails?.targetWeightLbs ? `→ ${userProfile.goalDetails.targetWeightLbs} lb` : ''}
+              </Text>
+            </View>
+          </View>
+
+          {/* Theme picker — 2-column grid of swatches. Showing the most
+              popular 8; the rest live in the full themes screen via
+              the "More themes" link below. */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginBottom: 0 }]}>THEME</Text>
+            <TouchableOpacity onPress={onEditThemes} activeOpacity={0.7}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>See all ›</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.profileThemeGrid}>
+            {themeOptions.map(t => {
+              const isActive = currentTheme === t.key;
+              return (
+                <TouchableOpacity
+                  key={t.key}
+                  style={[
+                    styles.profileThemeTile,
+                    { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
+                  ]}
+                  onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
+                  activeOpacity={0.8}>
+                  <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
+                  <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
+                  {isActive && <Text style={[styles.profileThemeCheck, { color: t.swatch }]}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Account + Sign out */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
+          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
+              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
+              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.profileSignOutBtn, { backgroundColor: themeColors.surface, borderColor: themeColors.error + '55' }]}
+            onPress={onSignOut}>
+            <Text style={[styles.profileSignOutText, { color: themeColors.error }]}>Sign Out</Text>
+          </TouchableOpacity>
+        </ScrollView>
+        );
+      })()}
 
       {/* Coach check-in modal */}
       <CoachCheckinModal
@@ -2598,6 +2846,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           visible={!!editingMeal}
           mealType={editingMeal.type}
           meal={editingMeal.meal}
+          themeName={userProfile.themePreference}
           nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
           allFoods={allFoodsWithCustom}
           foodCategories={userFoodCategories}
@@ -2646,75 +2895,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }}
       />
 
-      {/* Settings modal */}
-      <Modal visible={menuOpen} transparent animationType="fade" onRequestClose={() => setMenuOpen(false)}>
-        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setMenuOpen(false)}>
-          <View style={[styles.menuDropdown, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <View style={[styles.menuHeadingRow, { borderBottomColor: themeColors.border }]}>
-              <Text style={[styles.menuHeading, { color: themeColors.textMuted }]}>MENU</Text>
-            </View>
-            {[
-              { label: 'Account',          onPress: onViewAccount },
-              { label: 'View Progress',    onPress: onViewProgress },
-              { label: 'Edit Goal',        onPress: onEditGoal },
-              { label: 'Edit Workout',     onPress: onEditWorkout },
-              { label: 'Edit Meal Plan',   onPress: onEditMealPlan },
-              { label: 'Themes',           onPress: onEditThemes },
-            ].map((item, idx, arr) => (
-              <View key={item.label}>
-                <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); item.onPress(); }}>
-                  <Text style={[styles.menuItemText, { color: themeColors.textPrimary }]}>{item.label}</Text>
-                  <Text style={[styles.menuItemChevron, { color: themeColors.textMuted }]}>›</Text>
+      {/* Side menu modal removed — the bottom Profile tab now hosts the
+          same destinations as an inline list. */}
+
+      {/* Exercise library — inline View inside HomeScreen's render tree.
+          No more Modal portal, no more internal header/tab bar — the
+          outer workout sub-tab bar drives which content (exercises vs
+          muscles) shows via `libraryActiveTab`, which my sub-tab buttons
+          already set. Only a thin back header appears when the user
+          drills into a specific exercise or muscle detail. */}
+      {showExerciseLibrary && (
+        <View style={[styles.libraryInlineWrap, { top: insets.top + 72 + 44, backgroundColor: themeColors.background }]}>
+          <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
+
+            {/* Back header — only when drilled into a detail view. */}
+            {(selectedExercise || selectedMuscle) && (
+              <View style={styles.libraryHeader}>
+                <TouchableOpacity onPress={() => {
+                  if (selectedExercise) { setSelectedExercise(null); return; }
+                  if (selectedMuscle) { setSelectedMuscle(null); return; }
+                }}>
+                  <Text style={[styles.libraryClose, { color: themeColors.primary }]}>← Back</Text>
                 </TouchableOpacity>
-                {idx < arr.length - 1 && <View style={[styles.menuDivider, { backgroundColor: themeColors.border }]} />}
-              </View>
-            ))}
-            <View style={[styles.menuDivider, { backgroundColor: themeColors.border }]} />
-            <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuOpen(false); onSignOut(); }}>
-              <Text style={[styles.menuItemText, { color: themeColors.error }]}>Sign Out</Text>
-              <Text style={[styles.menuItemChevron, { color: themeColors.error + '80' }]}>›</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      </Modal>
-
-      <Modal visible={showExerciseLibrary} transparent animationType="slide" onRequestClose={() => {
-        if (selectedExercise) { setSelectedExercise(null); return; }
-        if (selectedMuscle) { setSelectedMuscle(null); return; }
-        setShowExerciseLibrary(false);
-      }}>
-        <View style={styles.libraryBackdrop}>
-          <View style={[styles.librarySheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
-
-            {/* Header */}
-            <View style={styles.libraryHeader}>
-              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>
-                {selectedExercise ? selectedExercise.name : selectedMuscle ? selectedMuscle.name : 'Library'}
-              </Text>
-              <TouchableOpacity onPress={() => {
-                if (selectedExercise) { setSelectedExercise(null); return; }
-                if (selectedMuscle) { setSelectedMuscle(null); return; }
-                setShowExerciseLibrary(false);
-              }}>
-                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>
-                  {selectedExercise || selectedMuscle ? '← Back' : 'Close'}
+                <Text style={[styles.libraryTitle, { color: themeColors.textPrimary, marginLeft: 12, flex: 1 }]}>
+                  {selectedExercise ? selectedExercise.name : selectedMuscle!.name}
                 </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Tab bar — only show when not in detail view */}
-            {!selectedExercise && !selectedMuscle && (
-              <View style={[styles.libTabBar, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                <TouchableOpacity
-                  style={[styles.libTab, libraryActiveTab === 'exercises' && { borderBottomColor: workoutPalette.strong }]}
-                  onPress={() => setLibraryActiveTab('exercises')}>
-                  <Text style={[styles.libTabText, { color: libraryActiveTab === 'exercises' ? workoutPalette.strong : themeColors.textMuted }]}>Exercises</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.libTab, libraryActiveTab === 'muscles' && { borderBottomColor: aiPalette.strong }]}
-                  onPress={() => setLibraryActiveTab('muscles')}>
-                  <Text style={[styles.libTabText, { color: libraryActiveTab === 'muscles' ? aiPalette.strong : themeColors.textMuted }]}>Muscles</Text>
-                </TouchableOpacity>
               </View>
             )}
 
@@ -2730,7 +2935,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         {selectedExercise.secondary_muscles?.length ? (
                           <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
-                        {selectedExercise.equipment ? <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment)}</Text> : null}
+                        <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment) || 'Bodyweight'}</Text>
                         <TouchableOpacity style={[styles.detailVideoBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => openExerciseVideo(selectedExercise.name)}>
                           <Text style={styles.detailVideoBtnText}>▶  Watch Form Video</Text>
                         </TouchableOpacity>
@@ -3048,7 +3253,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
           </View>
         </View>
-      </Modal>
+      )}
 
       <Modal visible={showTrainerModal} animationType="slide" transparent onRequestClose={() => setShowTrainerModal(false)}>
         <KeyboardAvoidingView
@@ -3131,7 +3336,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     CoachCheckinModal (doesn't start a chat thread). */}
                 <TouchableOpacity
                   style={[styles.checkinCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border, marginHorizontal: 0, marginTop: 24 }]}
-                  onPress={() => setShowCheckin(true)}
+                  onPress={() => {
+                    // React Native can't reliably stack a second <Modal>
+                    // on top of an already-open one (iOS silently drops
+                    // the new modal). Close the trainer sheet first,
+                    // then open the check-in on the next tick.
+                    setShowTrainerModal(false);
+                    setTimeout(() => setShowCheckin(true), 350);
+                  }}
                   activeOpacity={0.8}>
                   <View style={styles.checkinCardIconWrap}>
                     <Text style={styles.checkinCardIcon}>🩺</Text>
@@ -3826,56 +4038,114 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       </Modal>
 
-      {/* Floating AI chat button — purple/teal for AI identity */}
-      <TouchableOpacity
-        style={[styles.fab, { backgroundColor: aiPalette.strong }]}
-        onPress={() => setShowTrainerModal(true)}
-        activeOpacity={0.85}>
-        <Image
-          source={require('../../assets/images/Brain and speech bubble icon white.png')}
-          style={styles.fabIcon}
-          resizeMode="contain"
+      {/* AI Coach button moved to the header (top right) — see the
+          header block above where the hamburger used to live. */}
+
+      {/* ── Bottom tab bar ────────────────────────────────────────────────
+          Five top-level destinations. Each tab simply sets `activeTab`
+          and the screen body re-renders the matching content block. */}
+      <View style={[styles.bottomBar, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
+        <BottomTabButton
+          label="Goals"
+          icon="🎯"
+          active={activeTab === 'goals'}
+          tint={themeColors.primary}
+          mutedColor={themeColors.textMuted}
+          onPress={() => setActiveTab('goals')}
         />
-      </TouchableOpacity>
+        <BottomTabButton
+          label="Workouts"
+          icon="🏋️"
+          active={activeTab === 'workout'}
+          tint={workoutPalette.strong}
+          mutedColor={themeColors.textMuted}
+          onPress={() => setActiveTab('workout')}
+        />
+        <BottomTabButton
+          label="Meals"
+          icon="🍽️"
+          active={activeTab === 'meals'}
+          tint={mealPalette.strong}
+          mutedColor={themeColors.textMuted}
+          onPress={() => setActiveTab('meals')}
+        />
+        <BottomTabButton
+          label="Progress"
+          icon="📈"
+          active={activeTab === 'progress'}
+          tint={themeColors.primary}
+          mutedColor={themeColors.textMuted}
+          onPress={() => setActiveTab('progress')}
+        />
+        <BottomTabButton
+          label="Profile"
+          icon="👤"
+          active={activeTab === 'profile'}
+          tint={themeColors.primary}
+          mutedColor={themeColors.textMuted}
+          onPress={() => setActiveTab('profile')}
+        />
+      </View>
     </LinearGradient>
   );
 }
 
-// ── SectionBar ────────────────────────────────────────────────────────────────
-
-function SectionBar({
-  icon, label, subtitle, palette,
-}: {
-  icon: string;
+// ── SubTabBtn ─────────────────────────────────────────────────────────────────
+function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
   label: string;
-  subtitle?: string;
-  palette: { soft: string; strong: string; text: string };
+  active: boolean;
+  tint: string;
+  mutedColor: string;
+  onPress: () => void;
 }) {
   return (
-    <View style={[sbStyles.bar, { backgroundColor: palette.soft, borderColor: palette.strong + '40' }]}>
-      <Text style={sbStyles.icon}>{icon}</Text>
-      <Text style={[sbStyles.label, { color: palette.text }]}>{label}</Text>
-      {subtitle && (
-        <Text style={[sbStyles.subtitle, { color: palette.text + 'BB' }]}>{subtitle}</Text>
-      )}
-    </View>
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.7}
+      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+      style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: active ? tint : 'transparent' }}>
+      <Text style={{ fontSize: 13, fontWeight: '700', color: active ? tint : mutedColor, letterSpacing: 0.2 }}>
+        {label}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
-const sbStyles = StyleSheet.create({
-  bar: {
-    flexDirection: 'row',
+// ── BottomTabButton ───────────────────────────────────────────────────────────
+function BottomTabButton({
+  label, icon, active, tint, mutedColor, onPress,
+}: {
+  label: string;
+  icon: string;
+  active: boolean;
+  tint: string;
+  mutedColor: string;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={btStyles.btn}
+      onPress={onPress}
+      activeOpacity={0.7}
+      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}>
+      <Text style={[btStyles.icon, !active && { opacity: 0.55 }]}>{icon}</Text>
+      <Text style={[btStyles.label, { color: active ? tint : mutedColor }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+const btStyles = StyleSheet.create({
+  btn: {
+    flex: 1,
     alignItems: 'center',
-    gap: 8,
-    borderRadius: radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    marginBottom: 10,
-    borderWidth: 1,
+    justifyContent: 'center',
+    paddingVertical: 6,
+    gap: 2,
   },
-  icon:     { fontSize: 16 },
-  label:    { fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.8 },
-  subtitle: { fontSize: 12, fontWeight: '500', flex: 1, textAlign: 'right' },
+  icon:  { fontSize: 18 },
+  label: { fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
 });
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
@@ -4123,13 +4393,228 @@ const styles = StyleSheet.create({
   },
   chatPlanUpdateText: { fontSize: 13, fontWeight: '600' },
 
+  // Bottom tab bar — pinned to the screen bottom, sits above safe area.
+  // Add ~88px of padding to scrollContent so the last card isn't hidden
+  // behind it. Has a solid surface background so the gradient screen
+  // body doesn't bleed through.
+  bottomBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+    paddingTop: 8,
+    paddingBottom: 24,
+    paddingHorizontal: 4,
+    borderTopWidth: 1,
+  },
+
+  // Placeholder content for the goals/progress/profile tabs until they
+  // get dedicated dashboards. Simple card with a title, a one-line body,
+  // and a single primary action button.
+  tabPlaceholderCard: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 18,
+    marginBottom: 12,
+    gap: 10,
+  },
+  tabPlaceholderTitle: { fontSize: 17, fontWeight: '800' },
+  tabPlaceholderBody:  { fontSize: 13, lineHeight: 19 },
+  tabActionBtn: {
+    marginTop: 4,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    alignItems: 'center',
+  },
+  tabActionBtnText: { fontSize: 13, fontWeight: '700', color: '#fff' },
+
+  // Fixed sub-tab bar that sits below the app header. `top` is set
+  // inline via `insets.top + 72` so it lands cleanly below the gradient
+  // header on any device. Same zIndex as bottom nav so sibling overlays
+  // stay beneath it.
+  fixedSubTabBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    paddingHorizontal: 8,
+    zIndex: 6,
+  },
+
+  // Next-checkin indicator on the workout Plan sub-tab.
+  checkinIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  checkinDot: { width: 6, height: 6, borderRadius: 3 },
+  checkinLabel: { flex: 1, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
+  checkinDots: { flexDirection: 'row', gap: 3 },
+  checkinTick: { width: 4, height: 4, borderRadius: 2 },
+
+  // Inline wrapper for the exercise library — replaces the old Modal
+  // portal so the library content lives inside HomeScreen's render tree.
+  // `top` is set inline via `insets.top + 72 + 44` so it sits just
+  // below the fixed sub-tab bar on any device.
+  libraryInlineWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 88,      // above the bottom tab bar
+    zIndex: 4,
+  },
+
+  // Extra top padding for the workout/meals ScrollView so its content
+  // doesn't hide under the fixed sub-tab bar. The bar sits at top:120
+  // and is 44px tall, so content starts at 120+44+(~10 gap) - the
+  // scrollView's own top edge is at 0 but the ScrollView starts
+  // rendering right below the gradient header, so we just need the
+  // padding from where the ScrollView begins.
+  scrollContentBelowSubTab: {
+    paddingHorizontal: 16,
+    paddingTop: 70,  // clears the fixed sub-tab bar + a small gap
+    paddingBottom: 110,
+  },
+
+  // ── Sub-tab bar (Plan / Exercises / Muscles, etc.) ──────────────────────
+  subTabBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    marginBottom: 14,
+  },
+
+  // ── Ask AI button (header top-right) ────────────────────────────────────
+  // Solid filled pill so it stands out against the gradient header.
+  askAiBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radius.full,
+    borderWidth: 0,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  askAiIcon: { width: 16, height: 16 },
+  askAiText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.3, color: '#FFFFFF' },
+
+  // ── Compact "Why this plan?" link (replaces full-card explanation) ──────
+  planNoteLink: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  planNoteLinkText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
+
+  // ── Profile tab ─────────────────────────────────────────────────────────
+  profileHero: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 16,
+    marginBottom: 14,
+  },
+  profileAvatar: {
+    width: 56, height: 56, borderRadius: 28,
+    borderWidth: 2,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  profileAvatarText: { fontSize: 22, fontWeight: '800' },
+  profileHeroName:   { fontSize: 17, fontWeight: '800', textTransform: 'capitalize' },
+  profileHeroMeta:   { fontSize: 13, fontWeight: '500' },
+
+  profileStatRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
+  profileStatTile: {
+    flex: 1,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    gap: 4,
+  },
+  profileStatLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.6 },
+  profileStatValue: { fontSize: 22, fontWeight: '800', textTransform: 'capitalize' },
+  profileStatSub:   { fontSize: 10, fontWeight: '600' },
+
+  profileSectionLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 8,
+  },
+  profileThemeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  profileThemeTile: {
+    width: '47%',
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileThemeSwatch: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+  },
+  profileThemeLabel: { flex: 1, fontSize: 13, fontWeight: '700' },
+  profileThemeCheck: { fontSize: 14, fontWeight: '800' },
+
+  // Profile tab — list of menu rows with section dividers.
+  profileMenuList: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+    marginBottom: 14,
+  },
+  profileMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  profileMenuLabel:   { flex: 1, fontSize: 15, fontWeight: '600' },
+  profileMenuChevron: { fontSize: 20, fontWeight: '300' },
+  profileMenuDivider: { height: 1, marginLeft: 16 },
+  profileSignOutBtn: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  profileSignOutText: { fontSize: 14, fontWeight: '700' },
+
   fab: {
     position: 'absolute',
-    bottom: 28,
+    bottom: 96,  // raised above the bottom tab bar
     right: 20,
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -4222,7 +4707,7 @@ const styles = StyleSheet.create({
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
 
   scrollView:    { flex: 1 },
-  scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 110 },
 
   dayCard:         { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 0, marginBottom: 10, overflow: 'hidden' },
   dayCardTopAccent: { height: 3, marginBottom: 12, borderRadius: 0 },
@@ -4320,13 +4805,11 @@ const styles = StyleSheet.create({
 
   libraryBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   librarySheet: {
-    maxHeight: '78%',
+    flex: 1,
     backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.xl,
-    borderTopRightRadius: radius.xl,
-    borderTopWidth: 1,
+    borderTopWidth: 0,
     borderTopColor: colors.border,
-    paddingTop: 14,
+    paddingTop: 8,
   },
   libraryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 10 },
   libraryTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },

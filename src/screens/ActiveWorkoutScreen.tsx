@@ -9,7 +9,7 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -75,10 +75,13 @@ function getTargetSetCount(targetSets: unknown): number {
 const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 
-function isTimedExercise(name: string, targetReps?: string): boolean {
+function isTimedExercise(name: string, targetReps?: string | number): boolean {
   if (TIMED_EXERCISE_RE.test(name)) return true;
-  // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds"
-  if (targetReps && TIMED_REPS_RE.test(targetReps.trim())) return true;
+  // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds".
+  // Coerce to string — AI plans occasionally return reps as a number
+  // ("reps": 12) which crashed .trim() before this guard.
+  const reps = targetReps == null ? '' : String(targetReps).trim();
+  if (reps && TIMED_REPS_RE.test(reps)) return true;
   return false;
 }
 
@@ -416,6 +419,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
 
     const targetSetCount = getTargetSetCount(ex.targetSets);
+    // Effective total includes user-added extras minus removed sets, so
+    // rest timers + AI tips still fire for sets added beyond the base target.
+    const extras         = extraSetCounts[exIdx] ?? 0;
+    const removed        = removedSetCounts[exIdx] ?? 0;
+    const effectiveTotal = Math.max(targetSetCount + extras - removed, ex.sets.length + 1);
 
     // Insert or replace at the correct slot position
     const updatedSets = [...ex.sets];
@@ -427,8 +435,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setExercises(updatedExercises);
     setAiErrorIdx(null);
 
-    // Auto-advance to next incomplete exercise when all target sets are done
-    if (cleanSets.length >= targetSetCount) {
+    // Auto-advance to next incomplete exercise when all effective sets are done
+    if (cleanSets.length >= effectiveTotal) {
       const nextIdx = updatedExercises.findIndex((e, i) => i > exIdx && e.sets.length < getTargetSetCount(e.targetSets));
       setActiveExIdx(nextIdx >= 0 ? nextIdx : -1);
     } else {
@@ -436,7 +444,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
 
     // Start rest timer automatically if more sets remain
-    if (cleanSets.length < targetSetCount) {
+    if (cleanSets.length < effectiveTotal) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
       const nextSetLabel = timed
         ? `Set ${cleanSets.length + 1}: ${ex.targetReps}`
@@ -460,10 +468,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     // AI tip for next set (skip for timed/cardio exercises)
     const setsLogged = cleanSets.length;
-    if (!timed && setsLogged < targetSetCount) {
+    if (!timed && setsLogged < effectiveTotal) {
       setAiLoadingIdx(exIdx);
       try {
         if (!authToken) throw new Error('Not authenticated');
+        // Anchor the recommendation on what this user has hit before —
+        // especially important for the first set of the session where
+        // `cleanSets` is still empty and the backend would otherwise
+        // fall back to a generic category default.
+        const bests = await getExerciseBests(ex.name).catch(() => null);
         const rec = await getWeightRecommendation(authToken, ex.name, goal, cleanSets, setsLogged + 1, {
           targetSets: ex.targetSets,
           targetReps: ex.targetReps,
@@ -474,6 +487,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           workoutFocus: workout.focus,
           weekNumber: 1,
           incrementLbs: 5,
+          allTimeBestWeightLbs: bests?.allTime?.weightLbs,
+          allTimeBestReps: bests?.allTime?.reps,
+          lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
+          lastSessionBestReps: bests?.lastSession?.reps,
         });
         const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
         setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
@@ -485,7 +502,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setAiLoadingIdx(null);
       }
     }
-  }, [setInputs, exercises, authToken, goal, workout.focus, startRestTimer, rescheduleRestNotifications, clearRestState]);
+  }, [setInputs, exercises, authToken, goal, workout.focus, startRestTimer, rescheduleRestNotifications, clearRestState, extraSetCounts, removedSetCounts]);
 
   const openAddExerciseModal = useCallback(async () => {
     setAddExerciseModalVisible(true);
@@ -967,11 +984,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setFeedbackResult(null);
 
     const now = new Date();
+    const startedAtIso = new Date(startTime.current).toISOString();
+    const endedAtIso = now.toISOString();
     const session: WorkoutSession = {
       id: `${Date.now()}`,
       date: now.toISOString(),
       focus: workout.focus,
       durationSeconds: elapsed,
+      startedAt: startedAtIso,
+      endedAt: endedAtIso,
       exercises,
       completed: true,
     };
@@ -1015,6 +1036,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           durationSeconds: session.durationSeconds,
           totalSets,
           totalReps,
+          startedAt: startedAtIso,
+          endedAt: endedAtIso,
         });
       }
     } catch {
@@ -1496,28 +1519,43 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             );
                           }
 
-                          // Only the LAST unlogged slot is deletable so
-                          // we don't rearrange slot indices mid-list. Users
-                          // can tap delete repeatedly to trim multiple.
-                          const isLastUnlogged = !isLogged && slot === totalSetCount - 1 && totalSetCount > ex.sets.length;
+                          // Only the LAST slot is deletable (logged or
+                          // unlogged) so we don't rearrange slot indices
+                          // mid-list. Users can tap delete repeatedly to
+                          // trim multiple.
+                          const isLastSlot = slot === totalSetCount - 1 && totalSetCount > 1;
                           const handleDeleteSlot = () => {
-                            // Prefer removing a user-added "extra" set
-                            // first (reverse of + Add Set). If none,
-                            // reduce the base target via removedSetCounts.
-                            const extras = extraSetCounts[i] ?? 0;
-                            if (extras > 0) {
-                              setExtraSetCounts(prev => ({ ...prev, [i]: Math.max(0, (prev[i] ?? 0) - 1) }));
+                            const doDelete = () => {
+                              // If this slot holds a logged set, drop it
+                              // from the exercise's sets array.
+                              if (isLogged) {
+                                setExercises(prev => prev.map((e, idx) =>
+                                  idx === i ? { ...e, sets: e.sets.slice(0, -1) } : e
+                                ));
+                              }
+                              // Prefer removing a user-added "extra" set
+                              // first (reverse of + Add Set). If none,
+                              // reduce the base target via removedSetCounts.
+                              const extras = extraSetCounts[i] ?? 0;
+                              if (extras > 0) {
+                                setExtraSetCounts(prev => ({ ...prev, [i]: Math.max(0, (prev[i] ?? 0) - 1) }));
+                              } else {
+                                setRemovedSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }));
+                              }
+                              setSetInputs(prev => {
+                                const next = { ...prev };
+                                delete next[inputKey];
+                                return next;
+                              });
+                            };
+                            if (isLogged) {
+                              Alert.alert('Delete set', `Remove set ${slot + 1}?`, [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Delete', style: 'destructive', onPress: doDelete },
+                              ]);
                             } else {
-                              setRemovedSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }));
+                              doDelete();
                             }
-                            // Clean up any stale input for this slot so
-                            // the next row rendered at this index starts
-                            // with a blank weight/reps.
-                            setSetInputs(prev => {
-                              const next = { ...prev };
-                              delete next[inputKey];
-                              return next;
-                            });
                           };
                           return (
                             <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
@@ -1563,7 +1601,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   {isLogged ? '✏' : '○'}
                                 </Text>
                               </TouchableOpacity>
-                              {isLastUnlogged && (
+                              {isLastSlot && (
                                 <TouchableOpacity
                                   style={styles.inlineDeleteBtn}
                                   onPress={handleDeleteSlot}

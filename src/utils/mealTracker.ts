@@ -9,6 +9,107 @@ export type MealChecks = Record<string, boolean>; // { breakfast: true, lunch: f
 
 // ── Meal check state (done/not done per day) ───────────────────────────────────
 
+export interface DietConsistencyScore {
+  /** 0–100 overall diet consistency score. */
+  total: number;
+  /** 0–60 — fraction of expected meals checked off over the window. */
+  adherence: number;
+  /** 0–25 — % of tracked days where at least one meal was checked. */
+  streak: number;
+  /** 0–15 — how evenly meals were logged (penalizes day clusters). */
+  spread: number;
+  /** Number of tracked days in the window. */
+  daysTracked: number;
+  /** Total meals checked across the window. */
+  mealsChecked: number;
+  /** Expected mealsPerDay × daysInWindow. */
+  mealsExpected: number;
+}
+
+/** Compute a diet-consistency score across the last `windowDays` days,
+ *  using stored `mealChecks` as the source of truth. Returns `null` when
+ *  there's no data at all — callers render a "no data" card in that case.
+ *
+ *  This mirrors how `fitnessScore` is computed in ProgressScreen — same
+ *  14-day window, same 0–100 scale, same "consistency + trend" breakdown
+ *  so the two scores can sit side-by-side and feel comparable. */
+export async function computeDietConsistency(
+  mealsPerDay: number,
+  windowDays: number = 14,
+): Promise<DietConsistencyScore | null> {
+  try {
+    const raw = await AsyncStorage.getItem(CHECKS_KEY);
+    if (!raw) return null;
+    const all: Record<string, MealChecks> = JSON.parse(raw);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Build the set of date keys we care about (YYYY-MM-DD for today and
+    // the previous `windowDays - 1` days). Missing days count as 0.
+    const windowKeys: string[] = [];
+    for (let i = 0; i < windowDays; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      windowKeys.push(`${yyyy}-${mm}-${dd}`);
+    }
+
+    const per = Math.max(1, Math.min(10, Math.round(mealsPerDay || 3)));
+    let mealsChecked = 0;
+    const daysWithChecks: boolean[] = [];
+    for (const key of windowKeys) {
+      const checks = all[key] ?? {};
+      const count = Object.values(checks).filter(Boolean).length;
+      if (count > 0) {
+        mealsChecked += Math.min(count, per);
+        daysWithChecks.push(true);
+      } else {
+        daysWithChecks.push(false);
+      }
+    }
+
+    const mealsExpected = per * windowDays;
+    const adherencePct = mealsExpected > 0 ? mealsChecked / mealsExpected : 0;
+    const adherence = Math.round(Math.min(60, adherencePct * 60));
+
+    const daysTracked = daysWithChecks.filter(Boolean).length;
+    const streak = Math.round(Math.min(25, (daysTracked / windowDays) * 25));
+
+    // Spread: penalize logging only on a few isolated days. If tracked
+    // days cluster (stddev of gap > windowDays/3), cut the spread score.
+    let spread = 0;
+    if (daysTracked >= 2) {
+      const idxs = daysWithChecks
+        .map((v, i) => (v ? i : -1))
+        .filter(i => i >= 0);
+      const gaps: number[] = [];
+      for (let i = 1; i < idxs.length; i++) gaps.push(idxs[i] - idxs[i - 1]);
+      const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+      const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
+      const std = Math.sqrt(variance);
+      const evenness = Math.max(0, 1 - std / (windowDays / 3));
+      spread = Math.round(Math.min(15, evenness * 15));
+    } else if (daysTracked === 1) {
+      spread = 3;
+    }
+
+    const total = Math.min(100, adherence + streak + spread);
+    return {
+      total,
+      adherence,
+      streak,
+      spread,
+      daysTracked,
+      mealsChecked,
+      mealsExpected,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function getMealChecks(date: string): Promise<MealChecks> {
   try {
     const raw = await AsyncStorage.getItem(CHECKS_KEY);

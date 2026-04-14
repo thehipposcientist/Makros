@@ -9,7 +9,8 @@ import {
   MealItem, FoodUnit, FOOD_UNIT_LABELS, FOOD_UNIT_GROUPS,
 } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
-import { colors, radius } from '../constants/theme';
+import { getTheme, radius } from '../constants/theme';
+import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood } from '../utils/mealItems';
 
@@ -30,6 +31,7 @@ interface Props {
   prepTimeMinutes?: number;
   dietaryPreference?: string;
   allergies?: string[];
+  themeName?: AppThemeName;
 }
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
@@ -89,7 +91,9 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   }, zero);
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName }: Props) {
+  const colors = useMemo(() => getTheme(themeName).colors, [themeName]);
+  const s = useMemo(() => createStyles(colors), [colors]);
   // Structured items are the source of truth. Legacy foods[] / amounts[]
   // shapes are migrated via `ensureItems()` on open so downstream code only
   // has to handle the structured form. Each item gets a baseline rate
@@ -180,20 +184,29 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         return;
       }
     }
+    // Library photos are often full-resolution (12–48 MP) and their base64
+    // payloads trip the backend request size limit. Camera capture is
+    // already cropped, so we only aggressively shrink the library path.
     const result = source === 'camera'
-      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images' })
-      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: 'images' });
+      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images', exif: false })
+      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.4, mediaTypes: 'images', exif: false });
     if (result.canceled || !result.assets[0]?.base64) return;
     const asset = result.assets[0];
     setScanLoading(true);
     try {
-      // Force `image/jpeg`. Expo ImagePicker with `base64: true` transcodes
-      // HEIC/HEIF to JPEG bytes before returning base64, but `asset.mimeType`
-      // still sometimes reports the original HEIC type. OpenAI vision
-      // rejects HEIC outright ("wrong format" error), so we send the
-      // mime that actually matches the bytes.
+      // Use the asset's actual mime type. `quality < 1` forces
+      // expo-image-picker to re-encode HEIC/PNG to JPEG, so `asset.mimeType`
+      // is usually `image/jpeg` already — but when the source is already a
+      // JPEG or PNG the picker may return the original mime. Hard-coding
+      // `image/jpeg` was breaking library picks when the bytes weren't
+      // actually JPEG (OpenAI vision then rejected with "wrong format").
+      const rawMime = (asset.mimeType || '').toLowerCase();
+      const mime =
+        rawMime === 'image/jpeg' || rawMime === 'image/jpg' || rawMime === 'image/png' || rawMime === 'image/webp'
+          ? (rawMime === 'image/jpg' ? 'image/jpeg' : rawMime)
+          : 'image/jpeg';
       const res = await scanFoodsPhoto(authToken, {
-        images: [{ image_base64: asset.base64!, mime_type: 'image/jpeg' }],
+        images: [{ image_base64: asset.base64!, mime_type: mime }],
       });
       const picked = res.foods.filter(f => !items.some(it => it.name.toLowerCase() === f.name.toLowerCase()));
       if (res.foods.length === 0) {
@@ -204,24 +217,67 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         Alert.alert('Already added', 'All identified foods are already in this meal.');
       } else {
         const newItems: MealItem[] = picked.map(p => {
-          const lib = lookupFood(p.name, allFoods);
-          const cal = lib?.calories ?? 0;
-          const prot = lib?.protein ?? 0;
-          const carb = lib?.carbs ?? 0;
-          const fat = lib?.fat ?? 0;
+          // Prefer the macros the AI scan already returned for this food.
+          // Only fall back to the local library when the AI numbers are
+          // all zero (e.g. a recognizer that names a food but can't
+          // estimate nutrition). Historically this block ignored `p`'s
+          // macros entirely and only read `lookupFood`, which meant every
+          // scanned food that wasn't already in the user's library came
+          // back with 0 cal / 0 protein.
+          const aiHasMacros =
+            (p.calories ?? 0) > 0 || (p.protein ?? 0) > 0 ||
+            (p.carbs ?? 0) > 0 || (p.fat ?? 0) > 0;
+          const lib = aiHasMacros ? null : lookupFood(p.name, allFoods);
+          const cal  = aiHasMacros ? (p.calories ?? 0) : (lib?.calories ?? 0);
+          const prot = aiHasMacros ? (p.protein  ?? 0) : (lib?.protein  ?? 0);
+          const carb = aiHasMacros ? (p.carbs    ?? 0) : (lib?.carbs    ?? 0);
+          const fat  = aiHasMacros ? (p.fat      ?? 0) : (lib?.fat      ?? 0);
+          // The scan returns a human serving label like "1 cup" or
+          // "100 g". Parse it so the item displays its true serving
+          // instead of the meaningless "1 serving" placeholder.
+          const parsed = p.serving ? parseAmountString(p.serving) : null;
+          const guess  = guessUnitForFood(p.name);
+          const qty  = parsed?.quantity ?? guess.quantity;
+          const unit = (parsed?.unit ?? guess.unit) as FoodUnit;
           return {
             name: p.name,
-            quantity: 1,
-            unit: 'serving' as FoodUnit,
+            quantity: qty,
+            unit,
             calories: cal, protein: prot, carbs: carb, fat,
-            baseQuantity: 1,
+            baseQuantity: qty > 0 ? qty : 1,
             baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
           };
         });
         setItems(prev => [...prev, ...newItems]);
+        // Persist the scanned food into the user's custom library so
+        // future meals (and the backend's nutrition lookup) can find it
+        // without another AI call. Mirrors the flow used by the AI
+        // search-result "Save" button.
+        if (onAddCustomFood) {
+          for (const p of picked) {
+            const hasMacros =
+              (p.calories ?? 0) > 0 || (p.protein ?? 0) > 0 ||
+              (p.carbs ?? 0) > 0 || (p.fat ?? 0) > 0;
+            if (!hasMacros) continue;
+            if (allFoods.some(f => f.name.toLowerCase() === p.name.toLowerCase())) continue;
+            onAddCustomFood({
+              name: p.name,
+              unit: p.serving || '1 serving',
+              calories: p.calories ?? 0,
+              protein:  p.protein  ?? 0,
+              carbs:    p.carbs    ?? 0,
+              fat:      p.fat      ?? 0,
+            });
+          }
+        }
       }
     } catch (e: any) {
-      Alert.alert('Scan failed', e.message ?? 'Could not scan the photo.');
+      // Surface backend detail (e.g. "image too large", "wrong format")
+      // so we can diagnose library-photo failures. The generic "Could
+      // not scan" hid the real root cause.
+      const detail = e?.message || e?.detail || 'Could not scan the photo.';
+      console.warn('[MealEditModal] scan failed:', detail);
+      Alert.alert('Scan failed', detail);
     } finally {
       setScanLoading(false);
     }
@@ -743,7 +799,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   );
 }
 
-const s = StyleSheet.create({
+function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
 
   header: {
@@ -932,4 +988,4 @@ const s = StyleSheet.create({
   aiResultServing: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   aiResultMacros:  { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
   aiResultAdd:     { fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 },
-});
+}); }

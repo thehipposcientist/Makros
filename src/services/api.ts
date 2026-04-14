@@ -568,6 +568,10 @@ export async function getWeightRecommendation(
     workoutFocus?: string;
     weekNumber?: number;
     incrementLbs?: number;
+    allTimeBestWeightLbs?: number;
+    allTimeBestReps?: number;
+    lastSessionBestWeightLbs?: number;
+    lastSessionBestReps?: number;
   },
 ): Promise<{ weightLbs: number; reps: number; tip: string }> {
   return request('/ai/recommend-weight', {
@@ -577,7 +581,61 @@ export async function getWeightRecommendation(
   });
 }
 
+/** Map the frontend's rich goal vocabulary (lose_fat, build_muscle, etc.)
+ *  to the backend's legacy GoalType enum. The backend only accepts a
+ *  fixed set of values; passing anything else makes /profile/onboarding
+ *  return 422 and the user's profile silently fails to sync, which then
+ *  cascades into "calorie ranges 404" errors elsewhere in the app. */
+function mapGoalToBackendType(frontendGoal: string | undefined | null): string {
+  if (!frontendGoal) return 'maintain';
+  const g = frontendGoal.toLowerCase();
+  // Direct passthroughs (the values the backend already accepts).
+  const passthrough = new Set([
+    'fat_loss', 'muscle_gain', 'body_recomp', 'strength',
+    'endurance', 'athletic_performance', 'toning', 'maintain',
+    'flexibility', 'stress_relief',
+  ]);
+  if (passthrough.has(g)) return g;
+  // Frontend → backend mapping. Goals from goalConfig.ts on the left,
+  // backend GoalType on the right.
+  const map: Record<string, string> = {
+    lose_fat:                'fat_loss',
+    get_lean:                'fat_loss',
+    cut:                     'fat_loss',
+    preserve_muscle_cutting: 'fat_loss',
+    build_muscle:            'muscle_gain',
+    lean_bulk:               'muscle_gain',
+    gain_weight:             'muscle_gain',
+    bulk:                    'muscle_gain',
+    recomp:                  'body_recomp',
+    body_recomposition:      'body_recomp',
+    powerlifting:            'strength',
+    strength_training:       'strength',
+    get_stronger:            'strength',
+    cardio_endurance:        'endurance',
+    run_faster:              'endurance',
+    marathon:                'endurance',
+    sport_performance:       'athletic_performance',
+    athletic:                'athletic_performance',
+    tone_up:                 'toning',
+    tone:                    'toning',
+    maintain_weight:         'maintain',
+    maintenance:             'maintain',
+    mobility:                'flexibility',
+    yoga:                    'flexibility',
+    stress_management:       'stress_relief',
+    metabolic_health:        'maintain',
+    longevity:               'maintain',
+    healthy_lifestyle:       'maintain',
+  };
+  return map[g] ?? 'maintain';
+}
+
 export async function syncOnboarding(token: string, profile: import('../types').UserProfile) {
+  const mappedGoal = mapGoalToBackendType(profile.goal);
+  if (mappedGoal !== profile.goal) {
+    console.log('[syncOnboarding] mapped goal', profile.goal, '→', mappedGoal);
+  }
   return request('/profile/onboarding', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -590,7 +648,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
         gender:        profile.physicalStats.gender,
       },
       goal: {
-        goal_type:         profile.goal,
+        goal_type:         mappedGoal,
         pace:              profile.goalDetails.pace,
         target_weight_lbs: profile.goalDetails.targetWeightLbs ?? null,
         timeline_weeks:    profile.goalDetails.timelineWeeks ?? null,

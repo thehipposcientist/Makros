@@ -25,9 +25,8 @@ import { scanFoodsPhoto, scanEquipmentPhoto } from '../services/api';
 import { isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import {
-  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, GOAL_MODIFIERS,
-  modifiersForGoal, targetFocusesForGoal, goalCategory,
-  GoalCategoryId, PrimaryGoalDef, GoalModifierDef, TargetFocusDef,
+  LAUNCH_GOALS, PRIMARY_GOALS,
+  targetFocusesForGoal, goalCategory,
 } from '../constants/goalConfig';
 
 const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
@@ -341,8 +340,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   // Step 1 — Goal selection (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState('build_muscle');
-  const [showAllGoals, setShowAllGoals] = useState(false);
-  const [expandedCategory, setExpandedCategory] = useState<GoalCategoryId | null>(null);
+  // Advanced-goal UI removed — only the 8 launch goals are exposed.
 
   // Step 2 — Goal refinement (modifiers + target focus + pace)
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
@@ -407,14 +405,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     }
   };
 
-  const toggleModifier = (modId: string) => {
-    setSelectedModifiers(prev => {
-      if (prev.includes(modId)) return prev.filter(m => m !== modId);
-      if (prev.length >= 2) return [prev[0], modId]; // replace second
-      return [...prev, modId];
-    });
-  };
-
+  // toggleModifier removed — modifiers are gone.
   const toggleEquipment = (eq: string) => {
     setSelectedEquipment(prev =>
       prev.includes(eq) ? prev.filter(e => e !== eq) : [...prev, eq]
@@ -634,7 +625,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   const renderGoalStep = () => {
     const selectedDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
-    const goalsByCategory = (catId: GoalCategoryId) => PRIMARY_GOALS.filter(g => g.category === catId && !g.launch);
 
     return (
       <View style={styles.stepContainer}>
@@ -671,64 +661,8 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           })}
         </View>
 
-        {/* Expand to see all goals by category */}
-        <TouchableOpacity
-          style={{
-            marginTop: 16,
-            alignItems: 'center',
-            paddingVertical: 12,
-            paddingHorizontal: 20,
-            backgroundColor: colors.primary + '15',
-            borderRadius: 12,
-            borderWidth: 1.5,
-            borderColor: colors.primary + '40',
-            flexDirection: 'row',
-            justifyContent: 'center',
-            gap: 8,
-          }}
-          onPress={() => setShowAllGoals(prev => !prev)}
-          activeOpacity={0.7}
-        >
-          <Text style={{ fontSize: 16 }}>{showAllGoals ? '▾' : '▸'}</Text>
-          <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>
-            {showAllGoals ? 'Hide Advanced Goals' : 'Explore All Goals'}
-          </Text>
-        </TouchableOpacity>
-
-        {showAllGoals && GOAL_CATEGORIES.map(cat => {
-          const catGoals = goalsByCategory(cat.id);
-          if (catGoals.length === 0) return null;
-          const isExpanded = expandedCategory === cat.id;
-          return (
-            <View key={cat.id} style={{ marginTop: 8 }}>
-              <TouchableOpacity
-                onPress={() => setExpandedCategory(isExpanded ? null : cat.id)}
-                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}
-              >
-                <Text style={{ fontSize: 16, marginRight: 8 }}>{cat.icon}</Text>
-                <Text style={{ fontSize: 14, fontWeight: '600', color: colors.textPrimary, flex: 1 }}>{cat.label}</Text>
-                <Text style={{ fontSize: 12, color: colors.textMuted }}>{isExpanded ? '▲' : '▼'}</Text>
-              </TouchableOpacity>
-              {isExpanded && (
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingLeft: 4, marginBottom: 8 }}>
-                  {catGoals.map(g => {
-                    const active = selectedGoal === g.id;
-                    return (
-                      <TouchableOpacity
-                        key={g.id}
-                        style={[styles.foodChip, active && styles.foodChipActive]}
-                        onPress={() => selectGoal(g.id)}>
-                        <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{g.label}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              )}
-            </View>
-          );
-        })}
-
-        {/* (Live goal description now shown near the top of the step.) */}
+        {/* Advanced goals section removed — only the 8 launch goals are
+            exposed during onboarding. */}
       </View>
     );
   };
@@ -737,7 +671,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     const goalDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
     const goalLabel = goalDef?.label ?? selectedGoal;
     const cat = goalCategory(selectedGoal);
-    const availableModifiers = modifiersForGoal(selectedGoal);
     const availableFocuses = targetFocusesForGoal(selectedGoal);
     const paceOpts = pacesForGoal(selectedGoal, meta.paces);
 
@@ -762,28 +695,8 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         </Text>
         <Text style={styles.optionalBanner}>Everything on this page is optional — tap Next to skip.</Text>
 
-        {/* Modifiers — up to 2 */}
-        {availableModifiers.length > 0 && (
-          <View style={styles.fieldGroup}>
-            <Text style={styles.fieldLabel}>
-              Modifiers <Text style={styles.optional}>(pick up to 2)</Text>
-            </Text>
-            <View style={styles.foodChips}>
-              {availableModifiers.map(mod => {
-                const active = selectedModifiers.includes(mod.id);
-                return (
-                  <TouchableOpacity
-                    key={mod.id}
-                    style={[styles.foodChip, active && styles.foodChipActive]}
-                    onPress={() => toggleModifier(mod.id)}>
-                    <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{mod.label}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <Text style={styles.hint}>These refine how your plan is generated — not required.</Text>
-          </View>
-        )}
+        {/* Modifiers section removed — goals are now defined by the
+            primary goal + an optional muscle/target focus only. */}
 
         {/* Target focus */}
         {availableFocuses.length > 0 && (
