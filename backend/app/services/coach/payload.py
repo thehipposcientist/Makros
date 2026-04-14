@@ -28,7 +28,7 @@ from app.models import (
     UserRollup,
     WeeklyCheckIn,
 )
-from app.services.plan import PlanSnapshot, get_plan_snapshot
+from .plan import PlanSnapshot, get_plan_snapshot
 
 MICRO_SCHEMA = "micro.v1"
 WEEKLY_SCHEMA = "weekly.v1"

@@ -2491,7 +2491,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   cancelText: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
   saveText:   { fontSize: 14, fontWeight: '700', color: colors.primary },
 
-  content:      { padding: 16, paddingBottom: 48 },
+  // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px + safe
+  // area). Without this, the Save/Update button at the end of the form
+  // sits under the tab bar and can't be scrolled into view.
+  content:      { padding: 16, paddingBottom: 140 },
   tabBar:       { flexDirection: 'row', marginBottom: 20, borderRadius: radius.lg, backgroundColor: colors.surface, padding: 3, gap: 2, borderWidth: 1, borderColor: colors.border },
   tab:          { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: radius.lg - 3 },
   tabActive:    { backgroundColor: colors.primary },

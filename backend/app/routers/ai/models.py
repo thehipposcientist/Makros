@@ -152,6 +152,16 @@ class WeightRecommendRequest(BaseModel):
     allTimeBestReps: int | None = None
     lastSessionBestWeightLbs: float | None = None
     lastSessionBestReps: int | None = None
+    # Propagated next-session target from the deterministic workout
+    # planner. When present, this is the preferred anchor for the first
+    # set of the session — it already reflects the user's history + the
+    # goal-specific progression rules.
+    plannedTargetWeightLbs: float | None = None
+    # Optional canonical slug for the active exercise. When the client
+    # knows the slug (from the generated plan), passing it here lets the
+    # recommend-weight endpoint skip a `Exercise.name.ilike` lookup and
+    # run the layered performance profile / transfer pipeline directly.
+    exerciseSlug: str | None = None
 
 
 class TrainerQuestionRequest(BaseModel):

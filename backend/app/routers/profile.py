@@ -26,7 +26,7 @@ def get_calorie_ranges(
 
     Returns 404 if the user hasn't completed onboarding yet (no profile).
     """
-    from app.services.calorie_calculator import (
+    from app.services.nutrition.calorie_calculator import (
         CalorieInputs,
         calculate_reference_ranges,
     )

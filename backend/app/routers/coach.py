@@ -26,11 +26,11 @@ from app.models import (
     UserFlag,
     UserRollup,
 )
-from app.services.checkin_ai import CheckinAIError, call_checkin_llm
-from app.services.decision_rules import gate
-from app.services.flags import evaluate_flags
-from app.services.payload import build_micro_payload, build_weekly_payload
-from app.services.rollups import recompute_user
+from app.services.coach.checkin_ai import CheckinAIError, call_checkin_llm
+from app.services.coach.decision_rules import gate
+from app.services.coach.flags import evaluate_flags
+from app.services.coach.payload import build_micro_payload, build_weekly_payload
+from app.services.coach.rollups import recompute_user
 
 router = APIRouter(prefix="/coach", tags=["coach"])
 

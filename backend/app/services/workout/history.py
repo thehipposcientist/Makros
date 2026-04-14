@@ -13,7 +13,7 @@ Two responsibilities, both intentionally small:
      freshly generated plan, finds the user's most recent completed
      performance for each exercise, and uses the existing
      `WorkoutProgressionEngine` math to set the next session's
-     `_target_weight_lbs` / progression action / reason.
+     `target_weight_lbs` / progression action / reason.
 
 The data access layer is a `HistoryLookup` callable so tests can inject
 fake history and so `workout_planner.py` itself doesn't need to import
@@ -36,7 +36,9 @@ Where it influences the new targets:
       applies a session-level double-progression rule (all sets at top
       of range → +increment, majority missed → −increment, otherwise
       hold). The output is mutated onto each exercise dict in the plan
-      under `_target_weight_lbs`, `_progression_action`, `_progression_reason`.
+      under `target_weight_lbs`, `progression_action`, `progression_reason`,
+      plus `recommendation_source` / `recommendation_confidence` /
+      `recommendation_reason` for transferred estimates.
 """
 from __future__ import annotations
 
@@ -336,7 +338,24 @@ def recommend_next_session_load(
         _score, classification = engine.score_set_against_target(s, target)
         classifications.append(classification)
 
-    last_weight = working_sets[-1].weight_lbs
+    # Anchor next session on the TOP working weight, not the last set.
+    # Reasoning: if the user's protocol includes back-off or cluster
+    # sets (e.g. 3×5 @ 225 + 2×8 @ 185), using `working_sets[-1]`
+    # anchors progression on the 185 back-off set, which is wrong —
+    # the user's actual training stimulus is 225, and next session
+    # should progress from there. Using `max(weight)` handles:
+    #   - ramp-up protocols (last set is heaviest → same as before)
+    #   - straight sets (all equal → same as before)
+    #   - back-off / cluster protocols (first sets heaviest → fixed)
+    #   - drop sets (drops are lighter → anchor stays on the top)
+    # The classification loop above still reads every set, so an
+    # all-miss session still triggers the decrease branch regardless
+    # of which set holds the top weight.
+    working_weights = [
+        s.weight_lbs for s in working_sets
+        if s.weight_lbs is not None and s.weight_lbs > 0
+    ]
+    anchor_weight = max(working_weights) if working_weights else working_sets[-1].weight_lbs
     pace_mult = {
         ProgressionPace.CONSERVATIVE: 0.5,
         ProgressionPace.MODERATE: 1.0,
@@ -352,23 +371,29 @@ def recommend_next_session_load(
     # 3. All sets at top of range → increase
     if top_set_count == len(classifications):
         new_weight = engine.round_to_increment(
-            last_weight + increment, prescription.increment_lbs,
+            anchor_weight + increment, prescription.increment_lbs,
         )
-        reason = f"All {len(classifications)} sets hit top of range — adding {increment:g} lb"
+        reason = (
+            f"All {len(classifications)} sets hit top of range — adding "
+            f"{increment:g} lb over top working weight of {anchor_weight:g} lb"
+        )
         return new_weight, "increase", reason
 
     # 4. Majority missed → decrease
     if miss_count >= (len(classifications) + 1) // 2:
         new_weight = engine.round_to_increment(
-            last_weight - prescription.increment_lbs,
+            anchor_weight - prescription.increment_lbs,
             prescription.increment_lbs,
         )
-        reason = f"{miss_count}/{len(classifications)} sets below target — reducing {prescription.increment_lbs:g} lb"
+        reason = (
+            f"{miss_count}/{len(classifications)} sets below target — reducing "
+            f"{prescription.increment_lbs:g} lb from top working weight"
+        )
         return new_weight, "decrease", reason
 
-    # 5. Otherwise hold
-    reason = "Performance was on target — keep load and try for more reps"
-    return last_weight, "hold", reason
+    # 5. Otherwise hold at the top working weight and chase more reps.
+    reason = "Performance was on target — hold top working weight and try for more reps"
+    return anchor_weight, "hold", reason
 
 
 # ─── Layer 4 — Walk the plan and propagate ──────────────────────────────────
@@ -381,19 +406,46 @@ def propagate_session_targets(
     engine: Optional[WorkoutProgressionEngine] = None,
     phase: PhaseType = PhaseType.ACCUMULATION,
     week_number: int = 1,
+    *,
+    perf_profiles: Optional[dict] = None,
+    all_exercises_by_slug: Optional[dict] = None,
+    experience: str = "intermediate",
 ) -> dict:
     """Mutate every exercise in the plan in place to add session-level
     progression targets based on the user's prior performance.
 
-    Sets three new keys on each exercise dict:
-      * `_target_weight_lbs` — recommended next-session starting load
-      * `_progression_action` — "increase" | "hold" | "decrease"
-      * `_progression_reason` — human-readable explanation
+    Sets the following additive keys on each exercise dict (all
+    non-underscored so they're safe to serialize to the client and show
+    in the UI):
 
-    Exercises with no history are left untouched (the live progression
-    engine will pick a starting weight from user input on day 1).
+      * `target_weight_lbs` — recommended next-session starting load
+      * `progression_action` — "increase" | "hold" | "decrease"
+      * `progression_reason` — human-readable explanation
+      * `recommendation_source` — one of {"exact_history",
+        "substitution_group", "movement_pattern", "muscle_bucket",
+        "default"}
+      * `recommendation_confidence` — 0–1 confidence score
+      * `recommendation_reason` — source-aware explanation that the UI
+        can show beside the weight ("Based on your last 3 bench press
+        sessions", "Estimated from similar horizontal pressing work")
+
+    Priority:
+      1. If the user has logged sets for this exact exercise, use the
+         progression engine on the most recent session to compute the
+         next-session target. `recommendation_source` = "exact_history".
+      2. Otherwise, if `perf_profiles` and `all_exercises_by_slug` are
+         provided, run the layered recommendation pipeline to transfer
+         an estimate from a similar exercise. `progression_action` is
+         set to "hold" (first session on this lift → establish a
+         baseline, no progression signal yet).
+      3. Otherwise the exercise is left without a target and the
+         in-session `/recommend-weight` endpoint handles fallback.
     """
+    from .recommendation import recommend_starting_weight
+
     engine = engine or WorkoutProgressionEngine()
+    perf_profiles = perf_profiles or {}
+    all_by_slug = all_exercises_by_slug or {}
 
     for day in plan.get("workout_plan", {}).get("days", []) or []:
         focus = _focus_to_enum(day.get("focus", "Full Body"))
@@ -408,20 +460,67 @@ def propagate_session_targets(
             if not slug:
                 continue
             history = history_lookup(slug)
-            if not history:
+            if history:
+                # Tier 1 — exact exercise history. Run the progression
+                # engine to decide increase/hold/decrease from the most
+                # recent session's sets.
+                prescription = _build_synthetic_prescription(ex)
+                rep_range = parse_rep_range(ex.get("reps", ""))
+                weight, action, reason = recommend_next_session_load(
+                    engine, profile, ctx, prescription, history,
+                    prescribed_rep_range=rep_range,
+                )
+                if weight is not None:
+                    ex["target_weight_lbs"] = round(weight, 1)
+                ex["progression_action"] = action
+                ex["progression_reason"] = reason
+                p = perf_profiles.get(slug)
+                ex["recommendation_source"] = "exact_history"
+                ex["recommendation_confidence"] = (
+                    round(p.confidence, 2) if p is not None else 0.85
+                )
+                ex["recommendation_reason"] = (
+                    f"Based on your last {p.session_count} "
+                    f"{ex.get('name', slug)} session"
+                    + ("s" if p is not None and p.session_count != 1 else "")
+                    if p is not None
+                    else "Based on your most recent session"
+                )
                 continue
-            prescription = _build_synthetic_prescription(ex)
-            # Carry the planner's prescribed rep range into the engine so
-            # classification reads the same range the user was told to hit.
-            rep_range = parse_rep_range(ex.get("reps", ""))
-            weight, action, reason = recommend_next_session_load(
-                engine, profile, ctx, prescription, history,
-                prescribed_rep_range=rep_range,
+
+            # Tier 2+ — no exact history. Try the layered transfer
+            # pipeline if the caller passed the profile map + seed
+            # lookup. Skip silently when the caller didn't pass them
+            # (e.g. tests that only want tier-1 behavior).
+            if not perf_profiles or not all_by_slug:
+                continue
+            target_ex = all_by_slug.get(slug)
+            if target_ex is None:
+                continue
+            rec = recommend_starting_weight(
+                target_ex,
+                profiles=perf_profiles,
+                all_exercises_by_slug=all_by_slug,
+                target_reps=ex.get("reps"),
+                experience=experience,
             )
-            if weight is not None:
-                ex["_target_weight_lbs"] = round(weight, 1)
-            ex["_progression_action"] = action
-            ex["_progression_reason"] = reason
+            if rec.source == "default":
+                # Default baselines aren't confident enough to stamp as
+                # a target — let the in-session recommender handle set
+                # one when it has the full user context.
+                ex["recommendation_source"] = rec.source
+                ex["recommendation_confidence"] = rec.confidence
+                ex["recommendation_reason"] = rec.reason
+                continue
+            if rec.weight_lbs > 0:
+                ex["target_weight_lbs"] = round(rec.weight_lbs, 1)
+            ex["progression_action"] = "hold"
+            ex["progression_reason"] = (
+                "First session on this lift — establish a baseline before progressing"
+            )
+            ex["recommendation_source"] = rec.source
+            ex["recommendation_confidence"] = rec.confidence
+            ex["recommendation_reason"] = rec.reason
     return plan
 
 

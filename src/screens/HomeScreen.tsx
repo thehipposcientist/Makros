@@ -2396,7 +2396,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           is rendered underneath. Uses safe-area insets so it sits cleanly
           below the gradient header on any device. */}
       {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
           <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
           <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
@@ -2406,7 +2406,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* Fixed meals sub-tab bar — same pattern. */}
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('plan')} />
           <SubTabBtn label="Foods"       active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('foods')} />
           <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('supplements')} />
@@ -2905,7 +2905,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           already set. Only a thin back header appears when the user
           drills into a specific exercise or muscle detail. */}
       {showExerciseLibrary && (
-        <View style={[styles.libraryInlineWrap, { top: insets.top + 72 + 44, backgroundColor: themeColors.background }]}>
+        <View style={[styles.libraryInlineWrap, { top: insets.top + 70 + 44, backgroundColor: themeColors.background }]}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
 
             {/* Back header — only when drilled into a detail view. */}

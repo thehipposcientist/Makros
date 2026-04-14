@@ -16,7 +16,17 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
   const styles = createStyles(c, s);
 
   const totalSets        = workout.exercises.reduce((sum, ex) => sum + (Number(ex.sets) || 3), 0);
-  const estimatedMinutes = Math.round(workout.exercises.length * 8);
+  // Realistic duration estimate from the actual sets + rest time the
+  // planner prescribed — not a flat 8 min/exercise heuristic. Each set
+  // is ~45 s of working time plus the rest period, and we add ~60 s of
+  // setup/transition per exercise. The old heuristic showed ~40 min for
+  // a 60-minute plan because it ignored set count entirely.
+  const estimatedSeconds = workout.exercises.reduce((total, ex) => {
+    const sets = Number(ex.sets) || 3;
+    const rest = Number((ex as any).restSeconds) || 60;
+    return total + sets * (45 + rest) + 60;
+  }, 0);
+  const estimatedMinutes = Math.max(1, Math.round(estimatedSeconds / 60));
 
   return (
     <View style={styles.card}>

@@ -31,7 +31,7 @@ def _build_session_response(session_row: WorkoutSession, db: Session) -> dict:
     for ex in exercises:
         sets = db.exec(
             select(ExerciseSet)
-            .where(ExerciseSet.exercise_id == ex.id)
+            .where(ExerciseSet.workout_exercise_id == ex.id)
             .order_by(ExerciseSet.set_number)
         ).all()
         exercise_data.append({**ex.model_dump(), "sets": [s.model_dump() for s in sets]})
@@ -46,9 +46,13 @@ def progression_insights(
     db: Session = Depends(get_session),
 ):
     """Returns progression trend and plateau hint for a given exercise name."""
+    # Only completed sessions contribute to progression history. Before
+    # this filter an abandoned workout would show up as a "point" with
+    # zeroed sets and break the plateau detector.
     sessions = db.exec(
         select(WorkoutSession)
         .where(WorkoutSession.user_id == current_user.id)
+        .where(WorkoutSession.completed_at.is_not(None))
         .order_by(WorkoutSession.workout_date.desc())
     ).all()
 
@@ -57,13 +61,17 @@ def progression_insights(
         ex_rows = db.exec(
             select(WorkoutExercise)
             .where(WorkoutExercise.session_id == s.id)
+            # Case-insensitive exact match. `ilike(exercise_name)` without
+            # wildcards was already case-insensitive by luck in Postgres
+            # but required the exact name. Keep the same semantics but be
+            # explicit so future devs don't "improve" it into a pattern.
             .where(WorkoutExercise.name.ilike(exercise_name))
         ).all()
         for ex in ex_rows:
             sets = db.exec(
                 select(ExerciseSet)
-                .where(ExerciseSet.exercise_id == ex.id)
-                .where(ExerciseSet.completed == True)
+                .where(ExerciseSet.workout_exercise_id == ex.id)
+                .where(ExerciseSet.completed == True)  # noqa: E712
             ).all()
             if not sets:
                 continue
@@ -162,22 +170,44 @@ def create_workout(
     db.flush()  # get session_row.id before committing
 
     for ex_body in body.exercises:
+        # Resolve canonical Exercise.id. Prefer the client-provided
+        # `exercise_id` (set by plan-driven creates); fall back to a
+        # case-insensitive name lookup so older plans and custom workouts
+        # still end up linked to the seed row when possible. Rows that
+        # don't match stay with `exercise_id=None` — history lookup falls
+        # back to the free-text name path in that case.
+        resolved_exercise_id = ex_body.exercise_id
+        if resolved_exercise_id is None and ex_body.name:
+            from app.models import Exercise as _Exercise  # local to avoid cycle
+            seed = db.exec(
+                select(_Exercise).where(_Exercise.name.ilike(ex_body.name))
+            ).first()
+            if seed is not None:
+                resolved_exercise_id = seed.id
+
         exercise = WorkoutExercise(
             session_id=session_row.id,
+            exercise_id=resolved_exercise_id,
             name=ex_body.name,
             order_index=ex_body.order_index,
             equipment=ex_body.equipment,
             notes=ex_body.notes,
+            target_reps_text=ex_body.target_reps_text,
+            rest_seconds=ex_body.rest_seconds,
         )
         db.add(exercise)
         db.flush()
 
         for set_body in ex_body.sets:
             db.add(ExerciseSet(
-                exercise_id=exercise.id,
+                workout_exercise_id=exercise.id,
                 set_number=set_body.set_number,
-                target_reps=set_body.target_reps,
+                target_reps_min=set_body.target_reps_min,
+                target_reps_max=set_body.target_reps_max,
                 target_weight_lbs=set_body.target_weight_lbs,
+                set_type=set_body.set_type,
+                rpe_target=set_body.rpe_target,
+                rir_target=set_body.rir_target,
             ))
 
     db.commit()

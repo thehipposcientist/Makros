@@ -1153,7 +1153,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   tabTextActive: { color: colors.background },
 
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  content: { padding: 16, paddingBottom: 40 },
+  // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px +
+  // safe area). Otherwise the bottom of the content (sign-out,
+  // delete-last-entry, etc.) sits under the tab bar.
+  content: { padding: 16, paddingBottom: 140 },
 
   sectionLabel: {
     fontSize: 11, fontWeight: '700', color: colors.textSecondary,

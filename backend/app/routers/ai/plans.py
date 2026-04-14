@@ -19,10 +19,20 @@ from .utils import (
     get_openai_api_key, model_plan_generation, model_plan_update,
     _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     _log_openai_error, enrich_foods_with_macros, compute_tdee_and_targets,
+    map_goal_type, map_experience_level, map_progression_pace, map_recovery_level,
     SCHEMA_WORKOUT,
 )
 from .prompts import build_workout_prompt
-from app.services.meal_assembler import assemble_nutrition_response
+from app.services.nutrition.meal_assembler import assemble_nutrition_response
+from app.services.workout.planner import (
+    PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
+)
+from app.services.workout.history import (
+    build_history_familiarity, db_history_lookup, propagate_session_targets,
+)
+from app.services.workout.performance import build_performance_profile
+from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngine
+from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
 
 def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
@@ -275,6 +285,189 @@ def canonicalize_workout_exercises(workout_data: dict, library: list[dict]) -> d
     if rewrites or misses:
         print(f"[workout-canonicalize] {rewrites} rewritten, {misses} unmatched")
     return workout_data
+
+
+def _resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
+    """Translate the frontend's mixed equipment list (display names AND
+    legacy bucket strings) into a set of canonical Equipment slugs the
+    planner understands. Mirrors the logic inside
+    `build_user_exercise_library` so both the AI-prompt path and the
+    deterministic-planner path resolve equipment identically."""
+    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    valid_slugs = {e["slug"] for e in SEED_EQUIPMENT}
+    owned: set[str] = set()
+    for raw in (equipment or []):
+        if not raw:
+            continue
+        if raw in valid_slugs:
+            owned.add(raw)
+            continue
+        slug = name_to_slug.get(raw.lower())
+        if slug:
+            owned.add(slug)
+    # Legacy bucket pass-through so `equipment: ["bodyweight"]` still
+    # unlocks bodyweight exercises even though it isn't an Equipment slug.
+    for bucket in ("bodyweight", "home", "dumbbells", "gym", "other"):
+        if bucket in (equipment or []):
+            owned.add(bucket)
+    return owned
+
+
+def _build_deterministic_workout(
+    req: PlanRequest,
+    db: Session | None,
+    user_id: int | None,
+) -> dict:
+    """Build a workout plan deterministically from `workout_planner` and
+    decorate it with history-aware next-session targets.
+
+    Returns the same shape `_call_workout_ai` used to return:
+        {"trainerNote": "", "workout_plan": {...}}
+    except `trainerNote` is left blank — the caller fills it in with a
+    small AI call that sees the already-built plan.
+
+    `db` and `user_id` are optional so tests can call this without a
+    Session. When they're missing, history familiarity and next-session
+    target propagation are skipped gracefully (the planner still emits a
+    valid plan, just without continuity bias or target weights)."""
+    owned_slugs = _resolve_owned_equipment_slugs(req.equipment)
+    focused: str | None = None
+    if req.goalSelection is not None:
+        focused = getattr(req.goalSelection, "targetFocus", None) or req.focusedMuscleGroup
+    else:
+        focused = req.focusedMuscleGroup
+
+    inputs = PlannerInputs(
+        goal=req.goal,
+        days_per_week=max(1, min(7, req.daysPerWeek)),
+        session_minutes=max(20, min(180, req.workoutDurationMinutes or 60)),
+        experience=(req.experienceLevel or "intermediate").lower(),
+        equipment_slugs=tuple(sorted(owned_slugs)),
+        preferred_split=req.preferredSplit,
+        focused_muscle=focused,
+        preferred_exercises=tuple(req.preferredExercises or ()),
+        disliked_exercises=tuple(req.dislikedExercises or ()),
+        injuries=tuple(req.injuriesOrLimitations or ()),
+        rng_seed=int(user_id or 0),
+    )
+
+    history_familiarity: dict[str, int] = {}
+    if db is not None and user_id is not None:
+        try:
+            history_familiarity = build_history_familiarity(user_id, db)
+        except Exception as e:
+            print(f"[plan-gen workout] history familiarity lookup failed (non-fatal): {e}")
+            history_familiarity = {}
+
+    plan = planner_generate_workout_plan(
+        inputs,
+        SEED_EXERCISES,
+        history_familiarity=history_familiarity,
+    )
+
+    # Stamp each exercise with target_weight_lbs, progression_action,
+    # progression_reason, recommendation_source, recommendation_confidence,
+    # and recommendation_reason. The propagator uses the layered
+    # recommendation pipeline so exercises without exact history still
+    # get a transferred estimate from a substitution-group swap, a
+    # same-pattern lift, or a same-muscle / same-equipment fallback.
+    if db is not None and user_id is not None:
+        try:
+            profile = UserTrainingProfile(
+                primary_goal=map_goal_type(req.goal),
+                experience_level=map_experience_level(req.experienceLevel),
+                recovery_level=map_recovery_level(req.recoveryLevel),
+                progression_pace=map_progression_pace(None),
+            )
+            lookup = db_history_lookup(user_id, db)
+            perf_profiles = build_performance_profile(user_id, db)
+            all_by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+            propagate_session_targets(
+                plan,
+                profile=profile,
+                history_lookup=lookup,
+                engine=WorkoutProgressionEngine(),
+                perf_profiles=perf_profiles,
+                all_exercises_by_slug=all_by_slug,
+                experience=(req.experienceLevel or "intermediate"),
+            )
+        except Exception as e:
+            print(f"[plan-gen workout] propagate_session_targets failed (non-fatal): {e}")
+
+    days = plan.get("workout_plan", {}).get("days") or []
+    print(
+        f"[plan-gen workout] deterministic — goal={req.goal} days={len(days)} "
+        f"history_exercises={len(history_familiarity)} "
+        f"owned_eq={sorted(owned_slugs)[:6]}{'...' if len(owned_slugs) > 6 else ''}"
+    )
+    return plan
+
+
+def _generate_trainer_note(
+    client: OpenAI,
+    req: PlanRequest,
+    plan: dict,
+    model: str | None = None,
+) -> str:
+    """Small LLM call that writes a 120-180 word note describing the
+    already-built deterministic plan. Keeping this as an LLM call (vs. a
+    template) because it's the one piece of the response users actually
+    read, and a personalized description reads very differently from a
+    "Day 1: Push / 5 exercises / progressive overload" string.
+
+    Failure here is non-fatal — we return an empty string and the client
+    falls back to the deterministic plan on its own. The plan itself is
+    the contract; the note is a bonus."""
+    try:
+        wp = plan.get("workout_plan", {})
+        days_summary: list[str] = []
+        for d in wp.get("days", [])[:7]:
+            ex_names = ", ".join(
+                (ex.get("name") or "").strip()
+                for ex in d.get("exercises", [])[:6]
+            )
+            days_summary.append(f"  {d.get('day', '?')} ({d.get('focus', '?')}): {ex_names}")
+        days_block = "\n".join(days_summary) if days_summary else "  (no days)"
+
+        goal = (
+            req.goalSelection.primaryGoal
+            if req.goalSelection is not None
+            else req.goal
+        )
+        injuries = ", ".join(req.injuriesOrLimitations or []) or "none"
+        prompt = (
+            "Write a 120-180 word explanation of this pre-built training plan to the user.\n\n"
+            f"Goal: {goal}\n"
+            f"Days/week: {req.daysPerWeek}\n"
+            f"Session length: {req.workoutDurationMinutes or 60} min\n"
+            f"Experience: {req.experienceLevel or 'intermediate'}\n"
+            f"Injuries/limits: {injuries}\n"
+            f"Split: {wp.get('name', 'custom split')}\n"
+            f"Days:\n{days_block}\n\n"
+            "Cover: (1) WHY this split fits their goal and weekly frequency, "
+            "(2) WHY the chosen exercises work for their equipment and any injuries — name 2 exercises, "
+            "(3) HOW progression will work over the next 4 weeks, "
+            "(4) what the user should FEEL by the end of a session so they can self-assess. "
+            "Speak directly to the user ('you'). No generic platitudes. "
+            'Return JSON: {"trainerNote": "..."}'
+        )
+        kwargs = _build_chat_kwargs(
+            model or model_plan_generation(),
+            [
+                {"role": "system", "content": "You are an expert fitness coach. Be concise. Return only the required JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=450,
+            timeout_secs=45,
+        )
+        response = _chat_create(client, **kwargs)
+        raw = response.choices[0].message.content
+        data = _extract_json(raw)
+        note = (data or {}).get("trainerNote") or ""
+        return str(note).strip()
+    except Exception as e:
+        print(f"[plan-gen trainer-note] failed (non-fatal): {e}")
+        return ""
 
 
 def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_tokens: int = 2000) -> dict:
@@ -794,7 +987,12 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
 
-async def run_full_plan_generation(req: PlanRequest) -> dict:
+async def run_full_plan_generation(
+    req: PlanRequest,
+    *,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict:
     """Shared plan-generation pipeline. Callable from both the sync /plans
     endpoint and the async background job worker. No auth, no HTTP — pure
     data in, data out. Raises ValueError on validation / generation errors.
@@ -816,16 +1014,11 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     _m = model_plan_generation()
     print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
 
-    # Build the canonical exercise library for this user. Without this the
-    # AI invents exercise names ("Squats") and equipment strings ("Leg Press
-    # on the leg extension machine"). With it, the AI is constrained to a
-    # closed set and we canonicalize the response below.
-    workout_library = build_user_exercise_library(req.equipment)
-    if not req.exerciseLibrary and workout_library:
-        req.exerciseLibrary = [
-            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
-        ]
-    workout_prompt = build_workout_prompt(req)
+    # Workout plan is now built deterministically from `workout_planner`,
+    # seeded with the user's id for stable tie-breaking and decorated with
+    # history-aware next-session targets. The LLM is only used for the
+    # trainer note below, which describes the already-built plan.
+    workout_data = _build_deterministic_workout(req, db, user_id)
 
     # Deterministic target macros (source of truth for the assembler).
     targets_for_check = compute_tdee_and_targets(req)
@@ -839,10 +1032,9 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     variety_n = max(1, min(7, int(getattr(req, "mealVariety", 3) or 3)))
 
     # Hybrid nutrition pipeline: AI picks meal skeletons, algorithm solves
-    # portions and hits macro targets. Runs in parallel with enrichment +
-    # workout generation. `assemble_nutrition_response` needs the enriched
-    # data, so we do enrichment first then assembly, while workout runs
-    # independently in its own thread.
+    # portions and hits macro targets. Runs in parallel with the trainer
+    # note LLM call so the two AI round-trips overlap instead of
+    # serializing.
     async def _run_nutrition() -> dict:
         enriched_local = await asyncio.to_thread(
             enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
@@ -853,16 +1045,15 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
         )
         return {"enriched": enriched_local, "nutrition": nut}
 
-    nutrition_bundle, workout_data = await asyncio.gather(
+    nutrition_bundle, trainer_note = await asyncio.gather(
         _run_nutrition(),
-        asyncio.to_thread(_call_workout_ai, client, workout_prompt, _m, 1800),
+        asyncio.to_thread(_generate_trainer_note, client, req, workout_data, _m),
     )
     enriched = nutrition_bundle["enriched"]
     nutrition_data = nutrition_bundle["nutrition"]
-
-    # Canonicalize the AI workout response against the seed library so the
-    # client always sees real seed names + equipment instead of AI freeform.
-    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
+    workout_data["trainerNote"] = trainer_note
+    # Deterministic planner already emits canonical names and equipment
+    # labels straight from the seed — no canonicalization pass needed.
 
     plans_list = nutrition_data.get("nutrition_plans") or []
     # Back-compat fallback in case the model still emits the legacy A/B/C keys.
@@ -911,37 +1102,40 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
 async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     req: PlanRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """Sync plan generation (legacy). New client code should use the job
     queue at `/ai/plans/enqueue` so long-running work survives app kill."""
     try:
-        return await run_full_plan_generation(req)
+        return await run_full_plan_generation(req, db=db, user_id=current_user.id)
     except ValueError as e:
         print(f"[AI /plans] FAILED — {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
-async def run_workout_only_generation(plan_req: PlanRequest) -> dict:
-    """Shared workout-only generator — callable from sync endpoint and job worker."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise ValueError("OpenAI API key not configured")
-    client = OpenAI(api_key=api_key)
-    _m = model_plan_update()
+async def run_workout_only_generation(
+    plan_req: PlanRequest,
+    *,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict:
+    """Shared workout-only generator — callable from sync endpoint and job worker.
+
+    Same deterministic-planner pipeline as `run_full_plan_generation`.
+    The trainer note is generated by a small AI call that sees the
+    already-built plan; failures there are non-fatal and return an empty
+    string."""
     print(f"[plan-gen workout] goal={plan_req.goal}, days={plan_req.daysPerWeek}")
+    workout_data = _build_deterministic_workout(plan_req, db, user_id)
 
-    # Same library + canonicalize pipeline as the full plan generator.
-    workout_library = build_user_exercise_library(plan_req.equipment)
-    if not plan_req.exerciseLibrary and workout_library:
-        plan_req.exerciseLibrary = [
-            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
-        ]
-
-    # 1800-token baseline (retry at 2300) — enough for a 6-day plan with the
-    # new verbose trainerNote. 800 was the old cap and was truncating on
-    # bigger plans, which turned into "failed after 2 attempts" errors.
-    workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 1800)
-    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
+    api_key = get_openai_api_key()
+    note = ""
+    if api_key:
+        client = OpenAI(api_key=api_key)
+        note = await asyncio.to_thread(
+            _generate_trainer_note, client, plan_req, workout_data, model_plan_update(),
+        )
+    workout_data["trainerNote"] = note
     return {
         "trainerNote":  workout_data.get("trainerNote", ""),
         "workout_plan": workout_data["workout_plan"],
@@ -952,6 +1146,7 @@ async def run_workout_only_generation(plan_req: PlanRequest) -> dict:
 async def generate_workout_plan(
     req: WorkoutOnlyRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """Generate a workout plan only — called when equipment changes (sync legacy)."""
     plan_req = PlanRequest(
@@ -969,7 +1164,7 @@ async def generate_workout_plan(
         userContext=req.userContext,
     )
     try:
-        return await run_workout_only_generation(plan_req)
+        return await run_workout_only_generation(plan_req, db=db, user_id=current_user.id)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -1198,11 +1393,11 @@ async def _run_plan_job(job_id: int) -> None:
             # pydantic BaseModel so .model_validate accepts a dict.
             req = PlanRequest.model_validate(req_dict)
             if job.kind == "workout":
-                result = await run_workout_only_generation(req)
+                result = await run_workout_only_generation(req, db=db, user_id=job.user_id)
             elif job.kind == "nutrition":
                 result = await run_nutrition_only_generation(req)
             else:
-                result = await run_full_plan_generation(req)
+                result = await run_full_plan_generation(req, db=db, user_id=job.user_id)
 
             # Re-check cancellation before saving — user might have cancelled
             # while the OpenAI call was in flight.

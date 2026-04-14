@@ -493,7 +493,7 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     builds the inputs and re-shapes the output into the dict shape the
     prompt builder expects (with per-meal splits).
     """
-    from app.services.calorie_calculator import (
+    from app.services.nutrition.calorie_calculator import (
         CalorieInputs, CustomMacroOverrides, compute_targets,
     )
 

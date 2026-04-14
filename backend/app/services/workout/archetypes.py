@@ -1,0 +1,272 @@
+"""Day archetype vocabulary for the multi-goal workout planner.
+
+A `DayArchetype` is the primitive the weekly planner reasons about.
+Before this module, the planner only understood lifting day templates
+(full body / upper / lower / push / pull / legs). That worked for
+strength and hypertrophy goals but collapsed into generic lifting for
+anything else (endurance, athletic performance, flexibility,
+stress relief). This module adds a real non-lifting vocabulary so the
+planner can honestly handle all 10 user-facing goals.
+
+Architecture
+------------
+Each archetype has:
+
+- a stable id (string value, safe to serialize into the plan output)
+- a `category` — `lift | cond | mobility | recovery | hybrid`
+- a `training_type` — drives prescription dispatch
+- a `default_name` — human-facing label the day meta layer can format
+- a `intensity_cost` — 1 (easy) to 5 (maximal). Used by the weekly
+  planner to space hard days apart.
+
+The `ARCHETYPE_META` dict is the single source of truth. Adding a new
+archetype means adding one entry here plus a slot builder in
+`planner.py` under `_archetype_to_slots`.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Literal
+
+
+# String-valued enum so archetype ids are stable in serialized plans
+# and in logs. `DayArchetype.LIFT_FULL_BODY.value == "lift_full_body"`.
+class DayArchetype(str, Enum):
+    # ── Lifting ────────────────────────────────────────────────────
+    LIFT_FULL_BODY = "lift_full_body"
+    LIFT_UPPER = "lift_upper"
+    LIFT_LOWER = "lift_lower"
+    LIFT_PUSH = "lift_push"
+    LIFT_PULL = "lift_pull"
+    LIFT_LEGS = "lift_legs"
+    LIFT_BRO_CHEST = "lift_bro_chest"
+    LIFT_BRO_BACK = "lift_bro_back"
+    LIFT_BRO_SHOULDERS = "lift_bro_shoulders"
+    LIFT_BRO_ARMS = "lift_bro_arms"
+    LIFT_BRO_LEGS = "lift_bro_legs"
+    # Compact 4-5 compound session for non-lifting goals (endurance,
+    # flexibility, stress relief) that still want some strength
+    # maintenance without eating into their primary goal's recovery.
+    LIFT_STRENGTH_MAINTENANCE = "lift_strength_maintenance"
+
+    # ── Conditioning ──────────────────────────────────────────────
+    COND_ZONE2 = "cond_zone2"                    # 25-45 min conversational pace
+    COND_INTERVALS_SHORT = "cond_intervals_short"  # 6-10 × 30-60 s on
+    COND_INTERVALS_LONG = "cond_intervals_long"    # 4-6 × 2-5 min on
+    COND_TEMPO = "cond_tempo"                    # 15-25 min threshold
+    COND_CIRCUIT = "cond_circuit"                # metabolic circuit
+    COND_MIXED = "cond_mixed"                    # intervals + easy spin
+    COND_SPRINT_POWER = "cond_sprint_power"      # short explosive sprints
+
+    # ── Mobility / recovery ───────────────────────────────────────
+    MOBILITY_FLOW = "mobility_flow"              # full-body mobility flow
+    STRETCH_BLOCK = "stretch_block"              # focused static stretching
+    RECOVERY_EASY = "recovery_easy"              # easy walk / easy spin
+    STRESS_RELIEF_EASY = "stress_relief_easy"    # low-intensity mood session
+
+    # ── Hybrid (strength + conditioning in one session) ───────────
+    HYBRID_STRENGTH_INTERVALS = "hybrid_strength_intervals"
+    HYBRID_UPPER_INTERVALS = "hybrid_upper_intervals"
+    HYBRID_LOWER_POWER = "hybrid_lower_power"    # lower strength + plyo + sprint
+    HYBRID_FULL_BODY_CIRCUIT = "hybrid_full_body_circuit"
+
+
+ArchetypeCategory = Literal["lift", "cond", "mobility", "recovery", "hybrid"]
+TrainingType = Literal[
+    "strength",       # low-rep heavy compounds
+    "hypertrophy",    # moderate reps, volume focus
+    "power",          # explosive / plyometric
+    "conditioning",   # cardio + metabolic
+    "mobility",       # range of motion
+    "recovery",       # easy movement
+    "mixed",          # hybrid days
+]
+
+
+@dataclass(frozen=True)
+class ArchetypeMeta:
+    category: ArchetypeCategory
+    training_type: TrainingType
+    # User-facing base label. The naming layer in `planner._day_meta`
+    # can add an emphasis subtitle on top of this.
+    default_name: str
+    # Rough recovery cost on a 1-5 scale. Used by the weekly planner to
+    # space hard days apart and by session_minutes trimming.
+    intensity_cost: int
+    # Which `exercise_type` values the slot builders for this archetype
+    # accept. `strength` archetypes use `{"strength"}`, cardio uses
+    # `{"cardio"}`, mobility uses `{"mobility"}`. A set so hybrid
+    # archetypes can accept multiple (e.g. `{"strength", "cardio"}`).
+    accepts_types: frozenset[str]
+
+
+# ── Single source of truth ────────────────────────────────────────────
+# Every archetype must have an entry here AND a slot builder in
+# `planner._archetype_to_slots`. The tests check both.
+ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
+    # ── Lifting ────────────────────────────────────────────────────
+    DayArchetype.LIFT_FULL_BODY: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Full Body", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_UPPER: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Upper", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LOWER: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Lower", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PUSH: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Push", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PULL: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Pull", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LEGS: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Legs", intensity_cost=5,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_BRO_CHEST: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Chest", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_BRO_BACK: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Back", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_BRO_SHOULDERS: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Shoulders", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_BRO_ARMS: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Arms", intensity_cost=2,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_BRO_LEGS: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Legs", intensity_cost=5,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_STRENGTH_MAINTENANCE: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Strength Maintenance", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+
+    # ── Conditioning ──────────────────────────────────────────────
+    DayArchetype.COND_ZONE2: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Zone 2 Cardio", intensity_cost=2,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.COND_INTERVALS_SHORT: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Short Intervals", intensity_cost=4,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.COND_INTERVALS_LONG: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Long Intervals", intensity_cost=4,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.COND_TEMPO: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Tempo / Threshold", intensity_cost=3,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.COND_CIRCUIT: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Metabolic Circuit", intensity_cost=4,
+        # Circuits pull from both strength and cardio libraries.
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.COND_MIXED: ArchetypeMeta(
+        category="cond", training_type="conditioning",
+        default_name="Mixed Conditioning", intensity_cost=3,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.COND_SPRINT_POWER: ArchetypeMeta(
+        category="cond", training_type="power",
+        default_name="Sprint + Power", intensity_cost=4,
+        accepts_types=frozenset({"cardio", "strength"}),
+    ),
+
+    # ── Mobility / recovery ───────────────────────────────────────
+    DayArchetype.MOBILITY_FLOW: ArchetypeMeta(
+        category="mobility", training_type="mobility",
+        default_name="Mobility Flow", intensity_cost=1,
+        accepts_types=frozenset({"mobility"}),
+    ),
+    DayArchetype.STRETCH_BLOCK: ArchetypeMeta(
+        category="mobility", training_type="mobility",
+        default_name="Stretch Block", intensity_cost=1,
+        accepts_types=frozenset({"mobility"}),
+    ),
+    DayArchetype.RECOVERY_EASY: ArchetypeMeta(
+        category="recovery", training_type="recovery",
+        default_name="Easy Recovery", intensity_cost=1,
+        accepts_types=frozenset({"cardio"}),
+    ),
+    DayArchetype.STRESS_RELIEF_EASY: ArchetypeMeta(
+        category="recovery", training_type="recovery",
+        default_name="Easy Movement", intensity_cost=1,
+        accepts_types=frozenset({"cardio", "mobility"}),
+    ),
+
+    # ── Hybrid ────────────────────────────────────────────────────
+    DayArchetype.HYBRID_STRENGTH_INTERVALS: ArchetypeMeta(
+        category="hybrid", training_type="mixed",
+        default_name="Strength + Intervals", intensity_cost=5,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.HYBRID_UPPER_INTERVALS: ArchetypeMeta(
+        category="hybrid", training_type="mixed",
+        default_name="Upper + Intervals", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.HYBRID_LOWER_POWER: ArchetypeMeta(
+        category="hybrid", training_type="mixed",
+        default_name="Lower Power + Sprints", intensity_cost=5,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.HYBRID_FULL_BODY_CIRCUIT: ArchetypeMeta(
+        category="hybrid", training_type="mixed",
+        default_name="Full Body Circuit", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+}
+
+
+# Helpers used by both weekly_recipe and prescriptions.
+def is_lifting(a: DayArchetype) -> bool:
+    return ARCHETYPE_META[a].category == "lift"
+
+
+def is_conditioning(a: DayArchetype) -> bool:
+    return ARCHETYPE_META[a].category == "cond"
+
+
+def is_mobility(a: DayArchetype) -> bool:
+    return ARCHETYPE_META[a].category == "mobility"
+
+
+def is_recovery(a: DayArchetype) -> bool:
+    return ARCHETYPE_META[a].category == "recovery"
+
+
+def is_hybrid(a: DayArchetype) -> bool:
+    return ARCHETYPE_META[a].category == "hybrid"

@@ -421,18 +421,13 @@ def seed_foods(session: Session) -> None:
 
 # ─── Goal & Pace seed data ────────────────────────────────────────────────────
 
-GOAL_OPTIONS_DATA = [
-    ("fat_loss",             "Lose Weight",            "🔥", "Burn fat through a sustainable calorie deficit"),
-    ("muscle_gain",          "Build Muscle",            "💪", "Gain size and strength with a calorie surplus"),
-    ("body_recomp",          "Body Recomposition",      "⚖️", "Lose fat and build muscle at the same time"),
-    ("strength",             "Build Strength",          "🏋️", "Increase your 1-rep maxes and raw power output"),
-    ("toning",               "Tone & Define",           "✨", "Lean out and sculpt visible muscle definition"),
-    ("endurance",            "Improve Endurance",       "🏃", "Run longer, recover faster, and build stamina"),
-    ("athletic_performance", "Athletic Performance",    "⚡", "Speed, power, agility, and sport-specific fitness"),
-    ("maintain",             "Maintain & Stay Active",  "🎯", "Keep your current fitness level and stay healthy"),
-    ("flexibility",          "Flexibility & Mobility",  "🧘", "Improve range of motion and reduce injury risk"),
-    ("stress_relief",        "Mental Wellness",         "🌿", "Use movement to manage stress and improve mood"),
-]
+# Canonical goal list exposed to users. Sourced from
+# `app.services.workout.goals` so the registry (planner buckets +
+# aliases + support flags) and the seed UI metadata can never drift.
+# Add / remove / rename goals in `goals.py`, not here.
+from app.services.workout.goals import ui_goal_rows as _ui_goal_rows
+
+GOAL_OPTIONS_DATA = _ui_goal_rows()
 
 PACE_OPTIONS_DATA = [
     # Fat loss
@@ -475,15 +470,10 @@ PACE_OPTIONS_DATA = [
     ("maintain", "moderate",     "Steady Active",  "🎯", "3–4x/week", "Consistent training to hold your current fitness and physique"),
     ("maintain", "aggressive",   "Active Lifestyle","🔥", "5x/week",   "Stay highly active, keep challenging yourself without major goals"),
 
-    # Flexibility
-    ("flexibility", "conservative", "Gentle Flow",      "🧘", "10–15 min/day", "Basic stretching and static mobility — easy to start"),
-    ("flexibility", "moderate",     "Active Flexibility","🌀", "20–30 min/day", "Daily stretching, yoga flows, and targeted mobility drills"),
-    ("flexibility", "aggressive",   "Deep Mobility",    "🤸", "45–60 min/day", "Long holds, loaded stretching, and progressive mobility training"),
-
-    # Stress relief
-    ("stress_relief", "conservative", "Light Movement",  "🌿", "2–3x/week", "Short, low-intensity sessions focused on feeling good"),
-    ("stress_relief", "moderate",     "Regular Relief",  "😌", "3–4x/week", "Consistent routine combining movement and mindfulness"),
-    ("stress_relief", "aggressive",   "Daily Active",    "💪", "Daily",     "Daily exercise as your primary stress management and mood tool"),
+    # flexibility and stress_relief pace rows were removed alongside
+    # their goal entries in the goal-honesty pass. They stay resolvable
+    # in `goals.py` (unsupported=True) for stale user profiles but
+    # aren't seeded as new pace options.
 ]
 
 
