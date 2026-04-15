@@ -495,7 +495,7 @@ export async function getAIWorkoutPlan(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
   await writePendingPlanJob(job.id, 'workout');
   const result = await _pollPlanJobUntilDone(token, job.id);
 
@@ -503,6 +503,31 @@ export async function getAIWorkoutPlan(
     trainerNote: result?.trainerNote?.slice(0, 80) ?? 'MISSING',
     workoutDays: result?.workout_plan?.days?.length ?? 0,
   });
+
+  // Debug the AI plan-review layer so we can iterate on what the
+  // reviewer saw vs what it decided. Backend attaches `_debug.review`
+  // to every plan response containing the full brief, verdict,
+  // notes, and any patches it applied.
+  const reviewDebug = (result as any)?._debug?.review;
+  if (reviewDebug) {
+    try {
+      console.log('[plan-review] BRIEF sent to AI:\n' + JSON.stringify(reviewDebug.brief, null, 2));
+      console.log('[plan-review] VERDICT:', {
+        status: reviewDebug.verdict?.status,
+        notes: reviewDebug.verdict?.notes,
+        patchCount: reviewDebug.verdict?.patches?.length ?? 0,
+        error: reviewDebug.verdict?.error,
+      });
+      if (reviewDebug.verdict?.patches?.length > 0) {
+        console.log('[plan-review] PATCHES applied:\n' + JSON.stringify(reviewDebug.verdict.patches, null, 2));
+      }
+    } catch (e) {
+      console.log('[plan-review] failed to log debug payload:', e);
+    }
+  } else {
+    console.log('[plan-review] no _debug.review attached — backend may not have run the reviewer');
+  }
+
   return result;
 }
 
@@ -542,7 +567,7 @@ export async function getAINutritionPlan(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
   await writePendingPlanJob(job.id, 'nutrition');
   const result = await _pollPlanJobUntilDone(token, job.id);
 
@@ -579,6 +604,71 @@ export async function getWeightRecommendation(
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber, ...options }),
   });
+}
+
+/** Estimated one-rep-max for the user's showcase compound lifts.
+ *  Powered by the deterministic performance profile (Epley 1RM from
+ *  recent logged sessions). Returns only lifts the user has actually
+ *  trained in the ~28-day window. */
+export type OneRepMaxLift = {
+  slug: string;
+  name: string;
+  oneRepMaxLbs: number;
+  topWeightLbs: number;
+  topReps: number;
+  sessionCount: number;
+  confidence: number;
+  lastPerformedOn: string | null;
+};
+
+export async function getOneRepMaxShowcase(token: string): Promise<OneRepMaxLift[]> {
+  try {
+    const res = await request<{ lifts: OneRepMaxLift[] }>('/ai/strength/one-rep-max', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.lifts ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** 4-pillar composite fitness score. Each pillar is a 0-100 subscore
+ *  with a human-readable reason and a data quality tag. The headline
+ *  `total` is a weighted average. */
+export type FitnessPillar = {
+  name: 'Strength' | 'Cardio' | 'Consistency' | 'Recovery';
+  score: number;
+  reason: string;
+  dataQuality: 'full' | 'partial' | 'missing';
+};
+export type FitnessCompositeScore = {
+  total: number;
+  rating: 'Elite' | 'Strong' | 'Solid' | 'Building' | 'Starting';
+  pillars: FitnessPillar[];
+};
+
+export async function getFitnessCompositeScore(
+  token: string,
+  params: {
+    daysPerWeek?: number;
+    bodyweightLbs?: number;
+    recentSleepHours?: number;
+    avgSessionRpe?: number;
+  } = {},
+): Promise<FitnessCompositeScore | null> {
+  try {
+    const qs = new URLSearchParams();
+    if (params.daysPerWeek != null) qs.set('days_per_week', String(params.daysPerWeek));
+    if (params.bodyweightLbs != null) qs.set('bodyweight_lbs', String(params.bodyweightLbs));
+    if (params.recentSleepHours != null) qs.set('recent_sleep_hours', String(params.recentSleepHours));
+    if (params.avgSessionRpe != null) qs.set('avg_session_rpe', String(params.avgSessionRpe));
+    const path = `/ai/fitness/composite-score${qs.toString() ? `?${qs.toString()}` : ''}`;
+    return await request<FitnessCompositeScore>(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    return null;
+  }
 }
 
 /** Map the frontend's rich goal vocabulary (lose_fat, build_muscle, etc.)
@@ -724,16 +814,42 @@ export async function getPaces(goal?: string) {
   return request<any[]>(`/meta/paces${params}`);
 }
 
+export type LoggedSetPayload = {
+  set_number: number;
+  reps?: number;
+  weight_lbs?: number;
+  duration_seconds?: number | null;
+  feedback?: string | null;
+  rir?: number | null;
+};
+
+export type LoggedExercisePayload = {
+  name: string;
+  target_sets?: number | null;
+  target_reps?: string | null;
+  equipment?: string | null;
+  order_index?: number;
+  sets: LoggedSetPayload[];
+};
+
 export async function logWorkoutDone(
   token: string,
   workout_date: string,
   focus_label: string,
   duration_seconds: number,
+  exercises?: LoggedExercisePayload[],
 ) {
   return request('/workouts/complete', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ workout_date, focus_label, duration_seconds }),
+    body: JSON.stringify({
+      workout_date,
+      focus_label,
+      duration_seconds,
+      // Only include the exercises field when we actually have data,
+      // to stay compatible with older backend builds that don't read it.
+      ...(exercises && exercises.length > 0 ? { exercises } : {}),
+    }),
   });
 }
 
@@ -910,13 +1026,18 @@ export async function enqueuePlanJob(token: string, planReq: any): Promise<PlanJ
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(planReq),
-  });
+  }, 60000);
 }
 
 export async function getPlanJob(token: string, jobId: number): Promise<PlanJob> {
+  // Longer timeout (60s) than the default 30s: the poll endpoint
+  // itself is fast, but when the backend is running AI plan-review +
+  // regenerate in a worker thread, the event loop can still briefly
+  // stall on DB commits between stages. 60s swallows those without
+  // aborting the poll.
   return request(`/ai/plans/job/${jobId}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 60000);
 }
 
 export async function cancelPlanJob(token: string, jobId: number): Promise<PlanJob> {
@@ -1255,6 +1376,23 @@ export async function getWorkoutSummary(
   },
 ): Promise<import('../types').WorkoutSummary> {
   return request('/ai/workout-summary', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAiWarmup(
+  token: string,
+  payload: {
+    focus: string;
+    exercises: { name: string; equipment?: string | null }[];
+    injuries?: string[];
+    experience?: string;
+    durationMinutes?: number;
+  },
+): Promise<{ steps: string[]; source: 'ai' | 'fallback' }> {
+  return request('/ai/warmup', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),

@@ -147,9 +147,21 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_UPPER,
             DayArchetype.LIFT_LOWER,
         ),
-        planner_mode="lifting",
+        # Route through lifting_plus_cardio instead of pure lifting so
+        # the 15% conditioning fraction in `mix` actually materializes
+        # as real cardio days. Previously body_recomp's profile
+        # *claimed* conditioning + mobility archetypes in
+        # `allowed_archetypes` but the lifting-only recipe generator
+        # ignored them — the plan never had a single cardio day
+        # regardless of day count. The `_lifting_plus_cardio_recipe`
+        # reads `mix.conditioning` and reserves cardio days
+        # accordingly (1 at 4-5 days, 2 at 6+).
+        planner_mode="lifting_plus_cardio",
         stable_lifts=True,
-        notes="Balanced hypertrophy + conditioning. Earns the 'meaningful cardio' promise.",
+        notes=(
+            "Balanced hypertrophy + conditioning. Lifting backbone "
+            "with 1-2 dedicated cardio days per week at 4+ days/week."
+        ),
     ),
 
     "fat_loss": GoalProfile(
@@ -175,11 +187,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LOWER,
             DayArchetype.COND_INTERVALS_SHORT,
         ),
-        # `fat_loss_mix` instead of `lifting` so the recipe generator
-        # mixes conditioning days in alongside the lifting days. At
-        # 1-2 days/week it stays compound-focused; at 3+ it guarantees
-        # at least one dedicated conditioning day per week.
-        planner_mode="fat_loss_mix",
+        # `lifting_plus_cardio` routes through the generalized
+        # recipe generator that reads `mix.conditioning` to decide
+        # how many days to reserve for cardio. Fat loss gets more
+        # cardio days than body_recomp because its mix.conditioning
+        # is 0.35 vs body_recomp's 0.15.
+        planner_mode="lifting_plus_cardio",
         stable_lifts=True,
         notes=(
             "Lifting-supported fat loss with meaningful conditioning. "

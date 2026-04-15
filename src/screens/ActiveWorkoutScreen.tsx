@@ -9,15 +9,29 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup } from '../services/api';
+import { cleanAiText } from '../utils/aiText';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
+import { humanizeToken } from '../utils/exerciseGuide';
+
+/** Shared display helper for equipment strings. Splits on commas so
+ *  multi-equipment values like "barbell, flat_bench" become
+ *  "Barbell, Flat Bench" instead of the raw planner output. */
+function formatEquipmentLabel(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .split(',')
+    .map(part => humanizeToken(part.trim()))
+    .filter(Boolean)
+    .join(', ');
+}
 
 interface WorkoutCoachMessage {
   role: 'user' | 'assistant';
@@ -77,12 +91,69 @@ const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
   if (TIMED_EXERCISE_RE.test(name)) return true;
-  // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds".
-  // Coerce to string — AI plans occasionally return reps as a number
-  // ("reps": 12) which crashed .trim() before this guard.
+  // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds",
+  // "25 min", "20-30 min". Coerce to string — AI plans occasionally return
+  // reps as a number ("reps": 12) which crashed .trim() before this guard.
   const reps = targetReps == null ? '' : String(targetReps).trim();
-  if (reps && TIMED_REPS_RE.test(reps)) return true;
+  if (reps && (TIMED_REPS_RE.test(reps) || /\d\s*-?\s*\d*\s*m(in(ute)?s?)?$/i.test(reps))) return true;
   return false;
+}
+
+/** True when this timed exercise is "long" — i.e. the user is probably
+ *  doing it on equipment with its own clock (treadmill, bike, rower)
+ *  and should type the duration rather than run an in-app stopwatch
+ *  for the full time. Short holds (plank, dead hang, wall sit, carry)
+ *  are better served by the timer. Used to decide which control to
+ *  emphasize; both are always shown. */
+function isLongCardioExercise(name: string, targetReps?: string | number): boolean {
+  const lowered = (name || '').toLowerCase();
+  if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run/.test(lowered)) {
+    return true;
+  }
+  // If the target is expressed in minutes and is ≥ 3, treat as long.
+  const reps = targetReps == null ? '' : String(targetReps).trim();
+  const minMatch = reps.match(/(\d+)\s*-?\s*(\d*)\s*m(in)?/i);
+  if (minMatch) {
+    const n = parseInt(minMatch[1], 10);
+    if (Number.isFinite(n) && n >= 3) return true;
+  }
+  return false;
+}
+
+/** Parse a user-entered duration string into seconds. Accepts:
+ *    "mm:ss"      → minutes + seconds
+ *    "45s", "45 sec", "45 seconds"   → seconds
+ *    "25m", "25 min", "25 minutes"   → minutes
+ *    plain number → interpreted as minutes if `preferMinutes`, else seconds
+ *  Returns NaN on empty / unparseable input. */
+function parseDurationInput(text: string, preferMinutes: boolean): number {
+  const t = (text || '').trim().toLowerCase();
+  if (!t) return NaN;
+  if (t.includes(':')) {
+    const [mm, ss] = t.split(':').map(s => parseInt(s, 10));
+    if (!Number.isFinite(mm) || !Number.isFinite(ss)) return NaN;
+    return mm * 60 + ss;
+  }
+  const secMatch = t.match(/^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds)$/);
+  if (secMatch) return Math.round(parseFloat(secMatch[1]));
+  const minMatch = t.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes)$/);
+  if (minMatch) return Math.round(parseFloat(minMatch[1]) * 60);
+  const numMatch = t.match(/^(\d+(?:\.\d+)?)$/);
+  if (numMatch) {
+    const n = parseFloat(numMatch[1]);
+    return Math.round(preferMinutes ? n * 60 : n);
+  }
+  return NaN;
+}
+
+/** Format a duration in seconds for display in an input field. Short
+ *  holds render as "45s"; anything ≥ 60s uses mm:ss. */
+function formatDurationForInput(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '';
+  if (totalSeconds < 60) return `${Math.round(totalSeconds)}s`;
+  const mm = Math.floor(totalSeconds / 60);
+  const ss = Math.round(totalSeconds % 60);
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
 }
 
 function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string | null {
@@ -127,7 +198,66 @@ const SHARE_LOGO_DARK  = require('../../assets/images/Fitness brand logo with ap
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
     // Warm-up state
     const [warmupDone, setWarmupDone] = useState(false);
-    const warmupSteps = buildWarmupPlan(workout);
+    // When the user has started the workout, the warm-up card collapses
+    // into a small header at the top of the exercise list that can be
+    // tapped to re-expand if they want to re-read the steps mid-session.
+    const [warmupExpanded, setWarmupExpanded] = useState(false);
+    // AI-generated warm-up steps cached by (day + focus) for the SAME
+    // day — visiting the same workout twice in one day reuses the
+    // cached steps; the next calendar day regenerates. Falls back to
+    // the deterministic template while the AI call is in flight or if
+    // it fails. See backend: POST /ai/warmup.
+    const [warmupSteps, setWarmupSteps] = useState<string[]>(() => buildWarmupPlan(workout));
+    useEffect(() => {
+      let cancelled = false;
+      const loadWarmup = async () => {
+        if (!authToken) return;
+        const today = dateKey(new Date());
+        const dayKey = (workout.day || workout.focus || 'session').replace(/\s+/g, '_');
+        const cacheKey = `ai-warmup:${today}:${dayKey}`;
+        try {
+          const cached = await AsyncStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed?.steps) && parsed.steps.length > 0 && !cancelled) {
+              setWarmupSteps(parsed.steps);
+              return;
+            }
+          }
+        } catch {}
+        try {
+          let injuries: string[] = [];
+          try {
+            const rawProfile = await AsyncStorage.getItem('userProfile');
+            if (rawProfile) {
+              const p = JSON.parse(rawProfile);
+              injuries = (p.injuriesOrLimitations || p.injuries || [])
+                .map((i: any) => typeof i === 'string' ? i : (i?.label || i?.name || ''))
+                .filter(Boolean);
+            }
+          } catch {}
+          const result = await getAiWarmup(authToken, {
+            focus: workout.focus,
+            exercises: workout.exercises.map(e => ({
+              name: e.name,
+              equipment: typeof e.equipment === 'string' ? e.equipment : null,
+            })),
+            injuries,
+            durationMinutes: 60,
+          });
+          if (!cancelled && Array.isArray(result?.steps) && result.steps.length > 0) {
+            setWarmupSteps(result.steps);
+            try {
+              await AsyncStorage.setItem(cacheKey, JSON.stringify({ steps: result.steps, source: result.source }));
+            } catch {}
+          }
+        } catch {
+          // keep deterministic fallback already in state
+        }
+      };
+      loadWarmup();
+      return () => { cancelled = true; };
+    }, [authToken, workout.day, workout.focus]);
   const theme = getTheme(themeName);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
@@ -185,46 +315,117 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [restCue, setRestCue] = useState<string | null>(null);
   const [restNextTarget, setRestNextTarget] = useState<string | null>(null);
 
-  // Timed exercise timer: keyed by "exIdx-setSlot"
-  const [activeTimers, setActiveTimers] = useState<Record<string, { running: boolean; elapsed: number; startedAt: number | null }>>({});
+  // Timed exercise timer: keyed by "exIdx-setSlot".
+  //
+  // Wall-clock based so it survives screen lock / app backgrounding.
+  // Previously we incremented `elapsed` by +1 every second via
+  // setInterval — but setInterval pauses when the JS runtime suspends
+  // (iOS screen lock), which meant a 30-minute treadmill session
+  // whose screen went to sleep showed "4:12" when the user came back.
+  //
+  // New model:
+  //   baseElapsed  = seconds accumulated across prior runs (before any pause)
+  //   startedAt    = wall-clock ms when the current run started, or null if paused
+  //   elapsed     := baseElapsed + (running ? (now - startedAt)/1000 : 0)
+  //
+  // The setInterval is purely a render-trigger (forces a re-read of
+  // wall clock every second). It CAN pause in the background — that's
+  // fine, because the next foreground tick recomputes from wall clock
+  // and jumps straight to the correct total. `getTimerElapsed()` is
+  // the single read path; UI code should never read `elapsed` off
+  // state directly.
+  const [activeTimers, setActiveTimers] = useState<Record<string, { running: boolean; baseElapsed: number; startedAt: number | null }>>({});
   const timerIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  // Full-screen timer modal for timed exercises. When set to a
+  // "exIdx-setSlot" key, the modal is open for that slot; when null
+  // the modal is closed. The modal reads from activeTimers so the
+  // wall-clock computation is shared with the inline UI.
+  const [timerModalKey, setTimerModalKey] = useState<string | null>(null);
+  // Tick counter to force re-renders while a timer is running. We
+  // use a single shared ticker instead of one interval per timer so
+  // the derived-from-wall-clock computation stays cheap.
+  const [, setTimerTick] = useState(0);
+  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const getTimerElapsed = useCallback((key: string): number => {
+    const t = activeTimers[key];
+    if (!t) return 0;
+    if (t.running && t.startedAt != null) {
+      return t.baseElapsed + Math.max(0, Math.floor((Date.now() - t.startedAt) / 1000));
+    }
+    return t.baseElapsed;
+  }, [activeTimers]);
 
   const startExerciseTimer = useCallback((key: string) => {
-    setActiveTimers(prev => ({ ...prev, [key]: { running: true, elapsed: prev[key]?.elapsed ?? 0, startedAt: Date.now() } }));
-    if (timerIntervalsRef.current[key]) clearInterval(timerIntervalsRef.current[key]);
-    timerIntervalsRef.current[key] = setInterval(() => {
-      setActiveTimers(prev => {
-        const t = prev[key];
-        if (!t?.running || !t.startedAt) return prev;
-        return { ...prev, [key]: { ...t, elapsed: t.elapsed + 1 } };
-      });
-    }, 1000);
+    setActiveTimers(prev => {
+      const existing = prev[key];
+      return {
+        ...prev,
+        [key]: {
+          running: true,
+          baseElapsed: existing?.baseElapsed ?? 0,
+          startedAt: Date.now(),
+        },
+      };
+    });
+    // Single shared ticker — only starts when at least one timer is
+    // running, fires every second to trigger re-renders, and stops
+    // itself below when all timers are paused.
+    if (!tickIntervalRef.current) {
+      tickIntervalRef.current = setInterval(() => {
+        setTimerTick(t => (t + 1) % 1_000_000);
+      }, 1000);
+    }
   }, []);
 
   const stopExerciseTimer = useCallback((key: string) => {
-    if (timerIntervalsRef.current[key]) {
-      clearInterval(timerIntervalsRef.current[key]);
-      delete timerIntervalsRef.current[key];
-    }
     setActiveTimers(prev => {
       const t = prev[key];
       if (!t) return prev;
-      return { ...prev, [key]: { ...t, running: false, startedAt: null } };
+      const runElapsed = t.running && t.startedAt != null
+        ? Math.max(0, Math.floor((Date.now() - t.startedAt) / 1000))
+        : 0;
+      const next = {
+        ...prev,
+        [key]: {
+          running: false,
+          baseElapsed: t.baseElapsed + runElapsed,
+          startedAt: null,
+        },
+      };
+      // If nothing else is running, release the shared ticker.
+      const anyRunning = Object.values(next).some(v => v?.running);
+      if (!anyRunning && tickIntervalRef.current) {
+        clearInterval(tickIntervalRef.current);
+        tickIntervalRef.current = null;
+      }
+      return next;
     });
   }, []);
 
   const resetExerciseTimer = useCallback((key: string) => {
-    if (timerIntervalsRef.current[key]) {
-      clearInterval(timerIntervalsRef.current[key]);
-      delete timerIntervalsRef.current[key];
-    }
-    setActiveTimers(prev => ({ ...prev, [key]: { running: false, elapsed: 0, startedAt: null } }));
+    setActiveTimers(prev => {
+      const next = { ...prev, [key]: { running: false, baseElapsed: 0, startedAt: null } };
+      const anyRunning = Object.values(next).some(v => v?.running);
+      if (!anyRunning && tickIntervalRef.current) {
+        clearInterval(tickIntervalRef.current);
+        tickIntervalRef.current = null;
+      }
+      return next;
+    });
   }, []);
 
-  // Cleanup timer intervals on unmount
+  // Cleanup timer intervals on unmount. We only hold the shared
+  // ticker now; legacy per-timer intervals in timerIntervalsRef are
+  // no longer populated but we keep the ref around so any stale
+  // handles can still be cleared if old code slipped one in.
   useEffect(() => {
     return () => {
       Object.values(timerIntervalsRef.current).forEach(clearInterval);
+      if (tickIntervalRef.current) {
+        clearInterval(tickIntervalRef.current);
+        tickIntervalRef.current = null;
+      }
     };
   }, []);
 
@@ -241,8 +442,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
   const [finishedSession, setFinishedSession] = useState<WorkoutSession | null>(null);
 
-  // Post-workout feedback
-  const [summaryStep, setSummaryStep] = useState<'summary' | 'feedback'>('summary');
+  // Post-workout feedback. The step sequence is:
+  //   'summary'      — AI-generated summary (achievements / recommendations)
+  //   'feedback'     — user fills in feeling/intensity/soreness/notes
+  //   'confirmation' — after submit, user sees a confirmation screen
+  //                    and dismisses manually (fixes the old bug where
+  //                    the modal auto-closed immediately after submit
+  //                    and the user never got to read the result).
+  const [summaryStep, setSummaryStep] = useState<'summary' | 'feedback' | 'confirmation'>('summary');
   const [feedbackFeeling, setFeedbackFeeling] = useState<string | null>(null);
   const [feedbackIntensity, setFeedbackIntensity] = useState<number | null>(null);
   const [feedbackSoreness, setFeedbackSoreness] = useState<string[]>([]);
@@ -327,7 +534,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const last = lastSets[slot] ?? lastSets[lastSets.length - 1];
           if (last) {
             if (isTimedExercise(ex.name, ex.reps) && last.durationSeconds != null) {
-              inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: (last.durationSeconds / 60).toFixed(1) };
+              inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: formatDurationForInput(last.durationSeconds) };
             } else {
               inputs[`${exIdx}-${slot}`] = { weight: String(last.weightLbs), reps: String(last.reps), duration: '' };
             }
@@ -395,16 +602,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (!silent) Alert.alert('Enter duration', 'Fill in the duration before logging this set.');
         return;
       }
-      // Parse duration: accept "mm:ss" or plain seconds
-      let durationSeconds: number;
-      if (durText.includes(':')) {
-        const [mm, ss] = durText.split(':').map(Number);
-        durationSeconds = (mm || 0) * 60 + (ss || 0);
-      } else {
-        durationSeconds = Math.round(parseFloat(durText) * 60); // assume minutes if plain number
-      }
-      if (durationSeconds <= 0) {
-        if (!silent) Alert.alert('Enter duration', 'Enter a valid duration.');
+      // Plain numbers default to minutes for long cardio (treadmill,
+      // bike, etc.) and seconds for short holds (plank, dead hang).
+      const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps);
+      const durationSeconds = parseDurationInput(durText, preferMinutes);
+      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        if (!silent) Alert.alert('Enter duration', 'Enter a valid duration like "25:00", "25 min", or "45s".');
         return;
       }
       newSet = { setNumber: setSlot + 1, reps: 0, weightLbs: 0, durationSeconds };
@@ -773,59 +976,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       clearRestState();
     }
 
-    // Fetch AI tip for the next set
+    // ── Next-set recommendation is gated on feel ──────────────────
+    // Previously we fired /recommend-weight immediately after logging
+    // a set, which meant the AI card populated before the user had a
+    // chance to tell the app how the set felt — and the rec was
+    // working off half the signal. Now the fetch fires in
+    // `handleSetFeedback` (after the user taps easy/good/hard/etc),
+    // so the backend gets the feel field and the AI-reviewer layer
+    // can flag feel-vs-reps conflicts properly.
+    //
+    // Clear any stale AI tip from a prior set so the card stays hidden
+    // until the user rates this one.
+    setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
+    setRestNextTarget(null);
+    setRestCue(null);
     const setsLogged = updatedSets.length;
-    if (setsLogged < targetSetCount) {
-      console.log('[AI] Starting AI recommendation fetch for exercise:', ex.name, 'set:', setsLogged + 1);
-      setAiLoadingIdx(exIdx);
-      try {
-        console.log('[AI] Retrieved auth token:', authToken ? 'present' : 'missing');
-        if (!authToken) {
-          console.warn('[AI] No auth token found, throwing error');
-          throw new Error('Not authenticated');
-        }
-        console.log('[AI] Calling getWeightRecommendation API...');
-        const rec = await getWeightRecommendation(authToken, ex.name, goal, updatedSets, setsLogged + 1, {
-          targetSets: ex.targetSets,
-          targetReps: ex.targetReps,
-          progressionPace: 'moderate',
-          experienceLevel: 'intermediate',
-          recoveryLevel: 'normal',
-          phase: 'accumulation',
-          workoutFocus: workout.focus,
-          weekNumber: 1,
-          incrementLbs: 5,
-        });
-        console.log('[AI] API call successful, received recommendation:', rec);
-        const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-        console.log('[AI] Formatted tip text:', tip);
-        setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
-        setRestCue(rec.tip);
-        setExercises(prev => {
-          const newExercises = prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e);
-          console.log('[AI] Updated exercises state, recommendation set for exercise index:', exIdx);
-          return newExercises;
-        });
-        if (updatedSets.length < targetSetCount) {
-          await rescheduleRestNotifications({
-            seconds: restRemaining > 0 ? restRemaining : restDurationSeconds.current,
-            exerciseName: ex.name,
-            nextSetLabel: `Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`,
-            aiCue: rec.tip,
-            includeStartAlert: false,
-          });
-        }
-      } catch (error: any) {
-        console.error('[AI] Failed to get recommendation - full error:', error);
-        console.error('[AI] Error message:', error?.message);
-        console.error('[AI] Error stack:', error?.stack);
-        setAiErrorIdx(exIdx);
-      } finally {
-        console.log('[AI] Setting aiLoadingIdx to null');
-        setAiLoadingIdx(null);
-      }
-    } else {
+    if (setsLogged >= targetSetCount) {
       console.log('[AI] Skipping recommendation - all sets completed for this exercise');
+    } else {
+      console.log('[AI] Recommendation deferred until user taps a feel chip');
     }
   };
 
@@ -916,7 +1085,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const handleSubmitFeedback = async (skip = false) => {
     setFeedbackSubmitting(true);
     try {
-      if (!skip && authToken && (feedbackFeeling || feedbackIntensity)) {
+      // If the user is skipping outright, close immediately — no
+      // confirmation step needed.
+      if (skip) {
+        setSummaryVisible(false);
+        setSummaryStep('summary');
+        if (finishedSession) onFinish(finishedSession);
+        return;
+      }
+
+      if (authToken && (feedbackFeeling || feedbackIntensity)) {
         const feelingLabels: Record<string, string> = {
           great: 'great — felt strong and energized',
           good: 'good — solid session',
@@ -937,22 +1115,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
         const question = `I just finished ${workout.focus}. Overall feeling: ${feelingText}. Perceived intensity: ${intensityText}.${sorenessText}${notesText} Based on this feedback, should my upcoming workouts be adjusted? If the intensity was wrong or I had soreness concerns, please update the plan.`;
 
-        const resp = await askTrainerQuestion(authToken, {
-          question,
-          mode: 'trainer',
-          profile: { goal },
-          conversation: [],
-        });
+        try {
+          const resp = await askTrainerQuestion(authToken, {
+            question,
+            mode: 'trainer',
+            profile: { goal },
+            conversation: [],
+          });
 
-        if (resp.needs_plan_update && resp.updated_workout_plan) {
-          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
-          setFeedbackResult(resp.answer || 'Your upcoming workouts have been adjusted based on your feedback.');
-          // Brief pause so user sees the result
-          await new Promise(r => setTimeout(r, 2400));
+          if (resp.needs_plan_update && resp.updated_workout_plan) {
+            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
+            setFeedbackResult(resp.answer || 'Your upcoming workouts have been adjusted based on your feedback.');
+          } else if (resp.answer) {
+            setFeedbackResult(resp.answer);
+          } else {
+            setFeedbackResult('Feedback saved — your upcoming workouts will factor this in.');
+          }
+        } catch {
+          setFeedbackResult('Feedback saved locally. (Coach sync will retry next time you open the app.)');
         }
+      } else {
+        setFeedbackResult('Feedback saved.');
       }
 
-      // Persist feedback onto the saved session
+      // Persist feedback onto the saved session (raw history)
       if (finishedSession && feedbackFeeling && feedbackIntensity) {
         await saveWorkoutSession({
           ...finishedSession,
@@ -964,14 +1150,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           },
         });
       }
+
+      // Also patch the StoredWorkoutSummary so the feedback shows up
+      // on the Progress screen next to the AI summary + exercise
+      // detail. Idempotent via upsert-by-id.
+      if (finishedSession && feedbackFeeling && feedbackIntensity) {
+        await updateWorkoutSummary(finishedSession.id, {
+          feedback: {
+            feeling: feedbackFeeling as WorkoutFeeling,
+            intensity: feedbackIntensity as WorkoutIntensity,
+            sorenessAreas: feedbackSoreness,
+            notes: feedbackNotes.trim() || undefined,
+          },
+        });
+      }
+
+      // Move to confirmation step — modal stays open so the user can
+      // actually read what happened. They dismiss manually via the
+      // "Done" button on the confirmation view.
+      setSummaryStep('confirmation');
     } catch {
-      // Non-fatal — just close
+      // Non-fatal — still show a confirmation so the modal doesn't
+      // vanish out from under the user.
+      setFeedbackResult('Feedback saved.');
+      setSummaryStep('confirmation');
     } finally {
       setFeedbackSubmitting(false);
-      setSummaryVisible(false);
-      setSummaryStep('summary');
-      if (finishedSession) onFinish(finishedSession);
     }
+  };
+
+  /** Called by the confirmation step's Done button. Closes the modal
+   *  and fires the finish callback to the parent navigator. */
+  const dismissSummaryModal = () => {
+    setSummaryVisible(false);
+    setSummaryStep('summary');
+    if (finishedSession) onFinish(finishedSession);
   };
 
   const handleFinish = async () => {
@@ -1004,10 +1217,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setFinishedSession(session);
     setFinishModalVisible(false);
 
-    // Also persist completion to backend DB so it survives cache clears
+    // Also persist completion to backend DB so it survives cache clears.
+    // Now includes per-exercise per-set data so the backend can build
+    // real WorkoutSession + WorkoutExercise + ExerciseSet rows for
+    // downstream systems (plan reviewer, progression engine, analytics).
     try {
       if (authToken) {
-        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed);
+        const exercisesPayload = session.exercises.map((ex, idx) => ({
+          name: ex.name,
+          target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
+          target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
+          equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+          order_index: idx,
+          sets: ex.sets.map((s, si) => ({
+            set_number: s.setNumber ?? si + 1,
+            reps: s.reps ?? 0,
+            weight_lbs: s.weightLbs ?? 0,
+            duration_seconds: s.durationSeconds ?? null,
+            feedback: s.feedback ?? null,
+            rir: null,
+          })),
+        }));
+        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload);
       }
     } catch {}
 
@@ -1025,9 +1256,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           weightLbs,
         });
         setSummaryData(s);
-        // Persist summary so user can review it later in Progress
+        // Persist summary so user can review it later in Progress.
+        // Now includes the full per-exercise detail (name, equipment,
+        // target sets/reps, and every logged set with weight + reps
+        // + duration) so the Progress screen can render "exactly what
+        // you did." Feedback is patched on later by handleSubmitFeedback
+        // once the user fills in the form.
         const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
         const totalReps = session.exercises.reduce((sum, ex) => ex.sets.reduce((rs, set) => rs + set.reps, sum), 0);
+        const exercisesForSummary = session.exercises.map(ex => ({
+          name: ex.name,
+          equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+          targetSets: typeof ex.targetSets === 'number' ? ex.targetSets : undefined,
+          targetReps: typeof ex.targetReps === 'string' ? ex.targetReps : undefined,
+          sets: ex.sets,
+        }));
         await saveWorkoutSummary({
           ...s,
           id: session.id,
@@ -1038,6 +1281,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           totalReps,
           startedAt: startedAtIso,
           endedAt: endedAtIso,
+          exercises: exercisesForSummary,
         });
       }
     } catch {
@@ -1255,7 +1499,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </TouchableOpacity>
       </View>
 
-      {/* Warm-up card (must complete before exercises) */}
+      {/* Warm-up card.
+          - Before the workout starts: full expanded card with the
+            "Start Workout" button (the user must read + acknowledge
+            before the exercise list unlocks).
+          - After the workout starts: collapsed header at the top of
+            the screen that expands back to the full step list on tap.
+            Keeps the warm-up accessible mid-session so the user can
+            re-read the steps without leaving the workout. */}
       {!warmupDone && (
         <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}>
           <Text style={[styles.warmupTitle, { color: workoutPalette.text }]}>Warm-Up For Today</Text>
@@ -1263,7 +1514,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
           ))}
           <View style={styles.warmupActions}>
-            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => setWarmupDone(true)}>
+            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => { setWarmupDone(true); setWarmupExpanded(false); }}>
               <Text style={styles.warmupDoneBtnText}>Start Workout</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.warmupCoachBtn, { borderColor: workoutPalette.strong }]} onPress={() => { setCoachInput('Can you modify my warm-up based on today\'s workout focus?'); setCoachModalVisible(true); }}>
@@ -1273,14 +1524,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       )}
 
-      {/* Progress bar — only shown once workout starts */}
       {warmupDone && (
-        <View style={[styles.progressBarTrack, { backgroundColor: themeColors.border }]}>
-          <View style={[styles.progressBarFill, {
-            backgroundColor: workoutPalette.strong,
-            width: `${exercises.length ? (completedCount / exercises.length) * 100 : 0}%` as any,
-          }]} />
-        </View>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => setWarmupExpanded(v => !v)}
+          style={[
+            styles.warmupCollapsed,
+            { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong },
+          ]}>
+          <View style={styles.warmupCollapsedHeader}>
+            <Text style={[styles.warmupCollapsedTitle, { color: workoutPalette.text }]}>
+              Warm-Up {warmupExpanded ? '▾' : '▸'}
+            </Text>
+            <Text style={[styles.warmupCollapsedHint, { color: workoutPalette.text }]}>
+              {warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps · tap to view`}
+            </Text>
+          </View>
+          {warmupExpanded && (
+            <View style={{ marginTop: 8 }}>
+              {warmupSteps.map((step, index) => (
+                <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+              ))}
+            </View>
+          )}
+        </TouchableOpacity>
       )}
 
       {restRemaining > 0 && (
@@ -1393,7 +1660,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
                     </View>
                   )}
+                  {/* Render gate: only show the AI tip card once the user
+                      has rated the last logged set. The fetch itself is
+                      already gated in handleSetFeedback, but this second
+                      check belt-and-braces any state-ordering races. */}
                   {!isAiLoading && ex.aiRecommendation && (
+                    ex.sets.length === 0 || !!ex.sets[ex.sets.length - 1]?.feedback
+                  ) && (
                     <View style={styles.aiBubble}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.aiLabel}>AI TIP</Text>
@@ -1438,7 +1711,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             const timerKey = `${i}-${slot}`;
                             const timer = activeTimers[timerKey];
                             const timerRunning = timer?.running ?? false;
-                            const timerElapsed = timer?.elapsed ?? 0;
+                            // Wall-clock derived: survives screen lock and
+                            // app backgrounding. Ticked once per second by
+                            // the shared render ticker.
+                            const timerElapsed = getTimerElapsed(timerKey);
                             const timerMM = Math.floor(timerElapsed / 60).toString().padStart(2, '0');
                             const timerSS = (timerElapsed % 60).toString().padStart(2, '0');
                             const loggedLabel = logged?.durationSeconds != null
@@ -1453,44 +1729,69 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     <Text style={{ fontSize: 11, color: themeColors.textMuted }}>logged</Text>
                                   </View>
                                 ) : (
-                                  <View style={{ flex: 2, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                    <Text style={[styles.timerDisplay, timerRunning && { color: themeColors.primary }]}>
-                                      {timerMM}:{timerSS}
-                                    </Text>
-                                    {!timerRunning && timerElapsed === 0 ? (
-                                      <TouchableOpacity
-                                        style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
-                                        onPress={() => startExerciseTimer(timerKey)}>
-                                        <Text style={styles.timerBtnText}>Start</Text>
-                                      </TouchableOpacity>
-                                    ) : timerRunning ? (
-                                      <TouchableOpacity
-                                        style={[styles.timerBtn, { backgroundColor: '#E53935' }]}
-                                        onPress={() => {
-                                          stopExerciseTimer(timerKey);
-                                          // Auto-fill duration for logging
-                                          const secs = activeTimers[timerKey]?.elapsed ?? 0;
-                                          if (secs > 0) {
-                                            const durStr = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
-                                            setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
-                                          }
-                                        }}>
-                                        <Text style={styles.timerBtnText}>Stop</Text>
-                                      </TouchableOpacity>
-                                    ) : (
-                                      <View style={{ flexDirection: 'row', gap: 4 }}>
+                                  <View style={{ flex: 2, gap: 4 }}>
+                                    {/* Always-available manual entry. Long cardio
+                                        users (treadmill/bike/rower) type here
+                                        directly using the equipment's own clock. */}
+                                    <TextInput
+                                      style={[styles.inlineInput, { width: '100%' }]}
+                                      value={input.duration}
+                                      onChangeText={(v) => {
+                                        if (timerRunning) stopExerciseTimer(timerKey);
+                                        setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
+                                      }}
+                                      placeholder={isLongCardioExercise(ex.name, ex.targetReps) ? '25:00 or 25 min' : '45s or 1:00'}
+                                      placeholderTextColor={themeColors.textMuted}
+                                      keyboardType="default"
+                                    />
+                                    {/* Compact timer row — useful for short
+                                        holds (plank, dead hang, carries). */}
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                      <Text style={[styles.timerDisplay, timerRunning && { color: themeColors.primary }, { fontSize: 12 }]}>
+                                        {timerMM}:{timerSS}
+                                      </Text>
+                                      {!timerRunning && timerElapsed === 0 ? (
                                         <TouchableOpacity
                                           style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
-                                          onPress={() => startExerciseTimer(timerKey)}>
-                                          <Text style={styles.timerBtnText}>Resume</Text>
+                                          onPress={() => {
+                                            // Open the full-screen timer modal and start
+                                            // the timer so the user sees big digits from
+                                            // the first tick. The modal reads from the
+                                            // same activeTimers state, so stopping inside
+                                            // the modal also updates the inline display.
+                                            startExerciseTimer(timerKey);
+                                            setTimerModalKey(timerKey);
+                                          }}>
+                                          <Text style={styles.timerBtnText}>Start</Text>
                                         </TouchableOpacity>
+                                      ) : timerRunning ? (
                                         <TouchableOpacity
-                                          style={[styles.timerBtn, { backgroundColor: themeColors.textMuted }]}
-                                          onPress={() => resetExerciseTimer(timerKey)}>
-                                          <Text style={styles.timerBtnText}>Reset</Text>
+                                          style={[styles.timerBtn, { backgroundColor: '#E53935' }]}
+                                          onPress={() => {
+                                            stopExerciseTimer(timerKey);
+                                            const secs = getTimerElapsed(timerKey);
+                                            if (secs > 0) {
+                                              const durStr = formatDurationForInput(secs);
+                                              setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
+                                            }
+                                          }}>
+                                          <Text style={styles.timerBtnText}>Stop</Text>
                                         </TouchableOpacity>
-                                      </View>
-                                    )}
+                                      ) : (
+                                        <>
+                                          <TouchableOpacity
+                                            style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
+                                            onPress={() => startExerciseTimer(timerKey)}>
+                                            <Text style={styles.timerBtnText}>Resume</Text>
+                                          </TouchableOpacity>
+                                          <TouchableOpacity
+                                            style={[styles.timerBtn, { backgroundColor: themeColors.textMuted }]}
+                                            onPress={() => resetExerciseTimer(timerKey)}>
+                                            <Text style={styles.timerBtnText}>Reset</Text>
+                                          </TouchableOpacity>
+                                        </>
+                                      )}
+                                    </View>
                                   </View>
                                 )}
                                 <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
@@ -1498,13 +1799,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
                                   onPress={() => {
                                     if (!isLogged) {
-                                      // Stop timer and log
+                                      // If the user typed a duration, log that.
+                                      // Otherwise pull the elapsed off the timer.
+                                      const typed = (input.duration || '').trim();
+                                      if (typed) {
+                                        handleLogSetInline(i, slot, false);
+                                        return;
+                                      }
                                       if (timerRunning) stopExerciseTimer(timerKey);
-                                      const secs = activeTimers[timerKey]?.elapsed ?? 0;
+                                      const secs = getTimerElapsed(timerKey);
                                       if (secs > 0) {
-                                        const durStr = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
+                                        const durStr = formatDurationForInput(secs);
                                         setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
-                                        // Small delay so state updates before logging
                                         setTimeout(() => handleLogSetInline(i, slot, false), 50);
                                       } else {
                                         handleLogSetInline(i, slot, false);
@@ -1647,13 +1953,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                   )}
 
-                  {/* ── Add set / done row ── */}
-                  <View style={styles.doneRow}>
-                    {isDone && <Text style={styles.doneText}>All sets complete!</Text>}
-                    <TouchableOpacity style={styles.addSetBtn} onPress={() => setExtraSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }))}>
-                      <Text style={styles.addSetBtnText}>+ Add Set</Text>
-                    </TouchableOpacity>
-                  </View>
+                  {(() => {
+                    const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
+                    const unitLabel = timedInterval ? 'Interval' : 'Set';
+                    return (
+                      <>
+                        {isDone && (
+                          <Text style={[styles.doneText, { textAlign: 'center', marginTop: 4 }]}>All sets complete!</Text>
+                        )}
+                        <View style={styles.doneRow}>
+                          <TouchableOpacity
+                            style={styles.addSetBtn}
+                            onPress={() => {
+                              const removed = removedSetCounts[i] ?? 0;
+                              if (removed > 0) {
+                                setRemovedSetCounts(prev => ({ ...prev, [i]: Math.max(0, removed - 1) }));
+                              } else {
+                                setExtraSetCounts(prev => ({ ...prev, [i]: (prev[i] ?? 0) + 1 }));
+                              }
+                            }}>
+                            <Text style={styles.addSetBtnText}>+ Add {unitLabel}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </>
+                    );
+                  })()}
                 </View>
               )}
             </View>
@@ -1680,6 +2004,95 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           </>
         )}
       </ScrollView>
+
+      {/* Full-screen timer modal for timed exercises. Opens when the
+          user taps Start on a timed set row. Reads from the same
+          activeTimers state so the wall-clock calculation stays in
+          sync with the inline display. The user can pause / resume /
+          reset / done from the big controls and on Done the elapsed
+          is auto-written to the set input and the modal closes. */}
+      <Modal
+        visible={timerModalKey !== null}
+        transparent={false}
+        animationType="fade"
+        onRequestClose={() => setTimerModalKey(null)}>
+        {(() => {
+          if (timerModalKey == null) return null;
+          const [exIdxStr, slotStr] = timerModalKey.split('-');
+          const mExIdx = parseInt(exIdxStr, 10);
+          const mSlot = parseInt(slotStr, 10);
+          const mEx = exercises[mExIdx];
+          const mRunning = activeTimers[timerModalKey]?.running ?? false;
+          const mElapsed = getTimerElapsed(timerModalKey);
+          const mMM = Math.floor(mElapsed / 60).toString().padStart(2, '0');
+          const mSS = (mElapsed % 60).toString().padStart(2, '0');
+          const mInputKey = `${mExIdx}-${mSlot}`;
+          const writeDurationAndClose = () => {
+            if (mRunning) stopExerciseTimer(timerModalKey);
+            const secs = getTimerElapsed(timerModalKey);
+            if (secs > 0) {
+              const durStr = formatDurationForInput(secs);
+              setSetInputs(prev => ({
+                ...prev,
+                [mInputKey]: {
+                  ...prev[mInputKey] ?? { weight: '', reps: '', duration: '' },
+                  duration: durStr,
+                },
+              }));
+            }
+            setTimerModalKey(null);
+          };
+          return (
+            <View style={[styles.timerModalRoot, { backgroundColor: themeColors.background }]}>
+              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+                <Text style={[styles.timerModalExerciseName, { color: themeColors.textSecondary }]} numberOfLines={2}>
+                  {mEx?.name || 'Timed Set'}
+                </Text>
+                <Text style={[styles.timerModalTargetReps, { color: themeColors.textMuted }]}>
+                  Target: {mEx?.targetReps ?? '—'}
+                </Text>
+                <Text style={[styles.timerModalDigits, { color: mRunning ? themeColors.primary : themeColors.textPrimary }]}>
+                  {mMM}:{mSS}
+                </Text>
+                <Text style={[styles.timerModalStateHint, { color: themeColors.textMuted }]}>
+                  {mRunning ? 'Running — screen can lock, timer keeps counting' : mElapsed > 0 ? 'Paused' : 'Ready'}
+                </Text>
+
+                <View style={styles.timerModalControls}>
+                  {mRunning ? (
+                    <TouchableOpacity
+                      style={[styles.timerModalBigBtn, { backgroundColor: '#E53935' }]}
+                      onPress={() => stopExerciseTimer(timerModalKey)}>
+                      <Text style={styles.timerModalBigBtnText}>Pause</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.timerModalBigBtn, { backgroundColor: themeColors.primary }]}
+                      onPress={() => startExerciseTimer(timerModalKey)}>
+                      <Text style={styles.timerModalBigBtnText}>{mElapsed > 0 ? 'Resume' : 'Start'}</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                <View style={styles.timerModalSecondaryRow}>
+                  <TouchableOpacity
+                    style={[styles.timerModalSecondaryBtn, { borderColor: themeColors.border }]}
+                    onPress={() => resetExerciseTimer(timerModalKey)}>
+                    <Text style={[styles.timerModalSecondaryBtnText, { color: themeColors.textSecondary }]}>Reset</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.timerModalSecondaryBtn, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }]}
+                    onPress={writeDurationAndClose}>
+                    <Text style={[styles.timerModalSecondaryBtnText, { color: '#fff', fontWeight: '800' }]}>
+                      {mElapsed > 0 ? 'Done' : 'Close'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          );
+        })()}
+      </Modal>
 
       {/* Log Set Modal — keyboard-aware */}
       <Modal visible={logModalVisible} transparent animationType="slide" onRequestClose={() => setLogModalVisible(false)}>
@@ -1753,7 +2166,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       </Modal>
 
       {/* Post-Workout Summary Modal — Step 1: Summary / Step 2: Feedback */}
-      <Modal visible={summaryVisible} transparent animationType="slide" onRequestClose={() => handleSubmitFeedback(true)}>
+      <Modal visible={summaryVisible} transparent animationType="slide" onRequestClose={() => {
+        if (summaryStep === 'confirmation') { dismissSummaryModal(); return; }
+        handleSubmitFeedback(true);
+      }}>
         <View style={styles.summaryBackdrop}>
           <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
@@ -1821,7 +2237,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {/* AI motivation */}
                     {summaryData?.motivationMessage ? (
                       <View style={styles.shareMotivation}>
-                        <Text style={styles.shareMotivationText}>"{summaryData.motivationMessage}"</Text>
+                        <Text style={styles.shareMotivationText}>"{cleanAiText(summaryData.motivationMessage)}"</Text>
                       </View>
                     ) : null}
 
@@ -1843,7 +2259,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <View style={styles.summarySection}>
                     <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
                     {summaryData!.recommendations.map((r, i) => (
-                      <Text key={i} style={styles.summaryItem}>• {r}</Text>
+                      <Text key={i} style={styles.summaryItem}>• {cleanAiText(r)}</Text>
                     ))}
                   </View>
                 )}
@@ -1983,15 +2399,54 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     <TouchableOpacity
                       style={[styles.summaryFeedbackBtn, (!feedbackFeeling && !feedbackIntensity) && { opacity: 0.5 }]}
                       onPress={() => handleSubmitFeedback(false)}
-                      disabled={!feedbackFeeling && !feedbackIntensity}
+                      disabled={!feedbackFeeling && !feedbackIntensity || feedbackSubmitting}
                       activeOpacity={0.85}>
-                      <Text style={styles.summaryFeedbackBtnText}>Submit & Let AI Adjust Plan</Text>
+                      <Text style={styles.summaryFeedbackBtnText}>
+                        {feedbackSubmitting ? 'Submitting…' : 'Submit & Let AI Adjust Plan'}
+                      </Text>
                     </TouchableOpacity>
                     <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
                       <Text style={styles.summarySkipText}>Skip</Text>
                     </TouchableOpacity>
                   </>
                 )}
+              </View>
+            )}
+
+            {/* ── Step 3: Confirmation ────────────────────────────────────────
+                Stays on screen after the user taps Submit so they can
+                actually read the result. Previously the modal auto-
+                closed in the `finally` block of handleSubmitFeedback,
+                which made the feedback feel like it went nowhere. */}
+            {summaryStep === 'confirmation' && (
+              <View style={styles.summaryFeedback}>
+                <Text style={[styles.summaryFeedbackTitle, { textAlign: 'center' }]}>Feedback received</Text>
+                <Text style={{ fontSize: 14, color: themeColors.textSecondary, lineHeight: 21, marginTop: 10, marginBottom: 18, textAlign: 'center' }}>
+                  {feedbackResult || 'Your feedback has been saved.'}
+                </Text>
+                <View style={{ gap: 6, marginBottom: 24 }}>
+                  {feedbackFeeling && (
+                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
+                      Feeling: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackFeeling}</Text>
+                    </Text>
+                  )}
+                  {feedbackIntensity && (
+                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
+                      Intensity: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackIntensity}/5</Text>
+                    </Text>
+                  )}
+                  {feedbackSoreness.length > 0 && (
+                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
+                      Soreness: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackSoreness.join(', ')}</Text>
+                    </Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={styles.summaryFeedbackBtn}
+                  onPress={dismissSummaryModal}
+                  activeOpacity={0.85}>
+                  <Text style={styles.summaryFeedbackBtnText}>Done</Text>
+                </TouchableOpacity>
               </View>
             )}
 
@@ -2162,7 +2617,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
                         <Text style={styles.addExerciseName}>{ex.name}</Text>
                         <Text style={styles.addExerciseMeta}>
-                          {ex.primary_muscle} · {ex.equipment} · {ex.sets}×{ex.reps}
+                          {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}×{ex.reps}
                         </Text>
                         <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
                         {ex.form_cues?.length > 0 && (
@@ -2202,7 +2657,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.addExerciseName}>{item.name}</Text>
-                      <Text style={styles.addExerciseMeta}>{item.primary_muscle ?? 'general'} · {item.equipment ?? 'bodyweight'}</Text>
+                      <Text style={styles.addExerciseMeta}>{humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}</Text>
                     </View>
                     <Text style={styles.addExerciseUse}>Add</Text>
                   </TouchableOpacity>
@@ -2226,6 +2681,24 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     gap: 10,
     alignItems: 'flex-start',
   },
+  // Collapsed mid-session header — smaller padding, full-width row
+  // layout, expands inline when tapped.
+  warmupCollapsed: {
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginHorizontal: 18,
+    marginTop: 10,
+    marginBottom: 0,
+  },
+  warmupCollapsedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  warmupCollapsedTitle: { fontSize: 13, fontWeight: '700' },
+  warmupCollapsedHint: { fontSize: 11, fontWeight: '500', opacity: 0.75 },
   warmupTitle: { fontSize: 16, fontWeight: '800', marginBottom: 2 },
   warmupStep: { fontSize: 13, color: tc.textPrimary, lineHeight: 20 },
   warmupActions: { flexDirection: 'row', gap: 10, marginTop: 12, alignSelf: 'stretch' },
@@ -2250,7 +2723,10 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   coachBtn: { paddingHorizontal: 10, paddingVertical: 8, backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary },
   coachBtnText: { fontSize: 12, color: tc.primary, fontWeight: '700' },
 
-  progressBarTrack: { height: 3, backgroundColor: tc.border, marginHorizontal: 16, borderRadius: 2, marginBottom: 16 },
+  // marginTop adds breathing room from the collapsed warmup pill
+  // above so the progress bar doesn't look like a hairline glued to
+  // the bottom of the pill ("weird line under the circle" bug).
+  progressBarTrack: { height: 3, backgroundColor: tc.border, marginHorizontal: 16, borderRadius: 2, marginTop: 12, marginBottom: 16 },
   progressBarFill:  { height: 3, backgroundColor: tc.primary, borderRadius: 2 },
 
   restBanner: {
@@ -2290,7 +2766,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   restBannerBtnPrimaryText: { fontSize: 11, color: tc.background, fontWeight: '700' },
 
   scroll:        { flex: 1 },
-  scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 40 },
 
   exerciseCard:       { backgroundColor: tc.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: tc.border, padding: 14, marginBottom: 10 },
   exerciseCardDone:   { borderColor: tc.primary, opacity: 0.85 },
@@ -2395,6 +2871,71 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   timerDisplay: { fontSize: 18, fontWeight: '800', fontVariant: ['tabular-nums'] as any, color: tc.textPrimary, minWidth: 52 },
   timerBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, alignItems: 'center' as const, justifyContent: 'center' as const },
   timerBtnText: { fontSize: 12, fontWeight: '700', color: '#FFFFFF' },
+
+  // Full-screen timer modal — big digits, big buttons, minimal chrome
+  timerModalRoot: { flex: 1 },
+  timerModalExerciseName: {
+    fontSize: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+    letterSpacing: 0.3,
+  },
+  timerModalTargetReps: {
+    fontSize: 14,
+    fontWeight: '500',
+    marginTop: 6,
+    marginBottom: 32,
+  },
+  timerModalDigits: {
+    fontSize: 96,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+    letterSpacing: -2,
+    marginBottom: 8,
+  },
+  timerModalStateHint: {
+    fontSize: 12,
+    fontWeight: '500',
+    marginBottom: 48,
+    textAlign: 'center',
+  },
+  timerModalControls: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  timerModalBigBtn: {
+    width: '100%',
+    maxWidth: 320,
+    paddingVertical: 22,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timerModalBigBtnText: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  timerModalSecondaryRow: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+    maxWidth: 320,
+  },
+  timerModalSecondaryBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+  },
+  timerModalSecondaryBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
 
   setsLog: { gap: 6 },
   setRow:  { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: tc.border },

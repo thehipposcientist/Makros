@@ -262,3 +262,11 @@ class WorkoutSummaryRequest(BaseModel):
     focus: str
     goal: str
     weightLbs: float = 150.0
+
+
+class WarmupRequest(BaseModel):
+    focus: str
+    exercises: list[dict]                   # each has name + equipment
+    injuries: list[str] = []
+    experience: str | None = None
+    durationMinutes: int | None = 60

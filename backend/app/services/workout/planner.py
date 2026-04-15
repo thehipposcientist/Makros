@@ -1,48 +1,58 @@
 """
-Algorithmic workout planner — replaces AI-driven plan generation for the
-common case with deterministic, history-aware Python logic.
+Algorithmic workout planner — top-level orchestrator.
 
-Read this file in order. Each layer is its own named section so you can
-audit the math top-to-bottom without jumping around:
+This file is intentionally small now. It owns:
 
-    Layer 1 — Input normalization        (PlannerInputs)
-    Layer 2 — Split selection            (pick_split)
-    Layer 3 — Weekly volume targets      (weekly_set_targets)
-    Layer 4 — Day templates              (build_day_templates)
-    Layer 5 — Exercise selection engine  (filter_candidates, score_candidate,
-                                          pick_for_slot)
-    Layer 6 — Prescription assembler     (prescribe_sets_reps)
-    Layer 7 — Top-level orchestrator     (generate_workout_plan)
+    Layer 1 — Input normalization         (PlannerInputs)
+    Layer 3 — Weekly volume targets       (weekly_set_targets)
+    Layer 5 — Exercise selection engine   (filter_candidates,
+                                           score_candidate, pick_for_slot)
+    Layer 6 — Prescription assembler      (prescribe_sets_reps)
+    Layer 7 — Top-level orchestrator      (generate_workout_plan)
 
-The orchestrator returns a dict in the SAME shape `_call_workout_ai` used
-to produce, so plans.py can swap one call for the other without touching
-downstream consumers.
+The big structural pieces moved to dedicated modules in the
+"responsibility separation" refactor so this file stops being a
+secret god object:
 
-What this file is NOT:
-- It is not the in-workout set-by-set progression engine. That lives in
-  `app/workout_progression.py` and handles "you just hit 8/8/8 — add load
-  next set". The planner here decides what exercises and what targets
-  the next session should have; the progression engine handles execution.
-- It is not the session-to-session adaptation layer. That's Phase 2 —
-  see `propose_session_targets_from_history` placeholder at the bottom.
+    Slot + slot builders + density trimming  →  slots.py
+    Split constants + pick_split +                day_templates.py
+        archetype_to_slots + day naming
+    Cardio intensity classification          →  cardio.py
+    Goal profiles (training mix + allowed    →  goal_profiles.py
+        archetypes + planner mode)
+    Weekly archetype recipe                  →  weekly_recipe.py
+    Archetype-specific prescriptions         →  prescriptions.py
+    Day archetype enum + metadata            →  archetypes.py
 
-What stays AI in the new world:
-- The `trainerNote` (cheap, high value, one paragraph)
-- Trainer chat ("make Wednesday harder")
-- Anything outside this planner's structured output
+`generate_workout_plan` is the thin orchestrator that pulls those
+pieces together:
 
-What is now algorithmic:
-- Split selection
-- Weekly volume targets per muscle / goal / experience
-- Day-level slot templates
-- Exercise selection per slot (filtered + scored, never random)
-- Sets / reps / rest / RIR prescriptions
+    goal_profile_for → generate_weekly_recipe → archetype_to_slots
+    → filter_candidates → score_candidate → pick_for_slot
+    → prescribe_for_slot → (volume audit, optional focused-muscle
+    backfill if the planner mode supports it) → output
+
+Split selection is now a LIFTING SUBSYSTEM used only when the weekly
+recipe asks for a lifting-dominant schedule. Endurance, athletic,
+mobility, recovery, and maintain modes skip split selection entirely
+and go directly from archetype to slots.
+
+What stays AI in the plan pipeline:
+- Only the `trainerNote`, generated after the deterministic plan.
+- Trainer chat / "make Wednesday harder" edits.
+- Nothing inside this planner's structured output.
 """
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
 from typing import Iterable
+
+# Slot dataclass + every slot builder lives in `slots.py`. We import
+# what we need (plus the `Slot` type for `_find_best_accessory_host_day`
+# signatures) so removed Layer 4 block can stay removed.
+from .slots import Slot, density_adjust_slots  # noqa: F401
+from .cardio import classify_cardio
 
 # ─── Layer 1 — Inputs ────────────────────────────────────────────────────────
 
@@ -68,140 +78,48 @@ class PlannerInputs:
     # stable per-user value (e.g. user_id) to keep plans consistent across
     # regenerations when nothing else has changed.
     rng_seed: int = 0
+    # Normalized focus buckets from the user's last ~2 completed
+    # sessions within the last ~36 hours, newest first. Each element
+    # is one of: "lower_body", "upper_body", "full_body", "cardio",
+    # "mobility", "recovery". Used by `generate_weekly_recipe` to
+    # rotate the week so day 1 isn't the same kind of day as the
+    # user's most recent sessions. Empty tuple when there's no
+    # recent data. Populated by `plans.py` via
+    # `history.most_recent_completed_focus`; tests can set it
+    # directly.
+    recent_focus_buckets: tuple[str, ...] = ()
 
 
-# ─── Layer 2 — Split selection ───────────────────────────────────────────────
-
-
-# Available splits in the planner's vocabulary. Keep this short — every
-# split needs a corresponding day-template definition in Layer 4.
-SPLIT_FULL_BODY = "full_body"
-SPLIT_UPPER_LOWER = "upper_lower"
-SPLIT_PPL = "ppl"                  # push / pull / legs
-SPLIT_BRO = "bro"                  # chest / back / shoulders / arms / legs
-SPLIT_PPL_UL = "ppl_upper_lower"   # 5-day hybrid
-SPLIT_ENDURANCE = "endurance"      # cardio-focused, 1 strength maintenance day
-SPLIT_HYBRID = "hybrid"            # athletic mix — strength + conditioning
-
-# Minimum days a split needs to make sense. Used by the preferred-split
-# override in pick_split and by test helpers.
-_SPLIT_MIN_DAYS = {
-    SPLIT_FULL_BODY:   1,
-    SPLIT_UPPER_LOWER: 2,
-    SPLIT_PPL:         3,
-    SPLIT_BRO:         5,
-    SPLIT_PPL_UL:      5,
-    SPLIT_ENDURANCE:   1,
-    SPLIT_HYBRID:      3,
-}
+# ─── Goal bucket shim ────────────────────────────────────────────────────────
+#
+# Thin wrapper kept so legacy call sites inside this module don't have
+# to change their import path. Split constants and `pick_split` moved
+# to `day_templates.py` in the responsibility-separation refactor;
+# import them from there if you need the lifting subsystem.
 
 
 def _goal_bucket(goal: str) -> str:
-    """Thin shim over `goals.goal_bucket`. Kept so existing call sites
-    inside this module don't have to change; new code should import
-    `goal_bucket` directly from `app.services.workout.goals`."""
+    """Thin shim over `goals.goal_bucket`. Kept for the legacy
+    `_WEEKLY_VOLUME` / `weekly_set_targets` path below. New code
+    should import `goal_bucket` directly from
+    `app.services.workout.goals`."""
     from .goals import goal_bucket as _registry_bucket
     return _registry_bucket(goal)
 
 
-def pick_split(inputs: PlannerInputs) -> str:
-    """Choose a training split from (days_per_week, goal_bucket, experience).
-
-    This is a hand-written decision matrix — NOT a priority list walk.
-    The old implementation walked a goal-keyed priority list and
-    returned the first split whose minimum-day requirement fit. That
-    quietly broke at higher day counts: fat loss listed
-    `full_body` first, `full_body` has `min_days=1`, so a 5-day fat-loss
-    user still got 5 days of full-body. Fixed by being explicit per cell
-    of the matrix.
-
-    Rules (in order of evaluation):
-
-    1. **Explicit preferred_split override.** Honor it if it's a valid
-       split and has enough days. Anything else falls through.
-    2. **1-2 days/week: always full body.** Not enough sessions to
-       split productively.
-    3. **Beginners bias toward simpler splits.** Full-body through 3
-       days, upper/lower at 4+. Beginners don't need PPL complexity.
-    4. **3 days, intermediate+:**
-         - muscle_gain / strength: PPL (one dedicated day per function)
-         - body_recomp: PPL (same reasoning — moderate frequency helps)
-         - fat_loss / athletic / general_health: full body (higher
-           frequency per muscle helps these goals more than isolation)
-    5. **4 days, intermediate+:** upper/lower for everyone. The
-       workhorse 4-day split. Covers every muscle twice a week with
-       enough recovery between matched sessions.
-    6. **5 days, intermediate+:**
-         - muscle_gain / body_recomp: ppl_upper_lower (5-day hybrid)
-           gives 6 muscle exposures per week without over-specialization.
-         - fat_loss / strength / athletic / general_health: upper/lower
-           cycle — still a 2-day rotation, just repeated 2.5×. Avoids
-           the "5x full body" default that over-compounds recovery.
-    7. **6+ days, intermediate+:**
-         - muscle_gain + advanced: bro split (dedicated day per muscle)
-         - everything else: PPL run twice weekly
-
-    All decisions are deterministic — same (days, goal, experience)
-    always returns the same split.
-    """
-    if inputs.preferred_split and inputs.preferred_split != "auto":
-        if _SPLIT_MIN_DAYS.get(inputs.preferred_split, 99) <= inputs.days_per_week:
-            return inputs.preferred_split
-
-    days = max(1, min(7, inputs.days_per_week or 3))
-    bucket = _goal_bucket(inputs.goal)
-    experience = (inputs.experience or "intermediate").lower()
-
-    # Rule 0 — goal-first routing. Endurance and athletic_performance
-    # use dedicated splits at every day count because their templates
-    # (cardio days, hybrid strength+conditioning days) don't fit the
-    # standard upper/lower/PPL matrix. This MUST come before the "1-2
-    # days = full body" rule so a 2-day endurance user still gets
-    # cardio, not a full-body lifting day.
-    if bucket == "endurance":
-        return SPLIT_ENDURANCE
-    if bucket == "athletic_performance" and days >= 3:
-        return SPLIT_HYBRID
-
-    # Rule 2 — 1-2 day weeks always full body.
-    if days <= 2:
-        return SPLIT_FULL_BODY
-
-    # Rule 3 — beginners stay simple. Full body up to 3 days, upper/lower
-    # above that. A 5-day beginner still gets upper/lower repeated rather
-    # than PPL complexity they don't need yet.
-    if experience == "beginner":
-        if days <= 3:
-            return SPLIT_FULL_BODY
-        return SPLIT_UPPER_LOWER
-
-    # Intermediate / advanced path from here down.
-
-    if days == 3:
-        if bucket in ("muscle_gain", "strength", "body_recomp"):
-            return SPLIT_PPL
-        # fat_loss / athletic_performance / general_health — higher
-        # frequency per muscle group matters more than specialization
-        # at 3 days for these goals.
-        return SPLIT_FULL_BODY
-
-    if days == 4:
-        # 4-day upper/lower is the workhorse. Every muscle hits 2× per
-        # week with one full day between matched sessions.
-        return SPLIT_UPPER_LOWER
-
-    if days == 5:
-        if bucket in ("muscle_gain", "body_recomp"):
-            return SPLIT_PPL_UL
-        # fat_loss / strength / athletic / general_health: upper/lower
-        # cycle repeats 2.5× — gives every muscle 2-3× frequency
-        # without the 5-day full-body recovery problem.
-        return SPLIT_UPPER_LOWER
-
-    # days >= 6
-    if bucket == "muscle_gain" and experience == "advanced":
-        return SPLIT_BRO
-    return SPLIT_PPL
+# Re-export split constants + pick_split from day_templates so legacy
+# importers (`from app.services.workout.planner import SPLIT_FULL_BODY`)
+# keep working. Nothing in the planner service itself uses the
+# constants — they're imported via day_templates inside
+# `generate_workout_plan` when the weekly recipe asks for a split.
+from .day_templates import (  # noqa: E402,F401
+    SPLIT_FULL_BODY, SPLIT_UPPER_LOWER, SPLIT_PPL, SPLIT_BRO,
+    SPLIT_PPL_UL, SPLIT_ENDURANCE, SPLIT_HYBRID, _SPLIT_MIN_DAYS,
+    pick_split,
+    build_day_templates,
+    _day_meta,
+    _slots_for_day,
+)
 
 
 # ─── Layer 3 — Weekly volume targets ─────────────────────────────────────────
@@ -326,562 +244,6 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
         base[inputs.focused_muscle] = min(boosted, cap)
     return base
 
-
-# ─── Layer 4 — Day templates ─────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class Slot:
-    """One slot in a day template — a movement pattern + role + muscle hint.
-
-    The selection engine in Layer 5 fills each slot from the user's
-    eligible exercise pool by matching `movement_pattern` and using
-    `primary_muscle_hint` to break ties.
-    """
-    label: str                           # human-readable, e.g. "Primary Press"
-    movement_pattern: str                # matches Exercise.movement_pattern
-    primary_muscle_hint: str | None      # preferred primary_muscle for tie-break
-    role: str                            # "primary" | "secondary" | "isolation" | "core"
-
-
-# ─── Slot templates (pure slot lists — no names) ─────────────────────────────
-
-
-def _full_body_slots(day_index: int) -> list[Slot]:
-    """Slot list for one full-body day, rotated across three themes so
-    consecutive sessions don't repeat the exact same exercises. The
-    caller gets the trainer-style display name from `_day_meta`."""
-    if day_index % 3 == 0:
-        return [
-            Slot("Squat Pattern",     "squat",            "quads",       "primary"),
-            Slot("Horizontal Press",  "horizontal_press", "chest",       "primary"),
-            Slot("Horizontal Pull",   "horizontal_pull",  "back",        "primary"),
-            Slot("Hinge Accessory",   "hinge",            "hamstrings",  "secondary"),
-            Slot("Core",              "anti_extension",   "core",        "core"),
-        ]
-    if day_index % 3 == 1:
-        return [
-            Slot("Hinge Pattern",     "hinge",            "hamstrings",  "primary"),
-            Slot("Vertical Press",    "vertical_press",   "shoulders",   "primary"),
-            Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
-            Slot("Lunge / Single-leg","lunge",            "quads",       "secondary"),
-            Slot("Core",              "anti_extension",   "core",        "core"),
-        ]
-    return [
-        Slot("Squat Pattern",     "squat",            "quads",       "primary"),
-        Slot("Horizontal Press",  "horizontal_press", "chest",       "secondary"),
-        Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
-        Slot("Hinge",             "hinge",            "glutes",      "secondary"),
-        Slot("Core",              "anti_extension",   "core",        "core"),
-    ]
-
-
-def _upper_slots(cycle_index: int) -> list[Slot]:
-    """Upper-body day. Rotates emphasis across cycles so Upper 1 vs
-    Upper 2 feel different: horizontal push/pull → vertical push/pull
-    → balanced. The cycle index is (day_index // 2) for pure upper/lower
-    splits."""
-    if cycle_index % 3 == 0:
-        # Horizontal push/pull emphasis
-        return [
-            Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
-            Slot("Primary Pull",      "horizontal_pull",  "back",      "primary"),
-            Slot("Secondary Press",   "horizontal_press", "chest",     "secondary"),
-            Slot("Secondary Pull",    "horizontal_pull",  "back",      "secondary"),
-            Slot("Lateral Delt",      "isolation",        "shoulders", "isolation"),
-            Slot("Biceps",            "isolation",        "biceps",    "isolation"),
-            Slot("Triceps",           "isolation",        "triceps",   "isolation"),
-        ]
-    if cycle_index % 3 == 1:
-        # Vertical push/pull emphasis
-        return [
-            Slot("Vertical Press",    "vertical_press",   "shoulders", "primary"),
-            Slot("Vertical Pull",     "vertical_pull",    "back",      "primary"),
-            Slot("Horizontal Press",  "horizontal_press", "chest",     "secondary"),
-            Slot("Horizontal Pull",   "horizontal_pull",  "back",      "secondary"),
-            Slot("Rear Delt",         "isolation",        "shoulders", "isolation"),
-            Slot("Biceps",            "isolation",        "biceps",    "isolation"),
-            Slot("Triceps",           "isolation",        "triceps",   "isolation"),
-        ]
-    # Balanced
-    return [
-        Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
-        Slot("Primary Pull",      "horizontal_pull",  "back",      "primary"),
-        Slot("Vertical Press",    "vertical_press",   "shoulders", "secondary"),
-        Slot("Vertical Pull",     "vertical_pull",    "back",      "secondary"),
-        Slot("Lateral Delt",      "isolation",        "shoulders", "isolation"),
-        Slot("Biceps",            "isolation",        "biceps",    "isolation"),
-        Slot("Triceps",           "isolation",        "triceps",   "isolation"),
-    ]
-
-
-def _lower_slots(cycle_index: int) -> list[Slot]:
-    """Lower-body day. Rotates emphasis between squat bias, hinge bias,
-    and balanced across cycles."""
-    if cycle_index % 3 == 0:
-        # Squat bias
-        return [
-            Slot("Squat Pattern",     "squat",            "quads",      "primary"),
-            Slot("Single-leg",        "lunge",            "quads",      "secondary"),
-            Slot("Hinge Pattern",     "hinge",            "hamstrings", "secondary"),
-            Slot("Quad Isolation",    "isolation",        "quads",      "isolation"),
-            Slot("Calves",            "isolation",        "calves",     "isolation"),
-            Slot("Core",              "anti_extension",   "core",       "core"),
-        ]
-    if cycle_index % 3 == 1:
-        # Hinge bias
-        return [
-            Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
-            Slot("Squat Pattern",     "squat",            "quads",      "secondary"),
-            Slot("Single-leg",        "lunge",            "glutes",     "secondary"),
-            Slot("Hamstring Isolation","isolation",       "hamstrings", "isolation"),
-            Slot("Calves",            "isolation",        "calves",     "isolation"),
-            Slot("Core",              "anti_extension",   "core",       "core"),
-        ]
-    # Balanced
-    return [
-        Slot("Squat Pattern",     "squat",            "quads",      "primary"),
-        Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
-        Slot("Single-leg",        "lunge",            "quads",      "secondary"),
-        Slot("Hamstring Accessory","isolation",       "hamstrings", "isolation"),
-        Slot("Calves",            "isolation",        "calves",     "isolation"),
-        Slot("Core",              "anti_extension",   "core",       "core"),
-    ]
-
-
-def _push_slots() -> list[Slot]:
-    return [
-        Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
-        Slot("Vertical Press",    "vertical_press",   "shoulders", "primary"),
-        Slot("Secondary Press",   "horizontal_press", "chest",     "secondary"),
-        Slot("Lateral Delt",      "isolation",        "shoulders", "isolation"),
-        Slot("Triceps Compound",  "isolation",        "triceps",   "isolation"),
-        Slot("Triceps Isolation", "isolation",        "triceps",   "isolation"),
-    ]
-
-
-def _pull_slots() -> list[Slot]:
-    return [
-        Slot("Vertical Pull",     "vertical_pull",    "back",   "primary"),
-        Slot("Horizontal Pull",   "horizontal_pull",  "back",   "primary"),
-        Slot("Secondary Pull",    "horizontal_pull",  "back",   "secondary"),
-        Slot("Rear Delt",         "isolation",        "shoulders", "isolation"),
-        Slot("Bicep Curl",        "isolation",        "biceps", "isolation"),
-        Slot("Bicep Variation",   "isolation",        "biceps", "isolation"),
-    ]
-
-
-def _legs_slots() -> list[Slot]:
-    return [
-        Slot("Squat Pattern",     "squat",            "quads",      "primary"),
-        Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
-        Slot("Single-leg",        "lunge",            "quads",      "secondary"),
-        Slot("Hamstring Accessory","isolation",       "hamstrings", "isolation"),
-        Slot("Calves",            "isolation",        "calves",     "isolation"),
-        Slot("Core",              "anti_extension",   "core",       "core"),
-    ]
-
-
-# ─── Mobility / recovery / circuit slot builders ─────────────────────────────
-
-
-def _mobility_flow_slots() -> list[Slot]:
-    """Full-body mobility flow. Every slot uses `movement_pattern="mobility"`
-    which matches the ~13 mobility-bucket exercises in the seed
-    (cat_cow, world's greatest stretch, thoracic rotation, etc.)."""
-    return [
-        Slot("Spine Mobility",    "mobility", None, "primary"),
-        Slot("Hip Mobility",      "mobility", None, "primary"),
-        Slot("Shoulder Mobility", "mobility", None, "secondary"),
-        Slot("Ankle Mobility",    "mobility", None, "secondary"),
-        Slot("Flow Finisher",     "mobility", None, "isolation"),
-    ]
-
-
-def _stretch_block_slots() -> list[Slot]:
-    """Focused static stretch session. Fewer slots than a flow — the
-    prescription here uses longer holds."""
-    return [
-        Slot("Lower Body Stretch", "mobility", None, "primary"),
-        Slot("Upper Body Stretch", "mobility", None, "primary"),
-        Slot("Spine Stretch",      "mobility", None, "secondary"),
-        Slot("Final Stretch",      "mobility", None, "isolation"),
-    ]
-
-
-def _recovery_easy_slots() -> list[Slot]:
-    """Easy recovery cardio — single block, low intensity. Primary
-    muscle hint is `None` so any cardio row qualifies."""
-    return [
-        Slot("Easy Cardio", "cardio", None, "primary"),
-    ]
-
-
-def _stress_relief_slots() -> list[Slot]:
-    """Stress-relief session — one easy cardio block plus one gentle
-    mobility finisher. Accepts both cardio and mobility exercise
-    types via the archetype's accepts_types set."""
-    return [
-        Slot("Easy Movement", "cardio",   None, "primary"),
-        Slot("Gentle Mobility","mobility", None, "isolation"),
-    ]
-
-
-def _circuit_slots() -> list[Slot]:
-    """Metabolic circuit — mixes compound pushes, pulls, and squats
-    at circuit tempo. Slots are strength-typed; the prescription
-    branch for COND_CIRCUIT rewrites them to round-based formatting."""
-    return [
-        Slot("Circuit Press",   "horizontal_press", "chest",      "secondary"),
-        Slot("Circuit Row",     "horizontal_pull",  "back",       "secondary"),
-        Slot("Circuit Squat",   "squat",            "quads",      "secondary"),
-        Slot("Circuit Core",    "anti_extension",   "core",       "core"),
-        Slot("Circuit Finisher","cardio",           None,         "isolation"),
-    ]
-
-
-def _hybrid_lower_power_slots() -> list[Slot]:
-    """Athletic lower-body power day. Heavy compound lower + plyometric
-    + sprint finisher. Matches the HYBRID_LOWER_POWER archetype."""
-    return [
-        Slot("Main Lower Lift", "squat",      "quads",      "primary"),
-        Slot("Hinge Pattern",   "hinge",      "hamstrings", "secondary"),
-        Slot("Plyometric",      "plyometric", "quads",      "secondary"),
-        Slot("Sprint Finisher", "cardio",     None,         "isolation"),
-    ]
-
-
-def _hybrid_upper_intervals_slots() -> list[Slot]:
-    """Athletic upper-body + interval finisher day."""
-    return [
-        Slot("Horizontal Press", "horizontal_press", "chest", "primary"),
-        Slot("Horizontal Pull",  "horizontal_pull",  "back",  "primary"),
-        Slot("Vertical Press",   "vertical_press",   "shoulders", "secondary"),
-        Slot("Interval Finisher","cardio",           None,     "isolation"),
-    ]
-
-
-def _hybrid_strength_intervals_slots() -> list[Slot]:
-    """Combined strength + intervals session. Full-body strength block
-    followed by short intervals."""
-    return [
-        Slot("Main Lift",        "squat",      "quads",   "primary"),
-        Slot("Press",            "horizontal_press", "chest", "primary"),
-        Slot("Pull",             "horizontal_pull",  "back",  "secondary"),
-        Slot("Interval Finisher","cardio",     None,     "isolation"),
-    ]
-
-
-def _hybrid_full_body_circuit_slots() -> list[Slot]:
-    """Full-body circuit — mixes compounds with a cardio finisher."""
-    return [
-        Slot("Squat",         "squat",            "quads", "primary"),
-        Slot("Press",         "horizontal_press", "chest", "primary"),
-        Slot("Pull",          "horizontal_pull",  "back",  "primary"),
-        Slot("Hinge",         "hinge",            "hamstrings", "secondary"),
-        Slot("Cardio Burst",  "cardio",           None,    "isolation"),
-    ]
-
-
-# ─── Conditioning / cardio slot builders ─────────────────────────────────────
-#
-# Cardio slots all share `movement_pattern="cardio"` and leave
-# `primary_muscle_hint=None` so the filter doesn't constrain to a
-# specific muscle — cardio picks are categorized by `primary_muscle`
-# values of "cardio" or "full_body" in the seed, and we want both.
-
-
-def _cardio_intervals_slots() -> list[Slot]:
-    """High-intensity interval day. Warmup, intervals, cooldown.
-
-    The warmup and cooldown slots are marked `secondary`/`isolation` so
-    `_density_adjust_slots` trims them first when the user has a short
-    session budget — leaving the intervals as the irreducible core."""
-    return [
-        Slot("Cardio Warmup",   "cardio", None, "secondary"),
-        Slot("Main Intervals",  "cardio", None, "primary"),
-        Slot("Cardio Cooldown", "cardio", None, "isolation"),
-    ]
-
-
-def _cardio_steady_slots() -> list[Slot]:
-    """Steady-state cardio day. One primary block plus a short cooldown."""
-    return [
-        Slot("Steady-State Cardio", "cardio", None, "primary"),
-        Slot("Cardio Cooldown",     "cardio", None, "isolation"),
-    ]
-
-
-def _cardio_mixed_slots() -> list[Slot]:
-    """Mixed day — intervals on one modality followed by an easy spin on
-    another. Good middle-ground cardio session when the user has time."""
-    return [
-        Slot("Cardio Warmup",   "cardio", None, "secondary"),
-        Slot("Main Intervals",  "cardio", None, "primary"),
-        Slot("Easy Spin",       "cardio", None, "secondary"),
-        Slot("Cardio Cooldown", "cardio", None, "isolation"),
-    ]
-
-
-def _strength_maintenance_slots() -> list[Slot]:
-    """Compact full-body strength day used inside endurance plans. Keeps
-    muscle mass and connective tissue tolerance while the user chases
-    a cardio goal. Intentionally shorter than a normal full-body day —
-    5 compound slots, no isolation."""
-    return [
-        Slot("Squat Pattern",     "squat",            "quads",      "primary"),
-        Slot("Horizontal Press",  "horizontal_press", "chest",      "primary"),
-        Slot("Horizontal Pull",   "horizontal_pull",  "back",       "primary"),
-        Slot("Hinge Pattern",     "hinge",            "hamstrings", "secondary"),
-        Slot("Core",              "anti_extension",   "core",       "core"),
-    ]
-
-
-# Endurance split rotation: for N days/week we walk this sequence and
-# cycle when we run out. Steady / intervals / steady gives the most
-# realistic easy-hard-easy pattern; strength maintenance always lands
-# on the last day of the week so cardio days are spaced out.
-_ENDURANCE_DAY_KINDS = [
-    "intervals",        # day 1
-    "steady",           # day 2
-    "intervals",        # day 3
-    "steady",           # day 4
-    "mixed",            # day 5
-    "steady",           # day 6
-    "steady",           # day 7 — rest-day alternative
-]
-
-
-# Hybrid (athletic_performance) rotation: balances strength and
-# conditioning. At low day counts the user gets one of each; at higher
-# counts we alternate upper/lower strength with intervals/steady so no
-# muscle group is hammered two days in a row.
-_HYBRID_DAY_KINDS = [
-    "upper_strength",   # day 1
-    "intervals",        # day 2
-    "lower_strength",   # day 3
-    "steady",           # day 4
-    "full_body",        # day 5
-    "intervals",        # day 6
-    "steady",           # day 7
-]
-
-
-# Bro-split day slot lists keyed by position in the weekly rotation.
-_BRO_SLOT_SEQUENCE: list[list[Slot]] = [
-    # Chest
-    [
-        Slot("Primary Press",    "horizontal_press", "chest", "primary"),
-        Slot("Incline Press",    "horizontal_press", "chest", "secondary"),
-        Slot("Chest Fly",        "isolation",        "chest", "isolation"),
-        Slot("Tricep Compound",  "isolation",        "triceps", "isolation"),
-        Slot("Tricep Isolation", "isolation",        "triceps", "isolation"),
-    ],
-    # Back
-    [
-        Slot("Vertical Pull",    "vertical_pull",   "back",  "primary"),
-        Slot("Horizontal Pull",  "horizontal_pull", "back",  "primary"),
-        Slot("Secondary Row",    "horizontal_pull", "back",  "secondary"),
-        Slot("Rear Delt",        "isolation",       "shoulders", "isolation"),
-        Slot("Bicep Curl",       "isolation",       "biceps", "isolation"),
-    ],
-    # Shoulders
-    [
-        Slot("Vertical Press",   "vertical_press",  "shoulders", "primary"),
-        Slot("Lateral Raise",    "isolation",       "shoulders", "isolation"),
-        Slot("Rear Delt Fly",    "isolation",       "shoulders", "isolation"),
-        Slot("Upright Row",      "vertical_pull",   "shoulders", "secondary"),
-        Slot("Shrug",            "isolation",       "traps",     "isolation"),
-    ],
-    # Arms
-    [
-        Slot("Bicep Curl",       "isolation", "biceps", "primary"),
-        Slot("Tricep Press",     "isolation", "triceps", "primary"),
-        Slot("Hammer Curl",      "isolation", "biceps", "secondary"),
-        Slot("Overhead Tri",     "isolation", "triceps", "secondary"),
-    ],
-    # Legs
-    _legs_slots(),
-]
-
-
-# ─── Naming layer ────────────────────────────────────────────────────────────
-
-
-def _day_meta(split: str, day_index: int, days_per_week: int = 0) -> tuple[str, str]:
-    """Centralized day naming. Returns `(display_name, focus_label)`.
-
-    `display_name` is the trainer-style two-part label the user sees:
-    a short base (Upper / Lower / Push / Pull / Legs / Full Body / one
-    of the bro muscle days) followed by an em-dash and a short emphasis
-    subtitle derived from the template's slot composition.
-
-    `focus_label` is the semantic focus used internally for UI grouping
-    and muscle-tag coloring. It is NOT derived by splitting the display
-    name on whitespace — that produced `Full` for `Full Body A — …`,
-    which was the old focus-extraction bug.
-
-    Supported splits: full_body, upper_lower, ppl, ppl_upper_lower, bro.
-    Unknown splits fall back to `("Day N", "Full Body")`.
-    """
-    if split == SPLIT_FULL_BODY:
-        letters = ["A", "B", "C"]
-        emphases = ["Squat & Press", "Hinge & Vertical", "Mixed Power"]
-        i = day_index % 3
-        return f"Full Body {letters[i]} — {emphases[i]}", "Full Body"
-
-    if split == SPLIT_UPPER_LOWER:
-        is_upper = (day_index % 2) == 0
-        cycle_n = (day_index // 2) + 1
-        if is_upper:
-            upper_emph = [
-                "Horizontal Push/Pull",
-                "Vertical Push/Pull",
-                "Balanced Push/Pull",
-            ]
-            return f"Upper {cycle_n} — {upper_emph[(cycle_n - 1) % 3]}", "Upper"
-        lower_emph = [
-            "Squat Bias",
-            "Hinge Bias",
-            "Balanced Squat/Hinge",
-        ]
-        return f"Lower {cycle_n} — {lower_emph[(cycle_n - 1) % 3]}", "Lower"
-
-    if split == SPLIT_PPL:
-        pos = day_index % 3
-        cycle_n = (day_index // 3) + 1
-        if pos == 0:
-            return f"Push {cycle_n} — Chest/Shoulder Focus", "Push"
-        if pos == 1:
-            return f"Pull {cycle_n} — Lats/Upper Back Focus", "Pull"
-        return f"Legs {cycle_n} — Squat + Hinge", "Legs"
-
-    if split == SPLIT_PPL_UL:
-        # 5-day hybrid. Each day label baked into a stable sequence.
-        seq = [
-            ("Push — Chest/Shoulder Focus", "Push"),
-            ("Pull — Lats/Upper Back Focus", "Pull"),
-            ("Legs — Squat + Hinge", "Legs"),
-            ("Upper — Accessory & Arms", "Upper"),
-            ("Lower — Hinge & Glute Focus", "Lower"),
-        ]
-        return seq[day_index % 5]
-
-    if split == SPLIT_BRO:
-        seq = [
-            ("Chest — Press + Fly Emphasis", "Chest"),
-            ("Back — Width + Row Focus", "Back"),
-            ("Shoulders — Lateral + Overhead", "Shoulders"),
-            ("Arms — Biceps + Triceps", "Arms"),
-            ("Legs — Quad + Hamstring", "Legs"),
-        ]
-        return seq[day_index % 5]
-
-    if split == SPLIT_ENDURANCE:
-        kind = _endurance_day_kind(day_index, days_per_week or (day_index + 1))
-        if kind == "strength":
-            return "Strength Maintenance — Full Body", "Strength"
-        if kind == "intervals":
-            return "Cardio — Intervals", "Cardio"
-        if kind == "mixed":
-            return "Cardio — Mixed Intervals + Spin", "Cardio"
-        return "Cardio — Steady State", "Cardio"
-
-    if split == SPLIT_HYBRID:
-        kind = _HYBRID_DAY_KINDS[day_index % len(_HYBRID_DAY_KINDS)]
-        if kind == "upper_strength":
-            return "Upper Strength — Power Bias", "Upper"
-        if kind == "lower_strength":
-            return "Lower Strength — Squat + Hinge", "Lower"
-        if kind == "full_body":
-            return "Full Body — Power + Carry", "Full Body"
-        if kind == "intervals":
-            return "Conditioning — Intervals", "Cardio"
-        return "Conditioning — Steady State", "Cardio"
-
-    return f"Day {day_index + 1}", "Full Body"
-
-
-def _endurance_day_kind(day_index: int, total_days: int) -> str:
-    """Endurance plans always include exactly ONE strength maintenance
-    day per week (at 3+ days/week) — placed at the END of the week so
-    cardio days stay spaced out. Days 1..N-1 cycle through the cardio
-    rotation in `_ENDURANCE_DAY_KINDS`."""
-    if total_days >= 3 and day_index == total_days - 1:
-        return "strength"
-    return _ENDURANCE_DAY_KINDS[day_index % len(_ENDURANCE_DAY_KINDS)]
-
-
-def _slots_for_day(split: str, day_index: int, days_per_week: int = 0) -> list[Slot]:
-    """Return the slot list for one day. Mirrors `_day_meta`'s dispatch
-    so the two stay in lockstep.
-
-    `days_per_week` is only used by `SPLIT_ENDURANCE` to decide where
-    the weekly strength maintenance day falls. For every other split
-    it's ignored."""
-    if split == SPLIT_FULL_BODY:
-        return _full_body_slots(day_index)
-    if split == SPLIT_UPPER_LOWER:
-        is_upper = (day_index % 2) == 0
-        cycle_index = day_index // 2
-        return _upper_slots(cycle_index) if is_upper else _lower_slots(cycle_index)
-    if split == SPLIT_PPL:
-        pos = day_index % 3
-        if pos == 0:
-            return _push_slots()
-        if pos == 1:
-            return _pull_slots()
-        return _legs_slots()
-    if split == SPLIT_PPL_UL:
-        pos = day_index % 5
-        if pos == 0:
-            return _push_slots()
-        if pos == 1:
-            return _pull_slots()
-        if pos == 2:
-            return _legs_slots()
-        if pos == 3:
-            return _upper_slots(0)  # balanced upper accessory day
-        return _lower_slots(1)  # hinge-bias lower accessory day
-    if split == SPLIT_BRO:
-        return _BRO_SLOT_SEQUENCE[day_index % 5]
-    if split == SPLIT_ENDURANCE:
-        kind = _endurance_day_kind(day_index, days_per_week or (day_index + 1))
-        if kind == "strength":
-            return _strength_maintenance_slots()
-        if kind == "intervals":
-            return _cardio_intervals_slots()
-        if kind == "mixed":
-            return _cardio_mixed_slots()
-        return _cardio_steady_slots()
-    if split == SPLIT_HYBRID:
-        kind = _HYBRID_DAY_KINDS[day_index % len(_HYBRID_DAY_KINDS)]
-        if kind == "upper_strength":
-            return _upper_slots(0)
-        if kind == "lower_strength":
-            return _lower_slots(0)
-        if kind == "full_body":
-            return _full_body_slots(0)
-        if kind == "intervals":
-            return _cardio_intervals_slots()
-        return _cardio_steady_slots()
-    return _full_body_slots(day_index)
-
-
-def build_day_templates(split: str, days_per_week: int) -> list[tuple[str, list[Slot]]]:
-    """Return a list of `(day_name, slots)` for the chosen split.
-
-    Day count is exactly `days_per_week`. Splits with cycle lengths
-    that don't divide evenly into `days_per_week` repeat from the start
-    (e.g. PPL on 4 days = Push, Pull, Legs, Push). Naming and emphasis
-    rotation are centralized in `_day_meta` / `_slots_for_day` so every
-    split uses the same trainer-style format."""
-    out: list[tuple[str, list[Slot]]] = []
-    for i in range(days_per_week):
-        name, _focus = _day_meta(split, i, days_per_week)
-        slots = _slots_for_day(split, i, days_per_week)
-        out.append((name, slots))
-    return out
 
 
 # ─── Layer 5 — Exercise selection engine ─────────────────────────────────────
@@ -1176,15 +538,15 @@ def score_candidate(
                 score -= 0.6
 
     # 7c. Cardio intensity match — slot labels encode whether the day
-    # wants intervals (hard) or steady-state (easy). The exercise's
-    # `is_compound` flag is used on cardio rows as the intervals
-    # indicator (see seed_exercises_data.py — `treadmill_intervals` is
-    # compound=True, `treadmill_run` is compound=False). Without this
-    # term the intervals slot could pull a steady-state jog and a
-    # warmup slot could pull sprint intervals — both wrong.
-    if exercise.get("movement_pattern") == "cardio":
+    # wants intervals, steady-state, or easy recovery cardio. The
+    # intensity classification lives in `cardio.classify_cardio` so
+    # nothing outside that module depends on the seed's `is_compound`
+    # field for cardio semantics.
+    if classify_cardio(exercise) != "not_cardio":
         label_lower = (slot.label or "").lower()
-        is_interval_ex = bool(exercise.get("is_compound"))
+        intensity = classify_cardio(exercise)
+        is_interval_ex = intensity == "intervals"
+        is_easy_ex = intensity == "easy"
         wants_intervals = (
             "interval" in label_lower
             or "sprint" in label_lower
@@ -1198,18 +560,20 @@ def score_candidate(
             or "zone 2" in label_lower
             or "tempo" in label_lower
         )
-        # Recovery / stress-relief labels push HARD against any
-        # interval-style cardio. "Easy Movement" must not be HIIT.
         wants_easy = (
             "easy" in label_lower
             or "recovery" in label_lower
             or "gentle" in label_lower
         )
         if wants_easy:
+            # Recovery / stress-relief labels hard-ban intervals. Easy
+            # cardio gets the biggest bonus; steady still fine.
             if is_interval_ex:
-                score -= 5.0   # hard ban
+                score -= 5.0
+            elif is_easy_ex:
+                score += 3.0
             else:
-                score += 2.0
+                score += 1.5
         elif wants_intervals and is_interval_ex:
             score += 2.5
         elif wants_intervals and not is_interval_ex:
@@ -1329,17 +693,14 @@ def prescribe_sets_reps(
     role = slot.role
 
     # ── Cardio short-circuit ──────────────────────────────────────────
-    # Cardio exercises live in a different units system (minutes/distance,
-    # not sets × reps × load). Emit a duration-shaped prescription that
-    # the frontend already renders via the time/distance code paths and
-    # skip the strength rep tables below. The `is_compound` flag on the
-    # seed row distinguishes intervals (compound=True) from steady-state
-    # (compound=False) so we can key off that.
-    if (exercise.get("movement_pattern") == "cardio"
-            or exercise.get("exercise_type") == "cardio"):
-        if is_compound:
-            # Intervals — e.g. sprint intervals, treadmill intervals.
-            # One "set" = one interval block.
+    # Cardio exercises live in a different units system (minutes /
+    # distance / rounds), not sets × reps × load. Dispatch by intensity
+    # via `classify_cardio` instead of reading `is_compound` here —
+    # that inference now lives in `cardio.py` and the rest of the
+    # planner stays ignorant of the seed's field encoding.
+    intensity = classify_cardio(exercise)
+    if intensity != "not_cardio":
+        if intensity == "intervals":
             if role == "primary":
                 sets, reps, rest = 6, "30-45s", 90
             elif role == "secondary":
@@ -1347,7 +708,7 @@ def prescribe_sets_reps(
             else:  # cooldown
                 sets, reps, rest = 1, "3-5 min", 0
             return Prescription(sets=sets, reps=reps, rest_seconds=rest, rir_target=1.0)
-        # Steady-state — e.g. jog, easy bike.
+        # Steady-state or easy cardio — single duration block.
         if role == "primary":
             sets, reps, rest = 1, "25-40 min", 0
         elif role == "secondary":
@@ -1461,6 +822,29 @@ def prescribe_sets_reps(
     elif exercise.get("default_tracking_mode") == "distance":
         reps = "20-30 yds"
 
+    # ── Focused-muscle set bump (goal-gated) ──────────────────────────
+    # When the user declared a focused muscle AND the exercise trains
+    # it as a primary or secondary mover AND the goal bucket is one
+    # where extra volume is productive (hypertrophy / recomp / strength),
+    # bump sets by +1 capped at 5. Not applied to cardio exercises,
+    # fat_loss (fatigue risk), endurance/athletic (different stimulus),
+    # or general_health/maintain (lower fatigue by design).
+    _FOCUS_SET_BUMP_BUCKETS = {"muscle_gain", "body_recomp", "strength"}
+    if (
+        inputs.focused_muscle
+        and bucket in _FOCUS_SET_BUMP_BUCKETS
+        and role in ("primary", "secondary")
+        and exercise.get("movement_pattern") != "cardio"
+    ):
+        primary_muscle = exercise.get("primary_muscle")
+        secondary_muscles = exercise.get("secondary_muscles") or []
+        hits_focus = (
+            primary_muscle == inputs.focused_muscle
+            or inputs.focused_muscle in secondary_muscles
+        )
+        if hits_focus:
+            sets = min(5, sets + 1)
+
     # ── Beginner cap: never more than 3 working sets per exercise ─────
     if inputs.experience == "beginner":
         sets = min(sets, 3)
@@ -1504,115 +888,96 @@ def _equipment_label(exercise: dict) -> str:
     return "bodyweight"
 
 
-# ─── Archetype → slot dispatch ──────────────────────────────────────────────
 
+def _stamp_load_metadata(
+    out_ex: dict,
+    *,
+    exercise: dict,
+    prescription,
+    role: str,
+    goal_bucket: str,
+    experience: str,
+    perf_profiles: dict | None,
+    all_exercises_by_slug: dict | None,
+) -> None:
+    """Attach deterministic load recommendation + set-scheme metadata
+    to a planner output exercise dict IN PLACE.
 
-def _archetype_to_slots(archetype, day_index: int, days_per_week: int) -> list[Slot]:
-    """Turn a `DayArchetype` into a concrete slot list.
+    Pulled out of `generate_workout_plan` so the main pipeline stays
+    readable. Silently no-ops when the caller didn't pass performance
+    profiles — in that case the plan still carries a set scheme (with
+    null target loads) so the UI can render set-role pills without
+    needing history.
 
-    This is the single dispatch point between archetype and slot-level
-    structure. Lifting archetypes delegate to the existing split slot
-    builders (full body / upper / lower / push / pull / legs / bro);
-    cardio archetypes use the conditioning builders; mobility and
-    recovery use the new mobility/stretch builders; hybrid archetypes
-    compose two builders.
+    Non-load exercises (cardio, mobility, recovery, bodyweight timed
+    holds) explicitly skip weight recommendation — there's no
+    sensible "target weight" for a zone-2 bike session or a 30s
+    plank, and leaving `target_weight_lbs` stamped made the plan
+    review prompt show nonsense like "Treadmill Intervals at 140 lb".
+    """
+    from .recommendation import recommend_starting_weight
+    from .set_programming import build_set_scheme, parse_rep_range
 
-    `day_index` and `days_per_week` are forwarded to builders that
-    rotate emphasis across cycles (upper/lower/full-body each have
-    their own rotation — endurance/mobility don't)."""
-    from .archetypes import DayArchetype as _DA
-    if archetype == _DA.LIFT_FULL_BODY:
-        return _full_body_slots(day_index)
-    if archetype == _DA.LIFT_UPPER:
-        return _upper_slots(day_index // 2)
-    if archetype == _DA.LIFT_LOWER:
-        return _lower_slots(day_index // 2)
-    if archetype == _DA.LIFT_PUSH:
-        return _push_slots()
-    if archetype == _DA.LIFT_PULL:
-        return _pull_slots()
-    if archetype == _DA.LIFT_LEGS:
-        return _legs_slots()
-    if archetype == _DA.LIFT_BRO_CHEST:
-        return _BRO_SLOT_SEQUENCE[0]
-    if archetype == _DA.LIFT_BRO_BACK:
-        return _BRO_SLOT_SEQUENCE[1]
-    if archetype == _DA.LIFT_BRO_SHOULDERS:
-        return _BRO_SLOT_SEQUENCE[2]
-    if archetype == _DA.LIFT_BRO_ARMS:
-        return _BRO_SLOT_SEQUENCE[3]
-    if archetype == _DA.LIFT_BRO_LEGS:
-        return _BRO_SLOT_SEQUENCE[4]
-    if archetype == _DA.LIFT_STRENGTH_MAINTENANCE:
-        return _strength_maintenance_slots()
+    target_w: float | None = None
+    rec_source: str | None = None
+    rec_confidence: float | None = None
+    rec_reason: str | None = None
 
-    # Conditioning
-    if archetype == _DA.COND_ZONE2:
-        return _cardio_steady_slots()
-    if archetype == _DA.COND_INTERVALS_SHORT:
-        return _cardio_intervals_slots()
-    if archetype == _DA.COND_INTERVALS_LONG:
-        return _cardio_intervals_slots()  # shares layout; prescription differs
-    if archetype == _DA.COND_TEMPO:
-        return [
-            Slot("Cardio Warmup",       "cardio", None, "secondary"),
-            Slot("Tempo Block",         "cardio", None, "primary"),
-            Slot("Cardio Cooldown",     "cardio", None, "isolation"),
-        ]
-    if archetype == _DA.COND_MIXED:
-        return _cardio_mixed_slots()
-    if archetype == _DA.COND_SPRINT_POWER:
-        return [
-            Slot("Cardio Warmup",  "cardio",     None,    "secondary"),
-            Slot("Main Sprints",   "cardio",     None,    "primary"),
-            Slot("Plyometric",     "plyometric", "quads", "secondary"),
-            Slot("Cardio Cooldown","cardio",     None,    "isolation"),
-        ]
-    if archetype == _DA.COND_CIRCUIT:
-        return _circuit_slots()
+    # Load recommendation only applies to lifting work. Skip outright
+    # for cardio / mobility / recovery / timed holds / bodyweight.
+    training_type = (exercise.get("training_type") or "").lower()
+    primary_muscle = (exercise.get("primary_muscle") or "").lower()
+    equipment_bucket = (exercise.get("equipment_bucket") or "").lower()
+    rep_range = parse_rep_range(prescription.reps or "")
+    is_cardio_or_mobility = (
+        training_type in ("conditioning", "cardio", "mobility", "recovery")
+        or primary_muscle == "cardio"
+        or equipment_bucket in ("treadmill", "stationary_bike", "rowing_machine", "jump_rope", "elliptical")
+    )
+    is_timed_only = rep_range is None  # "30s", "3-5 min", "25-40 min", etc.
+    skip_load = is_cardio_or_mobility or is_timed_only
 
-    # Mobility / recovery
-    if archetype == _DA.MOBILITY_FLOW:
-        return _mobility_flow_slots()
-    if archetype == _DA.STRETCH_BLOCK:
-        return _stretch_block_slots()
-    if archetype == _DA.RECOVERY_EASY:
-        return _recovery_easy_slots()
-    if archetype == _DA.STRESS_RELIEF_EASY:
-        return _stress_relief_slots()
+    if not skip_load and perf_profiles is not None and all_exercises_by_slug is not None:
+        try:
+            rec = recommend_starting_weight(
+                exercise,
+                perf_profiles,
+                all_exercises_by_slug,
+                target_reps=prescription.reps,
+                experience=experience,
+            )
+            if rec.weight_lbs > 0:
+                target_w = rec.weight_lbs
+            rec_source = rec.source
+            rec_confidence = rec.confidence
+            rec_reason = rec.reason
+        except Exception as exc:  # defensive — never crash the planner
+            print(f"[workout_planner] starting-weight recommendation failed for {exercise.get('slug')}: {exc}")
 
-    # Hybrid
-    if archetype == _DA.HYBRID_STRENGTH_INTERVALS:
-        return _hybrid_strength_intervals_slots()
-    if archetype == _DA.HYBRID_UPPER_INTERVALS:
-        return _hybrid_upper_intervals_slots()
-    if archetype == _DA.HYBRID_LOWER_POWER:
-        return _hybrid_lower_power_slots()
-    if archetype == _DA.HYBRID_FULL_BODY_CIRCUIT:
-        return _hybrid_full_body_circuit_slots()
+    scheme = build_set_scheme(
+        exercise,
+        total_sets=prescription.sets,
+        reps=prescription.reps,
+        rir_target=prescription.rir_target,
+        target_weight_lbs=target_w,
+        goal_bucket=goal_bucket,
+        role=role,
+        experience=experience,
+    )
 
-    # Unknown archetype — safe fallback to full body.
-    return _full_body_slots(day_index)
-
-
-def _archetype_day_name(archetype, day_index: int, recipe: list) -> str:
-    """Build the user-facing day name from an archetype and its
-    position in the recipe. When the same archetype appears multiple
-    times in the recipe we number it (Upper 1, Upper 2, …)."""
-    from .archetypes import ARCHETYPE_META
-    base = ARCHETYPE_META[archetype].default_name
-    # How many times has this archetype appeared up to this index?
-    seen_before = sum(1 for a in recipe[:day_index] if a == archetype)
-    total = sum(1 for a in recipe if a == archetype)
-    if total > 1:
-        return f"{base} {seen_before + 1}"
-    return base
+    out_ex["targetWeightLbs"] = target_w
+    out_ex["weightRecommendationSource"] = rec_source
+    out_ex["weightRecommendationConfidence"] = rec_confidence
+    out_ex["weightRecommendationReason"] = rec_reason
+    out_ex["setScheme"] = [s.to_dict() for s in scheme]
 
 
 def generate_workout_plan(
     inputs: PlannerInputs,
     all_exercises: list[dict],
     history_familiarity: dict[str, int] | None = None,
+    *,
+    perf_profiles: dict | None = None,
 ) -> dict:
     """Build a complete plan dict in the same shape `_call_workout_ai` returns:
 
@@ -1655,6 +1020,7 @@ def generate_workout_plan(
     from .weekly_recipe import generate_weekly_recipe
     from .prescriptions import prescribe_for_slot
     from .archetypes import ARCHETYPE_META, DayArchetype
+    from .day_templates import archetype_to_slots, archetype_display_name
 
     profile = goal_profile_for(
         inputs.goal,
@@ -1662,19 +1028,20 @@ def generate_workout_plan(
         days_per_week=inputs.days_per_week,
         session_minutes=inputs.session_minutes,
     )
-    # Lifting-based profiles still go through `pick_split` so the
-    # existing split matrix owns "which lifting split fits the user
-    # today". Non-lifting modes don't use a split at all. `fat_loss_mix`
-    # is lifting-adjacent — it needs a split for its lifting days.
+    # Split selection is a LIFTING SUBSYSTEM — only consulted when the
+    # weekly recipe needs a traditional split for lifting-dominant
+    # modes. Endurance / mobility / recovery / athletic modes build
+    # their archetype sequence directly in `generate_weekly_recipe`.
     lifting_split = (
         pick_split(inputs)
-        if profile.planner_mode in ("lifting", "fat_loss_mix")
+        if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
         else None
     )
     recipe = generate_weekly_recipe(
         profile,
         inputs.days_per_week,
         lifting_split=lifting_split,
+        recent_focus_buckets=inputs.recent_focus_buckets,
     )
     print(
         f"[workout_planner] mode={profile.planner_mode} "
@@ -1682,13 +1049,17 @@ def generate_workout_plan(
         ", ".join(a.value for a in recipe) + "]"
     )
     # Build a concrete (name, slots, archetype) sequence from the recipe.
+    # Density trimming is now archetype-aware: the `category` argument
+    # picks a role→minutes cost map per day type so a 30-min zone2
+    # session doesn't trim like a 30-min lifting session.
     templates = []
     for idx, archetype in enumerate(recipe):
-        slots = _archetype_to_slots(archetype, idx, inputs.days_per_week)
-        name = _archetype_day_name(archetype, idx, recipe)
-        # Time budget shapes slot density for every archetype, not just
-        # lifting. Short sessions drop trailing low-priority slots.
-        slots = _density_adjust_slots(slots, inputs.session_minutes)
+        meta = ARCHETYPE_META[archetype]
+        slots = archetype_to_slots(archetype, idx, inputs.days_per_week)
+        name = archetype_display_name(archetype, idx, recipe)
+        slots = density_adjust_slots(
+            slots, inputs.session_minutes, category=meta.category,
+        )
         templates.append((name, slots, archetype))
     targets = weekly_set_targets(inputs)
     # Injury-aware movement-pattern blocklist. Built once from the
@@ -1714,6 +1085,15 @@ def generate_workout_plan(
 
     used_substitution_groups: set[str] = set()
     used_exercise_slugs: set[str] = set()
+
+    # Index once for load-recommendation lookups (transfer logic in
+    # recommend_starting_weight iterates over this dict). Tolerates
+    # missing slugs — rows without a slug simply can't be a source
+    # for transfer anyway.
+    all_exercises_by_slug: dict[str, dict] = {
+        ex["slug"]: ex for ex in all_exercises if ex.get("slug")
+    }
+    goal_bucket = profile.bucket
 
     days_out: list[dict] = []
     for day_idx, (day_name, slots, archetype) in enumerate(templates):
@@ -1748,7 +1128,7 @@ def generate_workout_plan(
                 continue
             prescription = prescribe_for_slot(archetype, slot, ex, inputs)
             equipment_label = _equipment_label(ex)
-            exercises_out.append({
+            out_ex = {
                 "name": ex["name"],
                 "sets": prescription.sets,
                 "reps": prescription.reps,
@@ -1764,7 +1144,18 @@ def generate_workout_plan(
                 "_secondary_muscles": list(ex.get("secondary_muscles") or []),
                 "_archetype": archetype.value,
                 "_training_type": meta.training_type,
-            })
+            }
+            _stamp_load_metadata(
+                out_ex,
+                exercise=ex,
+                prescription=prescription,
+                role=slot.role,
+                goal_bucket=goal_bucket,
+                experience=inputs.experience,
+                perf_profiles=perf_profiles,
+                all_exercises_by_slug=all_exercises_by_slug,
+            )
+            exercises_out.append(out_ex)
             _credit(ex, prescription.sets)
             sub = ex.get("substitution_group")
             if sub:
@@ -1780,13 +1171,20 @@ def generate_workout_plan(
         })
 
     # ── Focused-muscle deficit pass ───────────────────────────────────
-    # If the user specified a focused muscle but after the template
-    # sweep they're still ≥1 full set below target, append one isolation
-    # accessory for that muscle to whichever day already hits it (so
-    # recovery isn't orphaned). This is the only place we add exercises
-    # beyond the template; it only fires when a deficit actually exists.
+    # Only fires for lifting-oriented planner modes. Tacking a strength
+    # isolation accessory onto an endurance / mobility / recovery /
+    # maintain plan would undermine the plan's primary goal — a user
+    # asking for "glute focus" inside a flexibility plan doesn't want
+    # a bonus glute bridge on their stretch day. Athletic mode is
+    # included because it has real lifting days and bodybuilding-style
+    # muscle emphasis is coherent there.
+    _FOCUS_BACKFILL_MODES = {"lifting", "fat_loss_mix", "lifting_plus_cardio", "athletic"}
     fm = inputs.focused_muscle
-    if fm and targets.get(fm, 0) > 0:
+    if (
+        fm
+        and targets.get(fm, 0) > 0
+        and profile.planner_mode in _FOCUS_BACKFILL_MODES
+    ):
         deficit = targets[fm] - assigned.get(fm, 0.0)
         if deficit >= 1.0:
             host_day_idx = _find_best_accessory_host_day(days_out, fm)
@@ -1803,7 +1201,7 @@ def generate_workout_plan(
                 )
                 if ex is not None:
                     pres = prescribe_sets_reps(ex, slot, inputs)
-                    days_out[host_day_idx]["exercises"].append({
+                    out_ex = {
                         "name": ex["name"],
                         "sets": pres.sets,
                         "reps": pres.reps,
@@ -1815,7 +1213,18 @@ def generate_workout_plan(
                         "_rir_target": pres.rir_target,
                         "_primary_muscle": ex.get("primary_muscle"),
                         "_secondary_muscles": list(ex.get("secondary_muscles") or []),
-                    })
+                    }
+                    _stamp_load_metadata(
+                        out_ex,
+                        exercise=ex,
+                        prescription=pres,
+                        role=slot.role,
+                        goal_bucket=goal_bucket,
+                        experience=inputs.experience,
+                        perf_profiles=perf_profiles,
+                        all_exercises_by_slug=all_exercises_by_slug,
+                    )
+                    days_out[host_day_idx]["exercises"].append(out_ex)
                     _credit(ex, pres.sets)
 
     # Volume audit attached to the plan for transparency. Clients that
@@ -1883,64 +1292,6 @@ def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | No
     return scored[0][2]
 
 
-# ─── Session density + injury filter helpers ────────────────────────────────
-
-
-# Rough minutes budget per slot role. Used by `_density_adjust_slots` to
-# trim templates that don't fit the user's configured session time.
-# Numbers cover warmup + working sets + inter-set rest for each role.
-_ROLE_MINUTES = {
-    "primary":    12,
-    "secondary":   8,
-    "isolation":   6,
-    "core":        4,
-}
-
-
-def _density_adjust_slots(slots: list[Slot], session_minutes: int | None) -> list[Slot]:
-    """Trim trailing low-priority slots until the remaining set fits the
-    user's `session_minutes` budget.
-
-    Rules:
-      - If `session_minutes` is missing or 0, keep the whole template.
-      - Compute the template's estimated minutes from `_ROLE_MINUTES`.
-      - If we fit, return as-is.
-      - Otherwise drop the highest-indexed `core` slot, then highest
-        `isolation`, then highest `secondary`. Never drop `primary`
-        slots — compounds are the anchor of the session.
-      - Minimum output is the full set of primary+secondary slots;
-        if even those don't fit, return them anyway (the user gave us
-        a budget that's too short for their split — a trainer would
-        still prioritize compounds over skipping them).
-
-    Short sessions therefore stay compound-heavy; long sessions keep
-    every accessory the template defines. This is the deterministic
-    counterpart to the focused-muscle accessory pass below.
-    """
-    if not session_minutes or session_minutes <= 0:
-        return list(slots)
-    budget = max(20, min(180, int(session_minutes)))
-    total = sum(_ROLE_MINUTES.get(s.role, 6) for s in slots)
-    if total <= budget:
-        return list(slots)
-
-    kept = list(slots)
-    drop_order = ("core", "isolation", "secondary")
-    for role in drop_order:
-        while total > budget:
-            # Find the last slot of this role
-            drop_idx: int | None = None
-            for i in range(len(kept) - 1, -1, -1):
-                if kept[i].role == role:
-                    drop_idx = i
-                    break
-            if drop_idx is None:
-                break
-            total -= _ROLE_MINUTES.get(role, 6)
-            kept.pop(drop_idx)
-        if total <= budget:
-            break
-    return kept
 
 
 # Injury tags → movement patterns to exclude. Keys are lower-cased and
@@ -2011,20 +1362,155 @@ def _injury_blocked_patterns(injuries: tuple[str, ...] | list[str] | None) -> se
 def propose_session_targets_from_history(
     next_plan: dict,
     history: list[dict],
+    *,
+    goal_bucket: str = "muscle_gain",
+    experience: str = "intermediate",
 ) -> dict:
-    """Adjust the next plan's `target_weight` and `target_reps_*` based on
-    the user's last completed sets for each exercise.
+    """Stamp next-session target loads + set schemes onto `next_plan`
+    based on the user's recent completed sets.
 
-    Phase 2 — not implemented in this pass. The hook is here so plans.py
-    can wire it up in the next round. The eventual implementation will:
+    `history` is a list of exercise-result dicts in this shape:
 
-      1. For every exercise in `next_plan`, find the most recent matching
-         logged exercise in `history`.
-      2. Read its actual sets/reps/weight.
-      3. Apply double-progression rules (top-of-range → +load, partial
-         → hold, miss → -load) using the existing
-         `WorkoutProgressionEngine` for the math.
-      4. Set `target_weight_lbs` and adjust the rep range on the next
-         plan's exercise dict.
+        {
+          "slug": str,
+          "sets": [{"reps": int, "weight_lbs": float, "rir": float?}, ...],
+          "performed_on": date (optional, most-recent wins),
+        }
+
+    For every exercise in every day of `next_plan["workout_plan"]`, we
+    look up the most recent matching history entry by slug, run it
+    through `recommend_next_session_load`, and re-build the set scheme
+    with the new target load. Exercises without history are left
+    untouched (the `generate_workout_plan` starting-weight pass may
+    have already stamped a target; if not, the set scheme will carry
+    null loads and the frontend falls back to the live
+    `/recommend-weight` endpoint at session start).
+
+    This function MUTATES `next_plan` for convenience (matching the
+    pattern in `propagate_session_targets` in history.py) and also
+    returns it so callers can chain.
     """
+    from .set_programming import (
+        build_set_scheme,
+        parse_rep_range,
+        recommend_next_session_load,
+    )
+
+    if not isinstance(next_plan, dict) or "workout_plan" not in next_plan:
+        return next_plan
+
+    # Index history by slug → most-recent entry.
+    latest_by_slug: dict[str, dict] = {}
+    for entry in history or []:
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        prev = latest_by_slug.get(slug)
+        if prev is None:
+            latest_by_slug[slug] = entry
+            continue
+        a = entry.get("performed_on") or 0
+        b = prev.get("performed_on") or 0
+        if a and b:
+            if a > b:
+                latest_by_slug[slug] = entry
+        elif a and not b:
+            latest_by_slug[slug] = entry
+
+    days = next_plan.get("workout_plan", {}).get("days", [])
+    for day in days:
+        for ex_out in day.get("exercises", []):
+            slug = ex_out.get("_slug")
+            if not slug or slug not in latest_by_slug:
+                continue
+            last_sets = latest_by_slug[slug].get("sets") or []
+            if not last_sets:
+                continue
+
+            # Reconstruct a minimal "exercise dict" for the load
+            # helpers. The planner output already stores the fields
+            # they need (equipment_bucket lives on the seed row, but
+            # we recover is_compound via role + primary_muscle).
+            exercise_stub = {
+                "slug": slug,
+                "name": ex_out.get("name"),
+                "equipment_bucket": ex_out.get("_equipment_bucket") or _infer_bucket(ex_out.get("equipment", "")),
+                "primary_muscle": ex_out.get("_primary_muscle"),
+                "movement_pattern": ex_out.get("_movement_pattern"),
+                "is_compound": ex_out.get("_role") in ("primary", "compound"),
+            }
+
+            rng = parse_rep_range(ex_out.get("reps") or "")
+            # Build a synthetic "planned set 1" from the current exercise
+            # output so the next-session helper can read its progression
+            # mode off the FIRST set of the scheme.
+            scheme_dicts = ex_out.get("setScheme") or []
+            if scheme_dicts:
+                first = scheme_dicts[0]
+                from .set_programming import PlannedSet  # local import — avoid cycles
+                planned_first = PlannedSet(
+                    set_number=1,
+                    set_type=first.get("setType", "volume"),
+                    target_reps=first.get("targetReps", ex_out.get("reps", "")),
+                    target_rir=first.get("targetRir", ex_out.get("_rir_target", 2.0)),
+                    target_weight_lbs=first.get("targetWeightLbs"),
+                    progression_mode=first.get("progressionMode", "reps_first"),
+                )
+            else:
+                from .set_programming import PlannedSet
+                planned_first = PlannedSet(
+                    set_number=1,
+                    set_type="volume",
+                    target_reps=ex_out.get("reps", ""),
+                    target_rir=float(ex_out.get("_rir_target") or 2.0),
+                    target_weight_lbs=ex_out.get("targetWeightLbs"),
+                    progression_mode="reps_first",
+                )
+
+            new_w, action, reason = recommend_next_session_load(
+                exercise=exercise_stub,
+                planned_set=planned_first,
+                last_session_sets=last_sets,
+                rep_range=rng,
+            )
+
+            # Re-build the set scheme with the new anchor weight so the
+            # heavy-top / backoff loads reflect the update.
+            scheme = build_set_scheme(
+                exercise_stub,
+                total_sets=int(ex_out.get("sets") or 1),
+                reps=ex_out.get("reps", ""),
+                rir_target=float(ex_out.get("_rir_target") or 2.0),
+                target_weight_lbs=new_w,
+                goal_bucket=goal_bucket,
+                role=ex_out.get("_role", "accessory"),
+                experience=experience,
+            )
+
+            ex_out["targetWeightLbs"] = new_w
+            ex_out["weightRecommendationSource"] = "exact_history"
+            ex_out["weightRecommendationConfidence"] = 0.85
+            ex_out["weightRecommendationReason"] = reason
+            ex_out["progressionAction"] = action
+            ex_out["setScheme"] = [s.to_dict() for s in scheme]
+
     return next_plan
+
+
+def _infer_bucket(equipment_label: str) -> str:
+    """Best-effort equipment bucket inference from a comma-joined
+    equipment label. Used only by `propose_session_targets_from_history`
+    when the planner's internal `_equipment_bucket` wasn't preserved.
+    """
+    s = (equipment_label or "").lower()
+    if "barbell" in s:
+        return "barbell"
+    if "dumbbell" in s:
+        return "dumbbell"
+    if "cable" in s:
+        return "cable"
+    if "machine" in s or "plate loaded" in s:
+        return "machine"
+    if "bodyweight" in s or not s:
+        return "bodyweight"
+    return "other"

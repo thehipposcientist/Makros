@@ -26,9 +26,34 @@ export interface ExerciseGuide {
   eccentric: string;
 }
 
+/** Turn an identifier string into a human-readable label.
+ *
+ * Handles four input shapes the backend and seed data mix freely:
+ *   - snake_case:    "horizontal_press"  → "Horizontal Press"
+ *   - kebab-case:    "cool-down"         → "Cool Down"
+ *   - camelCase:     "lastSessionBest"   → "Last Session Best"
+ *   - PascalCase:    "UpperBody"         → "Upper Body"
+ *
+ * Also collapses multi-letter acronyms ("RPE", "1RM") so they stay
+ * intact instead of splitting into "R P E". Safe on already-humanized
+ * strings — "Barbell Bench Press" passes through unchanged.
+ */
 export function humanizeToken(s?: string | null): string {
   if (!s) return '';
-  return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  // 1. Break snake_ and kebab-case into words.
+  let out = s.replace(/[_\-]+/g, ' ');
+  // 2. Split camelCase / PascalCase: insert a space before every
+  //    lowercase→uppercase boundary ("lastBest" → "last Best") AND
+  //    before an uppercase followed by lowercase that itself follows
+  //    another uppercase ("HTTPServer" → "HTTP Server").
+  out = out
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  // 3. Collapse runs of whitespace, trim, title-case each word.
+  return out
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function joinParts(parts: string[]): string {

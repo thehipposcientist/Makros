@@ -17,6 +17,7 @@ import {
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
+import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -52,6 +53,11 @@ interface HomeScreenProps {
   onViewProgress: () => void;
   onViewAccount: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
+  /** Optional: push local AsyncStorage state to the backend. Called by
+   *  the trainer-chat Apply flow so plan changes persist cross-device
+   *  (the old flow only wrote to local storage and silently drifted
+   *  on the next login). */
+  onBackendSync?: () => Promise<void>;
   onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
   onCancelPlanGen?: () => void;
   // Wraps the parent's full profile-save handler so the inline tab
@@ -828,7 +834,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1324,6 +1330,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (picked && currentVersion != null) {
           (picked as any)._templatesVersion = currentVersion;
         }
+        // ── Diagnostic: count meals coming out of the template picker ──
+        const countBeforeOverlay = (picked.meals ?? []).length;
+
         // Order of layering:
         //   1. Routines first — they're the "every day" template and set
         //      up routine-backed extras with _routineId.
@@ -1336,6 +1345,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (routines.length > 0) {
           picked = applyRoutines(picked, routines);
         }
+        const countAfterRoutines = (picked.meals ?? []).length;
+
         const preserved = await getPreservedMeals(d.key);
         if (preserved.length > 0) {
           // Merge preserved checked meals into the unified meals[] list,
@@ -1363,6 +1374,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             picked = { ...picked, meals: [...currentMeals, ...toAdd] };
             if (routines.length > 0) picked = applyRoutines(picked, routines);
           }
+        }
+        const countAfterPreserved = (picked.meals ?? []).length;
+
+        // ── Hard guard: enforce meals-per-day budget ──
+        // The invariant is: displayed_meals == mealsPerDay + any user-added
+        // extras. The backend should already reduce generate_count by the
+        // routine count so routine overlay lands cleanly. If we land above
+        // mealsPerDay + routines (i.e., the backend didn't reduce), trim
+        // the tail so the UI stays sane. Also log loudly so the backend
+        // bug can still be diagnosed.
+        const expectedCount = (profile?.mealsPerDay ?? 3) + (preserved?.length ?? 0);
+        const currentCount = (picked.meals ?? []).length;
+        if (currentCount > expectedCount) {
+          console.warn(
+            `[loadPlans] ${d.key}: meal count overage — template=${countBeforeOverlay}, ` +
+            `afterRoutines=${countAfterRoutines}, afterPreserved=${countAfterPreserved}, ` +
+            `expected<=${expectedCount} (mealsPerDay=${profile?.mealsPerDay ?? 3}, ` +
+            `routines=${routines.length}, preserved=${preserved.length}). Trimming tail.`,
+          );
+          // Trim strategy: keep all routine-tagged and preserved (local-id)
+          // meals first; then fill up to `expectedCount` with non-routine
+          // meals from the head of the list. This preserves user-visible
+          // intent (routines + logged meals win) while dropping the
+          // overflow generated meals.
+          const meals = picked.meals ?? [];
+          const routineMeals = meals.filter(m => !!(m as any)._routineId);
+          const preservedMeals = meals.filter(m => !(m as any)._routineId && !!(m as any)._localId);
+          const regularMeals = meals.filter(m => !(m as any)._routineId && !(m as any)._localId);
+          const slotsLeft = Math.max(0, expectedCount - routineMeals.length - preservedMeals.length);
+          const trimmed = [...regularMeals.slice(0, slotsLeft), ...preservedMeals, ...routineMeals];
+          picked = { ...picked, meals: trimmed };
+        } else if (countBeforeOverlay !== undefined) {
+          console.log(
+            `[loadPlans] ${d.key}: ok — template=${countBeforeOverlay}, ` +
+            `afterRoutines=${countAfterRoutines}, afterPreserved=${countAfterPreserved}, ` +
+            `mealsPerDay=${profile?.mealsPerDay ?? 3}, routines=${routines.length}, preserved=${preserved.length}`,
+          );
         }
         return [d.key, picked] as const;
       })
@@ -1933,9 +1981,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           setWorkoutPlan(updatedPlan);
           await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
         } else {
-          setActiveChat(prev => [...prev, { role: 'assistant', content: 'The plan changes didn\'t come through correctly. Try asking again.' }]);
+          // Invalid plan structure — surface a clear error instead of
+          // silently closing the banner. The user needs to know the
+          // assistant promised a change it couldn't deliver.
+          console.warn('[applyPendingUpdate] plan failed isValid check:', updatedPlan);
+          setActiveChat(prev => [...prev, {
+            role: 'assistant',
+            content: 'I said I\'d update the plan but the response came back malformed. Please try rephrasing the request — something like "make tomorrow a push day" or "swap legs on day 3 for pull".',
+          }]);
           return;
         }
+      } else if (canUpdateWorkout && !resp.updated_workout_plan && resp.needs_plan_update) {
+        // needs_plan_update=true but no plan dict present — this is
+        // the exact failure mode the intent-detection safety net on
+        // the backend was added to prevent. If it still slips through,
+        // tell the user rather than silently no-op.
+        console.warn('[applyPendingUpdate] needs_plan_update=true but no updated_workout_plan in response');
+        setActiveChat(prev => [...prev, {
+          role: 'assistant',
+          content: 'I described a change but didn\'t return the actual updated plan. Could you ask again with more specific detail about the change you want?',
+        }]);
+        return;
       }
       if (canUpdateNutrition && resp.updated_nutrition_plan) {
         const today = todayKey();
@@ -1963,6 +2029,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onProfileUpdate(profileChanges, true); // skipRegen — plan already applied
       }
 
+      // Push the applied plan to the backend so it persists
+      // cross-device. Without this, the trainer-chat apply flow only
+      // wrote to local AsyncStorage and the next device login
+      // silently reverted to the pre-apply state. Fire-and-forget —
+      // a failed sync is logged but doesn't block the apply.
+      if (onBackendSync) {
+        try {
+          await onBackendSync();
+        } catch (e) {
+          console.warn('[applyPendingUpdate] backend sync failed (non-fatal):', e);
+        }
+      }
+
       const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
       const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
       const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
@@ -1981,7 +2060,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setIsChatPlanUpdating(false);
     }
-  }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, summarizeTrainerUpdate]);
+  }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, onBackendSync, summarizeTrainerUpdate]);
 
   const dismissPendingUpdate = useCallback(() => {
     const setActiveChat = pendingUpdate?.coachMode === 'trainer' ? setWorkoutChat : setNutritionChat;
@@ -2285,11 +2364,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
+  //
+  // The preserved check MUST run before the isRest short-circuit. Previously
+  // we bailed on isRest first, which broke this scenario: user finishes a
+  // workout on Tuesday on a 6-day plan, then reduces to a 4-day plan that
+  // doesn't have Tuesday as a training day. The new schedule marks Tuesday
+  // as rest, the overlay saw isRest and returned without restoring the
+  // preserved card, and the user saw "Rest day" where they'd just trained.
+  // Now: if a date has a preserved completed workout, it ALWAYS shows as
+  // a (non-rest) completed training day regardless of what the new schedule
+  // thinks the day should be.
   const schedule = scheduleRaw.map(item => {
-    if (item.isRest) return item;
     const k = dateKey(item.date);
     const preserved = preservedWorkouts[k];
-    if (preserved) return { ...item, workout: preserved };
+    if (preserved) {
+      return { ...item, workout: preserved, isRest: false };
+    }
     return item;
   });
   const mealDays = getNextMealDays(7);
@@ -3381,13 +3471,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
                     : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
                 </Text>
-              ) : (
-                (coachMode === 'trainer' ? workoutChat : nutritionChat).map((m, idx) => (
-                  <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
-                    <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
-                  </View>
-                ))
-              )}
+              ) : (() => {
+                // Display cap: show the 50 most recent messages.
+                // Older turns remain in state so `conversation`
+                // context sent to /ai/trainer-question still carries
+                // the full history, just trimmed to the last 6 there.
+                // This cap is purely visual — prevents the scroll
+                // view from growing unbounded over a long session.
+                const fullChat = coachMode === 'trainer' ? workoutChat : nutritionChat;
+                const visibleChat = fullChat.length > 50 ? fullChat.slice(-50) : fullChat;
+                const hiddenCount = fullChat.length - visibleChat.length;
+                return (
+                  <>
+                    {hiddenCount > 0 && (
+                      <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, fontSize: 11, paddingVertical: 8 }]}>
+                        {hiddenCount} earlier message{hiddenCount !== 1 ? 's' : ''} hidden
+                      </Text>
+                    )}
+                    {visibleChat.map((m, idx) => (
+                      <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
+                        <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
+                      </View>
+                    ))}
+                  </>
+                );
+              })()}
               {trainerLoading && (
                 <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%', paddingVertical: 14, paddingHorizontal: 16 }]}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -3991,7 +4099,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             <ScrollView contentContainerStyle={styles.noteModalBody}>
               {nutritionistNote ? (
-                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{nutritionistNote}</Text>
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(nutritionistNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
                   <Text style={styles.noteModalEmptyIcon}>🌱</Text>
@@ -4023,7 +4131,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             <ScrollView contentContainerStyle={styles.noteModalBody}>
               {trainerNote ? (
-                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{trainerNote}</Text>
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(trainerNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
                   <Text style={styles.noteModalEmptyIcon}>🏗️</Text>

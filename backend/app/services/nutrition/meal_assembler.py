@@ -247,12 +247,43 @@ def build_skeleton_prompt(
             f"across {variety_n} days."
         )
 
-    routine_block = ""
+    # Routine awareness. Two possible sources:
+    #   (a) `req.mealRoutine` — free-text the user typed during onboarding
+    #   (b) `req.routineMacros` + `req.routineSlots` — structured pinned
+    #       meals from the in-app routine UI. The macros are already
+    #       SUBTRACTED from the target the AI sees, and the meal COUNT
+    #       the AI is asked to generate is ALREADY reduced by the number
+    #       of pinned routines.
+    # Either way, the AI must NOT recreate the routine meals — they're
+    # overlaid onto the plan by the client after generation. We pass the
+    # info in purely as context so the AI picks complementary meals.
+    routine_parts: list[str] = []
+    structured_routine_count = len(getattr(req, "routineSlots", None) or [])
+    structured_routine_macros = getattr(req, "routineMacros", None) or {}
+    if structured_routine_count > 0 or structured_routine_macros:
+        rc_cal  = int(structured_routine_macros.get("calories", 0) or 0)
+        rc_prot = int(structured_routine_macros.get("protein", 0) or 0)
+        rc_carb = int(structured_routine_macros.get("carbs", 0) or 0)
+        rc_fat  = int(structured_routine_macros.get("fat", 0) or 0)
+        routine_parts.append(
+            f"\nPINNED ROUTINE MEALS (handled separately — do NOT recreate them):\n"
+            f"- The user has {structured_routine_count} fixed meal(s) already pinned "
+            f"that will be added to the final plan automatically.\n"
+            f"- Those pinned meals account for {rc_cal} cal / {rc_prot}g P / "
+            f"{rc_carb}g C / {rc_fat}g F already.\n"
+            f"- The macro target and meals-per-day count shown below are ALREADY "
+            f"reduced to account for these pinned meals. Your job is to generate "
+            f"the REMAINING meals that complement them — no duplicates, no similar "
+            f"concepts to fill the same role. If you see 'chicken rice bowl' as a "
+            f"routine and you pick 'chicken rice plate', that's a duplicate; pick "
+            f"a different protein/carb combination instead.\n"
+        )
     if req.mealRoutine:
-        routine_block = (
-            f"\nUSER'S FIXED MEAL ROUTINE (must appear verbatim in every template):\n"
+        routine_parts.append(
+            f"\nUSER'S MEAL HABIT NOTES (context only, describe what they normally eat):\n"
             f"{req.mealRoutine}\n"
         )
+    routine_block = "".join(routine_parts)
 
     return f"""You are a registered dietitian. Pick meal concepts ONLY — no macros, no grams, no portions.
 
@@ -1217,6 +1248,15 @@ def assemble_nutrition_response(
     meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     generate_count = max(0, meals_per_day - routine_count)
 
+    # Always log the inputs the assembler saw so it's obvious from the
+    # server log whether routines made it through the client → backend
+    # → worker hand-off. Pairs with [plan-gen] routine inputs in plans.py.
+    print(
+        f"[meal_assembler] INPUTS — mealsPerDay={meals_per_day} "
+        f"routineCount={routine_count} routineMacros=(cal={r_cal},p={r_prot},c={r_carb},f={r_fat}) "
+        f"→ generate_count={generate_count}"
+    )
+
     if r_cal > 0 or routine_count > 0:
         print(
             f"[meal_assembler] routine offset: -{r_cal} cal / -{r_prot}P / "
@@ -1306,6 +1346,24 @@ def assemble_nutrition_response(
             "carbs":    t_carbs,
             "fat":      t_fat,
         }
+
+    # Loud guarantee check — every outgoing template must contain exactly
+    # `generate_count` meals. Anything else means the skeleton builder or
+    # validator miscounted. Client overlays `routine_count` routines on
+    # top, so the final displayed count lands on `meals_per_day`.
+    for idx, tpl_out in enumerate(plans_list):
+        actual = len(tpl_out.get("meals") or [])
+        print(
+            f"[meal_assembler] OUT template {idx}: meals={actual} "
+            f"(expected generate_count={generate_count}, "
+            f"client will overlay {routine_count} routine(s) → "
+            f"displayed total={generate_count + routine_count})"
+        )
+        if actual != generate_count:
+            print(
+                f"[meal_assembler] WARN template {idx} meal count mismatch: "
+                f"expected {generate_count}, got {actual}"
+            )
 
     print(
         f"[meal_assembler] assembled {len(plans_list)} template(s) "

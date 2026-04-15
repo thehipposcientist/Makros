@@ -153,12 +153,59 @@ export interface UserProfile {
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
 
+/** Per-set programming role. Emitted by the backend's
+ *  set_programming module so the UI can render heavy vs volume set
+ *  structure directly on the exercise card. */
+export type SetType = 'warmup' | 'heavy_top' | 'backoff' | 'volume' | 'technique';
+
+/** How the next-set / next-session recommender should bias
+ *  progression on this set: load first, reps first, or hold. */
+export type ProgressionMode = 'load_first' | 'reps_first' | 'fixed_skill';
+
+/** Source tag for a starting-weight recommendation. Matches
+ *  RecommendationSource on the backend. */
+export type WeightRecommendationSource =
+  | 'exact_history'
+  | 'substitution_group'
+  | 'movement_pattern'
+  | 'muscle_bucket'
+  | 'default';
+
+export interface PlannedSet {
+  setNumber: number;
+  setType: SetType;
+  targetReps: string;
+  targetRir: number;
+  targetWeightLbs: number | null;
+  progressionMode: ProgressionMode;
+}
+
 export interface Exercise {
   name: string;
   sets: number;
   reps: string;
   restSeconds: number;
   equipment: Equipment;
+  // ── New progression layer (all optional — backward compatible) ──
+  /** Anchor target weight for the FIRST working set. Heavy-top and
+   *  backoff loads inside setScheme are derived from this. Null when
+   *  the user has no transferable history and the default baseline
+   *  is too coarse to emit. */
+  targetWeightLbs?: number | null;
+  /** Where the recommendation came from — for UI attribution like
+   *  "Based on your last 3 bench sessions". */
+  weightRecommendationSource?: WeightRecommendationSource | null;
+  /** 0..1 confidence in the recommendation. */
+  weightRecommendationConfidence?: number | null;
+  /** Human-readable reason string safe to show in the UI. */
+  weightRecommendationReason?: string | null;
+  /** Per-set programming: set number, type, reps, RIR, target weight,
+   *  and progression mode. Rendered as heavy/backoff/volume pills in
+   *  the active-workout UI. */
+  setScheme?: PlannedSet[];
+  /** Session-over-session progression verdict when the plan is
+   *  regenerated from history ('increase_load' | 'hold_load' | 'reduce_load'). */
+  progressionAction?: 'increase_load' | 'hold_load' | 'reduce_load' | 'keep_reps' | 'add_rep' | null;
 }
 
 export interface WorkoutDay {
@@ -340,6 +387,26 @@ export interface WorkoutSummary {
   recommendations: string[];
 }
 
+/** Per-exercise logged detail kept alongside the AI summary so the
+ *  Progress screen can render "exactly what you did" — exercise name,
+ *  equipment, and every logged set (weight, reps, optional duration). */
+export interface StoredWorkoutSummaryExercise {
+  name: string;
+  equipment?: string | null;
+  targetSets?: number;
+  targetReps?: string;
+  sets: CompletedSet[];
+}
+
+/** End-of-workout feedback captured on the summary modal. Optional —
+ *  older summaries predating this field still load cleanly. */
+export interface StoredWorkoutSummaryFeedback {
+  feeling: WorkoutFeeling;
+  intensity: WorkoutIntensity;
+  sorenessAreas: string[];
+  notes?: string;
+}
+
 export interface StoredWorkoutSummary extends WorkoutSummary {
   id: string;
   date: string;        // ISO
@@ -349,6 +416,12 @@ export interface StoredWorkoutSummary extends WorkoutSummary {
   totalReps: number;
   startedAt?: string;  // ISO — exact workout start time
   endedAt?: string;    // ISO — exact workout end time
+  // Full per-exercise detail — what the user actually did. Populated
+  // at finish time; older summaries may omit this.
+  exercises?: StoredWorkoutSummaryExercise[];
+  // End-of-workout feedback. Populated by handleSubmitFeedback after
+  // the user taps submit on the feedback form.
+  feedback?: StoredWorkoutSummaryFeedback;
 }
 
 export interface GoalHistoryEntry {

@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .archetypes import DayArchetype, ARCHETYPE_META
+from .cardio import classify_cardio
 
 
 @dataclass
@@ -61,7 +62,7 @@ def prescribe_for_slot(
     if training_type == "power":
         return _prescribe_power(slot, exercise, inputs)
     if training_type == "conditioning":
-        return _prescribe_conditioning(archetype, slot, exercise)
+        return _prescribe_conditioning(archetype, slot, exercise, inputs)
     if training_type == "mobility":
         return _prescribe_mobility(slot, exercise)
     if training_type == "recovery":
@@ -70,7 +71,7 @@ def prescribe_for_slot(
         # Hybrid days pick per-exercise — cardio rows get a conditioning
         # prescription, strength rows get a lifting prescription.
         if exercise.get("movement_pattern") == "cardio":
-            return _prescribe_conditioning(archetype, slot, exercise)
+            return _prescribe_conditioning(archetype, slot, exercise, inputs)
         return _prescribe_lifting(slot, exercise, inputs)
     return _prescribe_lifting(slot, exercise, inputs)
 
@@ -114,18 +115,38 @@ def _prescribe_power(slot, exercise: dict, inputs) -> Prescription:
 
 
 def _prescribe_conditioning(
-    archetype: DayArchetype, slot, exercise: dict,
+    archetype: DayArchetype, slot, exercise: dict, inputs=None,
 ) -> Prescription:
-    """Cardio prescription shaped by both the archetype and the slot
-    role. Labels on the slot tell us whether this is a warmup, main
-    block, or cooldown."""
+    """Cardio prescription shaped by archetype, slot role, and the
+    user's session_minutes budget. Interval counts and tempo block
+    lengths scale with budget so a 60-minute cardio day doesn't ship
+    as a 28-minute workout.
+
+    Scaling rules:
+      - `session_minutes` pulled off `inputs` (PlannerInputs); defaults
+        to 45 if not provided.
+      - Pool of ~10 min for warmup + cooldown leaves `work_minutes`
+        for the main block.
+      - Short intervals: ~1.9 min per interval (45s on + 75s rest)
+        so `interval_count = round(work_minutes / 1.9)`, clamped 6-16.
+      - Long intervals: ~5 min per (3 min on + 2:30 rest),
+        `count = round(work_minutes / 5)`, clamped 4-8.
+      - Tempo / Zone 2: main block uses the full remaining work time.
+    """
     role = slot.role
     label = (slot.label or "").lower()
-    is_interval_ex = bool(exercise.get("is_compound"))
+    is_interval_ex = classify_cardio(exercise) == "intervals"
+    session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
+    # Warmup + cooldown together eat ~10 min. Work block gets the rest.
+    work_minutes = max(10, session_minutes - 10)
 
     if archetype == DayArchetype.COND_ZONE2:
         if role == "primary":
-            return Prescription(sets=1, reps="30-45 min", rest_seconds=0, rir_target=1.5)
+            # Zone 2 fills most of the session. Cap at 70 min so a
+            # wild session_minutes=180 request doesn't ship a 2h slog.
+            z2_min = max(20, min(70, session_minutes - 8))
+            z2_low = max(20, z2_min - 10)
+            return Prescription(sets=1, reps=f"{z2_low}-{z2_min} min", rest_seconds=0, rir_target=1.5)
         return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
 
     if archetype == DayArchetype.COND_INTERVALS_SHORT:
@@ -133,24 +154,28 @@ def _prescribe_conditioning(
             return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
         if "cooldown" in label:
             return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # Main intervals — 6-10 × 30-45 s on.
-        return Prescription(sets=8, reps="30-45s", rest_seconds=75, rir_target=1.5)
+        # ~1.9 min per interval (45s work + 75s rest). Budget-scaled.
+        count = max(6, min(16, round(work_minutes / 1.9)))
+        return Prescription(sets=count, reps="30-45s", rest_seconds=75, rir_target=1.5)
 
     if archetype == DayArchetype.COND_INTERVALS_LONG:
         if "warmup" in label:
             return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
         if "cooldown" in label:
             return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # 4-6 × 2-5 min on.
-        return Prescription(sets=5, reps="2-3 min", rest_seconds=150, rir_target=2.0)
+        # ~5 min per interval (3 min on + 2.5 min rest).
+        count = max(4, min(8, round(work_minutes / 5)))
+        return Prescription(sets=count, reps="2-3 min", rest_seconds=150, rir_target=2.0)
 
     if archetype == DayArchetype.COND_TEMPO:
         if "warmup" in label:
             return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
         if "cooldown" in label:
             return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # Main tempo block — sustained threshold pace.
-        return Prescription(sets=1, reps="18-25 min", rest_seconds=0, rir_target=1.5)
+        # Tempo block fills the work budget, capped at 45 min.
+        tempo_min = max(15, min(45, work_minutes))
+        tempo_low = max(12, tempo_min - 7)
+        return Prescription(sets=1, reps=f"{tempo_low}-{tempo_min} min", rest_seconds=0, rir_target=1.5)
 
     if archetype == DayArchetype.COND_CIRCUIT:
         # Circuit day — round-based.

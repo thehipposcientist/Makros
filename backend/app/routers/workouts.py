@@ -11,10 +11,41 @@ from app.models import (
 from app.auth import get_current_user
 
 
+class CompletedSetPayload(BaseModel):
+    """One logged set from the mobile active-workout screen. Reps and
+    weight are the actual values the user put in — not planned."""
+    set_number: int
+    reps: int = 0
+    weight_lbs: float = 0.0
+    duration_seconds: int | None = None  # for timed sets (plank, treadmill)
+    feedback: str | None = None          # easy / good / hard / failure / pain
+    rir: float | None = None
+
+
+class CompletedExercisePayload(BaseModel):
+    """One exercise from a finished mobile workout. `sets` is the list
+    of sets the user actually logged — may be shorter than the planned
+    target set count."""
+    name: str
+    target_sets: int | None = None
+    target_reps: str | None = None
+    equipment: str | None = None
+    order_index: int = 0
+    sets: list[CompletedSetPayload] = []
+
+
 class WorkoutCompleteRequest(BaseModel):
     workout_date: date
     focus_label: str
     duration_seconds: int = 0
+    # ── NEW: optional per-exercise detail ─────────────────────────
+    # When present, the completion path ALSO creates matching
+    # WorkoutSession / WorkoutExercise / ExerciseSet rows so downstream
+    # consumers (plan review, progression engine, analytics) can see
+    # real per-set history instead of just the focus_label + duration.
+    # Backward compatible — older mobile builds omit the field and
+    # only the lightweight WorkoutCompletion row is written.
+    exercises: list[CompletedExercisePayload] | None = None
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
@@ -112,8 +143,18 @@ def mark_workout_complete(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Record that the current user completed a workout on a given date."""
-    # Upsert: remove any existing completion for this user+date, then insert fresh
+    """Record that the current user completed a workout on a given date.
+
+    Two rows land in the DB on every completion:
+
+      1. `WorkoutCompletion` — lightweight marker (date, focus, duration).
+         Powers home screen + continuity rotation + calendar.
+      2. `WorkoutSession` + `WorkoutExercise` + `ExerciseSet` rows, IF
+         the mobile app included the optional `exercises` field. These
+         give downstream systems (plan_review, progression engine,
+         analytics) real per-set history instead of just a duration.
+    """
+    # Upsert the lightweight completion row.
     existing = db.exec(
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
@@ -131,8 +172,93 @@ def mark_workout_complete(
             focus_label=body.focus_label,
             duration_seconds=body.duration_seconds,
         ))
+
+    # Also persist structured per-exercise data if the client sent it.
+    # Best-effort: failures here must NOT block the lightweight
+    # completion — the user has finished their workout and expects
+    # the app to move on.
+    session_rows_created = 0
+    if body.exercises:
+        try:
+            from app.models import Exercise as _Exercise, WorkoutSource
+            # Upsert WorkoutSession by (user, date, focus). If the same
+            # (date, focus) pair already has a session, overwrite its
+            # exercises so re-submitting a completion replaces rather
+            # than duplicates — matches the lightweight-row upsert
+            # above and protects against the user tapping Finish twice.
+            existing_session = db.exec(
+                select(WorkoutSession)
+                .where(WorkoutSession.user_id == current_user.id)
+                .where(WorkoutSession.workout_date == body.workout_date)
+                .where(WorkoutSession.focus == body.focus_label)
+            ).first()
+            if existing_session:
+                # Drop old exercises + sets so we can re-insert cleanly.
+                old_exs = db.exec(
+                    select(WorkoutExercise)
+                    .where(WorkoutExercise.session_id == existing_session.id)
+                ).all()
+                for ox in old_exs:
+                    old_sets = db.exec(
+                        select(ExerciseSet)
+                        .where(ExerciseSet.workout_exercise_id == ox.id)
+                    ).all()
+                    for os in old_sets:
+                        db.delete(os)
+                    db.delete(ox)
+                existing_session.completed_at = datetime.now(timezone.utc)
+                session_row = existing_session
+                db.add(session_row)
+                db.flush()
+            else:
+                session_row = WorkoutSession(
+                    user_id=current_user.id,
+                    name=body.focus_label or "Workout",
+                    focus=body.focus_label or "",
+                    workout_date=body.workout_date,
+                    source=WorkoutSource.GENERATED,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                db.add(session_row)
+                db.flush()
+
+            for idx, ex_payload in enumerate(body.exercises):
+                resolved_exercise_id = None
+                if ex_payload.name:
+                    seed = db.exec(
+                        select(_Exercise).where(_Exercise.name.ilike(ex_payload.name))
+                    ).first()
+                    if seed is not None:
+                        resolved_exercise_id = seed.id
+
+                exercise = WorkoutExercise(
+                    session_id=session_row.id,
+                    exercise_id=resolved_exercise_id,
+                    name=ex_payload.name,
+                    order_index=ex_payload.order_index or idx,
+                    equipment=ex_payload.equipment,
+                    target_reps_text=ex_payload.target_reps,
+                    rest_seconds=None,
+                )
+                db.add(exercise)
+                db.flush()
+
+                for set_payload in ex_payload.sets:
+                    db.add(ExerciseSet(
+                        workout_exercise_id=exercise.id,
+                        set_number=set_payload.set_number,
+                        actual_reps=set_payload.reps,
+                        actual_weight_lbs=set_payload.weight_lbs,
+                        rir_target=set_payload.rir,
+                        completed=True,
+                        completed_at=datetime.now(timezone.utc),
+                    ))
+            session_rows_created = 1
+        except Exception as e:
+            print(f"[workouts/complete] structured persistence failed (non-fatal): {e}")
+
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "structured_persisted": bool(session_rows_created)}
 
 
 @router.get("/status")

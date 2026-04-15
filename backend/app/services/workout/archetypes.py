@@ -270,3 +270,64 @@ def is_recovery(a: DayArchetype) -> bool:
 
 def is_hybrid(a: DayArchetype) -> bool:
     return ARCHETYPE_META[a].category == "hybrid"
+
+
+# ── Archetype → focus bucket (single source of truth) ────────────────
+# Maps every archetype to the coarse "stress bucket" the weekly planner
+# uses for recent-focus continuity. This is an EXPLICIT table rather
+# than deriving buckets from default_name strings, because hybrids
+# like "Upper + Intervals" would otherwise normalize to 'cardio' via
+# keyword matching and silently break continuity. Buckets:
+#   upper_body, lower_body, full_body, cardio, mobility, recovery
+ARCHETYPE_TO_FOCUS_BUCKET: dict[DayArchetype, str] = {
+    # Lifting
+    DayArchetype.LIFT_FULL_BODY: "full_body",
+    DayArchetype.LIFT_UPPER: "upper_body",
+    DayArchetype.LIFT_LOWER: "lower_body",
+    DayArchetype.LIFT_PUSH: "upper_body",
+    DayArchetype.LIFT_PULL: "upper_body",
+    DayArchetype.LIFT_LEGS: "lower_body",
+    DayArchetype.LIFT_BRO_CHEST: "upper_body",
+    DayArchetype.LIFT_BRO_BACK: "upper_body",
+    DayArchetype.LIFT_BRO_SHOULDERS: "upper_body",
+    DayArchetype.LIFT_BRO_ARMS: "upper_body",
+    DayArchetype.LIFT_BRO_LEGS: "lower_body",
+    DayArchetype.LIFT_STRENGTH_MAINTENANCE: "full_body",
+    # Conditioning
+    DayArchetype.COND_ZONE2: "cardio",
+    DayArchetype.COND_INTERVALS_SHORT: "cardio",
+    DayArchetype.COND_INTERVALS_LONG: "cardio",
+    DayArchetype.COND_TEMPO: "cardio",
+    DayArchetype.COND_CIRCUIT: "cardio",
+    DayArchetype.COND_MIXED: "cardio",
+    DayArchetype.COND_SPRINT_POWER: "lower_body",
+    # Mobility / recovery
+    DayArchetype.MOBILITY_FLOW: "mobility",
+    DayArchetype.STRETCH_BLOCK: "mobility",
+    DayArchetype.RECOVERY_EASY: "recovery",
+    DayArchetype.STRESS_RELIEF_EASY: "recovery",
+    # Hybrids map to the body region they primarily stress
+    DayArchetype.HYBRID_STRENGTH_INTERVALS: "full_body",
+    DayArchetype.HYBRID_UPPER_INTERVALS: "upper_body",
+    DayArchetype.HYBRID_LOWER_POWER: "lower_body",
+    DayArchetype.HYBRID_FULL_BODY_CIRCUIT: "full_body",
+}
+
+
+def archetype_to_focus_bucket(a: DayArchetype) -> str:
+    """Return the coarse focus/stress bucket for an archetype. Every
+    archetype in the enum has an entry in `ARCHETYPE_TO_FOCUS_BUCKET`;
+    this helper exists so callers don't have to import the dict."""
+    return ARCHETYPE_TO_FOCUS_BUCKET[a]
+
+
+def archetype_conflicts_with_recent(
+    a: DayArchetype,
+    recent_focus_buckets: tuple[str, ...] | list[str],
+) -> bool:
+    """True when scheduling `a` today would repeat a stress bucket the
+    user trained in the last ~36 hours. Centralized so weekly_recipe,
+    planner, and any future continuity logic share one rule."""
+    if not recent_focus_buckets:
+        return False
+    return archetype_to_focus_bucket(a) in set(recent_focus_buckets)

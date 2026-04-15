@@ -2,6 +2,21 @@ import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-nativ
 import { Ionicons } from '@expo/vector-icons';
 import { WorkoutDay, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
+import { humanizeToken } from '../utils/exerciseGuide';
+
+/** Turn a planner-emitted equipment string into a display label.
+ *  The planner outputs comma-separated slugs like
+ *  `"barbell, flat_bench, squat_rack"` — each piece needs to be run
+ *  through `humanizeToken` individually so the underscores become
+ *  spaces and every word gets title-cased. */
+function formatEquipmentLabel(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .split(',')
+    .map(part => humanizeToken(part.trim()))
+    .filter(Boolean)
+    .join(', ');
+}
 
 interface WorkoutCardProps {
   workout: WorkoutDay;
@@ -16,14 +31,53 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
   const styles = createStyles(c, s);
 
   const totalSets        = workout.exercises.reduce((sum, ex) => sum + (Number(ex.sets) || 3), 0);
-  // Realistic duration estimate from the actual sets + rest time the
-  // planner prescribed — not a flat 8 min/exercise heuristic. Each set
-  // is ~45 s of working time plus the rest period, and we add ~60 s of
-  // setup/transition per exercise. The old heuristic showed ~40 min for
-  // a 60-minute plan because it ignored set count entirely.
+
+  // Realistic duration estimate. Strength sets get ~45 s of working
+  // time + the prescribed rest; timed sets (cardio intervals, zone 2
+  // blocks, planks, carries) are parsed from the `reps` string so a
+  // "30-45 min" zone 2 session doesn't estimate as 4 minutes.
+  //
+  // Supported rep formats parsed as time-per-set:
+  //   "30s", "45 sec", "60 seconds"           → seconds
+  //   "30-45s", "30-45 sec"                   → seconds (midpoint)
+  //   "5m", "5 min", "5 minutes"              → minutes
+  //   "30-45 min", "25-40 minutes"            → minutes (midpoint)
+  // A plain number or rep-range like "6-8" falls back to the
+  // 45s-per-set working estimate (normal strength set timing).
+  const parseWorkSecondsPerSet = (reps: unknown): number | null => {
+    if (reps == null) return null;
+    const s = String(reps).trim().toLowerCase();
+    if (!s) return null;
+    const secMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)$/);
+    if (secMatch) {
+      const lo = parseInt(secMatch[1], 10);
+      const hi = secMatch[2] ? parseInt(secMatch[2], 10) : lo;
+      return Math.round((lo + hi) / 2);
+    }
+    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)$/);
+    if (minMatch) {
+      const lo = parseInt(minMatch[1], 10);
+      const hi = minMatch[2] ? parseInt(minMatch[2], 10) : lo;
+      return Math.round(((lo + hi) / 2) * 60);
+    }
+    return null;
+  };
+
   const estimatedSeconds = workout.exercises.reduce((total, ex) => {
     const sets = Number(ex.sets) || 3;
     const rest = Number((ex as any).restSeconds) || 60;
+    const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps);
+    if (timedWorkSec != null) {
+      // Timed exercise: use the actual working time per set. Rest
+      // between sets still counts (for interval work with rest
+      // between intervals). Add 60s setup per exercise.
+      return total + sets * (timedWorkSec + rest) + 60;
+    }
+    // Classic strength set: ~45s of work + prescribed rest. The
+    // backend's density budget already bakes ramp-up/warmup time
+    // into its primary-slot cost (primary=12 min includes warmup),
+    // so we do NOT add extra warmup seconds here — that would
+    // double-count against the session_minutes budget.
     return total + sets * (45 + rest) + 60;
   }, 0);
   const estimatedMinutes = Math.max(1, Math.round(estimatedSeconds / 60));
@@ -40,6 +94,9 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
         <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
         <StatItem icon="barbell-outline" value={`${workout.exercises.length} exercises`} color={s.strong} />
       </View>
+      <Text style={styles.warmupHint}>
+        Includes ~5 min warm-up time at the start of the session.
+      </Text>
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}
       <View style={styles.body}>
@@ -98,7 +155,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
       <View style={styles.exInfo}>
         <Text style={[styles.exName, { color: c.textPrimary }]}>{exercise.name}</Text>
         {exercise.equipment ? (
-          <Text style={[styles.exEquipment, { color: c.textMuted }]}>{exercise.equipment}</Text>
+          <Text style={[styles.exEquipment, { color: c.textMuted }]}>{formatEquipmentLabel(exercise.equipment)}</Text>
         ) : null}
 
         {/* Chips */}
@@ -184,6 +241,15 @@ const createStyles = (
     paddingBottom: 6,
   },
   statsDivider: { width: 1, height: 12 },
+
+  warmupHint: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: c.textMuted,
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+    fontStyle: 'italic',
+  },
 
   // Body
   body: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 8 },

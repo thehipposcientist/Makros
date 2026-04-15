@@ -1,0 +1,556 @@
+"""AI plan-review layer.
+
+After the deterministic planner emits a full plan, this module builds
+a compact brief and asks an LLM to sanity-check it against the user's
+goal + recent training. The LLM returns a structured verdict:
+
+    { "status": "ok" | "modify",
+      "notes": str,
+      "patches": [ {action, day_index, exercise_index?, ...}, ... ] }
+
+If `status == "modify"`, `apply_patches(plan, patches)` applies the
+changes deterministically — no free-form LLM rewrites of the plan.
+Patch types are:
+
+    swap_exercise    — replace exercise at (day_index, exercise_index)
+    remove_exercise  — drop exercise at (day_index, exercise_index)
+    add_exercise     — append exercise to day_index
+    change_sets_reps — edit sets/reps/rest on an existing exercise
+    change_focus     — retitle a day (no exercise shuffle)
+
+Anything outside this vocabulary is ignored (logged, not applied) so
+the AI can't accidentally tear the plan apart. The brief intentionally
+only surfaces the next ≤3 days to keep the call cheap.
+
+This module is small and pure except for one AI call. It does NOT
+import the planner or DB — the caller builds the brief, calls
+`review_plan`, and applies patches back on the plan dict.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Literal, Optional
+
+
+# ── Types ────────────────────────────────────────────────────────────
+
+ReviewStatus = Literal["ok", "modify"]
+
+PatchAction = Literal[
+    "swap_exercise",
+    "remove_exercise",
+    "add_exercise",
+    "change_sets_reps",
+    "change_focus",
+]
+
+
+@dataclass
+class PlanPatch:
+    action: PatchAction
+    day_index: int
+    exercise_index: Optional[int] = None  # required for swap/remove/change_sets_reps
+    # Payload fields — only the ones relevant to the action are read.
+    new_name: Optional[str] = None           # swap_exercise, add_exercise
+    new_equipment: Optional[str] = None      # swap_exercise, add_exercise
+    new_sets: Optional[int] = None           # swap_exercise, add_exercise, change_sets_reps
+    new_reps: Optional[str] = None           # swap_exercise, add_exercise, change_sets_reps
+    new_rest_seconds: Optional[int] = None   # swap_exercise, add_exercise, change_sets_reps
+    new_focus: Optional[str] = None          # change_focus
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> Optional["PlanPatch"]:
+        """Parse one patch from the AI's JSON output, tolerating
+        missing/unknown fields. Returns None if the patch is too
+        malformed to apply (missing action or day_index)."""
+        if not isinstance(raw, dict):
+            return None
+        action = raw.get("action")
+        if action not in (
+            "swap_exercise", "remove_exercise", "add_exercise",
+            "change_sets_reps", "change_focus",
+        ):
+            return None
+        try:
+            day_index = int(raw.get("day_index"))
+        except (TypeError, ValueError):
+            return None
+        ex_idx_raw = raw.get("exercise_index")
+        exercise_index = None
+        if ex_idx_raw is not None:
+            try:
+                exercise_index = int(ex_idx_raw)
+            except (TypeError, ValueError):
+                exercise_index = None
+        return cls(
+            action=action,
+            day_index=day_index,
+            exercise_index=exercise_index,
+            new_name=raw.get("new_name"),
+            new_equipment=raw.get("new_equipment"),
+            new_sets=_maybe_int(raw.get("new_sets")),
+            new_reps=raw.get("new_reps"),
+            new_rest_seconds=_maybe_int(raw.get("new_rest_seconds")),
+            new_focus=raw.get("new_focus"),
+            reason=str(raw.get("reason") or ""),
+        )
+
+
+@dataclass
+class PlanReview:
+    status: ReviewStatus
+    notes: str
+    patches: list[PlanPatch] = field(default_factory=list)
+    error: Optional[str] = None  # set when the AI call fails; status falls back to "ok"
+
+
+def _maybe_int(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# ── Brief builder ────────────────────────────────────────────────────
+
+
+# Brief caps. The full plan (all days) is included so the reviewer
+# can spot week-level imbalance — recomp with no cardio, strength
+# with two arm days and no legs, etc. Per-day exercise count stays
+# capped so one day with 14 accessories doesn't blow the token budget.
+BRIEF_MAX_EXERCISES_PER_DAY = 10
+
+
+def build_plan_brief(
+    plan: dict,
+    *,
+    goal: str,
+    days_per_week: int,
+    experience: str,
+    recent_completed: list[dict] | None = None,
+    injuries: tuple[str, ...] | list[str] = (),
+    focused_muscle: Optional[str] = None,
+    secondary_goal: Optional[str] = None,
+    goal_details: Optional[dict] = None,
+) -> dict:
+    """Compact JSON brief the AI reviewer will read.
+
+    Contents:
+      - user context: goal, experience, days/week, focused muscle, injuries
+      - `recent_completed`: the user's last ~3 days of finished workouts
+        (focus, workout_date, duration) so the reviewer can spot
+        continuity risks (e.g. legs yesterday AND today) AND big-picture
+        issues (e.g. user has done five lifting days this week but no
+        cardio — flag for a recomp goal)
+      - `plan_days`: every day of the proposed plan, with up to
+        `BRIEF_MAX_EXERCISES_PER_DAY` exercises per day
+
+    The brief is a pure function of the plan dict + caller-provided
+    context — this module never touches the DB.
+    """
+    wp = (plan or {}).get("workout_plan", {}) or {}
+    days = wp.get("days", []) or []
+    brief_days: list[dict] = []
+    for di, d in enumerate(days):
+        exs = d.get("exercises", []) or []
+        exs_brief = []
+        for ei, e in enumerate(exs[:BRIEF_MAX_EXERCISES_PER_DAY]):
+            exs_brief.append({
+                "index": ei,
+                "name": e.get("name"),
+                "sets": e.get("sets"),
+                "reps": e.get("reps"),
+                "rest_seconds": e.get("restSeconds"),
+                "equipment": e.get("equipment"),
+                "target_weight_lbs": e.get("targetWeightLbs"),
+                "role": e.get("_role"),
+                "primary_muscle": e.get("_primary_muscle"),
+            })
+        brief_days.append({
+            "index": di,
+            "day": d.get("day"),
+            "focus": d.get("focus"),
+            "category": d.get("category"),
+            "exercises": exs_brief,
+        })
+
+    # Recent-completed history — optionally rich. Each entry may
+    # carry an `exercises` list (from structured WorkoutSession rows)
+    # with real per-set reps/weight, or it may just be a focus label
+    # + date (lightweight WorkoutCompletion fallback). The reviewer
+    # prompt handles both shapes gracefully.
+    recent_brief: list[dict] = []
+    for r in (recent_completed or [])[:6]:
+        ex_in = r.get("exercises") or []
+        ex_out: list[dict] = []
+        for e in ex_in[:BRIEF_MAX_EXERCISES_PER_DAY]:
+            sets_in = e.get("sets") or []
+            sets_out = [
+                {
+                    "set": s.get("set_number"),
+                    "reps": s.get("reps"),
+                    "weight_lbs": s.get("weight_lbs"),
+                }
+                for s in sets_in[:8]
+            ]
+            ex_out.append({
+                "name": e.get("name"),
+                "equipment": e.get("equipment"),
+                "target_reps": e.get("target_reps"),
+                "logged_sets": sets_out,
+            })
+        recent_brief.append({
+            "focus": r.get("focus") or r.get("focus_label") or r.get("name") or "",
+            "workout_date": str(r.get("workout_date") or r.get("performed_on") or ""),
+            "duration_minutes": (
+                round((r.get("duration_seconds") or 0) / 60)
+                if r.get("duration_seconds") else None
+            ),
+            "exercises": ex_out,
+        })
+
+    return {
+        "goal": goal,
+        "secondary_goal": secondary_goal,
+        "goal_details": goal_details,
+        "days_per_week": days_per_week,
+        "experience": experience,
+        "focused_muscle": focused_muscle,
+        "injuries": list(injuries or ()),
+        "recent_completed": recent_brief,
+        "planner_mode": wp.get("planner_mode"),
+        "goal_bucket": wp.get("goal_bucket"),
+        "plan_days": brief_days,
+    }
+
+
+# ── AI reviewer ──────────────────────────────────────────────────────
+
+
+_SYSTEM_PROMPT = """You are a strength & conditioning reviewer auditing a deterministic \
+workout plan. You are NOT a generator — you never rewrite the plan from scratch. \
+You only point out problems and propose small, surgical patches.
+
+You will receive a compact JSON brief describing:
+- the user's PRIMARY goal (`goal` / `goal_bucket`) — the dominant driver of plan shape
+- `secondary_goal`: optional side-goal (e.g. "maintain strength" on a fat loss plan, \
+  "improve conditioning" on a hypertrophy plan). When present, the plan should make \
+  room for it without compromising the primary. If absent or null, ignore it.
+- `goal_details`: free-form dict the user filled in during onboarding (target \
+  bodyweight, deadline, preferences). Use it to refine your read on the plan — do \
+  NOT reject it just because it's sparse.
+- `focused_muscle`: muscle group the user asked to emphasize (e.g. "chest", "glutes", \
+  "back"). When present, the plan MUST show extra exposure to this muscle — either \
+  a dedicated isolation accessory on every lifting day OR a higher set count on \
+  compounds that hit it. If focused_muscle is set and you don't see clear extra \
+  exposure, that's a patch case (add an accessory via add_exercise).
+- experience, days/week, injuries
+- `recent_completed`: their last three days of finished workouts. Each entry has a \
+  `focus` label (e.g. "Pull", "Legs & Core", "Upper Body"), a `workout_date`, a \
+  `duration_minutes`, and an `exercises` list. The `exercises` list is OFTEN EMPTY — \
+  that means per-set data wasn't captured for that day, NOT that the user did zero \
+  exercises. Always treat the `focus` string as the ground truth for what they trained. \
+  Do NOT claim a user "did only cardio" or "did nothing" just because `exercises` is \
+  empty — use the `focus` label to understand what muscle groups they hit.
+- `plan_days`: the FULL proposed plan, every day, with exercises (name, sets, reps, \
+  rest, target weight, role). Indexes are 0-based and stable — patches must reference \
+  the same index you see here. `target_weight_lbs` is null for cardio, mobility, and \
+  timed holds by design — that is NOT a bug, do not patch it.
+
+Use the goal and the last three days of real training to judge fit. Look for:
+- recent upper/lower/push/pull/legs trained yesterday (check the `focus` string!) AND \
+  scheduled again today (continuity risk — flag and propose a swap)
+- week-level imbalance relative to the goal: recomp with zero cardio days, strength \
+  with only 10-15 rep volume ranges on compounds, endurance with five lifting days \
+  and no cardio, muscle gain with only 2 lifting days when days_per_week is 5
+- missing focused-muscle exposure when the user asked for it
+- injury conflicts (e.g. knee injury but heavy squats programmed)
+- obviously wrong rep ranges for the goal (5x5 for fat loss, 4x15 for strength)
+- any day with zero exercises
+- duplicate exercises stacked in the same day
+
+CRITICAL RULES for the `status` field:
+- If the plan has ANY of the issues above → status MUST be "modify" AND you MUST \
+  emit at least one patch fixing the biggest issue. It is INVALID to say "status=ok" \
+  and then list problems in `notes`. If you identify a problem, fix it with a patch.
+- If the plan genuinely has no issues → status="ok" with empty patches and a one-line \
+  `notes` confirming the plan looks good.
+- Do NOT use phrases like "lacks balance", "does not align", "risk of", \
+  "could lead to", "back-to-back", "without adequate recovery", "imbalance", or \
+  "continuity risk" in your notes UNLESS status="modify" with at least one patch. \
+  These phrases are monitored and a status=ok response containing any of them will \
+  be treated as a reviewer failure and the plan will be regenerated from scratch.
+- When in doubt between ok and modify, pick modify and emit a patch. Emitting a \
+  conservative patch is far better than shipping notes-only complaints.
+
+If it needs fixing, return status "modify" with a SHORT list of patches. Patch actions:
+- swap_exercise: replace one exercise; fields: day_index, exercise_index, new_name, new_equipment, new_sets, new_reps, new_rest_seconds, reason
+- remove_exercise: drop one exercise; fields: day_index, exercise_index, reason
+- add_exercise: append an exercise to a day; fields: day_index, new_name, new_equipment, new_sets, new_reps, new_rest_seconds, reason
+- change_sets_reps: retune volume on an existing exercise; fields: day_index, exercise_index, new_sets, new_reps, new_rest_seconds, reason
+- change_focus: retitle a day's focus; fields: day_index, new_focus, reason
+
+Return ONLY valid JSON in this shape:
+{"status": "ok" | "modify", "notes": "one-paragraph summary of the verdict", "patches": [ ... ]}
+
+Be conservative — prefer 0-2 patches over rewriting the week. Every patch needs a \
+one-sentence `reason` explaining why the original was wrong. Patches outside the \
+five actions above will be ignored.
+"""
+
+
+_REVIEW_JSON_SCHEMA = {
+    "name": "plan_review",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["status", "notes", "patches"],
+        "properties": {
+            "status": {"type": "string", "enum": ["ok", "modify"]},
+            "notes": {"type": "string"},
+            "patches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "required": ["action", "day_index", "reason"],
+                    "properties": {
+                        "action": {"type": "string"},
+                        "day_index": {"type": "integer"},
+                        "exercise_index": {"type": ["integer", "null"]},
+                        "new_name": {"type": ["string", "null"]},
+                        "new_equipment": {"type": ["string", "null"]},
+                        "new_sets": {"type": ["integer", "null"]},
+                        "new_reps": {"type": ["string", "null"]},
+                        "new_rest_seconds": {"type": ["integer", "null"]},
+                        "new_focus": {"type": ["string", "null"]},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def review_plan(brief: dict) -> PlanReview:
+    """Make one AI call to review the brief. Returns a PlanReview.
+
+    On any exception (no API key, network error, bad JSON) returns
+    `PlanReview(status="ok", notes="review unavailable", error=...)`.
+    Callers should treat an `error`-bearing review as "no changes" so
+    a reviewer outage never blocks plan generation.
+    """
+    try:
+        from openai import OpenAI
+        from ...routers.ai.utils import (
+            _build_chat_kwargs,
+            _chat_create,
+            _extract_json,
+            get_openai_api_key,
+            model_plan_update,
+        )
+    except Exception as exc:
+        return PlanReview(status="ok", notes="reviewer unavailable", error=f"import: {exc}")
+
+    try:
+        api_key = get_openai_api_key()
+    except Exception as exc:
+        return PlanReview(status="ok", notes="reviewer unavailable", error=f"api key: {exc}")
+    if not api_key:
+        return PlanReview(status="ok", notes="reviewer unavailable", error="no api key")
+
+    try:
+        client = OpenAI(api_key=api_key)
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Review this plan brief and decide whether it needs changes.\n\n"
+                    + json.dumps(brief, indent=2)
+                ),
+            },
+        ]
+        kwargs = _build_chat_kwargs(
+            model_plan_update(),
+            messages,
+            json_schema=_REVIEW_JSON_SCHEMA,
+            max_tokens=1200,
+            timeout_secs=35,
+        )
+        response = _chat_create(client, **kwargs)
+        raw = response.choices[0].message.content or ""
+        parsed = _extract_json(raw)
+    except Exception as exc:
+        print(f"[plan_review] AI call failed: {exc}")
+        return PlanReview(status="ok", notes="review call failed", error=str(exc))
+
+    status = parsed.get("status")
+    if status not in ("ok", "modify"):
+        return PlanReview(status="ok", notes=str(parsed.get("notes") or ""), error=f"bad status: {status}")
+    notes = str(parsed.get("notes") or "")
+    raw_patches = parsed.get("patches") or []
+    patches: list[PlanPatch] = []
+    if isinstance(raw_patches, list):
+        for rp in raw_patches:
+            p = PlanPatch.from_dict(rp)
+            if p is not None:
+                patches.append(p)
+    if status == "modify" and not patches:
+        # AI said "modify" but gave zero applicable patches — degrade
+        # to "ok" so we don't regenerate infinitely.
+        status = "ok"
+    # Contradiction detector: AI returned status=ok but its notes
+    # describe real problems. This is a prompt failure mode we saw in
+    # production — the model identifies problems in prose but forgets
+    # to emit patches. Logged loudly so we can iterate, surfaced via
+    # PlanReview.error so the debug sidecar carries it, and triggers
+    # the AI regenerate fallback downstream.
+    #
+    # The word list is intentionally broad. Every term here was pulled
+    # from a real prod log where the reviewer said "ok" while describing
+    # actual issues — "back-to-back", "lacks balance", "does not align",
+    # "risk of fatigue", "continuity risk", etc. False positives here
+    # are cheap (they trigger AI regenerate which is bounded); false
+    # negatives ship broken plans.
+    if status == "ok" and notes:
+        problem_terms = (
+            # Imbalance family
+            "imbalance", "imbalanced", "lack of", "lacks", "lacking",
+            "mismatch", "conflict", "does not align", "doesn't align",
+            "not aligned", "out of line", "disproportionate",
+            # Missing / insufficient
+            "missing", "absent", "no cardio", "no lifting", "no upper",
+            "no lower", "no push", "no pull", "no legs",
+            "too much", "too many", "too few", "too little",
+            "not enough", "insufficient", "inadequate", "needs more",
+            "needs to", "should include", "should have", "should add",
+            "should be", "recommend adding", "recommend including",
+            "would benefit", "would be better",
+            # Continuity / recovery risk
+            "back-to-back", "back to back", "continuity risk",
+            "risk of", "could lead to", "risk of fatigue",
+            "without adequate", "without enough", "without proper",
+            "insufficient recovery", "inadequate recovery",
+            "overlap", "overlaps", "overlapping",
+            "same focus", "same muscle",
+            # Goal-mismatch
+            "not suitable", "not appropriate", "doesn't match",
+            "does not match", "mismatched", "wrong for",
+        )
+        low = notes.lower()
+        hits = [t for t in problem_terms if t in low]
+        if hits:
+            error_msg = f"ok-with-complaints: notes mention {hits[:5]}"
+            print(f"[plan_review] CONTRADICTION: AI returned ok but notes describe problems → {error_msg}")
+            print(f"[plan_review] full notes: {notes}")
+            return PlanReview(status=status, notes=notes, patches=patches, error=error_msg)
+    return PlanReview(status=status, notes=notes, patches=patches)
+
+
+# ── Patch application ───────────────────────────────────────────────
+
+
+def apply_patches(plan: dict, patches: list[PlanPatch]) -> tuple[dict, list[str]]:
+    """Mutate `plan` in place applying each patch. Returns the plan
+    plus a list of human-readable application messages for logging.
+
+    Patches that reference out-of-range indices or missing fields are
+    skipped (logged, not applied) so a buggy AI response can't corrupt
+    the plan. Order matters: patches are applied in the order received,
+    which means later patches see the results of earlier ones — the AI
+    is instructed to return a short list so this is fine.
+    """
+    applied: list[str] = []
+    wp = (plan or {}).get("workout_plan", {})
+    days = wp.get("days", []) if isinstance(wp, dict) else []
+    if not isinstance(days, list):
+        return plan, ["no days list in plan"]
+
+    for p in patches:
+        msg = _apply_one(days, p)
+        applied.append(msg)
+    return plan, applied
+
+
+def _apply_one(days: list[dict], p: PlanPatch) -> str:
+    if not (0 <= p.day_index < len(days)):
+        return f"skip {p.action}: day_index {p.day_index} out of range"
+    day = days[p.day_index]
+    exs = day.get("exercises") or []
+
+    if p.action == "change_focus":
+        if not p.new_focus:
+            return "skip change_focus: no new_focus provided"
+        old = day.get("focus")
+        day["focus"] = p.new_focus
+        return f"change_focus day={p.day_index} {old!r}→{p.new_focus!r} ({p.reason})"
+
+    if p.action == "remove_exercise":
+        if p.exercise_index is None or not (0 <= p.exercise_index < len(exs)):
+            return f"skip remove_exercise: bad exercise_index {p.exercise_index}"
+        removed = exs.pop(p.exercise_index)
+        day["exercises"] = exs
+        return f"remove day={p.day_index} idx={p.exercise_index} name={removed.get('name')!r} ({p.reason})"
+
+    if p.action == "swap_exercise":
+        if p.exercise_index is None or not (0 <= p.exercise_index < len(exs)):
+            return f"skip swap_exercise: bad exercise_index {p.exercise_index}"
+        if not p.new_name:
+            return "skip swap_exercise: no new_name provided"
+        old = exs[p.exercise_index]
+        new_ex = {
+            "name": p.new_name,
+            "sets": p.new_sets if p.new_sets is not None else old.get("sets", 3),
+            "reps": p.new_reps or old.get("reps", "8-12"),
+            "restSeconds": p.new_rest_seconds if p.new_rest_seconds is not None else old.get("restSeconds", 90),
+            "equipment": p.new_equipment or old.get("equipment", "bodyweight"),
+            # Preserve role metadata so set-scheme stamping still works.
+            "_role": old.get("_role"),
+            "_slot": old.get("_slot"),
+            "_rir_target": old.get("_rir_target"),
+            "_primary_muscle": old.get("_primary_muscle"),
+            "_secondary_muscles": old.get("_secondary_muscles"),
+            "_review_patched": True,
+        }
+        exs[p.exercise_index] = new_ex
+        return f"swap day={p.day_index} idx={p.exercise_index} {old.get('name')!r}→{p.new_name!r} ({p.reason})"
+
+    if p.action == "change_sets_reps":
+        if p.exercise_index is None or not (0 <= p.exercise_index < len(exs)):
+            return f"skip change_sets_reps: bad exercise_index {p.exercise_index}"
+        ex = exs[p.exercise_index]
+        changed = []
+        if p.new_sets is not None:
+            changed.append(f"sets {ex.get('sets')}→{p.new_sets}")
+            ex["sets"] = p.new_sets
+        if p.new_reps:
+            changed.append(f"reps {ex.get('reps')!r}→{p.new_reps!r}")
+            ex["reps"] = p.new_reps
+        if p.new_rest_seconds is not None:
+            changed.append(f"rest {ex.get('restSeconds')}→{p.new_rest_seconds}")
+            ex["restSeconds"] = p.new_rest_seconds
+        ex["_review_patched"] = True
+        return f"change_sets_reps day={p.day_index} idx={p.exercise_index} " + ", ".join(changed) + f" ({p.reason})"
+
+    if p.action == "add_exercise":
+        if not p.new_name:
+            return "skip add_exercise: no new_name provided"
+        new_ex = {
+            "name": p.new_name,
+            "sets": p.new_sets if p.new_sets is not None else 3,
+            "reps": p.new_reps or "8-12",
+            "restSeconds": p.new_rest_seconds if p.new_rest_seconds is not None else 90,
+            "equipment": p.new_equipment or "bodyweight",
+            "_role": "accessory",
+            "_review_patched": True,
+        }
+        day["exercises"] = list(exs) + [new_ex]
+        return f"add day={p.day_index} name={p.new_name!r} ({p.reason})"
+
+    return f"skip unknown action {p.action}"

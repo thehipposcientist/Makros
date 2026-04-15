@@ -379,23 +379,31 @@ def _is_bodyweight_pick(seed_slug: str) -> bool:
 
 def test_recomp_with_gym_no_bodyweight_in_primary_or_secondary() -> None:
     """A recomp user with a full gym should never get a bodyweight pick
-    on a primary or secondary slot. Isolation/core can still be BW."""
-    print("\n[test] recomp + full gym → no bodyweight on primary/secondary slots")
+    on a LIFTING primary or secondary slot. Isolation/core can still
+    be BW. Cardio days are excluded — bodyweight cardio (cycling,
+    HIIT circuit, running) is the correct output there and not a
+    violation of the lift-focused scoring rule."""
+    print("\n[test] recomp + full gym → no bodyweight on lifting primary/secondary slots")
     inputs = _gym_recomp_inputs(rng_seed=42)
     plan = generate_workout_plan(inputs, SEED_EXERCISES)
 
     bw_violations = []
     for d in plan["workout_plan"]["days"]:
+        # Skip cardio / mobility / recovery days — the no-bodyweight
+        # rule is specifically about lift-focused slot scoring.
+        if d.get("category") != "lift":
+            continue
         for ex in d["exercises"]:
             role = ex.get("_role")
             if role in ("primary", "secondary") and _is_bodyweight_pick(ex.get("_slug", "")):
                 bw_violations.append(f"{d['day']}/{ex['_slot']}: {ex['name']}")
 
     assert not bw_violations, (
-        f"recomp+gym should not have bodyweight in primary/secondary slots: "
+        f"recomp+gym should not have bodyweight in primary/secondary lifting slots: "
         f"{bw_violations}"
     )
-    _ok(f"all primary/secondary slots are loaded across {len(plan['workout_plan']['days'])} days")
+    lift_days = sum(1 for d in plan["workout_plan"]["days"] if d.get("category") == "lift")
+    _ok(f"all lifting primary/secondary slots are loaded across {lift_days} lift days")
 
 
 def test_recomp_squat_slot_picks_loaded_over_bodyweight() -> None:

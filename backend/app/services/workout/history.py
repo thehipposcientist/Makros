@@ -116,6 +116,93 @@ def build_history_familiarity(
     return counts
 
 
+def most_recent_completed_focus(
+    user_id: int,
+    db_session,
+    *,
+    hours: int = 36,
+    limit: int = 2,
+) -> list[str]:
+    """Return normalized focus buckets for the user's most-recent
+    completed workouts within the last `hours` hours, newest first.
+
+    **Important: reads from `WorkoutCompletion`, not `WorkoutSession`.**
+    The mobile "Finish Workout" button posts to `/workouts/complete`,
+    which writes to `WorkoutCompletion` (a lightweight completion
+    marker with `workout_date` + `focus_label` + `completed_at`).
+    `WorkoutSession.completed_at` only gets populated when the user
+    logs every individual set via the structured-log endpoint, which
+    is a niche path most users never hit. Querying `WorkoutSession`
+    was the root cause of the rotation silently failing in production
+    — it always returned `None` because that table was almost always
+    empty for the current user.
+
+    Behavior:
+      - Returns up to `limit` buckets (default 2) so the planner can
+        avoid repeating the last TWO focuses, not just the last one.
+      - Each entry is one of `{"lower_body", "upper_body", "full_body",
+        "cardio", "mobility", "recovery"}`. Raw `focus_label` strings
+        are piped through `normalize_focus_to_bucket` so variants
+        like "Lower 2 — Hinge Bias", "Leg Day", "Back & Biceps",
+        "Upper Body", "Legs 1" all resolve correctly.
+      - Completions whose raw focus doesn't normalize are silently
+        skipped so we don't return garbage buckets to the rotation.
+      - Uses a naive `datetime.utcnow()` cutoff to match the
+        `TIMESTAMP WITHOUT TIME ZONE` column storage. Mixing
+        tz-aware and naive was the other silent-failure mode.
+      - `WorkoutCompletion` also tracks `workout_date` as a bare
+        `DATE` column — we additionally accept anything whose date
+        is today or yesterday, so a user who completed a workout
+        earlier today but whose `completed_at` somehow drifted still
+        shows up. (Belt-and-suspenders against timezone weirdness.)
+
+    Returns an empty list when no recent completions exist.
+    """
+    from datetime import date, datetime, timedelta
+    from sqlmodel import select, or_
+    from app.models import WorkoutCompletion
+    from .focus_normalize import normalize_focus_to_bucket
+
+    now_naive = datetime.utcnow()
+    cutoff_dt = now_naive - timedelta(hours=hours)
+    # Accept anything completed within the time window OR whose
+    # workout_date is today or yesterday (date-level fallback).
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    rows = db_session.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == user_id)
+        .where(
+            or_(
+                WorkoutCompletion.completed_at >= cutoff_dt,
+                WorkoutCompletion.workout_date >= yesterday,
+            )
+        )
+        .order_by(WorkoutCompletion.completed_at.desc())
+        .limit(max(limit, 5))  # over-fetch a bit so we can drop unnormalizable rows
+    ).all()
+
+    buckets: list[str] = []
+    for row in rows:
+        raw_focus = (row.focus_label or "").strip()
+        bucket = normalize_focus_to_bucket(raw_focus)
+        inside_cutoff = (
+            row.completed_at is not None and row.completed_at >= cutoff_dt
+        ) or (
+            row.workout_date is not None and row.workout_date >= yesterday
+        )
+        print(
+            f"[history] recent completion: workout_date={row.workout_date} "
+            f"completed_at={row.completed_at} raw_focus={raw_focus!r} "
+            f"normalized={bucket!r} inside_cutoff={inside_cutoff}"
+        )
+        if bucket and len(buckets) < limit:
+            buckets.append(bucket)
+    print(f"[history] recent focus buckets (last {hours}h, up to {limit}): {buckets}")
+    return buckets
+
+
 # ─── Layer 2 — Last session lookup ───────────────────────────────────────────
 
 

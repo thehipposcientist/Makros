@@ -12,6 +12,7 @@ import {
   Platform,
 } from 'react-native';
 import { colors, radius } from '../constants/theme';
+import { cleanAiText } from '../utils/aiText';
 import {
   submitCoachCheckin,
   CoachCheckinFeedback,
@@ -216,7 +217,7 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
               <>
                 <View style={[styles.responseHeader, { borderLeftColor: responseColor(response.response_type) }]}>
                   <Text style={styles.responseType}>{response.response_type.replace('_', ' ')}</Text>
-                  <Text style={styles.responseMessage}>{response.message}</Text>
+                  <Text style={styles.responseMessage}>{cleanAiText(response.message)}</Text>
                 </View>
 
                 {response.delta && (
