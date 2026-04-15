@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -11,8 +11,9 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { colors, radius } from '../constants/theme';
+import { getTheme, radius } from '../constants/theme';
 import { cleanAiText } from '../utils/aiText';
+import type { AppThemeName } from '../types';
 import {
   submitCoachCheckin,
   CoachCheckinFeedback,
@@ -35,6 +36,8 @@ interface Props {
   onClose: () => void;
   /** Called after a successful check-in so the parent can refresh state. */
   onCompleted?: (response: CoachCheckinResponse) => void;
+  /** Active theme — falls back to `midnight` when not provided. */
+  themeName?: AppThemeName;
 }
 
 type Scale = 1 | 2 | 3 | 4 | 5;
@@ -46,7 +49,10 @@ const SCALE_LABELS: Record<string, string[]> = {
   motivation: ['Zero',    'Low',  'OK',     'Good',  'Fired up'],
 };
 
-export default function CoachCheckinModal({ visible, authToken, onClose, onCompleted }: Props) {
+export default function CoachCheckinModal({ visible, authToken, onClose, onCompleted, themeName }: Props) {
+  const theme = getTheme(themeName);
+  const colors = theme.colors;
+  const styles = React.useMemo(() => createStyles(colors), [colors]);
   const [energy, setEnergy] = useState<Scale | null>(null);
   const [hunger, setHunger] = useState<Scale | null>(null);
   const [soreness, setSoreness] = useState<Scale | null>(null);
@@ -272,7 +278,7 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ReturnType<typeof getTheme>['colors']) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row',

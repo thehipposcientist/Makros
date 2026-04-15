@@ -13,7 +13,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
@@ -285,6 +285,69 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   );
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
+
+  // Pre-set coach hints keyed by exercise index. Populated lazily when
+  // an exercise becomes active with no sets logged yet. Each entry is
+  // the structured recommendation from /ai/pre-set-recommendation.
+  const [preSetHints, setPreSetHints] = useState<Record<number, {
+    rationale: string;
+    setType: string;
+    intensityLabel: string;
+    recommendedWeight: number | null;
+    recommendedReps: string;
+    confidence: 'high' | 'medium' | 'low';
+  }>>({});
+
+  // Fetch a pre-set recommendation the first time a given exercise
+  // card is in focus with no sets logged yet. Deterministic endpoint
+  // (zero AI cost on the normal path), so we can fire this freely.
+  // Skips if already cached. Uses last session data looked up via
+  // getLastSetsForExercise to ground the opening weight suggestion.
+  useEffect(() => {
+    const ex = exercises[activeExIdx];
+    if (!ex || !authToken) return;
+    if (ex.sets.length > 0) return;
+    if (preSetHints[activeExIdx]) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const lastSets = await getLastSetsForExercise(ex.name).catch(() => [] as CompletedSet[]);
+        const plannedSets = Array.from({ length: getTargetSetCount(ex.targetSets) }, (_, n) => ({
+          setNumber: n + 1,
+          setType: 'working',
+          targetReps: String(ex.targetReps ?? '8-12'),
+          targetRir: 2,
+          progressionMode: 'load_first',
+          targetWeightLbs: null,
+        }));
+        const rec = await getPreSetRecommendation(authToken, {
+          exerciseName: ex.name,
+          plannedSetNumber: 1,
+          plannedSets,
+          priorSetsThisSession: [],
+          lastSessionSets: (lastSets ?? []).map(s => ({ reps: s.reps, weightLbs: s.weightLbs })),
+          goal,
+          equipment: typeof ex.equipment === 'string' ? ex.equipment : undefined,
+          weightLbs,
+        });
+        if (cancelled) return;
+        setPreSetHints(prev => ({
+          ...prev,
+          [activeExIdx]: {
+            rationale: rec.rationaleShort,
+            setType: rec.setType,
+            intensityLabel: rec.intensityLabel,
+            recommendedWeight: rec.recommendedWeightLbs,
+            recommendedReps: rec.recommendedReps,
+            confidence: rec.confidence,
+          },
+        }));
+      } catch {
+        // silent — hint is additive, absence is fine
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeExIdx, exercises, authToken, goal, weightLbs]);
 
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
@@ -1645,6 +1708,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     ) : null;
                   })()}
 
+                  {/* ── Pre-set coach hint (first set only, before anything is logged) ── */}
+                  {ex.sets.length === 0 && preSetHints[i] && (
+                    <View style={[styles.warmupNoteCard, { borderLeftWidth: 3, borderLeftColor: workoutPalette.strong }]}>
+                      <Text style={[styles.warmupNoteText, { fontWeight: '700' }]}>
+                        {preSetHints[i].intensityLabel.replace('_', ' ').toUpperCase()}
+                        {preSetHints[i].recommendedWeight ? ` · ~${Math.round(preSetHints[i].recommendedWeight!)} lb` : ''}
+                        {preSetHints[i].recommendedReps ? ` × ${preSetHints[i].recommendedReps}` : ''}
+                      </Text>
+                      <Text style={styles.warmupNoteText}>{preSetHints[i].rationale}</Text>
+                    </View>
+                  )}
+
                   {/* ── Form video link ── */}
                   <TouchableOpacity
                     style={styles.formVideoLink}
@@ -2234,8 +2309,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </View>
                     )}
 
-                    {/* AI motivation */}
-                    {summaryData?.motivationMessage ? (
+                    {/* AI recap — prefer structured v2 fields when present */}
+                    {summaryData?.headline ? (
+                      <View style={styles.shareMotivation}>
+                        <Text style={styles.shareMotivationText}>{cleanAiText(summaryData.headline)}</Text>
+                      </View>
+                    ) : summaryData?.motivationMessage ? (
                       <View style={styles.shareMotivation}>
                         <Text style={styles.shareMotivationText}>"{cleanAiText(summaryData.motivationMessage)}"</Text>
                       </View>
@@ -2254,15 +2333,36 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                 )}
 
-                {/* Recovery tips (outside shareable card) */}
-                {!summaryLoading && (summaryData?.recommendations?.length ?? 0) > 0 && (
+                {/* Structured v2 recap — three labeled sections when present */}
+                {!summaryLoading && (summaryData?.comparison || summaryData?.coachingPoint || summaryData?.motivation) ? (
+                  <View style={styles.summarySection}>
+                    {summaryData?.comparison ? (
+                      <>
+                        <Text style={styles.summarySectionTitle}>📊  vs. Last Time</Text>
+                        <Text style={styles.summaryItem}>{cleanAiText(summaryData.comparison)}</Text>
+                      </>
+                    ) : null}
+                    {summaryData?.coachingPoint ? (
+                      <>
+                        <Text style={[styles.summarySectionTitle, { marginTop: 10 }]}>🎯  Next Time</Text>
+                        <Text style={styles.summaryItem}>{cleanAiText(summaryData.coachingPoint)}</Text>
+                      </>
+                    ) : null}
+                    {summaryData?.motivation ? (
+                      <>
+                        <Text style={[styles.summarySectionTitle, { marginTop: 10 }]}>💬  Note</Text>
+                        <Text style={styles.summaryItem}>{cleanAiText(summaryData.motivation)}</Text>
+                      </>
+                    ) : null}
+                  </View>
+                ) : !summaryLoading && (summaryData?.recommendations?.length ?? 0) > 0 ? (
                   <View style={styles.summarySection}>
                     <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
                     {summaryData!.recommendations.map((r, i) => (
                       <Text key={i} style={styles.summaryItem}>• {cleanAiText(r)}</Text>
                     ))}
                   </View>
-                )}
+                ) : null}
 
                 {/* Share + Feedback buttons */}
                 <View style={{ flexDirection: 'row', gap: 10 }}>

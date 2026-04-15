@@ -63,6 +63,21 @@ export interface CustomFoodItem {
   protein: number;
   carbs: number;
   fat: number;
+  // Micronutrients — snake_case to match backend MICRONUTRIENT_FIELDS.
+  // Optional; only populated when the enrichment or validation path
+  // has data.
+  micronutrients?: Record<string, number>;
+  /** Verification lifecycle:
+   *   ai_estimated     — created from a scan/search, not yet checked
+   *   ai_validated     — AI confirmed values are within USDA tolerance
+   *   user_corrected   — user manually edited the values
+   *   seed_verified    — sourced from the backend seed DB
+   *   insufficient_data — AI couldn't verify (brand-specific, etc.)
+   */
+  verificationStatus?: 'ai_estimated' | 'ai_validated' | 'user_corrected' | 'seed_verified' | 'insufficient_data';
+  /** ISO timestamp of the last validation attempt. Lets the background
+   *  re-check job skip recently-validated rows. */
+  lastValidatedAt?: string;
 }
 
 /** User-saved exercise from AI search. Stored in userProfile.customExercises
@@ -385,6 +400,12 @@ export interface WorkoutSummary {
   motivationMessage: string;
   achievements: string[];
   recommendations: string[];
+  // Structured v2 fields — backend now returns these alongside the
+  // legacy motivationMessage/recommendations for back-compat.
+  headline?: string;
+  comparison?: string;
+  coachingPoint?: string;
+  motivation?: string;
 }
 
 /** Per-exercise logged detail kept alongside the AI summary so the

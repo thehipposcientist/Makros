@@ -1382,6 +1382,71 @@ export async function getWorkoutSummary(
   });
 }
 
+export type FoodVerificationVerdict = 'ok' | 'corrected' | 'insufficient_data';
+
+export async function validateFoodMacros(
+  token: string,
+  payload: {
+    name: string;
+    servingLabel: string;
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+    micronutrients?: Record<string, number> | null;
+  },
+): Promise<{
+  verdict: FoodVerificationVerdict;
+  notes: string;
+  corrected: {
+    calories?: number | null;
+    protein?: number | null;
+    carbs?: number | null;
+    fat?: number | null;
+    micros?: Record<string, number> | null;
+  } | null;
+}> {
+  return request('/ai/validate-food-macros', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getPreSetRecommendation(
+  token: string,
+  payload: {
+    exerciseName: string;
+    exerciseSlug?: string | null;
+    plannedSetNumber: number;
+    plannedSets: any[];
+    priorSetsThisSession?: any[];
+    lastSessionSets?: any[];
+    goal?: string;
+    experienceLevel?: string;
+    feelFromLastSet?: string;
+    equipment?: string;
+    weightLbs?: number;
+  },
+): Promise<{
+  recommendedWeightLbs: number | null;
+  recommendedReps: string;
+  setType: string;
+  intensityLabel: string;
+  changeDirection: 'increase' | 'hold' | 'decrease';
+  confidence: 'high' | 'medium' | 'low';
+  rationaleShort: string;
+  reasonTags: string[];
+  askForFeelAfterSet: boolean;
+  source: 'deterministic' | 'ai_review' | 'fallback';
+}> {
+  return request('/ai/pre-set-recommendation', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getAiWarmup(
   token: string,
   payload: {

@@ -1353,16 +1353,36 @@ def assemble_nutrition_response(
     # top, so the final displayed count lands on `meals_per_day`.
     for idx, tpl_out in enumerate(plans_list):
         actual = len(tpl_out.get("meals") or [])
+        # Micronutrient coverage audit — count how many of the outgoing
+        # meals actually carry non-zero micros, and which fields are
+        # populated most/least. If coverage is low, the insight engine
+        # on the client has nothing to work with.
+        meals_with_micros = 0
+        micro_field_fills: dict[str, int] = {}
+        for m in tpl_out.get("meals") or []:
+            micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
+            nonzero = {k: v for k, v in micros.items() if isinstance(v, (int, float)) and v > 0}
+            if nonzero:
+                meals_with_micros += 1
+            for k in nonzero:
+                micro_field_fills[k] = micro_field_fills.get(k, 0) + 1
+        total_meals = max(1, len(tpl_out.get("meals") or []))
+        top_fields = sorted(micro_field_fills.items(), key=lambda kv: -kv[1])[:6]
         print(
             f"[meal_assembler] OUT template {idx}: meals={actual} "
-            f"(expected generate_count={generate_count}, "
-            f"client will overlay {routine_count} routine(s) → "
-            f"displayed total={generate_count + routine_count})"
+            f"(expected={generate_count}, +{routine_count} routine overlay), "
+            f"micro coverage={meals_with_micros}/{total_meals} meals, "
+            f"top micros={[f'{k}:{v}' for k, v in top_fields]}"
         )
         if actual != generate_count:
             print(
                 f"[meal_assembler] WARN template {idx} meal count mismatch: "
                 f"expected {generate_count}, got {actual}"
+            )
+        if meals_with_micros == 0 and total_meals > 0:
+            print(
+                f"[meal_assembler] WARN template {idx} has ZERO micronutrient data — "
+                f"check enrichment path + DB seed (extra_nutrients JSON)"
             )
 
     print(

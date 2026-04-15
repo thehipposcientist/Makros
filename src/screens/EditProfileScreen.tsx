@@ -891,9 +891,45 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     setPhotoMealServings('1');
   };
 
+  /** Returns true if the form state differs from `profile` in a way that
+   *  would trigger a plan regeneration. Theme / cosmetic-only changes
+   *  return false and save silently without the confirmation dialog. */
+  const hasPlanRelevantChanges = (): boolean => {
+    const sameArr = (a?: any[], b?: any[]) =>
+      JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
+    // Goal + goal details
+    if (selectedGoal !== profile.goal) return true;
+    if ((profile.goalDetails?.pace ?? null) !== pace) return true;
+    if (String(profile.goalDetails?.targetWeightLbs ?? '') !== String(targetWeight ?? '')) return true;
+    if (String(profile.goalDetails?.targetEvent ?? '') !== String(targetEvent ?? '')) return true;
+    // Training shape
+    if ((profile.daysPerWeek ?? 0) !== daysPerWeek) return true;
+    if ((profile.workoutDurationMinutes ?? 60) !== duration) return true;
+    if (!sameArr(profile.equipment, equipment)) return true;
+    // Nutrition shape
+    if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
+    if ((profile.mealVariety ?? 3) !== mealVariety) return true;
+    if (!sameArr(profile.foodsAvailable, foods.filter(f => !f.startsWith('__supp__')))) return true;
+    if ((profile.mealRoutine ?? '') !== (mealRoutine ?? '').trim()) return true;
+    // Bodyweight (affects macro targets)
+    const cw = currentWeight ? parseFloat(currentWeight) : profile.physicalStats?.weightLbs;
+    if (cw !== profile.physicalStats?.weightLbs) return true;
+    // Custom macro overrides
+    const nextCustom = (useCustomMacros || mode === 'mealplan') && (customCalories || customProtein || customCarbs || customFat);
+    const hadCustom = !!profile.customMacros;
+    if (!!nextCustom !== hadCustom) return true;
+    return false;
+  };
+
   const handleSave = () => {
-    // Confirm before persisting — saving regenerates plans which can take
-    // 30-60s and the user might've tapped by accident.
+    // Theme-only / cosmetic saves go straight through — the user isn't
+    // asking for a plan regen so the confirmation dialog is noise.
+    if (!hasPlanRelevantChanges()) {
+      doHandleSave();
+      return;
+    }
+    // Plan-relevant change — confirm before persisting because the save
+    // triggers a 30-60s plan regeneration.
     Alert.alert(
       'Save changes?',
       'This will update your plan and regenerate it from your new settings. Existing plans for upcoming days will be replaced.',

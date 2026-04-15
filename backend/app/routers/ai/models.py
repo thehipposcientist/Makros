@@ -270,3 +270,36 @@ class WarmupRequest(BaseModel):
     injuries: list[str] = []
     experience: str | None = None
     durationMinutes: int | None = 60
+
+
+class ValidateFoodMacrosRequest(BaseModel):
+    """Request to verify a single food's macros + micros against USDA
+    reference values. Used to upgrade a `custom_foods` entry from
+    `ai_estimated` to `ai_validated` (or to flag it as wrong)."""
+    name: str
+    servingLabel: str                       # e.g. "6 oz", "1 cup cooked"
+    calories: float
+    protein: float
+    carbs: float
+    fat: float
+    micronutrients: dict | None = None      # optional current values
+
+
+class PreSetRecommendRequest(BaseModel):
+    """Request body for `/ai/pre-set-recommendation`.
+
+    Sent when the user opens a set card BEFORE logging — no actual reps
+    yet. We return a structured SetRecommendation so the UI can show the
+    recommended weight/reps + the set's intent + a one-sentence rationale.
+    """
+    exerciseName: str
+    exerciseSlug: str | None = None
+    plannedSetNumber: int                   # 1-indexed; which set the user is about to do
+    plannedSets: list[dict] = []            # all PlannedSet dicts for the exercise
+    priorSetsThisSession: list[dict] = []   # CompletedSets for prior sets this session
+    lastSessionSets: list[dict] = []        # CompletedSets from most-recent comparable session
+    goal: str | None = None
+    experienceLevel: str | None = None
+    feelFromLastSet: str | None = None      # easy|good|hard|failure|pain
+    equipment: str | None = None
+    weightLbs: float = 150.0

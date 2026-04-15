@@ -1133,7 +1133,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // opened), which made in-progress plan generation look like it was
     // restarting. `loadPlans` reads from AsyncStorage, not from `meta`, so
     // there's no functional need to depend on it here.
-  }, [userProfile, authToken, planRefreshKey]);
+    //
+    // Dep list is narrowed to plan-relevant userProfile fields ONLY —
+    // NOT the whole userProfile object. Using the full object caused
+    // theme/UI-only changes (themePreference) to retrigger loadPlans
+    // and clobber `nutritionPlansByDate`, making theme selection
+    // flash the meals section like a plan was regenerating.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    userProfile?.goal,
+    userProfile?.daysPerWeek,
+    userProfile?.mealsPerDay,
+    userProfile?.mealVariety,
+    userProfile?.foodsAvailable?.length,
+    userProfile?.customFoods?.length,
+    userProfile?.mealRoutine,
+    authToken,
+    planRefreshKey,
+  ]);
 
   useEffect(() => {
     let mounted = true;
@@ -1280,6 +1297,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       return meals.length > 0 && meals.some(m => (m?.calories ?? 0) > 0);
     };
 
+    /** Returns true if the plan has Layer 2 micronutrient data on at
+     *  least one meal. Used to reject stale saved plans from before
+     *  the micronutrient expansion so the fresh rotating templates win. */
+    const hasLayer2Micros = (plan: DailyNutritionPlan | null | undefined): boolean => {
+      if (!plan) return false;
+      const meals = plan.meals ?? [];
+      const LAYER2 = ['saturated_fat', 'omega_3', 'potassium', 'calcium', 'iron', 'magnesium', 'vitamin_d', 'vitamin_b12'];
+      return meals.some(m => {
+        const micro: any = (m as any)?.micronutrients;
+        if (!micro) return false;
+        return LAYER2.some(k => typeof micro[k] === 'number' && micro[k] > 0);
+      });
+    };
+
     // Load routine meals once for the whole day loop. Any meal the user has
     // pinned as a routine gets overlaid on every day's plan so it appears
     // verbatim across the rotation.
@@ -1306,23 +1337,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const normalize = (p: any): DailyNutritionPlan =>
           normalizeServingUnitsInPlan(migrateNutritionPlanShape(p)) as DailyNutritionPlan;
 
+        // Precedence override: if the rotating template has Layer 2
+        // micros, prefer it over saved/remote plans that don't. Stale
+        // per-day saves from before the micronutrient expansion have
+        // macros but no micros, and would otherwise shadow the fresh
+        // data forever.
+        const freshTemplate = rotatingTemplates.length > 0 ? rotatingTemplates[i % rotatingTemplates.length] : null;
+        const templateHasMicros = hasLayer2Micros(freshTemplate);
+        const pickedPathRef: { name: string } = { name: 'none' };
+
         const saved = await getSavedNutritionPlan(d.key);
-        if (saved && hasMealMacros(saved) && stampOk(saved)) {
+        const savedIsUsable = saved && hasMealMacros(saved) && stampOk(saved) && (hasLayer2Micros(saved) || !templateHasMicros);
+        if (savedIsUsable) {
           picked = normalize(saved);
+          pickedPathRef.name = 'saved';
         }
         if (!picked && authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
-          if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan)) {
+          const remoteOk = remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan) && (hasLayer2Micros(remote.nutrition_plan) || !templateHasMicros);
+          if (remoteOk) {
             picked = normalize(remote.nutrition_plan);
+            pickedPathRef.name = 'remote';
           }
         }
-        if (!picked && rotatingTemplates.length > 0) {
-          const template = rotatingTemplates[i % rotatingTemplates.length];
-          if (hasMealMacros(template)) picked = normalize(template);
+        if (!picked && freshTemplate && hasMealMacros(freshTemplate)) {
+          picked = normalize(freshTemplate);
+          pickedPathRef.name = 'template';
         }
         if (!picked) {
           picked = normalize(generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key));
+          pickedPathRef.name = 'fallback';
         }
+        // Diagnostic — first meal's micronutrient key count so we can
+        // see whether data actually reached the UI layer.
+        const firstMeal: any = picked?.meals?.[0];
+        const firstMicros: any = firstMeal?.micronutrients ?? {};
+        const microKeyCount = typeof firstMicros === 'object' ? Object.keys(firstMicros).length : 0;
+        console.log(`[loadPlans] ${d.key}: path=${pickedPathRef.name} meals=${picked?.meals?.length ?? 0} micros_on_first_meal=${microKeyCount}`);
         // Stamp picked with the current templates version so subsequent
         // edits (rename, reorder, add meal) carry it forward into the
         // per-day save and remote day-state. Without the stamp, the
@@ -2928,6 +2979,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showCheckin}
         authToken={authToken}
         onClose={() => setShowCheckin(false)}
+        themeName={userProfile.themePreference}
       />
 
       {/* Meal edit modal */}

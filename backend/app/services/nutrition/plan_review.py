@@ -37,9 +37,22 @@ ReviewStatus = Literal["ok", "modify"]
 PatchAction = Literal[
     "adjust_meal_macros",
     "adjust_item_macros",
+    "adjust_item_micros",   # NEW — rewrites per-item micronutrients (fiber, sodium, etc.)
     "swap_food",
     "remove_item",
 ]
+
+
+# Canonical micronutrient field names the reviewer can patch. Must
+# match the backend's `MICRONUTRIENT_FIELDS` (snake_case) so patches
+# land on the same keys the rest of the pipeline uses.
+MICRO_FIELDS_PATCHABLE: tuple[str, ...] = (
+    "fiber", "sugar", "sodium", "cholesterol",
+    "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+    "omega_3", "omega_6",
+    "potassium", "calcium", "iron", "magnesium",
+    "vitamin_c", "vitamin_d", "vitamin_b12",
+)
 
 
 @dataclass
@@ -52,6 +65,10 @@ class NutritionPatch:
     new_protein: Optional[int] = None
     new_carbs: Optional[int] = None
     new_fat: Optional[int] = None
+    # Micronutrient patch payload — dict of canonical field name → value.
+    # Only keys present are written; unknown keys are ignored. Populated
+    # only for `adjust_item_micros`.
+    new_micros: dict[str, float] = field(default_factory=dict)
     reason: str = ""
 
     @classmethod
@@ -60,7 +77,7 @@ class NutritionPatch:
             return None
         action = raw.get("action")
         if action not in (
-            "adjust_meal_macros", "adjust_item_macros",
+            "adjust_meal_macros", "adjust_item_macros", "adjust_item_micros",
             "swap_food", "remove_item",
         ):
             return None
@@ -75,6 +92,29 @@ class NutritionPatch:
                 item_index = int(item_idx_raw)
             except (TypeError, ValueError):
                 item_index = None
+        # Parse the micros sub-dict if present. Accept both snake_case
+        # (canonical) and camelCase keys, normalizing to canonical.
+        raw_micros = raw.get("new_micros") or {}
+        micros_clean: dict[str, float] = {}
+        if isinstance(raw_micros, dict):
+            key_map = {
+                "saturatedFat": "saturated_fat",
+                "monounsaturatedFat": "monounsaturated_fat",
+                "polyunsaturatedFat": "polyunsaturated_fat",
+                "omega3": "omega_3",
+                "omega6": "omega_6",
+                "vitaminC": "vitamin_c",
+                "vitaminD": "vitamin_d",
+                "vitaminB12": "vitamin_b12",
+            }
+            for k, v in raw_micros.items():
+                canonical = key_map.get(k, k)
+                if canonical not in MICRO_FIELDS_PATCHABLE:
+                    continue
+                try:
+                    micros_clean[canonical] = float(v)
+                except (TypeError, ValueError):
+                    continue
         return cls(
             action=action,
             meal_index=meal_index,
@@ -84,6 +124,7 @@ class NutritionPatch:
             new_protein=_maybe_int(raw.get("new_protein")),
             new_carbs=_maybe_int(raw.get("new_carbs")),
             new_fat=_maybe_int(raw.get("new_fat")),
+            new_micros=micros_clean,
             reason=str(raw.get("reason") or ""),
         )
 
@@ -144,6 +185,20 @@ def build_nutrition_brief(
             for ii, it in enumerate(items_in[:BRIEF_MAX_ITEMS_PER_MEAL]):
                 if not isinstance(it, dict):
                     continue
+                # Surface the item's micronutrients (when present)
+                # so the reviewer can audit them. Pull from either the
+                # item-level keys or a nested `micronutrients` dict.
+                item_micros: dict[str, Any] = {}
+                raw_micros = it.get("micronutrients") if isinstance(it.get("micronutrients"), dict) else {}
+                for mk in MICRO_FIELDS_PATCHABLE:
+                    v = it.get(mk)
+                    if v is None and isinstance(raw_micros, dict):
+                        v = raw_micros.get(mk)
+                    if v is not None:
+                        try:
+                            item_micros[mk] = round(float(v), 2)
+                        except (TypeError, ValueError):
+                            continue
                 items_brief.append({
                     "index": ii,
                     "name": it.get("name"),
@@ -153,6 +208,7 @@ def build_nutrition_brief(
                     "protein":  _maybe_int(it.get("protein")),
                     "carbs":    _maybe_int(it.get("carbs")),
                     "fat":      _maybe_int(it.get("fat")),
+                    "micros":   item_micros,
                 })
         meals_brief.append({
             "index": mi,
@@ -202,6 +258,16 @@ Look for:
   Examples: "ribeye 8 oz: 50 cal" (should be ~550 cal), "1 cup rice: 800 cal" (should \
   be ~200), "1 egg: 200 cal" (should be ~70). Use real-world nutrition knowledge to \
   spot impossible values and emit an `adjust_item_macros` patch with corrected numbers.
+- **Missing or clearly-wrong micronutrients.** Every item has a `micros` dict. If a \
+  food that's known to be high in a nutrient shows zero or an absurdly low number, \
+  emit an `adjust_item_micros` patch with the corrected value. Red flags: \
+  salmon with `omega_3: 0`, spinach with `iron: 0`, milk with `calcium: 0`, \
+  eggs with `vitamin_d: 0` or `vitamin_b12: 0`, black beans with `fiber: 0`. \
+  Also flag impossibly-high values (e.g. `sodium: 9000 mg` for plain chicken). \
+  Use USDA values for the corrected numbers, scaled to the item's qty/unit. \
+  Micro units: grams for fiber/sugar/saturated_fat/mono/poly fat, milligrams for \
+  sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/magnesium/vitamin_c, \
+  micrograms for vitamin_d and vitamin_b12.
 - **Meal totals that don't match their items.** If a meal claims 600 cal but its items \
   sum to 300, patch the meal-level totals via `adjust_meal_macros` to match the items.
 - **Allergen violations.** Patch via `remove_item` or `swap_food` to a safe alternative.
@@ -224,14 +290,17 @@ CRITICAL RULES for `status`:
 Patch actions and their fields:
 - adjust_meal_macros: meal_index, new_calories?, new_protein?, new_carbs?, new_fat?, reason
 - adjust_item_macros: meal_index, item_index, new_calories?, new_protein?, new_carbs?, new_fat?, reason
+- adjust_item_micros: meal_index, item_index, new_micros (dict of snake_case nutrient names → values), reason
 - swap_food: meal_index, item_index, new_name, reason
 - remove_item: meal_index, item_index, reason
+
+Valid new_micros keys (snake_case only): fiber, sugar, sodium, cholesterol, saturated_fat, monounsaturated_fat, polyunsaturated_fat, omega_3, omega_6, potassium, calcium, iron, magnesium, vitamin_c, vitamin_d, vitamin_b12
 
 Return ONLY valid JSON:
 {"status": "ok" | "modify", "notes": "one-paragraph summary", "patches": [...]}
 
 Be conservative. Prefer 0-3 patches over a wholesale rewrite. Every patch needs a \
-one-sentence reason. Patches outside the four actions above are ignored.
+one-sentence reason. Patches outside the five actions above are ignored.
 """
 
 
@@ -259,6 +328,7 @@ _REVIEW_JSON_SCHEMA = {
                         "new_protein":  {"type": ["integer", "null"]},
                         "new_carbs":    {"type": ["integer", "null"]},
                         "new_fat":      {"type": ["integer", "null"]},
+                        "new_micros":   {"type": ["object", "null"]},
                         "reason":       {"type": "string"},
                     },
                 },
@@ -420,6 +490,40 @@ def _apply_one(meals: list[dict], p: NutritionPatch) -> str:
         it["_review_patched"] = True
         return (
             f"adjust_item meal={p.meal_index} item={p.item_index} "
+            f"{it.get('name')!r} " + ", ".join(changed) + f" ({p.reason})"
+        )
+
+    if p.action == "adjust_item_micros":
+        if p.item_index is None or not (0 <= p.item_index < len(items)):
+            return f"skip adjust_item_micros: bad item_index {p.item_index}"
+        it = items[p.item_index]
+        if not isinstance(it, dict):
+            return f"skip adjust_item_micros: item {p.item_index} not a dict"
+        if not p.new_micros:
+            return "skip adjust_item_micros: no micros provided"
+        # Write to both the top-level keys (where fiber/sugar/sodium
+        # traditionally live) AND the nested `micronutrients` dict (where
+        # the full panel lives). Items from the assembler carry both
+        # paths, so writing to both keeps readers consistent.
+        nested = it.get("micronutrients")
+        if not isinstance(nested, dict):
+            nested = {}
+            it["micronutrients"] = nested
+        changed: list[str] = []
+        for key, val in p.new_micros.items():
+            if key not in MICRO_FIELDS_PATCHABLE:
+                continue
+            old = it.get(key)
+            if old is None:
+                old = nested.get(key)
+            it[key] = val
+            nested[key] = val
+            changed.append(f"{key} {old}→{val}")
+        if not changed:
+            return "skip adjust_item_micros: no valid fields"
+        it["_review_patched"] = True
+        return (
+            f"adjust_micros meal={p.meal_index} item={p.item_index} "
             f"{it.get('name')!r} " + ", ".join(changed) + f" ({p.reason})"
         )
 

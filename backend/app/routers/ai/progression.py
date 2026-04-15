@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import openai
 from openai import OpenAI
@@ -12,7 +13,7 @@ from app.database import get_session
 from app.models import Exercise, User
 
 from .router import router
-from .models import WeightRecommendRequest, WorkoutSummaryRequest, WarmupRequest
+from .models import WeightRecommendRequest, WorkoutSummaryRequest, WarmupRequest, PreSetRecommendRequest, ValidateFoodMacrosRequest
 from .utils import (
     get_openai_api_key, model_chat,
     _build_chat_kwargs, _chat_create, _extract_json, _log_openai_error,
@@ -635,6 +636,7 @@ def fitness_composite_score(
 def generate_workout_summary(
     body: WorkoutSummaryRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """AI post-workout summary: calories burned, achievements, and personalised recommendations."""
     weight_kg      = body.weightLbs / 2.205
@@ -675,32 +677,130 @@ def generate_workout_summary(
             ],
         }
 
+    # Pull the most recent comparable session (same focus) so the AI can
+    # make an honest comparison instead of inventing one. Best-effort —
+    # failure here silently falls back to "no comparison".
+    last_session_lines = ""
+    last_session_date = None
+    try:
+        from app.models import WorkoutSession, ExerciseSet
+        last = db.exec(
+            select(WorkoutSession)
+            .where(
+                WorkoutSession.user_id == current_user.id,
+                WorkoutSession.focus == body.focus,
+            )
+            .order_by(WorkoutSession.workout_date.desc())
+            .limit(2)
+        ).all()
+        # Skip the most recent (that's THIS session that was just logged);
+        # the second hit is the previous comparable session.
+        prior = last[1] if len(last) >= 2 else None
+        if prior:
+            last_session_date = str(prior.workout_date)
+            prior_sets = db.exec(
+                select(ExerciseSet)
+                .where(ExerciseSet.session_id == prior.id)
+                .order_by(ExerciseSet.exercise_name, ExerciseSet.set_number)
+            ).all()
+            per_ex: dict[str, list[str]] = {}
+            for s in prior_sets:
+                per_ex.setdefault(s.exercise_name, []).append(
+                    f"{s.reps}×{int(s.weight_lbs)}"
+                )
+            last_session_lines = "\n".join(
+                f"  {name}: {', '.join(sets[:4])}"
+                for name, sets in list(per_ex.items())[:6]
+            )
+    except Exception:
+        pass
+
     client = OpenAI(api_key=api_key)
     try:
+        system_prompt = (
+            "You are a strength coach writing a grounded 4-part post-workout recap. "
+            "You receive today's session + the user's last comparable session (by focus). "
+            "Your job: identify what is real in the data, name ONE specific coaching point, "
+            "and hedge honestly when the data is mixed.\n\n"
+            "FORBIDDEN: 'Great work!', 'Keep pushing!', 'Crush it', generic motivation, "
+            "'every rep counts', 'stay consistent'.\n"
+            "REQUIRED: Every claim must cite a specific exercise, weight, or rep count "
+            "from today or the comparison session. If there is no comparison session, "
+            "say so in `comparison` and skip the comparison — do not invent one.\n\n"
+            "Return JSON only. Single-sentence values, plain prose, no markdown."
+        )
         prompt = (
-            f"Post-workout summary request:\n"
+            f"TODAY:\n"
             f"- Focus: {body.focus}\n"
             f"- Goal: {body.goal}\n"
             f"- Duration: {body.durationSeconds // 60} min\n"
             f"- Exercises completed: {exercises_done}\n"
             f"- Total sets logged: {total_sets}\n"
             f"- Estimated calories burned: {calories_burned}\n"
-            f"- Best sets: {'; '.join(achievements[:4]) or 'none logged'}\n\n"
-            "Write a short, energetic post-workout message and 3 concrete recovery/nutrition tips.\n"
-            'Return JSON: {"motivationMessage": string, "recommendations": [string, string, string]}'
+            f"- Top sets today:\n"
+            + ("\n".join(f"  {a}" for a in achievements[:6]) or "  (none logged)")
+            + "\n\n"
+            f"LAST COMPARABLE {body.focus.upper()} SESSION "
+            f"({last_session_date or 'none on file'}):\n"
+            + (last_session_lines or "  (no comparable session in history)")
+            + "\n\n"
+            "Return JSON with these four fields, in this exact order:\n"
+            "{\n"
+            '  "headline": "<one sentence, ≤100 chars, what actually happened>",\n'
+            '  "comparison": "<one sentence comparing to last session, OR empty string if none>",\n'
+            '  "coachingPoint": "<one specific cue for next session, names an exercise>",\n'
+            '  "motivation": "<one honest sentence — no generic filler>"\n'
+            "}"
         )
         _ws_messages = [
-            {"role": "system", "content": "You are an upbeat fitness coach. Give brief, practical post-workout feedback. Return JSON only."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ]
-        kwargs = _build_chat_kwargs(model_chat(), _ws_messages, json_schema=SCHEMA_WORKOUT_SUMMARY, max_tokens=300, timeout_secs=30)
+        # New structured schema — keep motivationMessage + recommendations
+        # populated for back-compat with the mobile client, but also
+        # surface the new structured fields.
+        schema = {
+            "name": "workout_summary_v2",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["headline", "comparison", "coachingPoint", "motivation"],
+                "properties": {
+                    "headline": {"type": "string", "maxLength": 120},
+                    "comparison": {"type": "string", "maxLength": 200},
+                    "coachingPoint": {"type": "string", "maxLength": 200},
+                    "motivation": {"type": "string", "maxLength": 160},
+                },
+            },
+        }
+        kwargs = _build_chat_kwargs(model_chat(), _ws_messages, json_schema=schema, max_tokens=400, timeout_secs=30)
         response = _chat_create(client, **kwargs)
         ai = _extract_json(response.choices[0].message.content)
+        headline       = str(ai.get("headline") or "").strip()
+        comparison     = str(ai.get("comparison") or "").strip()
+        coaching_point = str(ai.get("coachingPoint") or "").strip()
+        motivation     = str(ai.get("motivation") or "").strip()
+        # Back-compat: synthesize motivationMessage + recommendations so
+        # the mobile client renders something while it catches up.
+        legacy_message = motivation or headline or "Session logged."
+        legacy_tips = [s for s in (coaching_point, comparison) if s]
+        if len(legacy_tips) < 3:
+            legacy_tips += [
+                "Hydrate well post-workout.",
+                "Consume 20-40 g protein within 2 hours.",
+                "Aim for 7-9 hours of sleep tonight.",
+            ]
         return {
+            # New structured fields the upgraded client renders.
+            "headline": headline,
+            "comparison": comparison,
+            "coachingPoint": coaching_point,
+            "motivation": motivation,
+            # Legacy fields.
             "caloriesBurned": calories_burned,
-            "motivationMessage": ai.get("motivationMessage", "Great work today!"),
+            "motivationMessage": legacy_message,
             "achievements": achievements[:4],
-            "recommendations": ai.get("recommendations", []),
+            "recommendations": legacy_tips[:3],
         }
     except Exception:
         return {
@@ -825,5 +925,369 @@ def generate_warmup(
     except Exception as exc:
         print(f"[ai/warmup] failed (non-fatal): {exc}")
         return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex), "source": "fallback"}
+
+
+# ── Pre-set recommendation (deterministic, no AI by default) ────────
+# Shown in the active-workout card BEFORE the user logs a set, so the
+# user can see recommended weight + reps + set intent (heavy/backoff/
+# volume/technique) + a one-sentence rationale. Zero AI cost on the
+# normal path — AI only fires when the prior set was suspicious AND the
+# user fed back their feel.
+@router.post("/pre-set-recommendation")
+def pre_set_recommendation(
+    body: PreSetRecommendRequest,
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.workout.set_programming import (
+        PlannedSet as PS,
+        NextSetRecommendation,
+        parse_rep_range,
+        recommend_next_set,
+    )
+    from app.services.workout.recommendation_schema import (
+        enrich_to_set_recommendation,
+    )
+
+    # 1. Resolve the planned set we're about to do.
+    if body.plannedSetNumber < 1 or body.plannedSetNumber > max(1, len(body.plannedSets)):
+        raise HTTPException(status_code=400, detail="plannedSetNumber out of range")
+    raw = body.plannedSets[body.plannedSetNumber - 1]
+    planned = PS(
+        set_number=int(raw.get("setNumber") or body.plannedSetNumber),
+        set_type=raw.get("setType") or "working",
+        target_reps=str(raw.get("targetReps") or "8-12"),
+        target_rir=float(raw.get("targetRir") or 2.0),
+        target_weight_lbs=(float(raw["targetWeightLbs"]) if raw.get("targetWeightLbs") else None),
+        progression_mode=raw.get("progressionMode") or "load_first",
+    )
+
+    # 2. Build a minimal exercise dict for the increment helper.
+    exercise = {
+        "name": body.exerciseName,
+        "slug": body.exerciseSlug,
+        "equipment": body.equipment or "dumbbell",
+        "equipment_bucket": body.equipment or "dumbbell",
+    }
+
+    prior = body.priorSetsThisSession or []
+    last_session = body.lastSessionSets or []
+    is_first_session = not last_session
+    is_first_set = len(prior) == 0
+
+    # 3. Deterministic target weight + reps.
+    #    - If there's a prior set this session → feed it into recommend_next_set
+    #      (so Set 3 knows what happened on Set 2)
+    #    - Else if last session data exists → use that as the anchor
+    #    - Else → fall back to planner's target_weight_lbs
+    if prior:
+        last = prior[-1]
+        det = recommend_next_set(
+            exercise=exercise,
+            planned_set=planned,
+            actual_reps=int(last.get("reps") or 0),
+            actual_weight_lbs=float(last.get("weightLbs") or 0.0),
+            actual_rir=last.get("rir"),
+            rep_range=parse_rep_range(planned.target_reps),
+        )
+    elif last_session:
+        # Infer a plausible opening weight from the best comparable last-session set.
+        best = max(last_session, key=lambda s: float(s.get("weightLbs") or 0))
+        weight = float(best.get("weightLbs") or 0)
+        det = NextSetRecommendation(
+            next_set_weight_lbs=weight if weight > 0 else planned.target_weight_lbs,
+            next_set_rep_target=planned.target_reps,
+            action="hold_load",
+            explanation=(
+                f"Opening at {int(weight)} lb — same as your best working set last "
+                f"{body.exerciseName} session."
+            ) if weight > 0 else "Opening at the planned weight.",
+        )
+    else:
+        # First-ever session on this exercise — use anchor weight with
+        # low confidence and ask for feel after the set.
+        det = NextSetRecommendation(
+            next_set_weight_lbs=planned.target_weight_lbs,
+            next_set_rep_target=planned.target_reps,
+            action="hold_load",
+            explanation=(
+                f"First time on {body.exerciseName} — starting at "
+                f"{int(planned.target_weight_lbs or 0) or '?'} lb to calibrate. "
+                "Tell me how it feels after the set."
+            ),
+        )
+
+    rec = enrich_to_set_recommendation(
+        det=det,
+        planned=planned,
+        actual_reps=None,
+        actual_weight=None,
+        feel=body.feelFromLastSet,
+        is_first_session=is_first_session,
+        is_first_set=is_first_set,
+        rep_range=parse_rep_range(planned.target_reps),
+        source="deterministic",
+    )
+    return rec.to_dict()
+
+
+# ── Custom-food macro + micro validation ────────────────────────────
+# Called on-demand from the client when a custom food is tapped or
+# when the library runs a batch sanity-check. Returns corrected
+# macros/micros + a verification verdict:
+#   ok                 — values match USDA within tolerance; no changes
+#   corrected          — AI found a meaningful error and returned fixes
+#   insufficient_data  — AI couldn't find a USDA reference (e.g. a
+#                        brand-specific packaged food it doesn't know)
+#
+# The client stores the verdict as `verification_status` on the custom
+# food row so the UI can show a badge and skip re-validation next time.
+_FOOD_VALIDATION_SCHEMA = {
+    "name": "food_macro_validation",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["verdict", "notes"],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["ok", "corrected", "insufficient_data"]},
+            "notes": {"type": "string", "maxLength": 200},
+            "corrected": {
+                "type": ["object", "null"],
+                "properties": {
+                    "calories": {"type": ["number", "null"]},
+                    "protein":  {"type": ["number", "null"]},
+                    "carbs":    {"type": ["number", "null"]},
+                    "fat":      {"type": ["number", "null"]},
+                    "micros":   {"type": ["object", "null"]},
+                },
+            },
+        },
+    },
+}
+
+
+@router.post("/enrich-food-db")
+def enrich_food_db(
+    limit: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Bootstrap endpoint — seed every `food_nutrition` row that's
+    missing Layer 2 micronutrients with AI-generated USDA values.
+
+    Pass `?limit=N` to process a test batch. Omit for a full pass.
+    Writes directly to `FoodNutrition.extra_nutrients` (legacy fiber/
+    sugar/sodium columns are also backfilled). Idempotent — skips rows
+    already enriched.
+
+    Returns counts so the client can render a progress/result toast.
+    Cost: ~$0.0005 per food enriched, batched at 10 per AI call."""
+    from app.models import Food, FoodNutrition
+
+    try:
+        from openai import OpenAI
+        api_key = get_openai_api_key()
+        if not api_key:
+            raise HTTPException(status_code=503, detail="OpenAI not configured")
+        client = OpenAI(api_key=api_key)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"OpenAI init failed: {e}")
+
+    REQUIRED = (
+        "fiber", "sugar", "sodium", "cholesterol",
+        "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+        "omega_3", "omega_6",
+        "potassium", "calcium", "iron", "magnesium",
+        "vitamin_c", "vitamin_d", "vitamin_b12",
+    )
+    BATCH = 10
+
+    def _needs(nut: FoodNutrition) -> bool:
+        present = 0
+        for k in REQUIRED:
+            if k in ("fiber", "sugar"):
+                val = getattr(nut, k, None)
+            elif k == "sodium":
+                val = getattr(nut, "sodium_mg", None)
+            else:
+                val = (getattr(nut, "extra_nutrients", None) or {}).get(k)
+            if val is not None and float(val or 0) > 0:
+                present += 1
+        return present < 10
+
+    nut_rows = db.exec(select(FoodNutrition)).all()
+    candidates = [n for n in nut_rows if _needs(n)]
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    print(f"[enrich-food-db] {len(candidates)} rows need enrichment (of {len(nut_rows)})")
+    if not candidates:
+        return {"total": len(nut_rows), "enriched": 0, "skipped": len(nut_rows), "errors": 0}
+
+    food_ids = [n.food_id for n in candidates]
+    foods_by_id: dict[int, Food] = {
+        f.id: f for f in db.exec(select(Food).where(Food.id.in_(food_ids))).all()
+    }
+
+    enriched_count = 0
+    error_count = 0
+
+    for start in range(0, len(candidates), BATCH):
+        batch = candidates[start : start + BATCH]
+        pairs = [(foods_by_id[n.food_id], n) for n in batch if n.food_id in foods_by_id]
+        if not pairs:
+            continue
+        items_payload = [{"food_id": f.id, "name": f.name, "reference_unit": "100g"} for f, _ in pairs]
+        prompt = (
+            "Return USDA per-100g micronutrient values for each food. Use snake_case "
+            "keys exactly as shown. Be accurate — USDA reference data only.\n"
+            "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat "
+            "in g; sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/magnesium/"
+            "vitamin_c in mg; vitamin_d and vitamin_b12 in mcg.\n\n"
+            f"Foods:\n{json.dumps(items_payload, indent=2)}\n\n"
+            "Return JSON:\n"
+            '{"foods": [{"food_id": int, "name": str, "micros": {"fiber": 0, "sugar": 0, '
+            '"sodium": 0, "cholesterol": 0, "saturated_fat": 0, "monounsaturated_fat": 0, '
+            '"polyunsaturated_fat": 0, "omega_3": 0, "omega_6": 0, "potassium": 0, '
+            '"calcium": 0, "iron": 0, "magnesium": 0, "vitamin_c": 0, "vitamin_d": 0, '
+            '"vitamin_b12": 0}}]}'
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=os.getenv("MODEL_FOOD_ENRICHMENT") or "gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a USDA nutrition database. Return accurate per-100g micronutrient values. JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=2500,
+                timeout=30,
+            )
+            data = json.loads(resp.choices[0].message.content or "{}")
+        except Exception as e:
+            print(f"[enrich-food-db] batch AI failed: {e}")
+            error_count += len(pairs)
+            continue
+
+        results: dict[int, dict[str, float]] = {}
+        for entry in data.get("foods") or []:
+            if not isinstance(entry, dict):
+                continue
+            fid = entry.get("food_id")
+            micros = entry.get("micros") or {}
+            if not isinstance(fid, int) or not isinstance(micros, dict):
+                continue
+            clean: dict[str, float] = {}
+            for k, v in micros.items():
+                if k not in REQUIRED:
+                    continue
+                try:
+                    clean[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            if clean:
+                results[fid] = clean
+
+        for food, nut in pairs:
+            micros = results.get(food.id)
+            if not micros:
+                error_count += 1
+                continue
+            extras = dict(getattr(nut, "extra_nutrients", None) or {})
+            for k, v in micros.items():
+                if k == "fiber":
+                    nut.fiber = v
+                elif k == "sugar":
+                    nut.sugar = v
+                elif k == "sodium":
+                    nut.sodium_mg = v
+                else:
+                    extras[k] = v
+            nut.extra_nutrients = extras
+            db.add(nut)
+            enriched_count += 1
+        db.commit()
+
+    # Also pick up any custom foods stored per-user if the table exists.
+    print(f"[enrich-food-db] done — enriched={enriched_count} errors={error_count}")
+    return {
+        "total": len(nut_rows),
+        "candidates": len(candidates),
+        "enriched": enriched_count,
+        "errors": error_count,
+        "remaining": max(0, len(candidates) - enriched_count - error_count),
+    }
+
+
+@router.post("/validate-food-macros")
+def validate_food_macros(
+    body: ValidateFoodMacrosRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Validate one custom food's macros + micros against USDA reference.
+
+    Cheap call (~300 input + ~300 output tokens on gpt-4o-mini ≈ $0.0002).
+    The client is expected to call this lazily (e.g. first time the food
+    is opened in detail view) and cache the verdict per food."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {
+            "verdict": "insufficient_data",
+            "notes": "AI unavailable (no API key configured).",
+            "corrected": None,
+        }
+
+    try:
+        client = OpenAI(api_key=api_key)
+        current_payload = {
+            "name": body.name,
+            "serving": body.servingLabel,
+            "calories": body.calories,
+            "protein": body.protein,
+            "carbs": body.carbs,
+            "fat": body.fat,
+            "micronutrients": body.micronutrients or {},
+        }
+        prompt = (
+            "You are a USDA nutrition database. Given a food + serving + claimed "
+            "macros + optional micronutrients, decide whether the claimed values "
+            "match reference data within tolerance.\n\n"
+            "Rules:\n"
+            "1. Tolerance: ±15% on calories and macros is ok. Outside that → 'corrected'.\n"
+            "2. If micronutrients are missing or ALL zero, return 'corrected' with a\n"
+            "   full USDA-derived micronutrient panel for this serving.\n"
+            "3. If the food is too generic or brand-specific to verify (e.g. 'my\n"
+            "   homemade bowl', 'grandma's stew'), return 'insufficient_data'.\n"
+            "4. Use snake_case micronutrient keys: fiber, sugar, sodium, cholesterol,\n"
+            "   saturated_fat, monounsaturated_fat, polyunsaturated_fat, omega_3,\n"
+            "   omega_6, potassium, calcium, iron, magnesium, vitamin_c, vitamin_d,\n"
+            "   vitamin_b12. Units: g for fats/fiber/sugar, mg for sodium/cholesterol/\n"
+            "   omega_*/minerals/vitamin_c, mcg for vitamin_d and vitamin_b12.\n\n"
+            f"Food to validate:\n{json.dumps(current_payload, indent=2)}\n\n"
+            "Return JSON: {\"verdict\": \"ok\"|\"corrected\"|\"insufficient_data\", "
+            "\"notes\": \"<one sentence explanation>\", "
+            "\"corrected\": null OR {calories, protein, carbs, fat, micros}}"
+        )
+        kwargs = _build_chat_kwargs(
+            model_chat(),
+            [
+                {"role": "system", "content": "You are a precise USDA nutrition reference. Return only the required JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            json_schema=_FOOD_VALIDATION_SCHEMA,
+            max_tokens=500,
+            timeout_secs=20,
+        )
+        response = _chat_create(client, **kwargs)
+        data = _extract_json(response.choices[0].message.content or "")
+        if not isinstance(data, dict):
+            return {"verdict": "insufficient_data", "notes": "invalid response shape", "corrected": None}
+        return {
+            "verdict": data.get("verdict") or "insufficient_data",
+            "notes": str(data.get("notes") or "")[:200],
+            "corrected": data.get("corrected"),
+        }
+    except Exception as exc:
+        print(f"[validate_food_macros] failed: {exc}")
+        return {"verdict": "insufficient_data", "notes": f"error: {exc}", "corrected": None}
 
 

@@ -190,6 +190,156 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
     return hydrated, unknowns
 
 
+# Layer 1 + Layer 2 micronutrient fields that should be present on
+# every hydrated food for the insight engine to work. Used by the
+# on-the-fly AI backfill below to decide whether a DB-hydrated food
+# needs an AI top-up and to write the results back to FoodNutrition
+# so we only pay once per food.
+_REQUIRED_MICRO_FIELDS: tuple[str, ...] = (
+    "fiber", "sugar", "sodium", "cholesterol",
+    "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+    "omega_3", "omega_6",
+    "potassium", "calcium", "iron", "magnesium",
+    "vitamin_c", "vitamin_d", "vitamin_b12",
+)
+
+
+def _food_needs_micro_backfill(food_dict: dict) -> bool:
+    """Return True if this food is missing ANY of the required micro fields.
+    Aggressive by design — we'd rather burn a cheap AI call than ship a
+    food card with half-empty chips. Once backfilled, the food is cached
+    in FoodNutrition.extra_nutrients so the cost is one-time per food."""
+    for k in _REQUIRED_MICRO_FIELDS:
+        v = food_dict.get(k)
+        try:
+            if v is None or float(v or 0) <= 0:
+                # Allow legitimate zeros ONLY for cholesterol (vegan foods)
+                # and vitamin_b12 (plant foods) — everything else should
+                # have SOMETHING on a real food.
+                if k in ("cholesterol", "vitamin_b12") and v is not None:
+                    continue
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _ai_backfill_micros(
+    client: OpenAI,
+    thin_foods: list[dict],
+) -> dict[str, dict[str, float]]:
+    """One AI call to backfill Layer 1 + Layer 2 micronutrients for a
+    batch of DB-hydrated foods that came back missing most of them.
+    Returns {food_name_lower: micros_dict}. Silently fails to {} on
+    any error — the plan pipeline can still ship the macros it already
+    has.
+
+    Batched to avoid N+1 calls: even 20 thin foods = 1 call ≈ $0.001.
+    """
+    if not thin_foods:
+        return {}
+    prompt_items = []
+    for f in thin_foods:
+        prompt_items.append({
+            "name": f.get("name"),
+            "serving": f.get("serving") or f.get("quantity") or "1 serving",
+        })
+    prompt = (
+        "Return USDA micronutrient values for each food at its STATED serving "
+        "size. Use snake_case keys, match the exact units below, omit a field only "
+        "if it is truly zero for that food.\n\n"
+        "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat "
+        "in grams; sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/"
+        "magnesium/vitamin_c in milligrams; vitamin_d and vitamin_b12 in micrograms.\n\n"
+        f"Foods:\n{json.dumps(prompt_items, indent=2)}\n\n"
+        "Return JSON with this exact shape:\n"
+        '{"foods": [\n'
+        '  {"name": "chicken breast", "micros": {"fiber": 0, "sugar": 0, "sodium": 120, '
+        '"cholesterol": 140, "saturated_fat": 1.5, "monounsaturated_fat": 2, '
+        '"polyunsaturated_fat": 1, "omega_3": 40, "omega_6": 600, "potassium": 440, '
+        '"calcium": 12, "iron": 1.5, "magnesium": 50, "vitamin_c": 0, "vitamin_d": 0.2, '
+        '"vitamin_b12": 0.5}},\n'
+        '  ...\n'
+        ']}'
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model_food_enrichment(),
+            messages=[
+                {"role": "system", "content": "You are a USDA nutrition database. Return only the required JSON, no prose."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=2500,
+            timeout=25,
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+    except Exception as e:
+        print(f"[enrich_foods] backfill AI call failed: {e}")
+        return {}
+
+    out: dict[str, dict[str, float]] = {}
+    for entry in data.get("foods") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip().lower()
+        micros = entry.get("micros")
+        if not name or not isinstance(micros, dict):
+            continue
+        clean: dict[str, float] = {}
+        for k, v in micros.items():
+            if k not in _REQUIRED_MICRO_FIELDS:
+                continue
+            try:
+                clean[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if clean:
+            out[name] = clean
+    return out
+
+
+def _persist_backfilled_micros(name_to_micros: dict[str, dict[str, float]]) -> None:
+    """Write the AI-backfilled micros back to FoodNutrition.extra_nutrients
+    so the next plan gen hydrates them from the DB and skips the AI call.
+    Silent failure — persistence is an optimization, not a correctness
+    requirement."""
+    if not name_to_micros:
+        return
+    try:
+        from sqlmodel import Session, select
+        from app.database import engine
+        from app.models import Food, FoodNutrition
+        with Session(engine) as db:
+            for name_lower, micros in name_to_micros.items():
+                food = db.exec(
+                    select(Food).where(Food.normalized_name == name_lower)
+                ).first()
+                if not food:
+                    continue
+                nut = db.exec(
+                    select(FoodNutrition).where(FoodNutrition.food_id == food.id)
+                ).first()
+                if not nut:
+                    continue
+                extras = dict(getattr(nut, "extra_nutrients", None) or {})
+                for k, v in micros.items():
+                    if k == "fiber":
+                        nut.fiber = v
+                    elif k == "sugar":
+                        nut.sugar = v
+                    elif k == "sodium":
+                        nut.sodium_mg = v
+                    else:
+                        extras[k] = v
+                nut.extra_nutrients = extras
+                db.add(nut)
+            db.commit()
+    except Exception as e:
+        print(f"[enrich_foods] backfill persist failed (non-fatal): {e}")
+
+
 def enrich_foods_with_macros(
     client: OpenAI,
     foods: list[str],
@@ -197,24 +347,80 @@ def enrich_foods_with_macros(
 ) -> dict:
     """
     Convert raw food names and meal routine text into structured macro data.
-    Returns {"foods": [{name, serving, calories, protein, carbs, fat}], "routine_meals": [...]}.
+    Returns {"foods": [{name, serving, calories, protein, carbs, fat, ...micros}], "routine_meals": [...]}.
 
     Resolution order:
       1. Hydrate every food we can from the local DB (zero AI cost).
-      2. If there's a `meal_routine` free-text OR any unknown foods, make
+      2. Any DB-hydrated food that came back thin on micronutrients gets
+         its Layer 2 fields topped up via a single batched AI call. The
+         result is persisted back to `FoodNutrition.extra_nutrients` so
+         future plans skip the AI call.
+      3. If there's a `meal_routine` free-text OR any unknown foods, make
          a SINGLE AI call for just those — not the whole list.
-      3. Merge DB + AI results before returning.
-
-    Before this refactor, this function always made an AI call regardless of
-    whether the foods were already in the seed DB. That was the biggest piece
-    of pointless AI cost in the plan pipeline.
+      4. Merge DB + AI results before returning.
     """
     if not foods and not meal_routine:
         return {"foods": [], "routine_meals": []}
 
     hydrated, unknowns = _hydrate_foods_from_db(foods or [])
+    print(
+        f"[enrich_foods] STEP 1 hydrate: {len(hydrated)} from DB, "
+        f"{len(unknowns)} unknowns (input={len(foods or [])})"
+    )
+
+    # Sample the first hydrated food's micro coverage for diagnostic.
     if hydrated:
-        print(f"[enrich_foods] hydrated {len(hydrated)} foods from DB, {len(unknowns)} unknowns")
+        sample = hydrated[0]
+        present = sum(1 for k in _REQUIRED_MICRO_FIELDS if float(sample.get(k) or 0) > 0)
+        print(
+            f"[enrich_foods] STEP 1 sample '{sample.get('name')}' has "
+            f"{present}/{len(_REQUIRED_MICRO_FIELDS)} micro fields populated"
+        )
+
+    # ── Layer 2 backfill for thin DB rows ──
+    # Seed rows that only carry fiber/sugar/sodium need an AI top-up
+    # for the full Layer 2 panel. We batch every thin food into one
+    # call and persist the result so this cost is paid at most once
+    # per food lifetime.
+    thin = [f for f in hydrated if _food_needs_micro_backfill(f)]
+    print(f"[enrich_foods] STEP 2 backfill check: {len(thin)}/{len(hydrated)} foods need backfill")
+    if thin:
+        thin_names = [str(f.get("name", "")) for f in thin[:8]]
+        print(f"[enrich_foods] STEP 2 backfilling: {thin_names}{' ...' if len(thin) > 8 else ''}")
+        backfill = _ai_backfill_micros(client, thin)
+        print(f"[enrich_foods] STEP 2 AI returned backfill for {len(backfill)} foods")
+        if backfill:
+            filled_count = 0
+            for f in hydrated:
+                key = str(f.get("name", "")).strip().lower()
+                if key in backfill:
+                    fields_written = 0
+                    for mk, mv in backfill[key].items():
+                        existing = f.get(mk)
+                        try:
+                            if existing is None or float(existing or 0) == 0:
+                                f[mk] = mv
+                                fields_written += 1
+                        except (TypeError, ValueError):
+                            f[mk] = mv
+                            fields_written += 1
+                    if fields_written > 0:
+                        filled_count += 1
+            _persist_backfilled_micros(backfill)
+            print(
+                f"[enrich_foods] STEP 2 applied to {filled_count} hydrated foods, "
+                f"persisted {len(backfill)} to DB"
+            )
+            # Re-sample to prove the data landed.
+            if hydrated:
+                sample2 = hydrated[0]
+                present2 = sum(1 for k in _REQUIRED_MICRO_FIELDS if float(sample2.get(k) or 0) > 0)
+                print(
+                    f"[enrich_foods] STEP 2 sample '{sample2.get('name')}' now has "
+                    f"{present2}/{len(_REQUIRED_MICRO_FIELDS)} micro fields"
+                )
+        else:
+            print("[enrich_foods] STEP 2 WARN — AI backfill returned empty; check API key and model")
 
     # Fast path: if everything resolved from DB AND there's no free-text
     # routine, we're done — no AI call at all.
@@ -263,19 +469,42 @@ def _enrich_via_ai(
         "  - Milk, yogurt, liquids → cup or fl_oz\n"
         "  - Vegetables → cup\n"
         "Macros must match the quantity + unit exactly (USDA values).\n\n"
+        "EVERY food MUST also include the following micronutrient fields at USDA values\n"
+        "for the returned serving size. Use snake_case keys exactly as shown. Omit ONLY\n"
+        "if truly zero (e.g. water has no protein). Units: grams for macros + fiber +\n"
+        "sugar + saturated/mono/poly fat, milligrams for sodium/potassium/calcium/iron/\n"
+        "magnesium/cholesterol/omega_3/omega_6/vitamin_c, micrograms for vitamin_d and\n"
+        "vitamin_b12.\n"
+        "Required micronutrient fields:\n"
+        "  fiber, sugar, sodium, cholesterol,\n"
+        "  saturated_fat, monounsaturated_fat, polyunsaturated_fat,\n"
+        "  omega_3, omega_6,\n"
+        "  potassium, calcium, iron, magnesium,\n"
+        "  vitamin_c, vitamin_d, vitamin_b12\n\n"
         + "\n\n".join(parts) + "\n\n"
-        "Return JSON with this exact schema:\n"
+        "Return JSON with this exact schema (micronutrient fields are REQUIRED on each food):\n"
         '{\n'
         '  "foods": [\n'
-        '    {"name": "chicken breast", "quantity": 6, "unit": "oz", "calories": 280, "protein": 53, "carbs": 0, "fat": 6}\n'
+        '    {\n'
+        '      "name": "chicken breast", "quantity": 6, "unit": "oz",\n'
+        '      "calories": 280, "protein": 53, "carbs": 0, "fat": 6,\n'
+        '      "fiber": 0, "sugar": 0, "sodium": 120, "cholesterol": 140,\n'
+        '      "saturated_fat": 1.5, "monounsaturated_fat": 2, "polyunsaturated_fat": 1,\n'
+        '      "omega_3": 40, "omega_6": 600,\n'
+        '      "potassium": 440, "calcium": 12, "iron": 1.5, "magnesium": 50,\n'
+        '      "vitamin_c": 0, "vitamin_d": 0.2, "vitamin_b12": 0.5\n'
+        '    }\n'
         '  ],\n'
         '  "routine_meals": [\n'
         '    {\n'
         '      "meal_slot": "breakfast",\n'
         '      "description": "2 eggs and oatmeal",\n'
         '      "foods": [\n'
-        '        {"name": "eggs", "quantity": "2 large", "calories": 140, "protein": 12, "carbs": 1, "fat": 10},\n'
-        '        {"name": "oatmeal", "quantity": "1 cup cooked", "calories": 150, "protein": 5, "carbs": 27, "fat": 3}\n'
+        '        {"name": "eggs", "quantity": "2 large", "calories": 140, "protein": 12, "carbs": 1, "fat": 10,\n'
+        '         "fiber": 0, "sugar": 1, "sodium": 140, "cholesterol": 370,\n'
+        '         "saturated_fat": 3, "omega_3": 60, "vitamin_d": 2, "vitamin_b12": 1.1, "potassium": 130, "calcium": 50, "iron": 1.2, "magnesium": 12},\n'
+        '        {"name": "oatmeal", "quantity": "1 cup cooked", "calories": 150, "protein": 5, "carbs": 27, "fat": 3,\n'
+        '         "fiber": 4, "sugar": 1, "sodium": 10, "saturated_fat": 0.5, "magnesium": 60, "iron": 1.7, "potassium": 170}\n'
         '      ],\n'
         '      "total": {"calories": 290, "protein": 17, "carbs": 28, "fat": 13}\n'
         '    }\n'
@@ -283,7 +512,8 @@ def _enrich_via_ai(
         '}\n\n'
         "If no meal routine is provided, return an empty routine_meals array.\n"
         "If no food list is provided, return an empty foods array.\n"
-        "Be accurate with macro values. Use USDA-style nutrition data."
+        "Be accurate with ALL values. Use USDA-style nutrition data. Missing micronutrients\n"
+        "lead to bad coaching — always include them."
     )
 
     _model = model_food_enrichment()

@@ -112,6 +112,7 @@ def is_suspicious(
     reasons: list[str] = []
     rng = parse_rep_range(planned_set.target_reps)
     feel_b = _feel_bucket(feel)
+    no_history = not last_session_sets and not previous_sets_this_session
 
     # Pain always triggers review — this is a safety issue, never
     # something the deterministic recommender should ship silently.
@@ -120,9 +121,10 @@ def is_suspicious(
 
     if rng is not None:
         lo, hi = rng
-        # Big overshoot — beat top by ≥3 reps. Deterministic would
-        # just bump one increment; AI should consider a bigger jump.
-        if actual_reps >= hi + 3:
+        # Big overshoot — beat top by ≥3 reps AND feel isn't "hard".
+        # If user felt it was hard even after overshooting, the det
+        # +1 increment is already the right call.
+        if actual_reps >= hi + 3 and feel_b not in ("hard", "failure"):
             reasons.append(f"big overshoot: {actual_reps} vs top {hi}")
         # Big undershoot — missed bottom by ≥2 reps.
         if actual_reps <= max(0, lo - 2):
@@ -143,11 +145,12 @@ def is_suspicious(
             # consider whether to drop a rep target or deload.
             reasons.append("feel=failure even within rep range")
 
-    # First session of the exercise — no last-session data at all.
-    # Deterministic has no context beyond the anchor weight so a
-    # second opinion helps calibrate.
-    if not last_session_sets and not previous_sets_this_session:
-        reasons.append("first session of exercise — no history")
+    # First session of the exercise — no longer auto-escalates.
+    # The deterministic path returns `confidence=low` + `ask_for_feel=true`
+    # via the enricher, which gives the client enough to handle it. AI
+    # only fires on the first session IF the user's feel conflicts with
+    # their reps (already caught by the rules above).
+    # Old rule (always-escalate) removed per spec — was ~20% of prod fires.
 
     # Deterministic said reduce_load but user reports feel=easy —
     # that's a sign the load was fine and something else went wrong
@@ -424,4 +427,79 @@ def reviewed_next_set_recommendation(
         explanation=str(ai.get("explanation") or det.explanation),
         source="ai_confirmed" if bool(ai.get("confirmed")) else "ai_override",
         suspicion_reasons=reasons,
+    )
+
+
+# ── Structured recommendation wrapper ─────────────────────────────
+
+
+def reviewed_set_recommendation_structured(
+    *,
+    exercise: dict,
+    planned_set: PlannedSet,
+    actual_reps: int,
+    actual_weight_lbs: float,
+    actual_rir: Optional[float] = None,
+    feel: Optional[str] = None,
+    previous_sets_this_session: Optional[list[dict]] = None,
+    last_session_sets: Optional[list[dict]] = None,
+    require_feel: bool = True,
+):
+    """Structured variant — wraps `reviewed_next_set_recommendation` and
+    returns a `SetRecommendation` (camelCase on serialization). This is
+    the new contract the client will consume going forward.
+
+    Returns None when `require_feel=True` and `feel` is empty, matching
+    the suppression behavior of the legacy entry point."""
+    from .recommendation_schema import (
+        SetRecommendation,
+        enrich_to_set_recommendation,
+    )
+    from .set_programming import parse_rep_range
+
+    reviewed = reviewed_next_set_recommendation(
+        exercise=exercise,
+        planned_set=planned_set,
+        actual_reps=actual_reps,
+        actual_weight_lbs=actual_weight_lbs,
+        actual_rir=actual_rir,
+        feel=feel,
+        previous_sets_this_session=previous_sets_this_session,
+        last_session_sets=last_session_sets,
+        require_feel=require_feel,
+    )
+    if reviewed is None:
+        return None
+
+    # Rebuild a transient NextSetRecommendation-shaped object from the
+    # reviewed result so the enricher can consume it uniformly. The
+    # source tag tracks whether AI actually fired.
+    from .set_programming import NextSetRecommendation as _NSR
+
+    det_shaped = _NSR(
+        next_set_weight_lbs=reviewed.next_set_weight_lbs,
+        next_set_rep_target=reviewed.next_set_rep_target,
+        action=reviewed.action,  # type: ignore[arg-type]
+        explanation=reviewed.explanation,
+    )
+
+    is_first_session = not (last_session_sets or previous_sets_this_session)
+    is_first_set = not (previous_sets_this_session or [])
+
+    source = (
+        "ai_review"
+        if reviewed.source in ("ai_confirmed", "ai_override")
+        else "deterministic"
+    )
+
+    return enrich_to_set_recommendation(
+        det=det_shaped,
+        planned=planned_set,
+        actual_reps=actual_reps,
+        actual_weight=actual_weight_lbs,
+        feel=feel,
+        is_first_session=is_first_session,
+        is_first_set=is_first_set,
+        rep_range=parse_rep_range(planned_set.target_reps),
+        source=source,
     )

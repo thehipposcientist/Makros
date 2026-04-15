@@ -3,6 +3,8 @@ import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView } from 'rea
 import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
+import { computeDayInsights } from '../utils/nutritionLayers';
+import NutritionInsightCard from './NutritionInsightCard';
 
 interface NutritionCardProps {
   title?: string;
@@ -72,16 +74,23 @@ export default function NutritionCard({
   // emits snake_case (`vitamin_a`) but the legacy type + old cached
   // plans used camelCase (`vitaminA`). We sum whichever is present.
   const microFieldSpec: Array<{ out: string; keys: string[] }> = [
-    { out: 'fiber',       keys: ['fiber'] },
-    { out: 'sugar',       keys: ['sugar'] },
-    { out: 'sodium',      keys: ['sodium'] },
-    { out: 'cholesterol', keys: ['cholesterol'] },
-    { out: 'vitaminA',    keys: ['vitamin_a', 'vitaminA'] },
-    { out: 'vitaminC',    keys: ['vitamin_c', 'vitaminC'] },
-    { out: 'vitaminD',    keys: ['vitamin_d', 'vitaminD'] },
-    { out: 'calcium',     keys: ['calcium'] },
-    { out: 'iron',        keys: ['iron'] },
-    { out: 'potassium',   keys: ['potassium'] },
+    { out: 'fiber',              keys: ['fiber'] },
+    { out: 'sugar',              keys: ['sugar'] },
+    { out: 'sodium',             keys: ['sodium'] },
+    { out: 'cholesterol',        keys: ['cholesterol'] },
+    { out: 'saturatedFat',       keys: ['saturated_fat', 'saturatedFat'] },
+    { out: 'monounsaturatedFat', keys: ['monounsaturated_fat', 'monounsaturatedFat'] },
+    { out: 'polyunsaturatedFat', keys: ['polyunsaturated_fat', 'polyunsaturatedFat'] },
+    { out: 'omega3',             keys: ['omega_3', 'omega3'] },
+    { out: 'omega6',             keys: ['omega_6', 'omega6'] },
+    { out: 'potassium',          keys: ['potassium'] },
+    { out: 'calcium',            keys: ['calcium'] },
+    { out: 'iron',               keys: ['iron'] },
+    { out: 'magnesium',          keys: ['magnesium'] },
+    { out: 'vitaminD',           keys: ['vitamin_d', 'vitaminD'] },
+    { out: 'vitaminC',           keys: ['vitamin_c', 'vitaminC'] },
+    { out: 'vitaminB12',         keys: ['vitamin_b12', 'vitaminB12'] },
+    { out: 'vitaminA',           keys: ['vitamin_a', 'vitaminA'] },
   ];
   const dailyMicros: Record<string, number> = {};
   for (const spec of microFieldSpec) {
@@ -156,27 +165,86 @@ export default function NutritionCard({
                   </View>
                 </View>
 
-                {/* Micronutrient grid */}
-                <Text style={styles.modalSectionTitle}>Micronutrients</Text>
+                {/* Actionable insights — ≤3, sorted critical → notable */}
+                {(() => {
+                  const day: Record<string, number> = {
+                    fiber: dailyMicros.fiber || 0,
+                    sugar: dailyMicros.sugar || 0,
+                    sodium: dailyMicros.sodium || 0,
+                    saturatedFat: dailyMicros.saturatedFat || 0,
+                    omega3: dailyMicros.omega3 || 0,
+                    potassium: dailyMicros.potassium || 0,
+                    calcium: dailyMicros.calcium || 0,
+                    magnesium: dailyMicros.magnesium || 0,
+                    vitaminD: dailyMicros.vitaminD || 0,
+                    cholesterol: dailyMicros.cholesterol || 0,
+                  };
+                  const insights = computeDayInsights(day).slice(0, 3);
+                  if (insights.length === 0) return null;
+                  return (
+                    <View style={{ marginBottom: 8 }}>
+                      <Text style={styles.modalSectionTitle}>What to watch</Text>
+                      {insights.map(ins => (
+                        <NutritionInsightCard
+                          key={ins.key}
+                          insight={ins}
+                          themeColors={{
+                            textPrimary: colors.textPrimary,
+                            textSecondary: colors.textSecondary,
+                            textMuted: colors.textMuted,
+                            border: colors.border,
+                            surface: colors.surface,
+                          }}
+                        />
+                      ))}
+                    </View>
+                  );
+                })()}
+
+                {/* Layer 1 — fiber, sugar, sodium, cholesterol */}
+                <Text style={styles.modalSectionTitle}>Essentials</Text>
                 <View style={styles.microGridLg}>
-                  <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${dailyMicros.fiber}g` : '—'} target="25g" pct={dailyMicros.fiber / 25} colors={colors} styles={styles} />
-                  <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${dailyMicros.sugar}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
-                  <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${dailyMicros.sodium}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
-                  <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${dailyMicros.cholesterol}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} />
+                  <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${Math.round(dailyMicros.fiber)}g` : '—'} target="28g" pct={dailyMicros.fiber / 28} colors={colors} styles={styles} low={dailyMicros.fiber > 0 && dailyMicros.fiber < 20} />
+                  <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${Math.round(dailyMicros.sugar)}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
+                  <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${Math.round(dailyMicros.sodium)}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
+                  <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} />
                 </View>
 
-                <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Vitamins & Minerals</Text>
+                {/* Layer 2 — fats panel (sat / mono / poly / omega-3) */}
+                <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Fats panel</Text>
                 <View style={styles.microGridLg}>
+                  <MicroChipLg label="Saturated" value={dailyMicros.saturatedFat > 0 ? `${Math.round(dailyMicros.saturatedFat)}g` : '—'} target="<20g" pct={dailyMicros.saturatedFat > 0 ? Math.min(dailyMicros.saturatedFat / 20, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.saturatedFat > 20} />
+                  <MicroChipLg label="Mono" value={dailyMicros.monounsaturatedFat > 0 ? `${Math.round(dailyMicros.monounsaturatedFat)}g` : '—'} target="25g" pct={dailyMicros.monounsaturatedFat / 25} colors={colors} styles={styles} />
+                  <MicroChipLg label="Poly" value={dailyMicros.polyunsaturatedFat > 0 ? `${Math.round(dailyMicros.polyunsaturatedFat)}g` : '—'} target="15g" pct={dailyMicros.polyunsaturatedFat / 15} colors={colors} styles={styles} />
+                  <MicroChipLg label="Omega-3" value={dailyMicros.omega3 > 0 ? `${Math.round(dailyMicros.omega3)}mg` : '—'} target="1600mg" pct={dailyMicros.omega3 / 1600} colors={colors} styles={styles} low={dailyMicros.omega3 > 0 && dailyMicros.omega3 < 1000} />
+                </View>
+
+                {/* Layer 2 — minerals */}
+                <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Minerals</Text>
+                <View style={styles.microGridLg}>
+                  <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${Math.round(dailyMicros.potassium)}mg` : '—'} target="3400mg" pct={dailyMicros.potassium / 3400} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 2300} />
+                  <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${Math.round(dailyMicros.calcium)}mg` : '—'} target="1000mg" pct={dailyMicros.calcium / 1000} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 700} />
+                  <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${(Math.round(dailyMicros.iron * 10) / 10)}mg` : '—'} target="18mg" pct={dailyMicros.iron / 18} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 12} />
+                  <MicroChipLg label="Magnesium" value={dailyMicros.magnesium > 0 ? `${Math.round(dailyMicros.magnesium)}mg` : '—'} target="400mg" pct={dailyMicros.magnesium / 400} colors={colors} styles={styles} low={dailyMicros.magnesium > 0 && dailyMicros.magnesium < 280} />
+                </View>
+
+                {/* Layer 2 — vitamins */}
+                <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Vitamins</Text>
+                <View style={styles.microGridLg}>
+                  <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${(Math.round(dailyMicros.vitaminD * 10) / 10)}mcg` : '—'} target="15mcg" pct={dailyMicros.vitaminD / 15} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 10} />
+                  <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${Math.round(dailyMicros.vitaminC)}mg` : '—'} target="90mg" pct={dailyMicros.vitaminC / 90} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 60} />
+                  <MicroChipLg label="Vitamin B12" value={dailyMicros.vitaminB12 > 0 ? `${(Math.round(dailyMicros.vitaminB12 * 10) / 10)}mcg` : '—'} target="2.4mcg" pct={dailyMicros.vitaminB12 / 2.4} colors={colors} styles={styles} low={dailyMicros.vitaminB12 > 0 && dailyMicros.vitaminB12 < 1.6} />
                   <MicroChipLg label="Vitamin A" value={dailyMicros.vitaminA > 0 ? `${dailyMicros.vitaminA}%` : '—'} target="100% DV" pct={dailyMicros.vitaminA / 100} colors={colors} styles={styles} low={dailyMicros.vitaminA > 0 && dailyMicros.vitaminA < 50} />
-                  <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${dailyMicros.vitaminC}%` : '—'} target="100% DV" pct={dailyMicros.vitaminC / 100} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 50} />
-                  <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${dailyMicros.vitaminD}%` : '—'} target="100% DV" pct={dailyMicros.vitaminD / 100} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 50} />
-                  <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${dailyMicros.iron}%` : '—'} target="100% DV" pct={dailyMicros.iron / 100} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 50} />
-                  <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${dailyMicros.calcium}%` : '—'} target="100% DV" pct={dailyMicros.calcium / 100} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 50} />
-                  <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${dailyMicros.potassium}mg` : '—'} target="2600mg" pct={dailyMicros.potassium / 2600} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 1300} />
                 </View>
 
                 {!hasMicros && (
-                  <Text style={styles.microNoData}>Micronutrient data will appear once the AI generates a plan with detailed nutrition info.</Text>
+                  <View style={{ marginTop: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
+                    <Text style={styles.microNoData}>
+                      Nutrition details are computed from each food's USDA reference. If you're seeing dashes, your DB foods need enrichment — run{' '}
+                      <Text style={{ fontWeight: '700' }}>python enrich_food_micros.py</Text>{' '}
+                      in the backend to populate them.
+                    </Text>
+                  </View>
                 )}
 
                 {/* Legend */}
@@ -417,16 +485,27 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         </View>
       )}
 
-      {/* Macro pills — compact strip at the bottom of the row. */}
-      <View style={styles.mealBadges}>
-        <MacroPill label="cal"     value={Math.round(meal.calories)}   color={mealAccent.strong} styles={styles} />
-        <MacroPill label="p"       value={Math.round(meal.protein)}    color={colors.primary}    styles={styles} />
-        <MacroPill label="c"       value={Math.round(meal.carbs ?? 0)} color="#F59E0B"           styles={styles} />
-        <MacroPill label="f"       value={Math.round(meal.fat ?? 0)}   color="#A78BFA"           styles={styles} />
-        {(meal.fiber ?? meal.micronutrients?.fiber ?? 0) > 0 && (
-          <MacroPill label="fib" value={Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0)} color="#10B981" styles={styles} />
-        )}
-      </View>
+      {/* Macro pills — Layer 1 only. Sugar/sodium show ONLY when
+          notably high so the row stays uncluttered. Thresholds are
+          ~30% of daily cap, meaning one meal alone is spiking them. */}
+      {(() => {
+        const fiber = Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0);
+        const sugar = Math.round(meal.sugar ?? meal.micronutrients?.sugar ?? 0);
+        const sodium = Math.round(meal.sodium ?? meal.micronutrients?.sodium ?? 0);
+        const highSugar = sugar >= 15;
+        const highSodium = sodium >= 700;
+        return (
+          <View style={styles.mealBadges}>
+            <MacroPill label="cal" value={Math.round(meal.calories)} color={mealAccent.strong} styles={styles} />
+            <MacroPill label="p"   value={Math.round(meal.protein)}  color={colors.primary}    styles={styles} />
+            <MacroPill label="c"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
+            <MacroPill label="f"   value={Math.round(meal.fat ?? 0)}   color="#A78BFA"         styles={styles} />
+            {fiber > 0 && <MacroPill label="fib" value={fiber} color="#10B981" styles={styles} />}
+            {highSugar && <MacroPill label="sug" value={sugar} color="#EF4444" styles={styles} />}
+            {highSodium && <MacroPill label="Na" value={sodium} color="#EF4444" styles={styles} />}
+          </View>
+        );
+      })()}
     </View>
   );
 }

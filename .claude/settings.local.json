@@ -111,7 +111,12 @@
       "Bash(sed -n '840,855p' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
       "Bash(sed -i '' '1121,1178d' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
       "Bash(sed -n '1115,1130p' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
-      "Bash(wc *)"
+      "Bash(wc *)",
+      "Bash(pip3 show *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(command -v python)",
+      "Bash(command -v uvicorn)",
+      "Bash(lsof -iTCP -sTCP:LISTEN -P)"
     ]
   }
 }

@@ -1018,6 +1018,59 @@ def _generate_nutritionist_note(
             )
         meals_block = "\n".join(meal_lines) if meal_lines else "  (no meals)"
 
+        # ── Compute strengths + gaps from micronutrient totals ──
+        # Mirror of the client-side nutritionLayers.ts rules. Sums the
+        # first template's micronutrients and identifies anything notably
+        # low (fiber, omega3, potassium, calcium, magnesium) or high
+        # (sodium, saturated fat) so the note can cite real numbers.
+        def _sum_micros(template: dict) -> dict[str, float]:
+            totals: dict[str, float] = {}
+            for m in template.get("meals") or []:
+                if not isinstance(m, dict):
+                    continue
+                micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
+                totals["fiber"] = totals.get("fiber", 0.0) + float(m.get("fiber") or micros.get("fiber") or 0)
+                totals["sodium"] = totals.get("sodium", 0.0) + float(m.get("sodium") or micros.get("sodium") or 0)
+                totals["sugar"]  = totals.get("sugar", 0.0) + float(m.get("sugar") or micros.get("sugar") or 0)
+                for k in ("saturatedFat", "omega3", "potassium", "calcium",
+                          "magnesium", "iron", "vitaminD", "vitaminC", "vitaminB12"):
+                    totals[k] = totals.get(k, 0.0) + float(micros.get(k) or 0)
+            return totals
+
+        MIN_TARGETS = {  # daily target: higher-is-better nutrients
+            "fiber": 28, "omega3": 1600, "potassium": 3400,
+            "calcium": 1000, "magnesium": 400, "vitaminD": 15,
+        }
+        MAX_TARGETS = {  # lower-is-better
+            "sodium": 2300, "saturatedFat": 20, "sugar": 50,
+        }
+        LABELS = {
+            "fiber": "fiber", "omega3": "omega-3", "potassium": "potassium",
+            "calcium": "calcium", "magnesium": "magnesium", "vitaminD": "vitamin D",
+            "sodium": "sodium", "saturatedFat": "saturated fat", "sugar": "sugar",
+        }
+
+        micros = _sum_micros(first_np) if isinstance(first_np, dict) else {}
+        strengths: list[str] = []
+        gaps: list[str] = []
+        for key, target in MIN_TARGETS.items():
+            actual = micros.get(key, 0.0)
+            if actual <= 0:
+                continue
+            if actual >= target * 1.15:
+                strengths.append(f"{LABELS[key]} {int(round(actual))}")
+            elif actual < target * 0.70:
+                gaps.append(f"{LABELS[key]} {int(round(actual))} (target {target})")
+        for key, target in MAX_TARGETS.items():
+            actual = micros.get(key, 0.0)
+            if actual <= 0:
+                continue
+            if actual > target * 1.15:
+                gaps.append(f"{LABELS[key]} {int(round(actual))} (over {target})")
+
+        strengths_line = "; ".join(strengths[:2]) if strengths else "none stand out"
+        gaps_line      = "; ".join(gaps[:2])      if gaps      else "none significant"
+
         review_block = ""
         if review_summary:
             patch_bits: list[str] = []
@@ -1110,7 +1163,10 @@ def _generate_nutritionist_note(
             "=== GOAL-SPECIFIC RATIONALE (expand on this, do not parrot) ===\n"
             f"{goal_rationale}\n\n"
             "=== FIRST TEMPLATE MEALS (post-review, post-normalize — these exact numbers show in the UI) ===\n"
-            f"{meals_block}"
+            f"{meals_block}\n\n"
+            "=== REAL STRENGTHS + GAPS FROM THIS TEMPLATE'S MICRONUTRIENTS ===\n"
+            f"Strengths: {strengths_line}\n"
+            f"Gaps: {gaps_line}\n"
             f"{review_block}\n\n"
             "=== REQUIREMENTS FOR THE NOTE ===\n"
             f"1. Lead with the goal by name and the EXACT calorie target ({tgt_cal} kcal) "
@@ -1122,9 +1178,13 @@ def _generate_nutritionist_note(
             "calories) in terms of training fuel + recovery + satiety for THIS goal.\n"
             "4. Name ONE specific meal from the list above by its exact name and explain "
             "why it is built that way for this goal (cite its calories or protein).\n"
-            "5. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
+            "5. Name ONE strength from the Strengths line above by nutrient name with its number.\n"
+            "6. Name ONE gap from the Gaps line above with its number AND suggest one "
+            "concrete food fix (e.g. 'add a cup of spinach', 'two salmon fillets per week'). "
+            "If gaps_line says 'none significant', skip this requirement entirely.\n"
+            "7. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
             "gym performance) so they can self-assess whether it's working.\n"
-            "6. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
+            "8. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
             "BANNED: generic phrases like 'balanced nutrition', 'supports your goals', "
             "'fuel your workouts', 'clean eating'. Every sentence must cite a number "
             "or a named meal from above. No filler. If you can't cite a specific "
@@ -1385,25 +1445,55 @@ def _build_custom_foods(
                     if isinstance(macros, dict):
                         plan_food_macros[str(name).lower()] = macros
 
+    # Canonical micronutrient fields we'll copy through when the
+    # enrichment path supplied them. Clients store these alongside
+    # macros so the insight engine has day-level rollup data.
+    _MICRO_KEYS = (
+        "fiber", "sugar", "sodium", "cholesterol",
+        "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+        "omega_3", "omega_6",
+        "potassium", "calcium", "iron", "magnesium",
+        "vitamin_c", "vitamin_d", "vitamin_b12",
+    )
+
     custom_foods: list[dict] = []
     for name_lower in all_unknown:
         # Try enriched data first, then plan-extracted macros
         info = enriched_lookup.get(name_lower) or plan_food_macros.get(name_lower)
         if info:
-            custom_foods.append({
+            micros: dict[str, float] = {}
+            for k in _MICRO_KEYS:
+                v = info.get(k)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                    if fv != 0:
+                        micros[k] = fv
+                except (TypeError, ValueError):
+                    continue
+            entry = {
                 "name": info.get("name", name_lower.title()),
                 "unit": info.get("serving") or info.get("quantity") or "1 serving",
                 "calories": info.get("calories", 0),
                 "protein": info.get("protein", 0),
                 "carbs": info.get("carbs", 0),
                 "fat": info.get("fat", 0),
-            })
+                # Tag verification status so the client's UI can show
+                # a badge and the validate endpoint knows whether this
+                # food has already been through verification.
+                "verificationStatus": "ai_estimated",
+            }
+            if micros:
+                entry["micronutrients"] = micros
+            custom_foods.append(entry)
         else:
             # No macro data available — include with zeros so frontend knows about it
             custom_foods.append({
                 "name": name_lower.title(),
                 "unit": "1 serving",
                 "calories": 0, "protein": 0, "carbs": 0, "fat": 0,
+                "verificationStatus": "insufficient_data",
             })
 
     return custom_foods
