@@ -635,7 +635,9 @@ def _build_deterministic_workout(
         # bucket. Secondary goal might be "maintain strength" on a fat
         # loss plan, for example — changes what a balanced plan looks
         # like to the reviewer.
-        _secondary_goal = getattr(req, "secondaryGoal", None)
+        # secondaryGoal is deprecated (always None). targetFocus is the
+        # only active "secondary" context the reviewer can use.
+        _secondary_goal = _focused_for_ai  # pass target focus as secondary context
         _goal_details = None
         try:
             _goal_details = req.goalDetails.model_dump() if req.goalDetails else None
@@ -678,7 +680,29 @@ def _build_deterministic_workout(
                 f"new_reps={p.new_reps!r} reason={p.reason!r}"
             )
         if review.status == "modify" and review.patches:
-            _, applied = apply_patches(plan, review.patches)
+            # Belt-and-braces: any plan_day whose focus matches a
+            # session the user ALREADY completed today gets blocked
+            # from patches. The prompt is told to skip these, but the
+            # AI occasionally ignores the rule — filter defensively.
+            completed_today = set(brief.get("completed_today_focuses") or [])
+            blocked_day_indices: set[int] = set()
+            if completed_today:
+                for day_meta in brief.get("plan_days") or []:
+                    plan_focus = (day_meta.get("focus") or "").strip().lower()
+                    if plan_focus in completed_today:
+                        idx = day_meta.get("index")
+                        if isinstance(idx, int):
+                            blocked_day_indices.add(idx)
+                if blocked_day_indices:
+                    print(
+                        f"[plan-review] blocking patches on day_indices "
+                        f"{sorted(blocked_day_indices)} — user already "
+                        f"completed those focuses today"
+                    )
+            _, applied = apply_patches(
+                plan, review.patches,
+                blocked_day_indices=blocked_day_indices,
+            )
             for msg in applied:
                 print(f"[plan-gen workout] review patch: {msg}")
             # Re-stamp load metadata on any patched exercises so the
@@ -1024,30 +1048,58 @@ def _generate_nutritionist_note(
         # low (fiber, omega3, potassium, calcium, magnesium) or high
         # (sodium, saturated fat) so the note can cite real numbers.
         def _sum_micros(template: dict) -> dict[str, float]:
+            """Sum micronutrients across meals. Reads BOTH snake_case
+            (canonical backend) and camelCase (legacy) keys so we never
+            miss data regardless of which path generated the meal."""
             totals: dict[str, float] = {}
+            # Map canonical display keys → list of source keys to try.
+            # The first match wins per-meal.
+            KEY_MAP: dict[str, list[str]] = {
+                "fiber":        ["fiber"],
+                "sodium":       ["sodium"],
+                "sugar":        ["sugar"],
+                "saturated_fat":["saturated_fat", "saturatedFat"],
+                "omega_3":      ["omega_3", "omega3"],
+                "potassium":    ["potassium"],
+                "calcium":      ["calcium"],
+                "magnesium":    ["magnesium"],
+                "iron":         ["iron"],
+                "vitamin_d":    ["vitamin_d", "vitaminD"],
+                "vitamin_c":    ["vitamin_c", "vitaminC"],
+                "vitamin_b12":  ["vitamin_b12", "vitaminB12"],
+            }
             for m in template.get("meals") or []:
                 if not isinstance(m, dict):
                     continue
                 micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
-                totals["fiber"] = totals.get("fiber", 0.0) + float(m.get("fiber") or micros.get("fiber") or 0)
-                totals["sodium"] = totals.get("sodium", 0.0) + float(m.get("sodium") or micros.get("sodium") or 0)
-                totals["sugar"]  = totals.get("sugar", 0.0) + float(m.get("sugar") or micros.get("sugar") or 0)
-                for k in ("saturatedFat", "omega3", "potassium", "calcium",
-                          "magnesium", "iron", "vitaminD", "vitaminC", "vitaminB12"):
-                    totals[k] = totals.get(k, 0.0) + float(micros.get(k) or 0)
+                for canonical, alts in KEY_MAP.items():
+                    val = 0.0
+                    # Check top-level meal keys first (fiber/sodium/sugar
+                    # live there), then nested micronutrients dict.
+                    for alt in alts:
+                        v = m.get(alt) if alt in ("fiber", "sodium", "sugar") else None
+                        if v is None:
+                            v = micros.get(alt)
+                        if v is not None:
+                            try:
+                                val = float(v)
+                            except (TypeError, ValueError):
+                                val = 0.0
+                            break
+                    totals[canonical] = totals.get(canonical, 0.0) + val
             return totals
 
         MIN_TARGETS = {  # daily target: higher-is-better nutrients
-            "fiber": 28, "omega3": 1600, "potassium": 3400,
-            "calcium": 1000, "magnesium": 400, "vitaminD": 15,
+            "fiber": 28, "omega_3": 1600, "potassium": 3400,
+            "calcium": 1000, "magnesium": 400, "vitamin_d": 15,
         }
         MAX_TARGETS = {  # lower-is-better
-            "sodium": 2300, "saturatedFat": 20, "sugar": 50,
+            "sodium": 2300, "saturated_fat": 20, "sugar": 50,
         }
         LABELS = {
-            "fiber": "fiber", "omega3": "omega-3", "potassium": "potassium",
-            "calcium": "calcium", "magnesium": "magnesium", "vitaminD": "vitamin D",
-            "sodium": "sodium", "saturatedFat": "saturated fat", "sugar": "sugar",
+            "fiber": "fiber", "omega_3": "omega-3", "potassium": "potassium",
+            "calcium": "calcium", "magnesium": "magnesium", "vitamin_d": "vitamin D",
+            "sodium": "sodium", "saturated_fat": "saturated fat", "sugar": "sugar",
         }
 
         micros = _sum_micros(first_np) if isinstance(first_np, dict) else {}
@@ -1093,7 +1145,13 @@ def _generate_nutritionist_note(
             if req.goalSelection is not None
             else req.goal
         )
-        secondary = getattr(req, "secondaryGoal", None) or "none"
+        # The active goal model uses primaryGoal + targetFocus only.
+        # secondaryGoal and modifiers are deprecated (always empty).
+        target_focus = (
+            getattr(req.goalSelection, "targetFocus", None)
+            if req.goalSelection is not None
+            else getattr(req, "focusedMuscleGroup", None)
+        )
         diet = getattr(req, "dietaryPreference", None) or "no specific preference"
         allergens = ", ".join(getattr(req, "allergies", None) or []) or "none"
         goal_details = None
@@ -1141,20 +1199,54 @@ def _generate_nutritionist_note(
                 f"{req.daysPerWeek or 3}-day training schedule."
             )
 
+        # Build supplement stack summary for the note. The skeleton AI
+        # generates a supplementStack on every plan gen; the note should
+        # reference the top 2-3 supplements so the user sees WHY they're
+        # recommended.
+        supp_stack = nutrition_data.get("supplementStack") or []
+        if isinstance(supp_stack, list) and supp_stack:
+            supp_lines = []
+            for s in supp_stack[:3]:
+                if isinstance(s, dict):
+                    supp_lines.append(
+                        f"  {s.get('name', '?')}: {s.get('dose', '?')}, "
+                        f"{s.get('timing', '?')} — {s.get('purpose', '?')}"
+                    )
+            supp_block = "\n".join(supp_lines) if supp_lines else "  (none)"
+        else:
+            supp_block = "  (none generated)"
+
+        # Build shared nutrition context (bodyweight, adherence, etc.)
+        user_context_block = ""
+        try:
+            from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+            _nctx = build_nutrition_context(
+                goal=goal,
+                secondary_goal=target_focus,
+                experience=getattr(req, "experienceLevel", None),
+                bodyweight_lbs=bw,
+                dietary_preference=diet,
+                allergies=getattr(req, "allergies", None),
+            )
+            user_context_block = format_for_prompt(_nctx)
+        except Exception:
+            pass
+
         prompt = (
-            "Write a 120-180 word grounded nutrition explanation for this user. "
+            "Write a 150-220 word grounded nutrition explanation for this user. "
             "This note must READ LIKE A REGISTERED DIETITIAN explaining a plan "
             "tailored to THEIR specific goal and numbers — not generic meal-plan prose.\n\n"
             "=== USER CONTEXT ===\n"
             f"Primary goal: {goal}\n"
-            f"Secondary goal: {secondary}\n"
+            + (f"Target muscle focus: {target_focus} (user wants extra emphasis here)\n" if target_focus else "") +
             f"Goal details: {goal_details}\n"
             f"Bodyweight: {bw or '?'} lbs\n"
             f"Diet preference: {diet}\n"
             f"Allergies: {allergens}\n"
             f"Training: {req.daysPerWeek or 3} lifting days/week, "
-            f"{req.workoutDurationMinutes or 60} min/session\n\n"
-            "=== DAILY TARGETS (the numbers the user sees) ===\n"
+            f"{req.workoutDurationMinutes or 60} min/session\n"
+            + (f"\n{user_context_block}\n" if user_context_block else "") +
+            "\n=== DAILY TARGETS (the numbers the user sees) ===\n"
             f"Calories: {tgt_cal} kcal\n"
             f"Protein:  {tgt_prot} g  ({pct_prot}% of kcal, {prot_per_lb or '?'} g/lb bodyweight)\n"
             f"Carbs:    {tgt_carbs} g  ({pct_carbs}% of kcal)\n"
@@ -1168,6 +1260,8 @@ def _generate_nutritionist_note(
             f"Strengths: {strengths_line}\n"
             f"Gaps: {gaps_line}\n"
             f"{review_block}\n\n"
+            "=== SUPPLEMENT STACK (AI-recommended for this goal) ===\n"
+            f"{supp_block}\n\n"
             "=== REQUIREMENTS FOR THE NOTE ===\n"
             f"1. Lead with the goal by name and the EXACT calorie target ({tgt_cal} kcal) "
             f"and EXACT protein target ({tgt_prot}g) — the user must see their own numbers "
@@ -1182,17 +1276,20 @@ def _generate_nutritionist_note(
             "6. Name ONE gap from the Gaps line above with its number AND suggest one "
             "concrete food fix (e.g. 'add a cup of spinach', 'two salmon fillets per week'). "
             "If gaps_line says 'none significant', skip this requirement entirely.\n"
-            "7. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
+            "7. Reference 1-2 supplements from the stack above and explain in one clause "
+            "WHY they're included (e.g. 'creatine for strength output on a 4-day lifting "
+            "schedule', 'omega-3 because your plan's fish intake is low'). If the stack "
+            "is empty, skip this.\n"
+            "8. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
             "gym performance) so they can self-assess whether it's working.\n"
-            "8. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
+            "9. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
             "BANNED: generic phrases like 'balanced nutrition', 'supports your goals', "
-            "'fuel your workouts', 'clean eating'. Every sentence must cite a number "
-            "or a named meal from above. No filler. If you can't cite a specific "
-            "number from the TARGETS or MEALS section in a sentence, rewrite it.\n\n"
+            "'fuel your workouts', 'clean eating'. Every sentence must cite a number, "
+            "a named meal, a named supplement, or a nutrient from above. No filler.\n\n"
             "FORMATTING: Return a SINGLE flowing paragraph of plain prose. "
             "Do NOT use markdown, bold (**), headings (#), bullet points (- or *), "
             "numbered lists (1., 2.), or line breaks inside the note. One paragraph, "
-            "120-180 words, plain text. The UI renders it as a single Text block.\n\n"
+            "150-220 words, plain text. The UI renders it as a single Text block.\n\n"
             'Return JSON: {"nutritionistNote": "..."}'
         )
         kwargs = _build_chat_kwargs(
@@ -1880,6 +1977,25 @@ async def run_full_plan_generation(
                     continue
                 if np_.get("nutrition_validation", {}).get("ok"):
                     continue
+                # Build shared nutrition context for the reviewer so it
+                # knows bodyweight, experience, weight trend, adherence,
+                # and recent workouts. Same blob the skeleton AI now sees.
+                _review_ctx_str = ""
+                try:
+                    from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+                    _review_nctx = build_nutrition_context(
+                        goal=req.goal,
+                        secondary_goal=target_focus,  # target focus is the only active "secondary" context
+                        experience=getattr(req, "experienceLevel", None),
+                        bodyweight_lbs=getattr(getattr(req, "physicalStats", None), "weightLbs", None) if hasattr(req, "physicalStats") else None,
+                        dietary_preference=getattr(req, "dietaryPreference", None),
+                        allergies=getattr(req, "allergies", None),
+                        db=db,
+                        user_id=user_id,
+                    )
+                    _review_ctx_str = format_for_prompt(_review_nctx)
+                except Exception:
+                    pass
                 brief = build_nutrition_brief(
                     np_,
                     goal=req.goal or "muscle_gain",
@@ -1890,6 +2006,7 @@ async def run_full_plan_generation(
                     allowed_foods=req.foodsAvailable or [],
                     allergens=getattr(req, "allergies", None) or [],
                     diet_preference=getattr(req, "dietaryPreference", None),
+                    nutrition_context=_review_ctx_str,
                 )
                 review = review_nutrition_plan(brief)
                 print(
@@ -1943,8 +2060,13 @@ async def run_full_plan_generation(
         if grounded_note:
             nutrition_data["nutritionistNote"] = grounded_note
             print(f"[plan-gen] grounded nutritionist note generated ({len(grounded_note)} chars)")
+            print(f"[plan-gen] note preview: {grounded_note[:200]}...")
+        else:
+            print("[plan-gen] grounded nutritionist note returned empty — keeping assembler's note")
     except Exception as exc:
-        print(f"[plan-gen] grounded nutritionist note skipped: {exc}")
+        import traceback
+        print(f"[plan-gen] grounded nutritionist note FAILED: {exc}")
+        traceback.print_exc()
 
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
@@ -2093,6 +2215,29 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
             if summary:
                 print(f"[plan-gen nutrition] normalized template {idx}: {summary}")
+    # ── Grounded nutritionist note (same as full plan gen path) ──
+    # Without this, nutrition-only regens keep the skeleton AI's generic
+    # note, which doesn't cite actual numbers, nutrients, or supplements.
+    try:
+        _focused = (
+            getattr(plan_req.goalSelection, "targetFocus", None)
+            if plan_req.goalSelection else plan_req.focusedMuscleGroup
+        )
+        grounded_note = await asyncio.to_thread(
+            _generate_nutritionist_note,
+            client,
+            plan_req,
+            {"nutrition_plans": plans_list, "supplementStack": nutrition_data.get("supplementStack", [])},
+            nutrition_target_macros,
+            [],  # no review summary on nutrition-only path
+            _m,
+        )
+        if grounded_note:
+            nutrition_data["nutritionistNote"] = grounded_note
+            print(f"[plan-gen nutrition] grounded note generated ({len(grounded_note)} chars)")
+    except Exception as exc:
+        print(f"[plan-gen nutrition] grounded note skipped: {exc}")
+
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),

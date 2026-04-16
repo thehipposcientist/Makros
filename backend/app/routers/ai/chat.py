@@ -75,13 +75,37 @@ def ask_trainer_question(
 
     # Only send context relevant to this coach's domain — keep payload lean for speed
     profile_slim = body.profile or {}
-    # Drop heavy fields from profile context to reduce token count
+    # Extract foods list BEFORE dropping it from profile (nutritionist
+    # needs it for food-aware responses). Previously the list was
+    # dropped and the nutritionist couldn't reference the user's
+    # actual pantry.
+    foods_available = (profile_slim.get("foodsAvailable") or []) if isinstance(profile_slim, dict) else []
     if isinstance(profile_slim, dict):
         for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
             profile_slim.pop(drop_key, None)
     context_blob: dict = {"profile": profile_slim, "progress": body.progress}
     if is_nutritionist:
         context_blob["nutritionPlan"] = body.nutritionPlan
+        # Inject shared nutrition context so the chat knows bodyweight,
+        # experience, weight trend, recent adherence, and recent
+        # workouts — data the plan generator now also sees.
+        try:
+            from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+            bw = profile_slim.get("physicalStats", {}).get("weightLbs") if isinstance(profile_slim.get("physicalStats"), dict) else None
+            _nctx = build_nutrition_context(
+                goal=profile_slim.get("goal"),
+                secondary_goal=profile_slim.get("secondaryGoal"),
+                experience=profile_slim.get("experienceLevel"),
+                bodyweight_lbs=bw,
+                dietary_preference=profile_slim.get("dietaryPreference"),
+                allergies=profile_slim.get("allergies"),
+                foods_available=foods_available,
+            )
+            context_blob["nutritionContext"] = format_for_prompt(_nctx)
+            if foods_available:
+                context_blob["foodsAvailable"] = foods_available[:50]
+        except Exception as e:
+            print(f"[trainer-question] nutrition context enrichment failed: {e}")
     else:
         # Send full workout plan so the AI can return a complete updated plan
         # with all fields (equipment, restSeconds, etc.)

@@ -246,8 +246,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // user could hit "100" by logging 20 random exercises without ever
   // getting stronger or doing cardio.
   const [compositeFitness, setCompositeFitness] = useState<import('../services/api').FitnessCompositeScore | null>(null);
+  // Track the composite-fitness fetch state so the Records tab can
+  // show a skeleton while it's in flight instead of an empty flash.
+  const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
   useEffect(() => {
-    if (!authToken) return;
+    if (!authToken) { setCompositeFitnessLoading(false); return; }
+    setCompositeFitnessLoading(true);
     import('../services/api').then(({ getFitnessCompositeScore }) =>
       getFitnessCompositeScore(authToken, {
         daysPerWeek: userProfile.daysPerWeek,
@@ -257,6 +261,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       })
         .then(setCompositeFitness)
         .catch(() => setCompositeFitness(null))
+        .finally(() => setCompositeFitnessLoading(false))
     );
   }, [authToken, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
@@ -308,8 +313,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>📊</Text>
-              <Text style={styles.emptyTitle}>No data yet</Text>
-              <Text style={styles.emptyBody}>Complete workouts and log sets to see your progress charts.</Text>
+              <Text style={styles.emptyTitle}>Log 3 workouts to unlock</Text>
+              <Text style={styles.emptyBody}>Charts load after your first few sessions with logged sets.</Text>
             </View>
           ) : (
             <>
@@ -401,7 +406,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : tab === 'prs' ? (
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} style={{ backgroundColor: tc.background }}>
+          {/* Skeleton placeholder while the fitness score is fetching.
+              Without this, tapping into Records flashes an empty tab
+              for the duration of the network round-trip. */}
+          {compositeFitnessLoading && !compositeFitness && (
+            <View style={[styles.fitnessScoreCard, { alignItems: 'center', justifyContent: 'center', minHeight: 200 }]}>
+              <ActivityIndicator color={tc.primary} />
+              <Text style={{ marginTop: 10, color: tc.textMuted, fontSize: 12 }}>
+                Loading your fitness score…
+              </Text>
+            </View>
+          )}
           {/* ── 4-Pillar Fitness Score Card ── */}
           {compositeFitness && (
             <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
@@ -412,10 +428,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 style={styles.shareCardLogo}
                 resizeMode="contain"
               />
+              {/* Plain-language verdict — never show a score without
+                  a one-line read the user can act on. */}
+              <Text style={styles.fitnessVerdict}>
+                {compositeFitness.total >= 80 ? "You're in elite shape."
+                  : compositeFitness.total >= 65 ? "You're trending strong."
+                  : compositeFitness.total >= 45 ? "You're building — keep going."
+                  : compositeFitness.total >= 25 ? "Early days. Consistency is the lever."
+                  : "Let's get moving."}
+              </Text>
               <View style={styles.fitnessScoreHeader}>
                 <View>
-                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE</Text>
-                  <Text style={styles.fitnessScoreSubtext}>4-pillar composite · last 14 days</Text>
+                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE · 14 DAYS</Text>
+                  <Text style={styles.fitnessScoreSubtext}>4-pillar composite</Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
                   <Text style={styles.fitnessScoreValue}>{Math.round(compositeFitness.total)}</Text>
@@ -465,6 +490,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 ))}
               </View>
+
+              {/* Apple Health not connected — quiet CTA so the user
+                  knows exactly what unlocks recovery instead of a
+                  silent gap. */}
+              {!healthScore && (
+                <View style={[styles.recoverySection, { borderTopColor: tc.border }]}>
+                  <View style={styles.recoveryHeader}>
+                    <Text style={styles.recoverySectionTitle}>Recovery</Text>
+                  </View>
+                  <Text style={[styles.recoveryAdvice, { color: tc.textMuted }]}>
+                    Connect Apple Health to track recovery, sleep, and resting HR.
+                  </Text>
+                </View>
+              )}
 
               {/* Recovery Marker (Apple Health) */}
               {healthScore && (
@@ -538,10 +577,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               users treat diet adherence with the same weight as workouts. */}
           {dietScore && (
             <View style={styles.fitnessScoreCard}>
+              <Text style={styles.fitnessVerdict}>
+                {dietScore.total >= 80 ? "Nutrition is dialed in."
+                  : dietScore.total >= 60 ? "Nutrition is on track."
+                  : dietScore.total >= 40 ? `${dietScore.mealsChecked} of ${dietScore.mealsExpected} meals logged — keep going.`
+                  : dietScore.total >= 20 ? "Log one more meal today to build the habit."
+                  : "Log a meal to unlock insights."}
+              </Text>
               <View style={styles.fitnessScoreHeader}>
                 <View>
-                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY</Text>
-                  <Text style={styles.fitnessScoreSubtext}>Based on your last 14 days</Text>
+                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY · 14 DAYS</Text>
+                  <Text style={styles.fitnessScoreSubtext}>
+                    {dietScore.mealsChecked} / {dietScore.mealsExpected} meals logged
+                  </Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
                   <Text style={styles.fitnessScoreValue}>{dietScore.total}</Text>
@@ -1469,6 +1517,13 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 1.2,
+  },
+  fitnessVerdict: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginBottom: 10,
+    lineHeight: 22,
   },
   fitnessScoreSubtext: {
     fontSize: 11,

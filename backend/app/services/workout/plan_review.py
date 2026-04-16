@@ -142,18 +142,48 @@ def build_plan_brief(
     Contents:
       - user context: goal, experience, days/week, focused muscle, injuries
       - `recent_completed`: the user's last ~3 days of finished workouts
-        (focus, workout_date, duration) so the reviewer can spot
-        continuity risks (e.g. legs yesterday AND today) AND big-picture
-        issues (e.g. user has done five lifting days this week but no
-        cardio — flag for a recomp goal)
+        (focus, workout_date, days_ago, duration) so the reviewer can
+        reason about time gaps numerically — e.g. "legs 1 day ago" vs
+        "legs 4 days ago"
       - `plan_days`: every day of the proposed plan, with up to
-        `BRIEF_MAX_EXERCISES_PER_DAY` exercises per day
+        `BRIEF_MAX_EXERCISES_PER_DAY` exercises per day, each stamped
+        with `days_from_today` assuming day_index 0 = tomorrow
+      - `completed_day_focuses`: set of focus strings the user has
+        ALREADY done today. Plan days matching any of these focuses
+        on day_index 0 (tomorrow) are back-to-back risks.
 
     The brief is a pure function of the plan dict + caller-provided
     context — this module never touches the DB.
     """
+    from datetime import date as _date
+
     wp = (plan or {}).get("workout_plan", {}) or {}
     days = wp.get("days", []) or []
+
+    # Build a set of focus labels the user completed TODAY so the
+    # reviewer knows not to propose patches that conflict with an
+    # already-finished session. Dates are parsed defensively; malformed
+    # rows are skipped.
+    today = _date.today()
+    completed_today_focuses: set[str] = set()
+    completed_yesterday_focuses: set[str] = set()
+    for r in (recent_completed or []):
+        raw_date = r.get("workout_date") or r.get("performed_on")
+        if not raw_date:
+            continue
+        try:
+            rd = raw_date if isinstance(raw_date, _date) else _date.fromisoformat(str(raw_date)[:10])
+        except Exception:
+            continue
+        delta = (today - rd).days
+        focus = (r.get("focus") or r.get("focus_label") or "").strip().lower()
+        if not focus:
+            continue
+        if delta == 0:
+            completed_today_focuses.add(focus)
+        elif delta == 1:
+            completed_yesterday_focuses.add(focus)
+
     brief_days: list[dict] = []
     for di, d in enumerate(days):
         exs = d.get("exercises", []) or []
@@ -170,19 +200,31 @@ def build_plan_brief(
                 "role": e.get("_role"),
                 "primary_muscle": e.get("_primary_muscle"),
             })
+        plan_focus = (d.get("focus") or "").strip().lower()
+        # Day index → days from today. day_index 0 is the next session
+        # the user will do — tomorrow. A plan_day whose focus matches
+        # something the user finished TODAY is a direct back-to-back
+        # continuity risk (1 day gap, same muscle group).
+        days_from_today = di + 1
+        is_completed_conflict = (
+            di == 0 and plan_focus in completed_today_focuses
+        )
         brief_days.append({
             "index": di,
             "day": d.get("day"),
             "focus": d.get("focus"),
             "category": d.get("category"),
+            "days_from_today": days_from_today,
+            "conflicts_with_completed_today": is_completed_conflict,
             "exercises": exs_brief,
         })
 
     # Recent-completed history — optionally rich. Each entry may
     # carry an `exercises` list (from structured WorkoutSession rows)
     # with real per-set reps/weight, or it may just be a focus label
-    # + date (lightweight WorkoutCompletion fallback). The reviewer
-    # prompt handles both shapes gracefully.
+    # + date (lightweight WorkoutCompletion fallback). Each entry is
+    # stamped with `days_ago` so the reviewer can reason about gaps
+    # without parsing dates itself.
     recent_brief: list[dict] = []
     for r in (recent_completed or [])[:6]:
         ex_in = r.get("exercises") or []
@@ -203,9 +245,18 @@ def build_plan_brief(
                 "target_reps": e.get("target_reps"),
                 "logged_sets": sets_out,
             })
+        raw_date = r.get("workout_date") or r.get("performed_on")
+        days_ago: Optional[int] = None
+        if raw_date:
+            try:
+                rd = raw_date if isinstance(raw_date, _date) else _date.fromisoformat(str(raw_date)[:10])
+                days_ago = (today - rd).days
+            except Exception:
+                days_ago = None
         recent_brief.append({
             "focus": r.get("focus") or r.get("focus_label") or r.get("name") or "",
-            "workout_date": str(r.get("workout_date") or r.get("performed_on") or ""),
+            "workout_date": str(raw_date or ""),
+            "days_ago": days_ago,  # 0 = today, 1 = yesterday, etc.
             "duration_minutes": (
                 round((r.get("duration_seconds") or 0) / 60)
                 if r.get("duration_seconds") else None
@@ -222,6 +273,11 @@ def build_plan_brief(
         "focused_muscle": focused_muscle,
         "injuries": list(injuries or ()),
         "recent_completed": recent_brief,
+        # Focuses the user has already finished TODAY. Plan days whose
+        # focus overlaps with any of these should NEVER be patched —
+        # the user is done with them for the calendar day.
+        "completed_today_focuses": sorted(completed_today_focuses),
+        "completed_yesterday_focuses": sorted(completed_yesterday_focuses),
         "planner_mode": wp.get("planner_mode"),
         "goal_bucket": wp.get("goal_bucket"),
         "plan_days": brief_days,
@@ -261,17 +317,40 @@ You will receive a compact JSON brief describing:
   the same index you see here. `target_weight_lbs` is null for cardio, mobility, and \
   timed holds by design — that is NOT a bug, do not patch it.
 
-Use the goal and the last three days of real training to judge fit. Look for:
-- recent upper/lower/push/pull/legs trained yesterday (check the `focus` string!) AND \
-  scheduled again today (continuity risk — flag and propose a swap)
-- week-level imbalance relative to the goal: recomp with zero cardio days, strength \
+Use the goal and the last three days of real training to judge fit. Every entry in \
+`recent_completed` carries a `days_ago` field: 0 = today, 1 = yesterday, etc. \
+Every entry in `plan_days` carries a `days_from_today` field: 1 = tomorrow, 2 = day \
+after tomorrow, etc. Use these numbers to reason about TIME GAPS between sessions.
+
+Look for:
+
+- **Muscle proximity / continuity risk** — flag when a plan_day trains the SAME \
+  muscle group the user ALREADY trained with too small a gap. Minimum gap rules:
+    * Same-muscle compound (push/pull/legs/upper/lower) → **need at least 2 days gap**
+    * Same-muscle hypertrophy volume day → **need at least 3 days gap** for recovery
+    * Core / calves / forearms → no gap restriction
+  Example flags (issue a swap or change_focus patch):
+    * recent_completed has `focus="Push"` with `days_ago=0` AND plan_days[0] has \
+      `focus="Push"` with `days_from_today=1` → only 1 day gap on push, swap it
+    * recent_completed has `focus="Legs"` with `days_ago=1` AND plan_days[0] has \
+      `focus="Legs"` with `days_from_today=1` → only 2 days gap but same-day compound \
+      legs are usually okay IF the user's goal is high frequency; for beginner/recomp \
+      with full recovery this is a 1-day gap issue
+  Do NOT flag proximity issues when the gap is ≥3 days.
+
+- **Already-completed today protection** — if `plan_days[i].conflicts_with_completed_today` \
+  is TRUE, the user already finished that session earlier today. NEVER patch day[i] \
+  under any circumstances — no swap, no remove, no change_sets_reps, no change_focus. \
+  The session is done and the plan data for day[i] is historical, not future.
+
+- **Week-level imbalance** relative to the goal: recomp with zero cardio days, strength \
   with only 10-15 rep volume ranges on compounds, endurance with five lifting days \
   and no cardio, muscle gain with only 2 lifting days when days_per_week is 5
-- missing focused-muscle exposure when the user asked for it
-- injury conflicts (e.g. knee injury but heavy squats programmed)
-- obviously wrong rep ranges for the goal (5x5 for fat loss, 4x15 for strength)
-- any day with zero exercises
-- duplicate exercises stacked in the same day
+- **Missing focused-muscle exposure** when the user asked for it
+- **Injury conflicts** (e.g. knee injury but heavy squats programmed)
+- **Obviously wrong rep ranges for the goal** (5x5 for fat loss, 4x15 for strength)
+- **Any day with zero exercises**
+- **Duplicate exercises stacked in the same day**
 
 CRITICAL RULES for the `status` field:
 - If the plan has ANY of the issues above → status MUST be "modify" AND you MUST \
@@ -456,7 +535,12 @@ def review_plan(brief: dict) -> PlanReview:
 # ── Patch application ───────────────────────────────────────────────
 
 
-def apply_patches(plan: dict, patches: list[PlanPatch]) -> tuple[dict, list[str]]:
+def apply_patches(
+    plan: dict,
+    patches: list[PlanPatch],
+    *,
+    blocked_day_indices: frozenset[int] | set[int] | None = None,
+) -> tuple[dict, list[str]]:
     """Mutate `plan` in place applying each patch. Returns the plan
     plus a list of human-readable application messages for logging.
 
@@ -465,6 +549,10 @@ def apply_patches(plan: dict, patches: list[PlanPatch]) -> tuple[dict, list[str]
     the plan. Order matters: patches are applied in the order received,
     which means later patches see the results of earlier ones — the AI
     is instructed to return a short list so this is fine.
+
+    `blocked_day_indices` — optional set of day_index values the caller
+    wants to protect from patches. Use for days the user has already
+    completed. Any patch targeting a blocked index is logged + skipped.
     """
     applied: list[str] = []
     wp = (plan or {}).get("workout_plan", {})
@@ -472,7 +560,14 @@ def apply_patches(plan: dict, patches: list[PlanPatch]) -> tuple[dict, list[str]
     if not isinstance(days, list):
         return plan, ["no days list in plan"]
 
+    blocked = frozenset(blocked_day_indices or ())
     for p in patches:
+        if p.day_index in blocked:
+            applied.append(
+                f"skip {p.action} day={p.day_index}: user already completed "
+                f"this session today ({p.reason})"
+            )
+            continue
         msg = _apply_one(days, p)
         applied.append(msg)
     return plan, applied

@@ -377,50 +377,21 @@ def enrich_foods_with_macros(
             f"{present}/{len(_REQUIRED_MICRO_FIELDS)} micro fields populated"
         )
 
-    # ── Layer 2 backfill for thin DB rows ──
-    # Seed rows that only carry fiber/sugar/sodium need an AI top-up
-    # for the full Layer 2 panel. We batch every thin food into one
-    # call and persist the result so this cost is paid at most once
-    # per food lifetime.
-    thin = [f for f in hydrated if _food_needs_micro_backfill(f)]
-    print(f"[enrich_foods] STEP 2 backfill check: {len(thin)}/{len(hydrated)} foods need backfill")
-    if thin:
-        thin_names = [str(f.get("name", "")) for f in thin[:8]]
-        print(f"[enrich_foods] STEP 2 backfilling: {thin_names}{' ...' if len(thin) > 8 else ''}")
-        backfill = _ai_backfill_micros(client, thin)
-        print(f"[enrich_foods] STEP 2 AI returned backfill for {len(backfill)} foods")
-        if backfill:
-            filled_count = 0
-            for f in hydrated:
-                key = str(f.get("name", "")).strip().lower()
-                if key in backfill:
-                    fields_written = 0
-                    for mk, mv in backfill[key].items():
-                        existing = f.get(mk)
-                        try:
-                            if existing is None or float(existing or 0) == 0:
-                                f[mk] = mv
-                                fields_written += 1
-                        except (TypeError, ValueError):
-                            f[mk] = mv
-                            fields_written += 1
-                    if fields_written > 0:
-                        filled_count += 1
-            _persist_backfilled_micros(backfill)
-            print(
-                f"[enrich_foods] STEP 2 applied to {filled_count} hydrated foods, "
-                f"persisted {len(backfill)} to DB"
-            )
-            # Re-sample to prove the data landed.
-            if hydrated:
-                sample2 = hydrated[0]
-                present2 = sum(1 for k in _REQUIRED_MICRO_FIELDS if float(sample2.get(k) or 0) > 0)
-                print(
-                    f"[enrich_foods] STEP 2 sample '{sample2.get('name')}' now has "
-                    f"{present2}/{len(_REQUIRED_MICRO_FIELDS)} micro fields"
-                )
-        else:
-            print("[enrich_foods] STEP 2 WARN — AI backfill returned empty; check API key and model")
+    # Layer 2 micro backfill was previously done inline here, but it
+    # sent all thin foods (often 40+) in a single API call that always
+    # timed out — costing tokens without populating anything. Removed.
+    # Micro enrichment is now handled by:
+    #   (a) the startup hook in main.py (background thread, batched)
+    #   (b) the enrich_food_micros.py script (manual, batched at 5)
+    # Both batch at 5 foods/call and persist to DB, so the next plan
+    # gen picks up the data from hydration without any inline AI call.
+    thin_count = sum(1 for f in hydrated if _food_needs_micro_backfill(f))
+    if thin_count > 0:
+        print(
+            f"[enrich_foods] {thin_count}/{len(hydrated)} DB foods are missing "
+            f"Layer 2 micros — run enrich_food_micros.py or restart the server "
+            f"to populate them (inline backfill removed to save tokens)"
+        )
 
     # Fast path: if everything resolved from DB AND there's no free-text
     # routine, we're done — no AI call at all.
@@ -452,71 +423,33 @@ def _enrich_via_ai(
     if meal_routine:
         parts.append(f"MEAL ROUTINE (user's fixed meals):\n{meal_routine}")
 
+    # Lean prompt — macros + fiber/sugar/sodium only. Full Layer 2
+    # micros (omega-3, calcium, etc.) are handled by the startup
+    # enrichment script with proper batching. Keeping this prompt
+    # small avoids the 32k-token cost + timeout issue that hit when
+    # we asked for 16 micro fields on 20+ foods in one shot.
     prompt = (
         "Convert the following food items and/or meal routine into structured nutrition data.\n"
-        "For each food, return a STANDARD SERVING as an explicit numeric quantity and a\n"
-        "concrete unit. NEVER use the word 'serving' as a unit — always pick one of:\n"
-        "  g, oz, lb, ml, fl_oz, cup, tbsp, tsp, piece, slice, scoop\n"
-        "Guidelines for choosing the unit:\n"
-        "  - Meats, fish, tofu → oz (e.g. 6 oz chicken breast)\n"
-        "  - Cooked grains, pasta, rice, oatmeal → cup\n"
-        "  - Dry grains (oats, rice uncooked) → cup\n"
-        "  - Eggs, fruit (apple, banana, orange) → piece\n"
-        "  - Nuts, seeds, cheese chunks → oz\n"
-        "  - Protein powder → scoop\n"
-        "  - Bread, deli meat → slice\n"
-        "  - Oils, dressings, nut butters → tbsp\n"
-        "  - Milk, yogurt, liquids → cup or fl_oz\n"
-        "  - Vegetables → cup\n"
-        "Macros must match the quantity + unit exactly (USDA values).\n\n"
-        "EVERY food MUST also include the following micronutrient fields at USDA values\n"
-        "for the returned serving size. Use snake_case keys exactly as shown. Omit ONLY\n"
-        "if truly zero (e.g. water has no protein). Units: grams for macros + fiber +\n"
-        "sugar + saturated/mono/poly fat, milligrams for sodium/potassium/calcium/iron/\n"
-        "magnesium/cholesterol/omega_3/omega_6/vitamin_c, micrograms for vitamin_d and\n"
-        "vitamin_b12.\n"
-        "Required micronutrient fields:\n"
-        "  fiber, sugar, sodium, cholesterol,\n"
-        "  saturated_fat, monounsaturated_fat, polyunsaturated_fat,\n"
-        "  omega_3, omega_6,\n"
-        "  potassium, calcium, iron, magnesium,\n"
-        "  vitamin_c, vitamin_d, vitamin_b12\n\n"
+        "For each food, return a STANDARD SERVING as an explicit numeric quantity and unit.\n"
+        "Units: oz (meat/fish), cup (grains/veg/liquid), piece (eggs/fruit), "
+        "tbsp (oils/butters), scoop (protein powder), slice (bread).\n"
+        "Include: calories, protein, carbs, fat, fiber (g), sugar (g), sodium (mg).\n\n"
         + "\n\n".join(parts) + "\n\n"
-        "Return JSON with this exact schema (micronutrient fields are REQUIRED on each food):\n"
-        '{\n'
-        '  "foods": [\n'
-        '    {\n'
-        '      "name": "chicken breast", "quantity": 6, "unit": "oz",\n'
-        '      "calories": 280, "protein": 53, "carbs": 0, "fat": 6,\n'
-        '      "fiber": 0, "sugar": 0, "sodium": 120, "cholesterol": 140,\n'
-        '      "saturated_fat": 1.5, "monounsaturated_fat": 2, "polyunsaturated_fat": 1,\n'
-        '      "omega_3": 40, "omega_6": 600,\n'
-        '      "potassium": 440, "calcium": 12, "iron": 1.5, "magnesium": 50,\n'
-        '      "vitamin_c": 0, "vitamin_d": 0.2, "vitamin_b12": 0.5\n'
-        '    }\n'
-        '  ],\n'
-        '  "routine_meals": [\n'
-        '    {\n'
-        '      "meal_slot": "breakfast",\n'
-        '      "description": "2 eggs and oatmeal",\n'
-        '      "foods": [\n'
-        '        {"name": "eggs", "quantity": "2 large", "calories": 140, "protein": 12, "carbs": 1, "fat": 10,\n'
-        '         "fiber": 0, "sugar": 1, "sodium": 140, "cholesterol": 370,\n'
-        '         "saturated_fat": 3, "omega_3": 60, "vitamin_d": 2, "vitamin_b12": 1.1, "potassium": 130, "calcium": 50, "iron": 1.2, "magnesium": 12},\n'
-        '        {"name": "oatmeal", "quantity": "1 cup cooked", "calories": 150, "protein": 5, "carbs": 27, "fat": 3,\n'
-        '         "fiber": 4, "sugar": 1, "sodium": 10, "saturated_fat": 0.5, "magnesium": 60, "iron": 1.7, "potassium": 170}\n'
-        '      ],\n'
-        '      "total": {"calories": 290, "protein": 17, "carbs": 28, "fat": 13}\n'
-        '    }\n'
-        '  ]\n'
-        '}\n\n'
-        "If no meal routine is provided, return an empty routine_meals array.\n"
-        "If no food list is provided, return an empty foods array.\n"
-        "Be accurate with ALL values. Use USDA-style nutrition data. Missing micronutrients\n"
-        "lead to bad coaching — always include them."
+        'Return JSON:\n'
+        '{"foods": [{"name": "chicken breast", "quantity": 6, "unit": "oz", '
+        '"calories": 280, "protein": 53, "carbs": 0, "fat": 6, '
+        '"fiber": 0, "sugar": 0, "sodium": 120}], '
+        '"routine_meals": [{"meal_slot": "breakfast", "description": "...", '
+        '"foods": [{"name": "...", "quantity": "...", "calories": 0, '
+        '"protein": 0, "carbs": 0, "fat": 0}], '
+        '"total": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}}]}\n\n'
+        "Empty routine_meals if no meal routine provided. Empty foods if no food list.\n"
+        "Use USDA values. Be accurate."
     )
 
     _model = model_food_enrichment()
+    # Scale max_tokens by food count so large lists don't truncate.
+    _max_tokens = min(4000, max(1000, len(foods) * 80 + 500))
     try:
         resp = client.chat.completions.create(
             model=_model,
@@ -525,8 +458,8 @@ def _enrich_via_ai(
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
-            max_tokens=2000,
-            timeout=20,
+            max_tokens=_max_tokens,
+            timeout=30,
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)

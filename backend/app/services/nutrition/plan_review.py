@@ -175,6 +175,7 @@ def build_nutrition_brief(
     allowed_foods: list[str] | None = None,
     allergens: list[str] | None = None,
     diet_preference: Optional[str] = None,
+    nutrition_context: Optional[str] = None,
 ) -> dict:
     """Compact brief the reviewer reads. One template at a time."""
     meals_brief: list[dict] = []
@@ -220,7 +221,7 @@ def build_nutrition_brief(
             "items": items_brief,
         })
 
-    return {
+    brief: dict = {
         "goal": goal,
         "diet_preference": diet_preference,
         "targets": {
@@ -233,6 +234,9 @@ def build_nutrition_brief(
         "allergens": list(allergens or []),
         "meals": meals_brief,
     }
+    if nutrition_context:
+        brief["user_context"] = nutrition_context
+    return brief
 
 
 # ── AI reviewer ──────────────────────────────────────────────────────

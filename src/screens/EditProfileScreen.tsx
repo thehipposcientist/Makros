@@ -288,6 +288,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [customCarbs, setCustomCarbs]       = useState(profile.customMacros?.carbs ? String(profile.customMacros.carbs) : '');
   const [customFat, setCustomFat]           = useState(profile.customMacros?.fat ? String(profile.customMacros.fat) : '');
 
+  // Percentage-based macro mode. When enabled, the user enters
+  // protein/carbs/fat as % of calories and we compute grams on save.
+  const [macroPctMode, setMacroPctMode] = useState(!!(profile.customMacros as any)?.proteinPct);
+  const [proteinPct, setProteinPct] = useState((profile.customMacros as any)?.proteinPct ? String((profile.customMacros as any).proteinPct) : '30');
+  const [carbsPct, setCarbsPct]     = useState((profile.customMacros as any)?.carbsPct ? String((profile.customMacros as any).carbsPct) : '40');
+  const [fatPct, setFatPct]         = useState((profile.customMacros as any)?.fatPct ? String((profile.customMacros as any).fatPct) : '30');
+
   // Modals
   const [addFoodVisible,    setAddFoodVisible]    = useState(false);
   const [photoMealLoading,  setPhotoMealLoading]  = useState(false);
@@ -991,12 +998,37 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         ...profile.physicalStats,
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
       },
-      customMacros: (useCustomMacros || mode === 'mealplan') && (customCalories || customProtein || customCarbs || customFat) ? {
-        ...(customCalories ? { calories: parseInt(customCalories, 10) } : {}),
-        ...(customProtein  ? { protein: parseInt(customProtein, 10) }   : {}),
-        ...(customCarbs    ? { carbs: parseInt(customCarbs, 10) }       : {}),
-        ...(customFat      ? { fat: parseInt(customFat, 10) }           : {}),
-      } : undefined,
+      customMacros: (() => {
+        const hasAny = useCustomMacros || mode === 'mealplan';
+        if (!hasAny) return undefined;
+        // Percentage mode: convert % → grams using the calorie target.
+        // When in pct mode the user sets protein/carbs/fat as percentages
+        // of total calories. Grams are computed: protein_g = cal × pct / 400,
+        // carb_g = cal × pct / 400, fat_g = cal × pct / 900.
+        if (macroPctMode && customCalories) {
+          const cal = parseInt(customCalories, 10) || 0;
+          const pp = parseInt(proteinPct, 10) || 0;
+          const cp = parseInt(carbsPct, 10) || 0;
+          const fp = parseInt(fatPct, 10) || 0;
+          return {
+            calories: cal,
+            protein: Math.round(cal * pp / 400),
+            carbs:   Math.round(cal * cp / 400),
+            fat:     Math.round(cal * fp / 900),
+            // Persist the percentages so they reload correctly.
+            proteinPct: pp, carbsPct: cp, fatPct: fp,
+          };
+        }
+        if (customCalories || customProtein || customCarbs || customFat) {
+          return {
+            ...(customCalories ? { calories: parseInt(customCalories, 10) } : {}),
+            ...(customProtein  ? { protein: parseInt(customProtein, 10) }   : {}),
+            ...(customCarbs    ? { carbs: parseInt(customCarbs, 10) }       : {}),
+            ...(customFat      ? { fat: parseInt(customFat, 10) }           : {}),
+          };
+        }
+        return undefined;
+      })(),
     });
   };
 
@@ -1067,7 +1099,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </View>
       )}
 
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
 
         {mode === 'goal' && (
         <>
@@ -1861,10 +1893,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>🍽  Meals per Day</Text>
             <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
-              How many meals you actually eat in a day. The plan splits your
-              calories evenly across these. Pinned routines count toward this
-              total — pin 2 routines on a 4-meal day and the AI generates 2
-              new meals to fill the rest.
+              How many meals per day. Pinned routines count toward the total.
             </Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
               <TouchableOpacity
@@ -1895,10 +1924,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>🔁  Meal Variety</Text>
             <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
-              How many unique daily meal plans the AI will build. Lower means
-              faster plan generation and simpler prep; higher means more
-              variety day-to-day. Every plan still hits your calorie and
-              macro targets exactly.
+              Daily rotation. 1 = same plan every day. Every plan still hits your macros exactly.
             </Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
               <TouchableOpacity
@@ -2218,62 +2244,145 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </View>
 
         <View style={styles.section}>
-          <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Daily Macro Targets</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <Text style={styles.sectionLabel}>Daily Macro Targets</Text>
+            {/* Grams / Percentage toggle */}
+            <View style={{ flexDirection: 'row', borderRadius: 8, borderWidth: 1, borderColor: tc.border, overflow: 'hidden' }}>
+              <TouchableOpacity
+                style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: !macroPctMode ? tc.primary : 'transparent' }}
+                onPress={() => setMacroPctMode(false)}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: !macroPctMode ? '#fff' : tc.textMuted }}>Grams</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: macroPctMode ? tc.primary : 'transparent' }}
+                onPress={() => setMacroPctMode(true)}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: macroPctMode ? '#fff' : tc.textMuted }}>% of Cal</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
           <Text style={styles.sectionHint}>
-            Leave any field blank to use the calculator's target based on your goal + training volume. Fill a field to pin it manually — the calculator won't override what you set.
+            {macroPctMode
+              ? 'Set calories first, then split protein / carbs / fat by percentage. Grams are computed automatically.'
+              : 'Leave blank to use the calculator. Filled values override.'}
           </Text>
           <View style={{ marginTop: 14, gap: 10 }}>
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.macroFieldLabel}>Calories</Text>
-                <TextInput
-                  style={styles.macroFieldInput}
-                  value={customCalories}
-                  onChangeText={setCustomCalories}
-                  placeholder="e.g. 2400"
-                  placeholderTextColor={tc.textMuted}
-                  keyboardType="number-pad"
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.macroFieldLabel}>Protein (g)</Text>
-                <TextInput
-                  style={styles.macroFieldInput}
-                  value={customProtein}
-                  onChangeText={setCustomProtein}
-                  placeholder="e.g. 180"
-                  placeholderTextColor={tc.textMuted}
-                  keyboardType="number-pad"
-                />
-              </View>
+            {/* Calories — always shown in both modes */}
+            <View>
+              <Text style={styles.macroFieldLabel}>Calories</Text>
+              <TextInput
+                style={styles.macroFieldInput}
+                value={customCalories}
+                onChangeText={setCustomCalories}
+                placeholder="e.g. 2400"
+                placeholderTextColor={tc.textMuted}
+                keyboardType="number-pad"
+              />
             </View>
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.macroFieldLabel}>Carbs (g)</Text>
-                <TextInput
-                  style={styles.macroFieldInput}
-                  value={customCarbs}
-                  onChangeText={setCustomCarbs}
-                  placeholder="e.g. 250"
-                  placeholderTextColor={tc.textMuted}
-                  keyboardType="number-pad"
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.macroFieldLabel}>Fat (g)</Text>
-                <TextInput
-                  style={styles.macroFieldInput}
-                  value={customFat}
-                  onChangeText={setCustomFat}
-                  placeholder="e.g. 70"
-                  placeholderTextColor={tc.textMuted}
-                  keyboardType="number-pad"
-                />
-              </View>
-            </View>
-            <Text style={[styles.sectionHint, { fontSize: 11, marginTop: 2 }]}>
-              Leave any field blank to let AI calculate it. Only filled values override.
-            </Text>
+
+            {macroPctMode ? (
+              <>
+                {/* Percentage inputs */}
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Protein %</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={proteinPct}
+                      onChangeText={setProteinPct}
+                      placeholder="30"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Carbs %</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={carbsPct}
+                      onChangeText={setCarbsPct}
+                      placeholder="40"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Fat %</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={fatPct}
+                      onChangeText={setFatPct}
+                      placeholder="30"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                </View>
+                {/* Live preview of computed grams */}
+                {customCalories ? (() => {
+                  const cal = parseInt(customCalories, 10) || 0;
+                  const pp = parseInt(proteinPct, 10) || 0;
+                  const cp = parseInt(carbsPct, 10) || 0;
+                  const fp = parseInt(fatPct, 10) || 0;
+                  const totalPct = pp + cp + fp;
+                  const pg = Math.round(cal * pp / 400);
+                  const cg = Math.round(cal * cp / 400);
+                  const fg = Math.round(cal * fp / 900);
+                  const warnColor = totalPct !== 100 ? '#EF4444' : tc.textMuted;
+                  return (
+                    <View style={{ backgroundColor: tc.surface, borderRadius: 8, padding: 10, borderWidth: 1, borderColor: tc.border }}>
+                      <Text style={{ fontSize: 12, color: tc.textSecondary }}>
+                        = {pg}g protein · {cg}g carbs · {fg}g fat
+                      </Text>
+                      <Text style={{ fontSize: 11, color: warnColor, marginTop: 2 }}>
+                        Total: {totalPct}% {totalPct !== 100 ? '(should be 100%)' : '✓'}
+                      </Text>
+                    </View>
+                  );
+                })() : null}
+              </>
+            ) : (
+              <>
+                {/* Gram inputs (original) */}
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Protein (g)</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={customProtein}
+                      onChangeText={setCustomProtein}
+                      placeholder="e.g. 180"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Carbs (g)</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={customCarbs}
+                      onChangeText={setCustomCarbs}
+                      placeholder="e.g. 250"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.macroFieldLabel}>Fat (g)</Text>
+                    <TextInput
+                      style={styles.macroFieldInput}
+                      value={customFat}
+                      onChangeText={setCustomFat}
+                      placeholder="e.g. 70"
+                      placeholderTextColor={tc.textMuted}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }} />
+                </View>
+              </>
+            )}
           </View>
         </View>
 

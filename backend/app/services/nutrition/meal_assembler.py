@@ -285,6 +285,27 @@ def build_skeleton_prompt(
         )
     routine_block = "".join(routine_parts)
 
+    # Shared nutrition context — adds bodyweight, experience, secondary
+    # goal, weight trend, recent macro adherence, and last 3 days of
+    # completed workouts so the meal AI can make smarter picks (e.g.
+    # higher carbs on a day following a heavy legs session).
+    from .context import build_nutrition_context, format_for_prompt
+    # The active goal model: primaryGoal + targetFocus. Modifiers and
+    # secondaryGoal are deprecated (always empty).
+    _target_focus = getattr(req.goalSelection, "targetFocus", None) if req.goalSelection else getattr(req, "focusedMuscleGroup", None)
+    _nctx = build_nutrition_context(
+        goal=req.goalSelection.primaryGoal if req.goalSelection else req.goal,
+        secondary_goal=_target_focus,
+        experience=getattr(req, "experienceLevel", None),
+        bodyweight_lbs=getattr(getattr(req, "physicalStats", None), "weightLbs", None) if hasattr(req, "physicalStats") else getattr(req, "weightLbs", None),
+        target_weight_lbs=getattr(getattr(req, "goalDetails", None), "targetWeightLbs", None) if hasattr(req, "goalDetails") else None,
+        pace=getattr(getattr(req, "goalDetails", None), "pace", None) if hasattr(req, "goalDetails") else None,
+        dietary_preference=getattr(req, "dietaryPreference", None),
+        allergies=getattr(req, "allergies", None),
+        foods_available=allowed_foods,
+    )
+    user_context_block = format_for_prompt(_nctx)
+
     return f"""You are a registered dietitian. Pick meal concepts ONLY — no macros, no grams, no portions.
 
 The app will compute portions and macros itself. Your job is purely creative:
@@ -294,6 +315,7 @@ USER:
 - Goal: {req.goalSelection.primaryGoal if req.goalSelection else req.goal}
 - Daily targets (for context only, do NOT compute macros): {t_cal} cal / {t_prot}g P / {t_carbs}g C / {t_fat}g F
 {diet_context}
+{user_context_block}
 {routine_block}
 AVAILABLE FOODS — use ONLY these names, no substitutions, no additions:
 {foods_str}

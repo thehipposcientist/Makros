@@ -225,22 +225,24 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
     """Return a {muscle: target_working_sets_per_week} dict for this user.
 
     Adds a +30% bonus to the user's `focused_muscle` if set, clamped at
-    the advanced-tier volume for the same (bucket, muscle). Without the
-    clamp an advanced muscle-gain user could request "chest focus" and
-    blow through 23 sets/week (18 × 1.3), which is beyond MRV for most
-    intermediates. The cap enforces the docstring promise that the
-    bonus never escapes the next-experience-level ceiling.
+    the advanced-tier volume for the same (bucket, muscle) PLUS a
+    3-set focus allowance so the bonus isn't neutralized when the
+    advanced tier equals the intermediate tier for that muscle (e.g.
+    glutes in recomp where both tiers sit at 12). The allowance keeps
+    the boost meaningful for the user's declared focus while still
+    preventing runaway volume: max deliverable sets for any focused
+    muscle = advanced_tier + 3.
     """
     bucket = _goal_bucket(inputs.goal)
     base = _WEEKLY_VOLUME.get((bucket, inputs.experience), _DEFAULT_VOLUME).copy()
     if inputs.focused_muscle and inputs.focused_muscle in base:
         boosted = round(base[inputs.focused_muscle] * 1.3)
-        # Cap at the same-bucket advanced-tier value. For advanced users,
-        # the cap becomes their own tier — effectively no ceiling past
-        # that, which is the right behavior because they already sit at
-        # the top of the volume landscape.
+        # Cap at the same-bucket advanced-tier value PLUS a 3-set
+        # allowance so a muscle whose advanced tier equals the current
+        # tier (e.g. glutes/recomp at 12/12) still benefits from
+        # focusing. Without the +3 the boost gets fully neutralized.
         cap_source = _WEEKLY_VOLUME.get((bucket, "advanced"), _DEFAULT_VOLUME)
-        cap = cap_source.get(inputs.focused_muscle, boosted)
+        cap = cap_source.get(inputs.focused_muscle, boosted) + 3
         base[inputs.focused_muscle] = min(boosted, cap)
     return base
 

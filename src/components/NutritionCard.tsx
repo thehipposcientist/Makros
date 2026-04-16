@@ -145,6 +145,38 @@ export default function NutritionCard({
               </View>
 
               <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+                {/* Plain-language verdict + calorie bar, above the macro grid */}
+                {(() => {
+                  const calPct = targets.calories > 0 ? (actual.calories / targets.calories) : 0;
+                  const proteinHit = targets.protein > 0 && actual.protein >= targets.protein * 0.95;
+                  const bars = Math.min(10, Math.max(0, Math.round(calPct * 10)));
+                  const verdict =
+                    targets.calories <= 0 ? 'Targets load with your plan.' :
+                    calPct < 0.75 ? 'Under-fed today. Add a meal or a shake.' :
+                    calPct > 1.15 ? 'Over target. Trim dinner or swap a starchy side.' :
+                    proteinHit ? 'On target. Protein locked in.' :
+                    'Calories on track. Protein is the gap.';
+                  const barColor =
+                    calPct < 0.75 || calPct > 1.15 ? '#F59E0B' :
+                    (calPct >= 0.95 && calPct <= 1.05) ? colors.primary :
+                    section.strong;
+                  return (
+                    <View style={{ marginBottom: 14 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary, marginBottom: 6 }}>
+                        {verdict}
+                      </Text>
+                      <View style={{ flexDirection: 'row', gap: 3 }}>
+                        {Array.from({ length: 10 }).map((_, i) => (
+                          <View key={i} style={{
+                            flex: 1, height: 4, borderRadius: 2,
+                            backgroundColor: i < bars ? barColor : colors.border,
+                          }} />
+                        ))}
+                      </View>
+                    </View>
+                  );
+                })()}
+
                 {/* Macro summary at top */}
                 <View style={styles.modalMacroRow}>
                   <View style={styles.modalMacroItem}>
@@ -238,13 +270,9 @@ export default function NutritionCard({
                 </View>
 
                 {!hasMicros && (
-                  <View style={{ marginTop: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
-                    <Text style={styles.microNoData}>
-                      Nutrition details are computed from each food's USDA reference. If you're seeing dashes, your DB foods need enrichment — run{' '}
-                      <Text style={{ fontWeight: '700' }}>python enrich_food_micros.py</Text>{' '}
-                      in the backend to populate them.
-                    </Text>
-                  </View>
+                  <Text style={styles.microNoData}>
+                    Nutrition details load with your next plan.
+                  </Text>
                 )}
 
                 {/* Legend */}
