@@ -187,6 +187,95 @@ def normalize_focus_to_bucket(raw_focus: Optional[str]) -> FocusBucket:
     return None
 
 
+def normalize_focus_to_family(raw_focus: Optional[str]) -> FocusBucket:
+    """Collapse a focus label to a fine-grained focus family.
+
+    Unlike `normalize_focus_to_bucket` (which maps Push and Pull both
+    to "upper_body"), this function preserves split identity:
+
+        "push"   — push, chest, pressing, bench
+        "pull"   — pull, back, lats, pulling, row (non-cardio)
+        "legs"   — legs, quads, hamstrings, glutes, squat, hinge, lower
+        "upper"  — upper (when not specifically push or pull)
+        "lower"  — lower (when not specifically legs)
+        "full_body", "cardio", "mobility", "recovery" — same as bucket
+
+    Returns None for empty or unrecognizable input.
+    """
+    if not raw_focus or not isinstance(raw_focus, str):
+        return None
+
+    text = raw_focus.strip().lower()
+    if not text:
+        return None
+
+    # Drop trailing numbering
+    text = re.sub(r"\s+\d+\s*$", "", text)
+
+    # Full body first (unambiguous)
+    for pattern in _FULL_BODY_KEYWORDS:
+        if re.search(pattern, text):
+            return "full_body"
+
+    # Cardio / mobility / recovery override body-part keywords
+    for pattern in _CARDIO_KEYWORDS:
+        if re.search(pattern, text):
+            return "cardio"
+    for pattern in _MOBILITY_KEYWORDS:
+        if re.search(pattern, text):
+            return "mobility"
+    for pattern in _RECOVERY_KEYWORDS:
+        if re.search(pattern, text):
+            return "recovery"
+
+    # Fine-grained push/pull/legs detection BEFORE coarse upper/lower
+    _PUSH_PATTERNS = [
+        r"\bpush\b", r"\bchest\b", r"\bpressing\b",
+        r"\bbench\b", r"\btriceps?\b",
+    ]
+    _PULL_PATTERNS = [
+        r"\bpull\b", r"\bback\b", r"\blats?\b",
+        r"\bpulling\b", r"\bbiceps?\b",
+    ]
+    _LEGS_PATTERNS = [
+        r"\blegs?\b", r"\bleg day\b", r"\bquads?\b",
+        r"\bhamstrings?\b", r"\bglutes?\b", r"\bsquat\b",
+        r"\bhinge\b", r"\bcalves?\b",
+    ]
+
+    for pattern in _LEGS_PATTERNS:
+        if re.search(pattern, text):
+            return "legs"
+    for pattern in _PUSH_PATTERNS:
+        if re.search(pattern, text):
+            return "push"
+    for pattern in _PULL_PATTERNS:
+        if re.search(pattern, text):
+            return "pull"
+
+    # Coarse upper/lower fallback
+    for pattern in _LOWER_BODY_KEYWORDS:
+        if re.search(pattern, text):
+            return "lower"
+    for pattern in _UPPER_BODY_KEYWORDS:
+        if re.search(pattern, text):
+            return "upper"
+
+    return None
+
+
+# Reverse mapping: given a coarse bucket, what focus families could
+# it contain? Used when only a coarse bucket is available.
+BUCKET_TO_FAMILIES: dict[str, tuple[str, ...]] = {
+    "upper_body": ("push", "pull", "upper"),
+    "lower_body": ("legs", "lower"),
+    "full_body": ("full_body",),
+    "cardio": ("cardio",),
+    "mobility": ("mobility",),
+    "recovery": ("recovery",),
+}
+
+
 def describe_bucket(bucket: FocusBucket) -> str:
     """Short human label for logs / audit — never user-facing."""
     return bucket or "unknown"

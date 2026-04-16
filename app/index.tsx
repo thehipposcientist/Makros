@@ -967,7 +967,7 @@ export default function Index() {
             return;
           }
           // Otherwise trigger plan regeneration
-          const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal;
+          const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal || !!changes.preferredSplit;
           const needsNutrition = !!changes.goal;
           if (needsWorkout || needsNutrition) {
             if (needsWorkout) setIsWorkoutUpdating(true);

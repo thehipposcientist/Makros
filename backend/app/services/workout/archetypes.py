@@ -50,6 +50,16 @@ class DayArchetype(str, Enum):
     # maintenance without eating into their primary goal's recovery.
     LIFT_STRENGTH_MAINTENANCE = "lift_strength_maintenance"
 
+    # ── Stimulus-differentiated lifting ──────────────────────────────
+    LIFT_UPPER_HEAVY = "lift_upper_heavy"
+    LIFT_UPPER_HYPERTROPHY = "lift_upper_hypertrophy"
+    LIFT_LOWER_HEAVY = "lift_lower_heavy"
+    LIFT_LOWER_HYPERTROPHY = "lift_lower_hypertrophy"
+    LIFT_PUSH_VOLUME = "lift_push_volume"
+    LIFT_PULL_VOLUME = "lift_pull_volume"
+    LIFT_LEGS_VOLUME = "lift_legs_volume"
+    LIFT_FULL_BODY_STRENGTH = "lift_full_body_strength"
+
     # ── Conditioning ──────────────────────────────────────────────
     COND_ZONE2 = "cond_zone2"                    # 25-45 min conversational pace
     COND_INTERVALS_SHORT = "cond_intervals_short"  # 6-10 × 30-60 s on
@@ -76,6 +86,7 @@ ArchetypeCategory = Literal["lift", "cond", "mobility", "recovery", "hybrid"]
 TrainingType = Literal[
     "strength",       # low-rep heavy compounds
     "hypertrophy",    # moderate reps, volume focus
+    "volume",         # high-rep lighter volume work
     "power",          # explosive / plyometric
     "conditioning",   # cardio + metabolic
     "mobility",       # range of motion
@@ -167,6 +178,48 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
         accepts_types=frozenset({"strength"}),
     ),
 
+    # ── Stimulus-differentiated lifting ──────────────────────────────
+    DayArchetype.LIFT_UPPER_HEAVY: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Upper — Heavy", intensity_cost=5,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_UPPER_HYPERTROPHY: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Upper — Hypertrophy", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LOWER_HEAVY: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Lower — Heavy", intensity_cost=5,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LOWER_HYPERTROPHY: ArchetypeMeta(
+        category="lift", training_type="hypertrophy",
+        default_name="Lower — Hypertrophy", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PUSH_VOLUME: ArchetypeMeta(
+        category="lift", training_type="volume",
+        default_name="Push — Volume", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PULL_VOLUME: ArchetypeMeta(
+        category="lift", training_type="volume",
+        default_name="Pull — Volume", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LEGS_VOLUME: ArchetypeMeta(
+        category="lift", training_type="volume",
+        default_name="Legs — Volume", intensity_cost=3,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_FULL_BODY_STRENGTH: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Full Body — Strength", intensity_cost=5,
+        accepts_types=frozenset({"strength"}),
+    ),
+
     # ── Conditioning ──────────────────────────────────────────────
     DayArchetype.COND_ZONE2: ArchetypeMeta(
         category="cond", training_type="conditioning",
@@ -219,7 +272,7 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
     DayArchetype.RECOVERY_EASY: ArchetypeMeta(
         category="recovery", training_type="recovery",
         default_name="Easy Recovery", intensity_cost=1,
-        accepts_types=frozenset({"cardio"}),
+        accepts_types=frozenset({"cardio", "mobility"}),
     ),
     DayArchetype.STRESS_RELIEF_EASY: ArchetypeMeta(
         category="recovery", training_type="recovery",
@@ -293,6 +346,15 @@ ARCHETYPE_TO_FOCUS_BUCKET: dict[DayArchetype, str] = {
     DayArchetype.LIFT_BRO_ARMS: "upper_body",
     DayArchetype.LIFT_BRO_LEGS: "lower_body",
     DayArchetype.LIFT_STRENGTH_MAINTENANCE: "full_body",
+    # Stimulus-differentiated lifting
+    DayArchetype.LIFT_UPPER_HEAVY: "upper_body",
+    DayArchetype.LIFT_UPPER_HYPERTROPHY: "upper_body",
+    DayArchetype.LIFT_LOWER_HEAVY: "lower_body",
+    DayArchetype.LIFT_LOWER_HYPERTROPHY: "lower_body",
+    DayArchetype.LIFT_PUSH_VOLUME: "upper_body",
+    DayArchetype.LIFT_PULL_VOLUME: "upper_body",
+    DayArchetype.LIFT_LEGS_VOLUME: "lower_body",
+    DayArchetype.LIFT_FULL_BODY_STRENGTH: "full_body",
     # Conditioning
     DayArchetype.COND_ZONE2: "cardio",
     DayArchetype.COND_INTERVALS_SHORT: "cardio",
@@ -319,6 +381,59 @@ def archetype_to_focus_bucket(a: DayArchetype) -> str:
     archetype in the enum has an entry in `ARCHETYPE_TO_FOCUS_BUCKET`;
     this helper exists so callers don't have to import the dict."""
     return ARCHETYPE_TO_FOCUS_BUCKET[a]
+
+
+# ── Fine-grained focus family ──────────────────────────────────────
+# Unlike the coarse `ARCHETYPE_TO_FOCUS_BUCKET` (which maps Push and
+# Pull both to "upper_body"), this map preserves split identity:
+# Push ≠ Pull even though both stress the upper body. Used by the
+# recipe rotation and adjacency repair to prevent same-focus
+# duplication within a chosen split.
+ARCHETYPE_TO_FOCUS_FAMILY: dict[DayArchetype, str] = {
+    # Lifting — each split identity gets its own family
+    DayArchetype.LIFT_FULL_BODY: "full_body",
+    DayArchetype.LIFT_UPPER: "upper",
+    DayArchetype.LIFT_LOWER: "lower",
+    DayArchetype.LIFT_PUSH: "push",
+    DayArchetype.LIFT_PULL: "pull",
+    DayArchetype.LIFT_LEGS: "legs",
+    DayArchetype.LIFT_BRO_CHEST: "push",
+    DayArchetype.LIFT_BRO_BACK: "pull",
+    DayArchetype.LIFT_BRO_SHOULDERS: "push",
+    DayArchetype.LIFT_BRO_ARMS: "upper",
+    DayArchetype.LIFT_BRO_LEGS: "legs",
+    DayArchetype.LIFT_STRENGTH_MAINTENANCE: "full_body",
+    # Stimulus-differentiated — SAME family as their base
+    DayArchetype.LIFT_UPPER_HEAVY: "upper",
+    DayArchetype.LIFT_UPPER_HYPERTROPHY: "upper",
+    DayArchetype.LIFT_LOWER_HEAVY: "lower",
+    DayArchetype.LIFT_LOWER_HYPERTROPHY: "lower",
+    DayArchetype.LIFT_PUSH_VOLUME: "push",
+    DayArchetype.LIFT_PULL_VOLUME: "pull",
+    DayArchetype.LIFT_LEGS_VOLUME: "legs",
+    DayArchetype.LIFT_FULL_BODY_STRENGTH: "full_body",
+    # Non-lifting
+    DayArchetype.COND_ZONE2: "cardio",
+    DayArchetype.COND_INTERVALS_SHORT: "cardio",
+    DayArchetype.COND_INTERVALS_LONG: "cardio",
+    DayArchetype.COND_TEMPO: "cardio",
+    DayArchetype.COND_CIRCUIT: "cardio",
+    DayArchetype.COND_MIXED: "cardio",
+    DayArchetype.COND_SPRINT_POWER: "cardio",
+    DayArchetype.MOBILITY_FLOW: "mobility",
+    DayArchetype.STRETCH_BLOCK: "mobility",
+    DayArchetype.RECOVERY_EASY: "recovery",
+    DayArchetype.STRESS_RELIEF_EASY: "recovery",
+    DayArchetype.HYBRID_STRENGTH_INTERVALS: "full_body",
+    DayArchetype.HYBRID_UPPER_INTERVALS: "upper",
+    DayArchetype.HYBRID_LOWER_POWER: "lower",
+    DayArchetype.HYBRID_FULL_BODY_CIRCUIT: "full_body",
+}
+
+
+def archetype_to_focus_family(a: DayArchetype) -> str:
+    """Fine-grained split identity. Push ≠ Pull ≠ Legs."""
+    return ARCHETYPE_TO_FOCUS_FAMILY.get(a, archetype_to_focus_bucket(a))
 
 
 def archetype_conflicts_with_recent(

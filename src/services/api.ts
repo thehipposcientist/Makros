@@ -407,6 +407,36 @@ export async function resumePendingPlanJob(token: string): Promise<any | null> {
   return _pollPlanJobUntilDone(token, pending.id);
 }
 
+export interface SplitOption {
+  id: string;
+  name: string;
+  short_name: string;
+  description: string;
+  days_per_week_range: string;
+  day_labels: string[];
+  rationale: string;
+  fit_score: number;
+  is_recommended: boolean;
+  stimulus_note: string;
+  pros: string[];
+  cons: string[];
+}
+
+export async function getSplitOptions(
+  token: string,
+  params: { goal: string; daysPerWeek: number; experienceLevel?: string; targetFocus?: string },
+): Promise<{ options: SplitOption[]; recommended: string | null }> {
+  const qs = new URLSearchParams({
+    goal: params.goal,
+    daysPerWeek: String(params.daysPerWeek),
+    experienceLevel: params.experienceLevel || 'intermediate',
+  });
+  if (params.targetFocus) qs.set('targetFocus', params.targetFocus);
+  return request(`/ai/plans/split-options?${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getAIPlans(
   token: string,
   profile: import('../types').UserProfile,
@@ -428,6 +458,7 @@ export async function getAIPlans(
     foodsAvailable:         profile.foodsAvailable,
     supplementsAvailable:   profile.supplementsAvailable ?? [],
     experienceLevel:        profile.experienceLevel,
+    preferredSplit:         profile.preferredSplit || undefined,
     injuriesOrLimitations,
     mealRoutine:            mealRoutineText,
     routineMacros:          routinePayload?.routineMacros,
@@ -483,6 +514,7 @@ export async function getAIWorkoutPlan(
     equipment:              profile.equipment,
     foodsAvailable:         [],
     experienceLevel:        profile.experienceLevel,
+    preferredSplit:         profile.preferredSplit || undefined,
     injuriesOrLimitations:  buildInjuries(profile),
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -1134,6 +1166,19 @@ export async function searchFoodNutrition(
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ query }),
   }, 15000);
+}
+
+/** Enrich food items with micronutrients. Used for routine/custom foods
+ *  that bypass normal plan gen enrichment. */
+export async function enrichFoodItems(
+  token: string,
+  items: Array<{ name: string; quantity?: number; unit?: string }>,
+): Promise<{ items: Array<{ name: string; micronutrients: Record<string, number> }> }> {
+  return request<any>('/ai/plans/enrich-items', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ items }),
+  }, 25000);
 }
 
 /** Parse natural language workout descriptions into structured sessions. */

@@ -38,6 +38,7 @@ class WorkoutCompleteRequest(BaseModel):
     workout_date: date
     focus_label: str
     duration_seconds: int = 0
+    stimulus: str | None = None  # strength/hypertrophy/volume/conditioning/etc.
     # ── NEW: optional per-exercise detail ─────────────────────────
     # When present, the completion path ALSO creates matching
     # WorkoutSession / WorkoutExercise / ExerciseSet rows so downstream
@@ -163,6 +164,7 @@ def mark_workout_complete(
     if existing:
         existing.focus_label      = body.focus_label
         existing.duration_seconds = body.duration_seconds
+        existing.stimulus         = body.stimulus
         existing.completed_at     = datetime.now(timezone.utc)
         db.add(existing)
     else:
@@ -171,6 +173,7 @@ def mark_workout_complete(
             workout_date=body.workout_date,
             focus_label=body.focus_label,
             duration_seconds=body.duration_seconds,
+            stimulus=body.stimulus,
         ))
 
     # Also persist structured per-exercise data if the client sent it.

@@ -349,21 +349,28 @@ def _build_deterministic_workout(
     # the user already trained recently. Empty tuple = no recent
     # signal; fresh week is fine.
     recent_focus_buckets: tuple[str, ...] = ()
+    recent_focus_families: tuple[str, ...] = ()
     if db is not None and user_id is not None:
         try:
             from app.services.workout.history import most_recent_completed_focus
-            buckets = most_recent_completed_focus(user_id, db, hours=36, limit=2)
+            # Expanded to 10 days / 10 entries so the planner can see
+            # the full prior week for freshness, stimulus spacing, and
+            # smarter rotation. Was 36h/2 which only saw the last 1-2
+            # sessions — not enough for a 5-6 day program.
+            buckets, families = most_recent_completed_focus(user_id, db, hours=240, limit=10)
             recent_focus_buckets = tuple(buckets)
+            recent_focus_families = tuple(families)
             if recent_focus_buckets:
                 print(
-                    f"[plan-gen workout] recent focus buckets (last 36h): "
-                    f"{list(recent_focus_buckets)}"
+                    f"[plan-gen workout] recent focus (10d): "
+                    f"buckets={list(recent_focus_buckets)} families={list(recent_focus_families)}"
                 )
             else:
-                print("[plan-gen workout] recent focus buckets (last 36h): none")
+                print("[plan-gen workout] recent focus (10d): none")
         except Exception as e:
             print(f"[plan-gen workout] recent-focus lookup failed (non-fatal): {e}")
             recent_focus_buckets = ()
+            recent_focus_families = ()
 
     inputs = PlannerInputs(
         goal=req.goal,
@@ -378,6 +385,7 @@ def _build_deterministic_workout(
         injuries=tuple(req.injuriesOrLimitations or ()),
         rng_seed=int(user_id or 0),
         recent_focus_buckets=recent_focus_buckets,
+        recent_focus_families=recent_focus_families,
     )
 
     history_familiarity: dict[str, int] = {}
@@ -595,6 +603,36 @@ def _build_deterministic_workout(
         f"(first focus={recent_completed_rows[0].get('focus') if recent_completed_rows else None!r})"
     )
 
+    # ── Query skipped days (last 7 days) ─────────────────────────────
+    # Passed into the AI reviewer brief so it knows what the user
+    # deliberately skipped. A pattern of skipped sessions (e.g. 3 legs
+    # skips in a row) signals the reviewer to swap the focus or flag
+    # adherence concerns.
+    skipped_days: list[dict] = []
+    if db is not None and user_id is not None:
+        try:
+            from datetime import datetime, timedelta
+            from sqlmodel import select
+            from app.models import UserDayState as _UDS
+            cutoff = (datetime.utcnow() - timedelta(days=7)).date()
+            skip_rows = db.exec(
+                select(_UDS).where(
+                    _UDS.user_id == user_id,
+                    _UDS.day_key >= cutoff,
+                    _UDS.skipped_focus.isnot(None),
+                )
+            ).all()
+            for sr in skip_rows:
+                skipped_days.append({
+                    "date": str(sr.day_key),
+                    "focus": sr.skipped_focus,
+                })
+            if skipped_days:
+                print(f"[plan-gen workout] skipped days (7d): {skipped_days}")
+        except Exception as e:
+            print(f"[plan-gen workout] skip query failed (non-fatal): {e}")
+    plan["_skipped_days"] = skipped_days
+
     # ── AI plan review (final QA pass) — GATED BY ENV VAR ───────────
     # Disabled by default; set `PLAN_REVIEW_ENABLED=1` in the backend
     # env to re-enable. When enabled, the review call + AI regenerate
@@ -655,6 +693,14 @@ def _build_deterministic_workout(
             secondary_goal=_secondary_goal,
             goal_details=_goal_details,
         )
+        # Inject the user's chosen split so the reviewer doesn't
+        # propose patches that conflict with the split structure.
+        if req.preferredSplit:
+            brief["user_preferred_split"] = req.preferredSplit
+        # Inject skipped-day data so the reviewer can see patterns
+        # (e.g. user keeps skipping legs → flag or swap).
+        if skipped_days:
+            brief["skipped_days_7d"] = skipped_days
         # Debug: full brief + AI verdict so we can iterate on the
         # reviewer prompt and the plan's structural choices.
         try:
@@ -788,10 +834,22 @@ def _build_deterministic_workout(
         # lifting days for fat loss but no cardio"). AI success
         # replaces the plan wholesale; AI failure keeps the
         # deterministic (and possibly patched) plan.
-        should_regenerate = (
-            review.status == "modify"
-            or (review.error or "").startswith("ok-with-complaints")
-        )
+        # Only regenerate from scratch when the reviewer said "ok" but
+        # described real problems in notes (the ok-with-complaints
+        # contradiction). When status="modify" AND patches were applied,
+        # the plan is already fixed — regenerating would REPLACE the
+        # patched deterministic plan with a free-form AI plan that
+        # loses the user's chosen split, stimulus structure, etc.
+        # NEVER regenerate the plan from scratch. The AI regenerate
+        # path replaces the entire deterministic plan with a free-form
+        # AI plan that loses the user's chosen split, stimulus types,
+        # exercise families, and all planner invariants we enforce.
+        # The deterministic planner + surgical patches is the source
+        # of truth. The ok-with-complaints contradiction is logged
+        # for debugging but does NOT trigger regen — the reviewer
+        # frequently hallucinates issues (e.g. "no cardio days" when
+        # there are 2 cardio days in the plan).
+        should_regenerate = False
         if should_regenerate:
             try:
                 from app.services.workout.plan_ai_regenerate import (
@@ -1004,7 +1062,7 @@ def _generate_nutritionist_note(
     review_summary: list[dict] | None = None,
     model: str | None = None,
 ) -> str:
-    """Parallel to `_generate_trainer_note`. Writes a 120-180 word
+    """Parallel to `_generate_trainer_note`. Writes a 200-280 word
     nutritionist note grounded in: (1) the deterministic targets from
     `compute_tdee_and_targets`, (2) a per-meal summary of the FIRST
     finalized template (post-review, post-normalize), (3) any patches
@@ -1232,64 +1290,49 @@ def _generate_nutritionist_note(
         except Exception:
             pass
 
+        days_per_week = req.daysPerWeek or 3
         prompt = (
-            "Write a 150-220 word grounded nutrition explanation for this user. "
-            "This note must READ LIKE A REGISTERED DIETITIAN explaining a plan "
-            "tailored to THEIR specific goal and numbers — not generic meal-plan prose.\n\n"
+            "Write a 200-280 word grounded nutrition explanation for this user. "
+            "This note must read like a registered dietitian explaining a plan "
+            "tailored to THEIR specific goal and numbers.\n\n"
             "=== USER CONTEXT ===\n"
             f"Primary goal: {goal}\n"
-            + (f"Target muscle focus: {target_focus} (user wants extra emphasis here)\n" if target_focus else "") +
-            f"Goal details: {goal_details}\n"
+            + (f"Target muscle focus: {target_focus}\n" if target_focus else "") +
             f"Bodyweight: {bw or '?'} lbs\n"
             f"Diet preference: {diet}\n"
             f"Allergies: {allergens}\n"
-            f"Training: {req.daysPerWeek or 3} lifting days/week, "
+            f"Training: {days_per_week} lifting days/week, "
             f"{req.workoutDurationMinutes or 60} min/session\n"
             + (f"\n{user_context_block}\n" if user_context_block else "") +
-            "\n=== DAILY TARGETS (the numbers the user sees) ===\n"
+            "\n=== DAILY TARGETS ===\n"
             f"Calories: {tgt_cal} kcal\n"
             f"Protein:  {tgt_prot} g  ({pct_prot}% of kcal, {prot_per_lb or '?'} g/lb bodyweight)\n"
             f"Carbs:    {tgt_carbs} g  ({pct_carbs}% of kcal)\n"
-            f"Fat:      {tgt_fat} g  ({pct_fat}% of kcal)\n"
-            f"(Sanity: macros add up to {total_cal_from_macros} kcal — within rounding of target.)\n\n"
+            f"Fat:      {tgt_fat} g  ({pct_fat}% of kcal)\n\n"
             "=== GOAL-SPECIFIC RATIONALE (expand on this, do not parrot) ===\n"
             f"{goal_rationale}\n\n"
-            "=== FIRST TEMPLATE MEALS (post-review, post-normalize — these exact numbers show in the UI) ===\n"
+            "=== FIRST TEMPLATE MEALS ===\n"
             f"{meals_block}\n\n"
-            "=== REAL STRENGTHS + GAPS FROM THIS TEMPLATE'S MICRONUTRIENTS ===\n"
+            "=== MICRONUTRIENT STRENGTHS + GAPS ===\n"
             f"Strengths: {strengths_line}\n"
             f"Gaps: {gaps_line}\n"
             f"{review_block}\n\n"
-            "=== SUPPLEMENT STACK (AI-recommended for this goal) ===\n"
+            "=== SUPPLEMENT STACK ===\n"
             f"{supp_block}\n\n"
-            "=== REQUIREMENTS FOR THE NOTE ===\n"
-            f"1. Lead with the goal by name and the EXACT calorie target ({tgt_cal} kcal) "
-            f"and EXACT protein target ({tgt_prot}g) — the user must see their own numbers "
-            "in the first two sentences.\n"
-            f"2. Explain the protein choice using the g/lb bodyweight ratio "
-            f"({prot_per_lb or '?'} g/lb) — why this range is right for their goal.\n"
-            f"3. Explain the carb/fat split ({pct_carbs}% carbs / {pct_fat}% fat of total "
-            "calories) in terms of training fuel + recovery + satiety for THIS goal.\n"
-            "4. Name ONE specific meal from the list above by its exact name and explain "
-            "why it is built that way for this goal (cite its calories or protein).\n"
-            "5. Name ONE strength from the Strengths line above by nutrient name with its number.\n"
-            "6. Name ONE gap from the Gaps line above with its number AND suggest one "
-            "concrete food fix (e.g. 'add a cup of spinach', 'two salmon fillets per week'). "
-            "If gaps_line says 'none significant', skip this requirement entirely.\n"
-            "7. Reference 1-2 supplements from the stack above and explain in one clause "
-            "WHY they're included (e.g. 'creatine for strength output on a 4-day lifting "
-            "schedule', 'omega-3 because your plan's fish intake is low'). If the stack "
-            "is empty, skip this.\n"
-            "8. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
-            "gym performance) so they can self-assess whether it's working.\n"
-            "9. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
-            "BANNED: generic phrases like 'balanced nutrition', 'supports your goals', "
-            "'fuel your workouts', 'clean eating'. Every sentence must cite a number, "
-            "a named meal, a named supplement, or a nutrient from above. No filler.\n\n"
+            "=== REQUIREMENTS (exactly 5) ===\n"
+            f"1. Start with: \"At {tgt_cal} kcal and {tgt_prot}g protein "
+            f"({prot_per_lb or '?'} g/lb)...\" — these exact numbers must appear "
+            "in the first sentence.\n"
+            f"2. Explain why this calorie level fits {goal} with {days_per_week} "
+            "training days.\n"
+            "3. Name one meal from the list and explain its role.\n"
+            "4. If there are nutrient gaps, mention the top one with a specific "
+            "food fix.\n"
+            "5. If supplements are recommended, mention 1-2 and why.\n\n"
             "FORMATTING: Return a SINGLE flowing paragraph of plain prose. "
-            "Do NOT use markdown, bold (**), headings (#), bullet points (- or *), "
-            "numbered lists (1., 2.), or line breaks inside the note. One paragraph, "
-            "150-220 words, plain text. The UI renders it as a single Text block.\n\n"
+            "Do NOT use markdown, bold, headings, bullet points, numbered lists, "
+            "or line breaks inside the note. One paragraph, 200-280 words, "
+            "plain text only.\n\n"
             'Return JSON: {"nutritionistNote": "..."}'
         )
         kwargs = _build_chat_kwargs(
@@ -2089,8 +2132,163 @@ async def run_full_plan_generation(
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
+
+    # ── Post-assembly micro enrichment ─────────────────────────────
+    # Walk every meal item in every template. Any item missing Layer 2
+    # micros gets enriched via a batched AI call. This catches:
+    # - Items from thin DB foods the lazy enrichment missed
+    # - Items from routine meals that bypassed the enrichment path
+    # - Items from custom/scanned foods with macros-only
+    # Results are written directly onto the item dicts so the client
+    # sees full micros on every item.
+    try:
+        _MICRO_CHECK = ("saturated_fat", "omega_3", "potassium", "calcium", "iron", "vitamin_d")
+        thin_items: list[dict] = []
+        for np_ in plans_list:
+            if not isinstance(np_, dict):
+                continue
+            for meal in np_.get("meals") or []:
+                if not isinstance(meal, dict):
+                    continue
+                # Check meal-level micros
+                mn = meal.get("micronutrients") or {}
+                has_layer2 = sum(1 for k in _MICRO_CHECK if isinstance(mn.get(k), (int, float)) and mn[k] > 0)
+                if has_layer2 >= 3:
+                    continue  # meal already has decent micros
+                # Check per-item micros
+                for it in meal.get("items") or []:
+                    if not isinstance(it, dict):
+                        continue
+                    it_mn = it.get("micronutrients") or {}
+                    it_has = sum(1 for k in _MICRO_CHECK if isinstance(it_mn.get(k), (int, float)) and it_mn[k] > 0)
+                    if it_has < 2 and it.get("name"):
+                        thin_items.append(it)
+
+        if thin_items:
+            print(f"[plan-gen] {len(thin_items)} meal items missing Layer 2 micros — enriching")
+            from app.routers.ai.utils import _ai_backfill_micros
+            # Build food-shaped dicts for the backfill function
+            food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in thin_items[:20]]
+            backfill = _ai_backfill_micros(client, food_dicts)
+            if backfill:
+                for it in thin_items[:20]:
+                    key = str(it.get("name", "")).strip().lower()
+                    micros = backfill.get(key)
+                    if not micros:
+                        continue
+                    # Write micros onto the item
+                    it_mn = it.get("micronutrients") or {}
+                    for mk, mv in micros.items():
+                        if mk not in it_mn or not it_mn[mk]:
+                            it_mn[mk] = mv
+                            it[mk] = mv  # also top-level for legacy readers
+                    it["micronutrients"] = it_mn
+                # Re-sum meal-level micros from enriched items
+                for np_ in plans_list:
+                    if not isinstance(np_, dict):
+                        continue
+                    for meal in np_.get("meals") or []:
+                        if not isinstance(meal, dict):
+                            continue
+                        items = meal.get("items") or []
+                        if not items:
+                            continue
+                        resummed: dict[str, float] = {}
+                        for it in items:
+                            it_mn = it.get("micronutrients") or {}
+                            for mk, mv in it_mn.items():
+                                try:
+                                    resummed[mk] = resummed.get(mk, 0.0) + float(mv or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                        if resummed:
+                            meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
+                            if "fiber" in resummed:
+                                meal["fiber"] = round(resummed["fiber"], 1)
+                print(f"[plan-gen] enriched {len(backfill)} items, re-summed meal micros")
+    except Exception as exc:
+        print(f"[plan-gen] post-assembly micro enrichment failed (non-fatal): {exc}")
+
     print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
+
+
+@router.get("/plans/split-options")
+def get_split_options_endpoint(
+    goal: str,
+    daysPerWeek: int,
+    experienceLevel: str = "intermediate",
+    targetFocus: str | None = None,
+    current_user: User = Depends(get_current_user),
+):
+    """Return scored split options for the user's goal + days + focus.
+
+    Each option includes a fit_score, rationale, pros/cons, day labels,
+    and a stimulus_note. When `targetFocus` is set (e.g. "glutes"),
+    splits that give higher frequency for that muscle score higher.
+
+    No plan is generated — this is a lightweight picker call."""
+    from app.services.workout.split_options import get_split_options
+    options = get_split_options(
+        goal=goal,
+        days_per_week=daysPerWeek,
+        target_focus=targetFocus,
+        experience=experienceLevel,
+    )
+    return {
+        "options": [o.to_dict() for o in options],
+        "recommended": next((o.id for o in options if o.is_recommended), None),
+    }
+
+
+from pydantic import BaseModel as _BaseModel
+
+class EnrichItemsRequest(_BaseModel):
+    items: list[dict]
+
+
+@router.post("/plans/enrich-items")
+async def enrich_items_endpoint(
+    req: EnrichItemsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Enrich a list of food items with micronutrients.
+
+    Accepts items like [{name, quantity, unit}] and returns them with
+    full Layer 2 micros filled in. Used by the client to enrich routine
+    meals and custom foods that bypass the normal plan gen enrichment."""
+    if not req.items:
+        return {"items": []}
+
+    try:
+        api_key = get_openai_api_key()
+        client = OpenAI(api_key=api_key)
+    except Exception:
+        return {"items": []}
+
+    from app.routers.ai.utils import _ai_backfill_micros
+    food_dicts = [
+        {
+            "name": it.get("name"),
+            "serving": f"{it.get('quantity', 1)} {it.get('unit', 'serving')}",
+        }
+        for it in req.items[:20]
+        if it.get("name")
+    ]
+    if not food_dicts:
+        return {"items": []}
+
+    backfill = _ai_backfill_micros(client, food_dicts)
+    enriched = []
+    for it in req.items[:20]:
+        name = str(it.get("name", "")).strip().lower()
+        micros = backfill.get(name, {})
+        enriched.append({
+            "name": it.get("name", ""),
+            "micronutrients": micros,
+        })
+    print(f"[enrich-items] enriched {len([e for e in enriched if e['micronutrients']])} of {len(enriched)} items")
+    return {"items": enriched}
 
 
 @router.post("/plans")
@@ -2249,6 +2447,67 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
     custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
+
+    # Post-assembly micro enrichment (same as full plan gen path)
+    try:
+        _MICRO_CHECK = ("saturated_fat", "omega_3", "potassium", "calcium", "iron", "vitamin_d")
+        thin_items: list[dict] = []
+        for np_ in plans_list:
+            if not isinstance(np_, dict):
+                continue
+            for meal in np_.get("meals") or []:
+                if not isinstance(meal, dict):
+                    continue
+                mn = meal.get("micronutrients") or {}
+                if sum(1 for k in _MICRO_CHECK if isinstance(mn.get(k), (int, float)) and mn[k] > 0) >= 3:
+                    continue
+                for it in meal.get("items") or []:
+                    if not isinstance(it, dict):
+                        continue
+                    it_mn = it.get("micronutrients") or {}
+                    if sum(1 for k in _MICRO_CHECK if isinstance(it_mn.get(k), (int, float)) and it_mn[k] > 0) < 2 and it.get("name"):
+                        thin_items.append(it)
+        if thin_items:
+            print(f"[plan-gen nutrition] {len(thin_items)} items missing micros — enriching")
+            from app.routers.ai.utils import _ai_backfill_micros
+            food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in thin_items[:20]]
+            backfill = _ai_backfill_micros(client, food_dicts)
+            if backfill:
+                for it in thin_items[:20]:
+                    key = str(it.get("name", "")).strip().lower()
+                    micros = backfill.get(key)
+                    if not micros:
+                        continue
+                    it_mn = it.get("micronutrients") or {}
+                    for mk, mv in micros.items():
+                        if mk not in it_mn or not it_mn[mk]:
+                            it_mn[mk] = mv
+                            it[mk] = mv
+                    it["micronutrients"] = it_mn
+                for np_ in plans_list:
+                    if not isinstance(np_, dict):
+                        continue
+                    for meal in np_.get("meals") or []:
+                        if not isinstance(meal, dict):
+                            continue
+                        items = meal.get("items") or []
+                        if not items:
+                            continue
+                        resummed: dict[str, float] = {}
+                        for it in items:
+                            for mk, mv in (it.get("micronutrients") or {}).items():
+                                try:
+                                    resummed[mk] = resummed.get(mk, 0.0) + float(mv or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                        if resummed:
+                            meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
+                            if "fiber" in resummed:
+                                meal["fiber"] = round(resummed["fiber"], 1)
+                print(f"[plan-gen nutrition] enriched {len(backfill)} items")
+    except Exception as exc:
+        print(f"[plan-gen nutrition] post-assembly enrichment failed: {exc}")
+
     return result
 
 

@@ -122,7 +122,7 @@ def most_recent_completed_focus(
     *,
     hours: int = 36,
     limit: int = 2,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Return normalized focus buckets for the user's most-recent
     completed workouts within the last `hours` hours, newest first.
 
@@ -161,7 +161,7 @@ def most_recent_completed_focus(
     from datetime import date, datetime, timedelta
     from sqlmodel import select, or_
     from app.models import WorkoutCompletion
-    from .focus_normalize import normalize_focus_to_bucket
+    from .focus_normalize import normalize_focus_to_bucket, normalize_focus_to_family
 
     now_naive = datetime.utcnow()
     cutoff_dt = now_naive - timedelta(hours=hours)
@@ -184,9 +184,11 @@ def most_recent_completed_focus(
     ).all()
 
     buckets: list[str] = []
+    families: list[str] = []
     for row in rows:
         raw_focus = (row.focus_label or "").strip()
         bucket = normalize_focus_to_bucket(raw_focus)
+        family = normalize_focus_to_family(raw_focus)
         inside_cutoff = (
             row.completed_at is not None and row.completed_at >= cutoff_dt
         ) or (
@@ -195,12 +197,17 @@ def most_recent_completed_focus(
         print(
             f"[history] recent completion: workout_date={row.workout_date} "
             f"completed_at={row.completed_at} raw_focus={raw_focus!r} "
-            f"normalized={bucket!r} inside_cutoff={inside_cutoff}"
+            f"bucket={bucket!r} family={family!r} inside_cutoff={inside_cutoff}"
         )
         if bucket and len(buckets) < limit:
             buckets.append(bucket)
-    print(f"[history] recent focus buckets (last {hours}h, up to {limit}): {buckets}")
-    return buckets
+        if family and len(families) < limit:
+            families.append(family)
+    print(
+        f"[history] recent focus buckets (last {hours}h, up to {limit}): {buckets} "
+        f"families: {families}"
+    )
+    return buckets, families
 
 
 # ─── Layer 2 — Last session lookup ───────────────────────────────────────────

@@ -162,6 +162,10 @@ export interface UserProfile {
   injuries?: string;             // legacy: free-text injuries
   injuryEntries?: InjuryEntry[]; // structured injury tracking with statuses
   experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
+  /** Training split preference. "auto" or null = planner picks the best
+   *  split for the user's goal + days. Otherwise one of:
+   *  "full_body" | "upper_lower" | "ppl" | "ppl_upper_lower" | "bro" */
+  preferredSplit?: string;
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
 }
@@ -226,6 +230,11 @@ export interface Exercise {
 export interface WorkoutDay {
   day: string;
   focus: string;
+  /** Training stimulus intent: "strength" | "hypertrophy" | "volume" |
+   *  "conditioning" | "mobility" | "recovery" | "mixed". Shipped by the
+   *  planner from the archetype's training_type. Drives the stimulus
+   *  badge on the workout card. */
+  stimulus?: string;
   exercises: Exercise[];
 }
 
@@ -356,6 +365,7 @@ export interface MealItem {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  micronutrients?: Record<string, number>;
 }
 
 export interface MealSuggestion {

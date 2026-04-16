@@ -95,6 +95,11 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_BRO_CHEST, DayArchetype.LIFT_BRO_BACK,
             DayArchetype.LIFT_BRO_SHOULDERS, DayArchetype.LIFT_BRO_ARMS,
             DayArchetype.LIFT_BRO_LEGS,
+            # Stimulus-differentiated
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
+            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
+            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_PUSH,
@@ -117,6 +122,11 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_FULL_BODY, DayArchetype.LIFT_UPPER,
             DayArchetype.LIFT_LOWER, DayArchetype.LIFT_PUSH,
             DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
+            # Stimulus-differentiated
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
+            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
+            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_LOWER,
@@ -142,6 +152,11 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.COND_INTERVALS_SHORT,
             DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
             DayArchetype.MOBILITY_FLOW,
+            # Stimulus-differentiated
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
+            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
+            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_UPPER,
@@ -174,6 +189,9 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         allowed_archetypes=frozenset({
             DayArchetype.LIFT_FULL_BODY, DayArchetype.LIFT_UPPER,
             DayArchetype.LIFT_LOWER,
+            # PPL archetypes — needed when user explicitly chooses PPL
+            DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL,
+            DayArchetype.LIFT_LEGS,
             DayArchetype.COND_ZONE2,
             DayArchetype.COND_INTERVALS_SHORT,
             DayArchetype.COND_CIRCUIT,
@@ -181,6 +199,11 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.HYBRID_STRENGTH_INTERVALS,
             DayArchetype.MOBILITY_FLOW,
             DayArchetype.RECOVERY_EASY,
+            # Stimulus-differentiated
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
+            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
+            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_UPPER,
@@ -246,6 +269,11 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.HYBRID_UPPER_INTERVALS,
             DayArchetype.HYBRID_STRENGTH_INTERVALS,
             DayArchetype.MOBILITY_FLOW,
+            # Stimulus-differentiated
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
+            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
+            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
         anchor_archetypes=(
             DayArchetype.HYBRID_LOWER_POWER,
@@ -266,6 +294,8 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         ),
         allowed_archetypes=frozenset({
             DayArchetype.LIFT_FULL_BODY,
+            DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER,
+            DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
             DayArchetype.LIFT_STRENGTH_MAINTENANCE,
             DayArchetype.COND_ZONE2,
             DayArchetype.COND_INTERVALS_SHORT,
@@ -365,16 +395,36 @@ def goal_profile_for(
 
     # Special planner modes (flexibility, stress_relief) short-circuit
     # the normal bucket lookup because they don't map to a lifting
-    # bucket — their profile IS a different planner mode.
-    if gid in _SPECIAL_PROFILES:
-        return _SPECIAL_PROFILES[gid]
+    # bucket — their profile IS a different planner mode. Also catch
+    # aliases like "improve_flexibility" → "flexibility".
+    _SPECIAL_ALIASES = {
+        "improve_flexibility": "flexibility",
+        "improve_mobility": "flexibility",
+        "maintain_mobility": "flexibility",
+        "stress_exercise": "stress_relief",
+    }
+    # Goals that should route to a specific PROFILE TABLE entry
+    # (not a special profile). These are goal ids that the bucket
+    # resolver maps incorrectly (e.g. longevity → body_recomp when
+    # it should use the general_health maintain-mode profile).
+    _PROFILE_OVERRIDES = {
+        "longevity": "general_health",
+        "healthy_aging": "general_health",
+        "heart_health": "general_health",
+        "general_health": "general_health",
+    }
+    resolved_gid = _SPECIAL_ALIASES.get(gid, gid)
+    if resolved_gid in _SPECIAL_PROFILES:
+        return _SPECIAL_PROFILES[resolved_gid]
+    if gid in _PROFILE_OVERRIDES:
+        return _PROFILE_TABLE.get(_PROFILE_OVERRIDES[gid]) or _PROFILE_TABLE["general_health"]
 
     bucket = goal_bucket(goal)
     # flexibility / stress_relief resolve to general_health via the
     # registry's `supported=False` fallback. Intercept those so they
     # get the mobility/recovery profile, not the generic one.
-    if bucket == "general_health" and gid in ("flexibility", "stress_relief"):
-        return _SPECIAL_PROFILES[gid]
+    if bucket == "general_health" and resolved_gid in ("flexibility", "stress_relief"):
+        return _SPECIAL_PROFILES[resolved_gid]
 
     return _PROFILE_TABLE.get(bucket) or _PROFILE_TABLE["general_health"]
 

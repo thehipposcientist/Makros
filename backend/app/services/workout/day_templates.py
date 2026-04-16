@@ -51,6 +51,14 @@ from .slots import (
     _stretch_block_slots,
     _strength_maintenance_slots,
     _upper_slots,
+    _upper_heavy_slots,
+    _upper_hypertrophy_slots,
+    _lower_heavy_slots,
+    _lower_hypertrophy_slots,
+    _push_volume_slots,
+    _pull_volume_slots,
+    _legs_volume_slots,
+    _full_body_strength_slots,
 )
 
 
@@ -361,6 +369,24 @@ def archetype_to_slots(archetype, day_index: int, days_per_week: int) -> list[Sl
         return _BRO_SLOT_SEQUENCE[4]
     if archetype == _DA.LIFT_STRENGTH_MAINTENANCE:
         return _strength_maintenance_slots()
+
+    # Stimulus-differentiated lifting
+    if archetype == _DA.LIFT_UPPER_HEAVY:
+        return _upper_heavy_slots()
+    if archetype == _DA.LIFT_UPPER_HYPERTROPHY:
+        return _upper_hypertrophy_slots()
+    if archetype == _DA.LIFT_LOWER_HEAVY:
+        return _lower_heavy_slots()
+    if archetype == _DA.LIFT_LOWER_HYPERTROPHY:
+        return _lower_hypertrophy_slots()
+    if archetype == _DA.LIFT_PUSH_VOLUME:
+        return _push_volume_slots()
+    if archetype == _DA.LIFT_PULL_VOLUME:
+        return _pull_volume_slots()
+    if archetype == _DA.LIFT_LEGS_VOLUME:
+        return _legs_volume_slots()
+    if archetype == _DA.LIFT_FULL_BODY_STRENGTH:
+        return _full_body_strength_slots()
 
     # Conditioning
     if archetype == _DA.COND_ZONE2:

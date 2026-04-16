@@ -973,8 +973,10 @@ def test_propagate_session_targets_walks_a_full_plan() -> None:
             ]
         elif ex.get("_role") == "primary" and chosen_decrease is None:
             chosen_decrease = ex["_slug"]
+            # Use reps=1 so this is clearly below any prescription range
+            # (strength 3-5, hypertrophy 6-8/8-12), triggering a decrease.
             fixtures[chosen_decrease] = [
-                SetResult(set_number=i + 1, weight_lbs=200.0, reps=4) for i in range(3)
+                SetResult(set_number=i + 1, weight_lbs=200.0, reps=1) for i in range(3)
             ]
             break
 

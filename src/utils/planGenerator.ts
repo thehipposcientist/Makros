@@ -285,16 +285,16 @@ function fullBodyDays(gym: boolean, db: boolean, pu: boolean, count: number, equ
   const pull  = pullPool(gym, db, pu);
   const core  = corePool(gym, db);
 
-  const makeDay = (label: string, focus: string, pools: Exercise[][]): WorkoutDay => {
+  const makeDay = (label: string, focus: string, pools: Exercise[][], stimulus: string = 'hypertrophy'): WorkoutDay => {
     const combined = pools.flat();
     const base = pick(combined, count);
-    return { day: label, focus, exercises: withCardioFinisher(base, equipment, goal) };
+    return { day: label, focus, stimulus, exercises: withCardioFinisher(base, equipment, goal) };
   };
 
   return [
-    makeDay('Day 1', 'Full Body — Strength',   [squat, push, pull, core]),
-    makeDay('Day 2', 'Full Body — Power',       [hinge, push, pull, core]),
-    makeDay('Day 3', 'Full Body — Hypertrophy', [squat, hinge, push, pull, core]),
+    makeDay('Day 1', 'Full Body — Strength',   [squat, push, pull, core], 'strength'),
+    makeDay('Day 2', 'Full Body — Power',       [hinge, push, pull, core], 'power'),
+    makeDay('Day 3', 'Full Body — Hypertrophy', [squat, hinge, push, pull, core], 'hypertrophy'),
   ].slice(0, 3);
 }
 

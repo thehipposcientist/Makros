@@ -434,6 +434,11 @@ class WorkoutCompletion(SQLModel, table=True):
     workout_date: date
     focus_label: str
     duration_seconds: int = Field(default=0)
+    # Training stimulus of the session: "strength" / "hypertrophy" /
+    # "volume" / "conditioning" / "mobility" / "recovery". Stored on
+    # completion so the planner can space heavy days from heavy days
+    # and avoid back-to-back high-intensity stimulus.
+    stimulus: str | None = Field(default=None)
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

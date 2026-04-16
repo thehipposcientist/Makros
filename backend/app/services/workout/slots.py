@@ -42,8 +42,10 @@ class Slot:
 def _full_body_slots(day_index: int) -> list[Slot]:
     """Full-body day. Rotates across three themes so consecutive
     sessions don't repeat the exact same exercises."""
+    _warmup = Slot("Warmup Mobility", "mobility", "full_body", "warmup")
     if day_index % 3 == 0:
         return [
+            _warmup,
             Slot("Squat Pattern",     "squat",            "quads",       "primary"),
             Slot("Horizontal Press",  "horizontal_press", "chest",       "primary"),
             Slot("Horizontal Pull",   "horizontal_pull",  "back",        "primary"),
@@ -52,6 +54,7 @@ def _full_body_slots(day_index: int) -> list[Slot]:
         ]
     if day_index % 3 == 1:
         return [
+            _warmup,
             Slot("Hinge Pattern",     "hinge",            "hamstrings",  "primary"),
             Slot("Vertical Press",    "vertical_press",   "shoulders",   "primary"),
             Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
@@ -59,6 +62,7 @@ def _full_body_slots(day_index: int) -> list[Slot]:
             Slot("Core",              "anti_extension",   "core",        "core"),
         ]
     return [
+        _warmup,
         Slot("Squat Pattern",     "squat",            "quads",       "primary"),
         Slot("Horizontal Press",  "horizontal_press", "chest",       "secondary"),
         Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
@@ -70,8 +74,10 @@ def _full_body_slots(day_index: int) -> list[Slot]:
 def _upper_slots(cycle_index: int) -> list[Slot]:
     """Upper-body day with rotating emphasis (horizontal → vertical →
     balanced) so Upper 1 / Upper 2 / Upper 3 feel materially different."""
+    _warmup = Slot("Warmup Mobility", "mobility", "shoulders", "warmup")
     if cycle_index % 3 == 0:
         return [
+            _warmup,
             Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
             Slot("Primary Pull",      "horizontal_pull",  "back",      "primary"),
             Slot("Secondary Press",   "horizontal_press", "chest",     "secondary"),
@@ -82,6 +88,7 @@ def _upper_slots(cycle_index: int) -> list[Slot]:
         ]
     if cycle_index % 3 == 1:
         return [
+            _warmup,
             Slot("Vertical Press",    "vertical_press",   "shoulders", "primary"),
             Slot("Vertical Pull",     "vertical_pull",    "back",      "primary"),
             Slot("Horizontal Press",  "horizontal_press", "chest",     "secondary"),
@@ -91,6 +98,7 @@ def _upper_slots(cycle_index: int) -> list[Slot]:
             Slot("Triceps",           "isolation",        "triceps",   "isolation"),
         ]
     return [
+        _warmup,
         Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
         Slot("Primary Pull",      "horizontal_pull",  "back",      "primary"),
         Slot("Vertical Press",    "vertical_press",   "shoulders", "secondary"),
@@ -103,8 +111,10 @@ def _upper_slots(cycle_index: int) -> list[Slot]:
 
 def _lower_slots(cycle_index: int) -> list[Slot]:
     """Lower-body day with squat / hinge / balanced rotation."""
+    _warmup = Slot("Warmup Mobility", "mobility", "hips", "warmup")
     if cycle_index % 3 == 0:
         return [
+            _warmup,
             Slot("Squat Pattern",     "squat",            "quads",      "primary"),
             Slot("Single-leg",        "lunge",            "quads",      "secondary"),
             Slot("Hinge Pattern",     "hinge",            "hamstrings", "secondary"),
@@ -114,6 +124,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
         ]
     if cycle_index % 3 == 1:
         return [
+            _warmup,
             Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
             Slot("Squat Pattern",     "squat",            "quads",      "secondary"),
             Slot("Single-leg",        "lunge",            "glutes",     "secondary"),
@@ -122,6 +133,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
             Slot("Core",              "anti_extension",   "core",       "core"),
         ]
     return [
+        _warmup,
         Slot("Squat Pattern",     "squat",            "quads",      "primary"),
         Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
         Slot("Single-leg",        "lunge",            "quads",      "secondary"),
@@ -133,6 +145,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
 
 def _push_slots() -> list[Slot]:
     return [
+        Slot("Warmup Mobility",   "mobility",         "shoulders", "warmup"),
         Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
         Slot("Vertical Press",    "vertical_press",   "shoulders", "primary"),
         Slot("Secondary Press",   "horizontal_press", "chest",     "secondary"),
@@ -144,6 +157,7 @@ def _push_slots() -> list[Slot]:
 
 def _pull_slots() -> list[Slot]:
     return [
+        Slot("Warmup Mobility",   "mobility",         "back",   "warmup"),
         Slot("Vertical Pull",     "vertical_pull",    "back",   "primary"),
         Slot("Horizontal Pull",   "horizontal_pull",  "back",   "primary"),
         Slot("Secondary Pull",    "horizontal_pull",  "back",   "secondary"),
@@ -155,6 +169,7 @@ def _pull_slots() -> list[Slot]:
 
 def _legs_slots() -> list[Slot]:
     return [
+        Slot("Warmup Mobility",   "mobility",         "hips",       "warmup"),
         Slot("Squat Pattern",     "squat",            "quads",      "primary"),
         Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
         Slot("Single-leg",        "lunge",            "quads",      "secondary"),
@@ -169,6 +184,7 @@ def _strength_maintenance_slots() -> list[Slot]:
     (endurance, flexibility, stress relief, maintain). Keeps muscle
     mass without fighting recovery from the user's primary goal."""
     return [
+        Slot("Warmup Mobility",   "mobility",         "full_body",  "warmup"),
         Slot("Squat Pattern",     "squat",            "quads",      "primary"),
         Slot("Horizontal Press",  "horizontal_press", "chest",      "primary"),
         Slot("Horizontal Pull",   "horizontal_pull",  "back",       "primary"),
@@ -181,6 +197,7 @@ def _strength_maintenance_slots() -> list[Slot]:
 _BRO_SLOT_SEQUENCE: list[list[Slot]] = [
     # Chest
     [
+        Slot("Warmup Mobility",  "mobility",         "shoulders", "warmup"),
         Slot("Primary Press",    "horizontal_press", "chest", "primary"),
         Slot("Incline Press",    "horizontal_press", "chest", "secondary"),
         Slot("Chest Fly",        "isolation",        "chest", "isolation"),
@@ -189,6 +206,7 @@ _BRO_SLOT_SEQUENCE: list[list[Slot]] = [
     ],
     # Back
     [
+        Slot("Warmup Mobility",  "mobility",        "back",  "warmup"),
         Slot("Vertical Pull",    "vertical_pull",   "back",  "primary"),
         Slot("Horizontal Pull",  "horizontal_pull", "back",  "primary"),
         Slot("Secondary Row",    "horizontal_pull", "back",  "secondary"),
@@ -197,6 +215,7 @@ _BRO_SLOT_SEQUENCE: list[list[Slot]] = [
     ],
     # Shoulders
     [
+        Slot("Warmup Mobility",  "mobility",        "shoulders", "warmup"),
         Slot("Vertical Press",   "vertical_press",  "shoulders", "primary"),
         Slot("Lateral Raise",    "isolation",       "shoulders", "isolation"),
         Slot("Rear Delt Fly",    "isolation",       "shoulders", "isolation"),
@@ -205,6 +224,7 @@ _BRO_SLOT_SEQUENCE: list[list[Slot]] = [
     ],
     # Arms
     [
+        Slot("Warmup Mobility",  "mobility",  "shoulders", "warmup"),
         Slot("Bicep Curl",       "isolation", "biceps", "primary"),
         Slot("Tricep Press",     "isolation", "triceps", "primary"),
         Slot("Hammer Curl",      "isolation", "biceps", "secondary"),
@@ -213,6 +233,113 @@ _BRO_SLOT_SEQUENCE: list[list[Slot]] = [
     # Legs
     _legs_slots(),
 ]
+
+
+# ─── Stimulus-differentiated lifting slot builders ─────────────────
+
+
+def _upper_heavy_slots() -> list[Slot]:
+    """Upper heavy day: fewer slots, heavier per exercise."""
+    return [
+        Slot("Warmup Mobility",          "mobility",         "shoulders", "warmup"),
+        Slot("Primary Horizontal Press", "horizontal_press", "chest",     "primary"),
+        Slot("Primary Vertical Press",   "vertical_press",   "shoulders", "primary"),
+        Slot("Horizontal Pull",          "horizontal_pull",  "back",      "secondary"),
+        Slot("Isolation",                "isolation",         "biceps",    "isolation"),
+        Slot("Core",                     "anti_extension",   "core",      "core"),
+    ]
+
+
+def _upper_hypertrophy_slots() -> list[Slot]:
+    """Upper hypertrophy day: more slots for variety + volume."""
+    return [
+        Slot("Warmup Mobility",   "mobility",         "shoulders", "warmup"),
+        Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
+        Slot("Secondary Pull",    "horizontal_pull",  "back",      "secondary"),
+        Slot("Secondary Press",   "vertical_press",   "shoulders", "secondary"),
+        Slot("Chest Isolation",   "isolation",         "chest",     "isolation"),
+        Slot("Back Isolation",    "isolation",         "back",      "isolation"),
+        Slot("Arm Isolation",     "isolation",         "biceps",    "isolation"),
+        Slot("Core",              "anti_extension",    "core",      "core"),
+    ]
+
+
+def _lower_heavy_slots() -> list[Slot]:
+    """Lower heavy day: fewer slots, heavier per exercise."""
+    return [
+        Slot("Warmup Mobility",  "mobility",       "hips",       "warmup"),
+        Slot("Primary Squat",    "squat",          "quads",      "primary"),
+        Slot("Primary Hinge",    "hinge",          "hamstrings", "primary"),
+        Slot("Secondary Lunge",  "lunge",          "quads",      "secondary"),
+        Slot("Glute Isolation",  "isolation",       "glutes",    "isolation"),
+        Slot("Core",             "anti_extension",  "core",      "core"),
+    ]
+
+
+def _lower_hypertrophy_slots() -> list[Slot]:
+    """Lower hypertrophy day: more slots for variety + volume."""
+    return [
+        Slot("Warmup Mobility",      "mobility",      "hips",       "warmup"),
+        Slot("Primary Squat",        "squat",         "quads",      "primary"),
+        Slot("Primary Hinge",        "hinge",         "hamstrings", "primary"),
+        Slot("Secondary Lunge",      "lunge",         "quads",      "secondary"),
+        Slot("Quad Isolation",       "isolation",      "quads",     "isolation"),
+        Slot("Hamstring Isolation",  "isolation",      "hamstrings","isolation"),
+        Slot("Core",                 "anti_extension", "core",      "core"),
+        Slot("Calves",               "isolation",      "calves",    "isolation"),
+    ]
+
+
+def _push_volume_slots() -> list[Slot]:
+    """Push volume day: moderate weight, higher reps."""
+    return [
+        Slot("Warmup Mobility",     "mobility",         "shoulders", "warmup"),
+        Slot("Primary Press",       "horizontal_press", "chest",     "primary"),
+        Slot("Secondary Press A",   "vertical_press",   "shoulders", "secondary"),
+        Slot("Secondary Press B",   "horizontal_press", "chest",     "secondary"),
+        Slot("Chest Isolation",     "isolation",         "chest",     "isolation"),
+        Slot("Triceps Isolation",   "isolation",         "triceps",   "isolation"),
+        Slot("Core",                "anti_extension",    "core",      "core"),
+    ]
+
+
+def _pull_volume_slots() -> list[Slot]:
+    """Pull volume day: moderate weight, higher reps."""
+    return [
+        Slot("Warmup Mobility",    "mobility",         "back",      "warmup"),
+        Slot("Primary Pull",       "vertical_pull",    "back",      "primary"),
+        Slot("Secondary Pull A",   "horizontal_pull",  "back",      "secondary"),
+        Slot("Secondary Pull B",   "horizontal_pull",  "back",      "secondary"),
+        Slot("Biceps Isolation",   "isolation",         "biceps",    "isolation"),
+        Slot("Rear Delt Isolation","isolation",         "shoulders", "isolation"),
+        Slot("Core",               "anti_extension",    "core",      "core"),
+    ]
+
+
+def _legs_volume_slots() -> list[Slot]:
+    """Legs volume day: moderate weight, higher reps."""
+    return [
+        Slot("Warmup Mobility",    "mobility",       "hips",       "warmup"),
+        Slot("Primary Squat",      "squat",          "quads",      "primary"),
+        Slot("Primary Hinge",      "hinge",          "hamstrings", "primary"),
+        Slot("Secondary Lunge",    "lunge",          "quads",      "secondary"),
+        Slot("Leg Press",          "squat",          "quads",      "secondary"),
+        Slot("Quad Isolation",     "isolation",       "quads",     "isolation"),
+        Slot("Hamstring Isolation","isolation",       "hamstrings","isolation"),
+        Slot("Calves",             "isolation",       "calves",    "isolation"),
+    ]
+
+
+def _full_body_strength_slots() -> list[Slot]:
+    """Full body strength day: 5 heavy compound slots."""
+    return [
+        Slot("Warmup Mobility",   "mobility",         "full_body",  "warmup"),
+        Slot("Squat Pattern",     "squat",            "quads",      "primary"),
+        Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
+        Slot("Horizontal Press",  "horizontal_press", "chest",      "primary"),
+        Slot("Vertical Pull",     "vertical_pull",    "back",       "primary"),
+        Slot("Core",              "anti_extension",   "core",       "core"),
+    ]
 
 
 # ─── Conditioning slot builders ─────────────────────────────────────
@@ -376,16 +503,16 @@ def _hybrid_full_body_circuit_slots() -> list[Slot]:
 # short-session cardio to behave like short-session lifting, which
 # was the bug this per-category table fixes.
 _ROLE_MINUTES_BY_CATEGORY: dict[str, dict[str, int]] = {
-    "lift": {"primary": 12, "secondary": 8, "isolation": 6, "core": 4},
+    "lift": {"primary": 12, "secondary": 8, "isolation": 6, "core": 4, "warmup": 3},
     # Cardio primary = the main work block. Warmup/cooldown are short.
-    "cond": {"primary": 25, "secondary": 6, "isolation": 4, "core": 4},
+    "cond": {"primary": 25, "secondary": 6, "isolation": 4, "core": 4, "warmup": 3},
     # Mobility slots are quick drills; every slot is cheap.
-    "mobility": {"primary": 5, "secondary": 4, "isolation": 3, "core": 3},
+    "mobility": {"primary": 5, "secondary": 4, "isolation": 3, "core": 3, "warmup": 3},
     # Recovery primary = an easy 15-25 min block.
-    "recovery": {"primary": 18, "secondary": 5, "isolation": 3, "core": 3},
+    "recovery": {"primary": 18, "secondary": 5, "isolation": 3, "core": 3, "warmup": 3},
     # Hybrid days have both lift and cardio slots — we use
     # mid-weight numbers so neither side dominates trimming.
-    "hybrid": {"primary": 10, "secondary": 8, "isolation": 6, "core": 4},
+    "hybrid": {"primary": 10, "secondary": 8, "isolation": 6, "core": 4, "warmup": 3},
 }
 # Fallback when the caller doesn't know the category (backward-compat
 # for any legacy code still calling `_density_adjust_slots` without
@@ -427,7 +554,7 @@ def density_adjust_slots(
         return list(slots)
 
     kept = list(slots)
-    drop_order = ("core", "isolation", "secondary")
+    drop_order = ("warmup", "core", "isolation", "secondary")
     for role in drop_order:
         while total > budget:
             drop_idx: Optional[int] = None

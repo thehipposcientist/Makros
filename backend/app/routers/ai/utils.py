@@ -204,6 +204,14 @@ _REQUIRED_MICRO_FIELDS: tuple[str, ...] = (
 )
 
 
+def _safe_float(v) -> float:
+    """Convert a value to float, returning 0.0 on any failure."""
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _food_needs_micro_backfill(food_dict: dict) -> bool:
     """Return True if this food is missing ANY of the required micro fields.
     Aggressive by design — we'd rather burn a cheap AI call than ship a
@@ -377,21 +385,44 @@ def enrich_foods_with_macros(
             f"{present}/{len(_REQUIRED_MICRO_FIELDS)} micro fields populated"
         )
 
-    # Layer 2 micro backfill was previously done inline here, but it
-    # sent all thin foods (often 40+) in a single API call that always
-    # timed out — costing tokens without populating anything. Removed.
-    # Micro enrichment is now handled by:
-    #   (a) the startup hook in main.py (background thread, batched)
-    #   (b) the enrich_food_micros.py script (manual, batched at 5)
-    # Both batch at 5 foods/call and persist to DB, so the next plan
-    # gen picks up the data from hydration without any inline AI call.
-    thin_count = sum(1 for f in hydrated if _food_needs_micro_backfill(f))
-    if thin_count > 0:
-        print(
-            f"[enrich_foods] {thin_count}/{len(hydrated)} DB foods are missing "
-            f"Layer 2 micros — run enrich_food_micros.py or restart the server "
-            f"to populate them (inline backfill removed to save tokens)"
+    # ── Lazy inline micro backfill (batched at 5) ──────────────────
+    # Check each hydrated food: if fewer than 8 of the 16 required
+    # micro fields have non-zero values, queue it for AI enrichment.
+    # This runs during plan gen so every food in the plan ships with
+    # full micros — no separate script or startup hook needed.
+    thin_foods = []
+    for f in hydrated:
+        populated = sum(
+            1 for k in _REQUIRED_MICRO_FIELDS
+            if _safe_float(f.get(k)) > 0
         )
+        if populated < 8:
+            thin_foods.append(f)
+
+    if thin_foods:
+        print(
+            f"[enrich_foods] {len(thin_foods)}/{len(hydrated)} DB foods have "
+            f"<8/16 micro fields — running lazy backfill in batches of 5"
+        )
+        # Process in batches of 5 to avoid timeouts
+        for batch_start in range(0, len(thin_foods), 5):
+            batch = thin_foods[batch_start:batch_start + 5]
+            name_to_micros = _ai_backfill_micros(client, batch)
+            if name_to_micros:
+                # Write back to the hydrated food dicts so this plan
+                # gen sees the data immediately.
+                for f in hydrated:
+                    fname = str(f.get("name") or "").strip().lower()
+                    if fname in name_to_micros:
+                        for mk, mv in name_to_micros[fname].items():
+                            f[mk] = mv
+                # Persist to DB so future plan gens skip the AI call.
+                _persist_backfilled_micros(name_to_micros)
+                print(
+                    f"[enrich_foods] backfill batch "
+                    f"{batch_start // 5 + 1}: enriched "
+                    f"{len(name_to_micros)} foods"
+                )
 
     # Fast path: if everything resolved from DB AND there's no free-text
     # routine, we're done — no AI call at all.

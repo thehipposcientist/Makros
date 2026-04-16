@@ -7,12 +7,13 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
   loadPreservedCompletedWorkouts,
+  savePreservedCompletedWorkout,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
@@ -437,6 +438,93 @@ const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
 const LOGO_DARK   = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
 const LOGO_LIGHT_HEADER = require('../../assets/images/main_logo_header-removebg-preview.png');
 
+const _MICRO_CHECK_KEYS = ['saturated_fat', 'omega_3', 'potassium', 'calcium', 'iron', 'vitamin_d'];
+
+async function _enrichRoutineMealsMicros(
+  plansByDate: Record<string, DailyNutritionPlan>,
+  token: string,
+  routines: MealRoutineEntry[],
+  setPlansByDate: (plans: Record<string, DailyNutritionPlan>) => void,
+) {
+  try {
+    const thinItems: Array<{ name: string; quantity?: number; unit?: string }> = [];
+    const seen = new Set<string>();
+    for (const plan of Object.values(plansByDate)) {
+      for (const meal of plan.meals ?? []) {
+        if (!(meal as any)._routineId && !meal.isRoutine) continue;
+        const mn = meal.micronutrients ?? {};
+        const hasEnough = _MICRO_CHECK_KEYS.filter(k => typeof (mn as any)[k] === 'number' && (mn as any)[k] > 0).length >= 3;
+        if (hasEnough) continue;
+        for (const it of meal.items ?? []) {
+          const key = it.name.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const itMn = it.micronutrients ?? {};
+          const itHas = _MICRO_CHECK_KEYS.filter(k => typeof (itMn as any)[k] === 'number' && (itMn as any)[k] > 0).length;
+          if (itHas < 2) {
+            thinItems.push({ name: it.name, quantity: it.quantity, unit: it.unit });
+          }
+        }
+      }
+    }
+    if (thinItems.length === 0) return;
+    console.log(`[enrichRoutineMicros] ${thinItems.length} routine items need micros — calling server`);
+    const resp = await enrichFoodItems(token, thinItems);
+    if (!resp?.items?.length) return;
+    const microsByName: Record<string, Record<string, number>> = {};
+    for (const e of resp.items) {
+      if (e.micronutrients && Object.keys(e.micronutrients).length > 0) {
+        microsByName[e.name.toLowerCase()] = e.micronutrients;
+      }
+    }
+    if (Object.keys(microsByName).length === 0) return;
+    const patched = { ...plansByDate };
+    let patchCount = 0;
+    for (const [dk, plan] of Object.entries(patched)) {
+      let changed = false;
+      const meals = (plan.meals ?? []).map(meal => {
+        if (!(meal as any)._routineId && !meal.isRoutine) return meal;
+        const items = (meal.items ?? []).map(it => {
+          const micros = microsByName[it.name.toLowerCase()];
+          if (!micros) return it;
+          patchCount++;
+          return { ...it, micronutrients: { ...(it.micronutrients ?? {}), ...micros } };
+        });
+        const resummed: Record<string, number> = {};
+        for (const it of items) {
+          for (const [k, v] of Object.entries(it.micronutrients ?? {})) {
+            resummed[k] = (resummed[k] ?? 0) + (typeof v === 'number' ? v : 0);
+          }
+        }
+        changed = true;
+        return { ...meal, items, micronutrients: { ...(meal.micronutrients ?? {}), ...resummed } };
+      });
+      if (changed) patched[dk] = { ...plan, meals };
+    }
+    if (patchCount > 0) {
+      console.log(`[enrichRoutineMicros] patched ${patchCount} items across ${Object.keys(patched).length} days`);
+      setPlansByDate(patched);
+      // Persist micros back onto routine entries so future loads skip enrichment
+      let routinesDirty = false;
+      for (const r of routines) {
+        if (!r.items?.length) continue;
+        for (const it of r.items) {
+          const micros = microsByName[it.name.toLowerCase()];
+          if (micros) {
+            it.micronutrients = { ...(it.micronutrients ?? {}), ...micros };
+            routinesDirty = true;
+          }
+        }
+      }
+      if (routinesDirty) {
+        saveMealRoutines(routines).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.log(`[enrichRoutineMicros] failed (non-fatal):`, e);
+  }
+}
+
 function bgIsDark(hex: string): boolean {
   const h = hex.replace('#', '');
   if (h.length < 6) return true;
@@ -467,7 +555,12 @@ const TRAINING_DAY_SETS: Record<number, number[]> = {
   7: [0, 1, 2, 3, 4, 5, 6],
 };
 
-function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number, skippedDates?: Set<string>): ScheduleItem[] {
+function get7DaySchedule(
+  workoutPlan: WorkoutPlan,
+  daysPerWeek: number,
+  skippedDates?: Set<string>,
+  droppedSkipDates?: Set<string>,
+): ScheduleItem[] {
   if (!workoutPlan?.days?.length) return [];
   const trainingSet = new Set(TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]);
   const today = new Date();
@@ -475,13 +568,17 @@ function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number, skippedD
   const daysFromMon = todayDow === 0 ? 6 : todayDow - 1;
 
   // Count training days earlier this week that were NOT skipped
+  // (or were dropped — dropped skips still advance the index)
   let weekOffset = 0;
   for (let i = 0; i < daysFromMon; i++) {
     const dow = (i + 1) % 7;
     if (trainingSet.has(dow)) {
       const pastDate = new Date(today);
       pastDate.setDate(today.getDate() - (daysFromMon - i));
-      if (!skippedDates?.has(dateKey(pastDate))) {
+      const key = dateKey(pastDate);
+      // Advance index if: not skipped at all, OR was a "drop" skip
+      // (skip entirely = the workout slot is consumed, just not done)
+      if (!skippedDates?.has(key) || droppedSkipDates?.has(key)) {
         weekOffset++;
       }
     }
@@ -495,9 +592,11 @@ function get7DaySchedule(workoutPlan: WorkoutPlan, daysPerWeek: number, skippedD
     const dow = date.getDay();
     if (trainingSet.has(dow)) {
       schedule.push({ date, workout: workoutPlan.days[workoutIdx % workoutPlan.days.length], isRest: false });
-      // Only advance the workout index if this day isn't skipped —
-      // skipping pushes the workout to the next training day
-      if (!skippedDates?.has(dateKey(date))) {
+      const key = dateKey(date);
+      // 'push' skip: hold index (workout pushes to next training day)
+      // 'drop' skip: advance index (workout slot consumed, just missed)
+      // not skipped: advance index (normal)
+      if (!skippedDates?.has(key) || droppedSkipDates?.has(key)) {
         workoutIdx++;
       }
     } else {
@@ -1045,6 +1144,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
+  // Dropped skips = user chose "skip entirely" (don't push to tomorrow).
+  // get7DaySchedule advances the workout index for these dates.
+  const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
 
@@ -1052,6 +1154,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
   const [selectedSkipReason, setSelectedSkipReason]   = useState('');
   const [customSkipReason, setCustomSkipReason]       = useState('');
+  // 'push' = push today's workout to tomorrow (current default)
+  // 'drop' = skip entirely, don't reschedule
+  const [skipType, setSkipType]                       = useState<'push' | 'drop'>('push');
   const [skipReasonsByDate, setSkipReasonsByDate]     = useState<Record<string, string>>({});
 
   // Meal tracking
@@ -1468,6 +1573,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     );
     const raw: Record<string, DailyNutritionPlan> = Object.fromEntries(localEntries);
     setNutritionPlansByDate(raw);
+
+    // ── Background enrichment for routine/custom meals missing micros ──
+    // Routine meals are overlaid client-side and never go through the
+    // server's post-assembly enrichment. Fire a background call to fill
+    // in micros for any items that lack them.
+    if (authToken) {
+      _enrichRoutineMealsMicros(raw, authToken, routines, setNutritionPlansByDate);
+    }
     } finally {
       loadPlansInFlightRef.current = false;
     }
@@ -2379,20 +2492,47 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const focus = skipReasonFocus;
     if (!focus) return;
     const reason = customSkipReason.trim() || selectedSkipReason || undefined;
+    const type = skipType;
     setSkipReasonFocus(null);
     setSelectedSkipReason('');
     setCustomSkipReason('');
+    setSkipType('push');
     const today = todayKey();
     setSkippedDates(prev => new Set([...prev, today]));
     if (reason) setSkipReasonsByDate(prev => ({ ...prev, [today]: reason }));
+    if (type === 'drop') {
+      setDroppedSkipDates(prev => new Set([...prev, today]));
+    }
+    // Freeze today's workout so a plan regen doesn't replace the
+    // content of the skipped day. Same mechanism as completed days
+    // — preservedWorkouts survives plan regeneration.
+    const todayScheduleItem = scheduleRaw.find(
+      item => dateKey(item.date) === today && item.workout,
+    );
+    if (todayScheduleItem?.workout) {
+      await savePreservedCompletedWorkout(today, todayScheduleItem.workout);
+      setPreservedWorkouts(prev => ({ ...prev, [today]: todayScheduleItem.workout! }));
+    }
     await persistDayState(today, { skipped_focus: focus });
     await saveSkipToHistory(today, focus, reason);
-  }, [skipReasonFocus, selectedSkipReason, customSkipReason, persistDayState]);
+  }, [skipReasonFocus, selectedSkipReason, customSkipReason, skipType, persistDayState, scheduleRaw]);
 
   const handleUnskipDay = useCallback(async (date: string) => {
     setSkippedDates(prev => {
       const next = new Set(prev);
       next.delete(date);
+      return next;
+    });
+    setDroppedSkipDates(prev => {
+      const next = new Set(prev);
+      next.delete(date);
+      return next;
+    });
+    // Remove the frozen workout snapshot so the schedule picks up
+    // whatever the current plan assigns to this date slot.
+    setPreservedWorkouts(prev => {
+      const next = { ...prev };
+      delete next[date];
       return next;
     });
     await persistDayState(date, { skipped_focus: null });
@@ -2411,7 +2551,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
     ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
     ?? userProfile.goal;
-  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates) : [];
+  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates) : [];
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -2542,7 +2682,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
             <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
             <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
-            <SubTabBtn label="Equipment" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+            <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
           </View>
         </View>
       )}
@@ -3763,16 +3903,52 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 }]}
               />
 
+              {/* Skip type selector */}
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                <TouchableOpacity
+                  style={{
+                    flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
+                    borderWidth: 1.5,
+                    borderColor: skipType === 'push' ? workoutPalette.strong : themeColors.border,
+                    backgroundColor: skipType === 'push' ? workoutPalette.strong + '15' : themeColors.surfaceRaised,
+                  }}
+                  onPress={() => setSkipType('push')}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: skipType === 'push' ? workoutPalette.strong : themeColors.textSecondary }}>
+                    📅 Do it tomorrow
+                  </Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2, textAlign: 'center', paddingHorizontal: 4 }}>
+                    This workout shifts to your next training day
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{
+                    flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
+                    borderWidth: 1.5,
+                    borderColor: skipType === 'drop' ? themeColors.warning : themeColors.border,
+                    backgroundColor: skipType === 'drop' ? themeColors.warning + '15' : themeColors.surfaceRaised,
+                  }}
+                  onPress={() => setSkipType('drop')}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: skipType === 'drop' ? themeColors.warning : themeColors.textSecondary }}>
+                    ✕ Skip it
+                  </Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2, textAlign: 'center', paddingHorizontal: 4 }}>
+                    Move on — tomorrow picks up with the next workout
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.skipReasonBtns}>
                 <TouchableOpacity
                   style={[styles.skipReasonCancel, { borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised }]}
-                  onPress={() => { setSkipReasonFocus(null); setSelectedSkipReason(''); setCustomSkipReason(''); }}>
+                  onPress={() => { setSkipReasonFocus(null); setSelectedSkipReason(''); setCustomSkipReason(''); setSkipType('push'); }}>
                   <Text style={[styles.skipReasonCancelText, { color: themeColors.textSecondary }]}>Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.skipReasonConfirm, { backgroundColor: themeColors.warning }]}
+                  style={[styles.skipReasonConfirm, { backgroundColor: skipType === 'drop' ? themeColors.warning : workoutPalette.strong }]}
                   onPress={confirmSkip}>
-                  <Text style={styles.skipReasonConfirmText}>Skip Workout</Text>
+                  <Text style={styles.skipReasonConfirmText}>
+                    {skipType === 'push' ? 'Reschedule' : 'Skip'}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -4434,7 +4610,33 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
           </View>
           <View style={styles.dayCardRight}>
-            <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+              {(() => {
+                const stim = item.workout?.stimulus || (() => {
+                  // Infer stimulus from focus name for old cached plans
+                  // that don't have the stimulus field yet.
+                  const f = (item.workout?.focus ?? '').toLowerCase();
+                  if (f.includes('heavy') || f.includes('strength')) return 'strength';
+                  if (f.includes('volume')) return 'volume';
+                  if (f.includes('power')) return 'power';
+                  if (f.includes('cardio') || f.includes('zone') || f.includes('interval')) return 'conditioning';
+                  if (f.includes('mobility') || f.includes('stretch') || f.includes('yoga')) return 'mobility';
+                  if (f.includes('recovery') || f.includes('easy')) return 'recovery';
+                  // Default lifting days to hypertrophy
+                  if (f.includes('push') || f.includes('pull') || f.includes('upper') || f.includes('lower') || f.includes('legs') || f.includes('full body') || f.includes('chest') || f.includes('back') || f.includes('arms') || f.includes('shoulders')) return 'hypertrophy';
+                  return null;
+                })();
+                if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
+                const stimLabel = stim === 'strength' ? 'HEAVY' : stim === 'hypertrophy' ? 'HYPERTROPHY' : stim === 'volume' ? 'VOLUME' : stim.toUpperCase();
+                const stimColor = stim === 'strength' ? '#EF4444' : stim === 'volume' ? '#8B5CF6' : tc.primary;
+                return (
+                  <View style={{ backgroundColor: stimColor + '18', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 }}>
+                    <Text style={{ fontSize: 9, fontWeight: '800', color: stimColor, letterSpacing: 0.5 }}>{stimLabel}</Text>
+                  </View>
+                );
+              })()}
+            </View>
             {skipReason ? (
               <Text style={[styles.exerciseCount, { color: tc.warning }]} numberOfLines={1}>
                 {skipReason}
@@ -4479,7 +4681,22 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
         </View>
         <View style={styles.dayCardRight}>
-          <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+            {/* Stimulus badge — shows the training intent (strength/hypertrophy/volume/etc.)
+                so the user knows what kind of session this is at a glance. */}
+            {(() => {
+              const stim = item.workout?.stimulus;
+              if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
+              const stimLabel = stim === 'strength' ? 'HEAVY' : stim === 'hypertrophy' ? 'HYPERTROPHY' : stim === 'volume' ? 'VOLUME' : stim.toUpperCase();
+              const stimColor = stim === 'strength' ? '#EF4444' : stim === 'volume' ? '#8B5CF6' : accentColor;
+              return (
+                <View style={{ backgroundColor: stimColor + '18', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 }}>
+                  <Text style={{ fontSize: 9, fontWeight: '800', color: stimColor, letterSpacing: 0.5 }}>{stimLabel}</Text>
+                </View>
+              );
+            })()}
+          </View>
           {(() => {
             const muscles = Array.from(new Set(
               item.workout!.exercises.map(ex => inferGroup(`${item.workout!.focus} ${ex.name}`))

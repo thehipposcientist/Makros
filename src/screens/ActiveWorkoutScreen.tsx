@@ -2675,7 +2675,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.coachSheet}>
             <View style={styles.coachHeader}>
-              <Text style={styles.coachTitle}>Add Exercise</Text>
+              <Text style={styles.coachTitle}>Add an exercise</Text>
               <TouchableOpacity onPress={() => setAddExerciseModalVisible(false)}>
                 <Text style={styles.coachClose}>Close</Text>
               </TouchableOpacity>
@@ -2686,7 +2686,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 containerStyle={{ flex: 1 }}
                 value={exerciseSearch}
                 onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
-                placeholder="Search exercise library..."
+                placeholder="Search by name, muscle, or equipment…"
                 placeholderTextColor={themeColors.textMuted}
                 style={styles.addExerciseSearch}
                 returnKeyType="search"
@@ -2699,7 +2699,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   disabled={aiExerciseLoading}>
                   {aiExerciseLoading
                     ? <ActivityIndicator size="small" color="#fff" />
-                    : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                    : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Find</Text>}
                 </TouchableOpacity>
               )}
             </View>
@@ -2712,7 +2712,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     the LLM. Each has Add (→ workout) and Save (→ library). */}
                 {aiExerciseResults.length > 0 && (
                   <View style={{ marginBottom: 14 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>AI Results</Text>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Suggestions</Text>
                     {aiExerciseResults.map((ex, i) => (
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
                         <Text style={styles.addExerciseName}>{ex.name}</Text>
@@ -2729,12 +2729,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           <TouchableOpacity
                             style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
                             onPress={() => handleAddAiExercise(ex)}>
-                            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add to Workout</Text>
+                            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
                             onPress={() => handleSaveAiExerciseToLibrary(ex)}>
-                            <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>+ Library</Text>
+                            <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>Save to library</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -2744,12 +2744,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                 {filteredExerciseLibrary.length === 0 ? (
                   <>
-                    <Text style={styles.coachEmpty}>No exercises match your search.</Text>
+                    <Text style={styles.coachEmpty}>Nothing in your library matches.</Text>
                     {exerciseSearch.trim().length > 1 && aiExerciseResults.length === 0 && !aiExerciseLoading && (
                       <TouchableOpacity
                         style={{ marginTop: 10, alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 18, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10 }}
                         onPress={handleAiExerciseSearch}>
-                        <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 13 }}>Tap to find with AI →</Text>
+                        <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 13 }}>Search beyond your library →</Text>
                       </TouchableOpacity>
                     )}
                   </>

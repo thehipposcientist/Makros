@@ -765,11 +765,14 @@ def test_most_recent_completed_focus_reads_workout_completion_table() -> None:
         _StubRow("Upper", now - timedelta(hours=26), date.today() - timedelta(days=1)),
     ]
     session = _StubSession(rows)
-    buckets = most_recent_completed_focus(user_id=1, db_session=session, hours=36, limit=2)
+    buckets, families = most_recent_completed_focus(user_id=1, db_session=session, hours=36, limit=2)
     assert buckets == ["lower_body", "upper_body"], (
         f"expected ['lower_body', 'upper_body'], got {buckets}"
     )
-    _ok(f"buckets = {buckets} — reads WorkoutCompletion via normalizer")
+    assert families == ["legs", "upper"], (
+        f"expected ['legs', 'upper'], got {families}"
+    )
+    _ok(f"buckets = {buckets}, families = {families} — reads WorkoutCompletion via normalizer")
 
 
 def test_body_recomp_with_raw_db_focus_variants() -> None:

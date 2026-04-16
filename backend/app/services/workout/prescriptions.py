@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .archetypes import DayArchetype, ARCHETYPE_META
+from .archetypes import DayArchetype, ARCHETYPE_META, TrainingType
 from .cardio import classify_cardio
 
 
@@ -56,7 +56,31 @@ def prescribe_for_slot(
         # never return a bogus prescription.
         return _prescribe_lifting(slot, exercise, inputs)
 
+    # Warmup-role slots get a fixed light prescription regardless of
+    # the archetype's training_type.
+    if hasattr(slot, "role") and slot.role == "warmup":
+        return _prescribe_warmup(slot, exercise)
+
     training_type = meta.training_type
+    if training_type == "volume":
+        return _prescribe_by_stimulus("volume", slot, exercise)
+    # Stimulus-differentiated archetypes: the new LIFT_*_HEAVY and
+    # LIFT_*_HYPERTROPHY archetypes carry an explicit training_type of
+    # "strength" or "hypertrophy". We detect them by checking whether
+    # the archetype value contains a stimulus suffix; the OLD
+    # strength/hypertrophy archetypes (LIFT_UPPER, LIFT_LOWER, etc.)
+    # continue to flow through _prescribe_lifting which delegates to
+    # the goal-bucket-aware prescribe_sets_reps. The new ones use the
+    # stimulus-driven prescriber instead.
+    _STIMULUS_ARCHETYPES = {
+        DayArchetype.LIFT_UPPER_HEAVY,
+        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+        DayArchetype.LIFT_FULL_BODY_STRENGTH,
+    }
+    if archetype in _STIMULUS_ARCHETYPES:
+        return _prescribe_by_stimulus(training_type, slot, exercise)
     if training_type in ("strength", "hypertrophy"):
         return _prescribe_lifting(slot, exercise, inputs)
     if training_type == "power":
@@ -89,6 +113,51 @@ def _prescribe_lifting(slot, exercise: dict, inputs) -> Prescription:
         sets=pres.sets, reps=pres.reps,
         rest_seconds=pres.rest_seconds, rir_target=pres.rir_target,
     )
+
+
+# ── Stimulus-driven lifting ────────────────────────────────────────
+
+
+def _prescribe_by_stimulus(
+    training_type: str, slot, exercise: dict,
+) -> Prescription:
+    """Prescription for stimulus-differentiated lifting archetypes.
+
+    Unlike `_prescribe_lifting` (which delegates to goal-bucket-aware
+    `prescribe_sets_reps`), this function prescribes based on the
+    archetype's explicit training_type so a "heavy" day always gets
+    heavy parameters regardless of the user's goal bucket.
+
+    training_type values handled:
+        "strength"    — low rep, long rest, low RIR
+        "hypertrophy" — moderate rep, moderate rest
+        "volume"      — high rep, short rest, higher RIR
+    """
+    role = slot.role
+
+    if training_type == "strength":
+        if role == "primary":
+            return Prescription(sets=4, reps="3-5", rest_seconds=180, rir_target=1.5)
+        if role == "secondary":
+            return Prescription(sets=3, reps="5-8", rest_seconds=150, rir_target=2.0)
+        # isolation / core
+        return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0)
+
+    if training_type == "hypertrophy":
+        if role == "primary":
+            return Prescription(sets=4, reps="6-10", rest_seconds=120, rir_target=2.0)
+        if role == "secondary":
+            return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0)
+        # isolation / core
+        return Prescription(sets=3, reps="10-15", rest_seconds=75, rir_target=2.5)
+
+    # training_type == "volume"
+    if role == "primary":
+        return Prescription(sets=3, reps="10-15", rest_seconds=90, rir_target=2.5)
+    if role == "secondary":
+        return Prescription(sets=3, reps="12-15", rest_seconds=75, rir_target=3.0)
+    # isolation / core
+    return Prescription(sets=3, reps="12-20", rest_seconds=60, rir_target=3.0)
 
 
 # ── Power / plyometric ─────────────────────────────────────────────
@@ -233,6 +302,18 @@ def _prescribe_mobility(slot, exercise: dict) -> Prescription:
         return Prescription(sets=2, reps="5-8 reps flow", rest_seconds=15, rir_target=1.0)
     # Default mobility drill.
     return Prescription(sets=2, reps="8-10 reps", rest_seconds=10, rir_target=1.0)
+
+
+# ── Warmup ────────────────────────────────────────────────────────
+
+
+def _prescribe_warmup(slot, exercise: dict) -> Prescription:
+    """Warmup prescription: 1 set of a brief mobility drill. Either a
+    45-60s hold or a 5-8 rep flow depending on the exercise type."""
+    mp = (exercise.get("movement_pattern") or "").lower()
+    if "stretch" in mp or "static" in mp:
+        return Prescription(sets=1, reps="45-60s hold", rest_seconds=0, rir_target=1.0)
+    return Prescription(sets=1, reps="5-8 reps flow", rest_seconds=0, rir_target=1.0)
 
 
 # ── Recovery ───────────────────────────────────────────────────────

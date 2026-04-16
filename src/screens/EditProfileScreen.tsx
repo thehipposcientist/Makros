@@ -253,6 +253,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Workout prefs
   const [daysPerWeek, setDaysPerWeek] = useState(profile.daysPerWeek);
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
+  const [preferredSplit, setPreferredSplit] = useState(profile.preferredSplit ?? 'auto');
+  const [splitOptions, setSplitOptions] = useState<import('../services/api').SplitOption[]>([]);
+  const [splitLoading, setSplitLoading] = useState(false);
+  const [splitModalVisible, setSplitModalVisible] = useState(false);
   const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 3);
   const [mealsPerDay, setMealsPerDay] = useState<number>(profile.mealsPerDay ?? 3);
   // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
@@ -389,6 +393,34 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   useEffect(() => {
     loadMealRoutines().then(setMealRoutinesState);
   }, []);
+
+  // Fetch split options when days or goal change (workout mode only).
+  useEffect(() => {
+    if (mode !== 'workout' && mode !== 'goal') return;
+    if (!authToken) return;
+    let cancelled = false;
+    setSplitLoading(true);
+    import('../services/api').then(({ getSplitOptions }) =>
+      getSplitOptions(authToken, {
+        goal: selectedGoal,
+        daysPerWeek,
+        experienceLevel: profile.experienceLevel || 'intermediate',
+        targetFocus: selectedTargetFocus || undefined,
+      })
+    ).then(res => {
+      if (cancelled) return;
+      setSplitOptions(res.options);
+      // If current selection isn't compatible, reset to auto
+      if (preferredSplit !== 'auto' && !res.options.some(o => o.id === preferredSplit)) {
+        setPreferredSplit('auto');
+      }
+    }).catch(() => {
+      if (!cancelled) setSplitOptions([]);
+    }).finally(() => {
+      if (!cancelled) setSplitLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [selectedGoal, daysPerWeek, authToken, mode]);
 
   // Load calorie ranges when the macros tab is opened. Cached in
   // component state so switching tabs doesn't re-fetch.
@@ -912,6 +944,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     // Training shape
     if ((profile.daysPerWeek ?? 0) !== daysPerWeek) return true;
     if ((profile.workoutDurationMinutes ?? 60) !== duration) return true;
+    if ((profile.preferredSplit ?? 'auto') !== preferredSplit) return true;
     if (!sameArr(profile.equipment, equipment)) return true;
     // Nutrition shape
     if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
@@ -984,6 +1017,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
       workoutDurationMinutes: duration,
+      preferredSplit: preferredSplit === 'auto' ? undefined : preferredSplit,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
       mealsPerDay: Math.min(10, Math.max(1, mealsPerDay)),
       equipment,
@@ -1407,6 +1441,33 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 </TouchableOpacity>
               ))}
             </View>
+          </View>
+
+          {/* ── Training Split ── */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>🏋️  Training Split</Text>
+            {(() => {
+              const selected = splitOptions.find(o => o.id === preferredSplit);
+              const recommended = splitOptions.find(o => o.is_recommended);
+              const displayName = preferredSplit === 'auto'
+                ? `Auto${recommended ? ` · ${recommended.short_name}` : ''}`
+                : selected?.name ?? preferredSplit;
+              const displayHint = preferredSplit === 'auto' && recommended
+                ? recommended.rationale
+                : selected?.rationale ?? 'Tap to choose your training split.';
+              return (
+                <TouchableOpacity
+                  style={[styles.splitCard, { borderColor: tc.border, backgroundColor: tc.surfaceRaised, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}
+                  onPress={() => setSplitModalVisible(true)}
+                  activeOpacity={0.8}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{displayName}</Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }} numberOfLines={2}>{displayHint}</Text>
+                  </View>
+                  <Text style={{ fontSize: 16, color: tc.textMuted, marginLeft: 8 }}>›</Text>
+                </TouchableOpacity>
+              );
+            })()}
           </View>
 
           <View style={styles.sectionTopRow}>
@@ -2399,6 +2460,106 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </TouchableOpacity>
       </ScrollView>
 
+      {/* ── Split picker modal ── */}
+      <Modal visible={splitModalVisible} transparent animationType="slide" onRequestClose={() => setSplitModalVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: tc.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '85%', borderTopWidth: 1, borderTopColor: tc.border }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 18, paddingBottom: 10 }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: tc.textPrimary }}>Choose your split</Text>
+              <TouchableOpacity onPress={() => setSplitModalVisible(false)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <Text style={{ fontSize: 15, fontWeight: '600', color: tc.primary }}>Done</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 40 }}>
+              {/* Auto option */}
+              <TouchableOpacity
+                style={[styles.splitCard, {
+                  borderColor: preferredSplit === 'auto' ? tc.primary : tc.border,
+                  backgroundColor: preferredSplit === 'auto' ? tc.primary + '12' : tc.surfaceRaised,
+                  marginBottom: 8,
+                }]}
+                onPress={() => { setPreferredSplit('auto'); setSplitModalVisible(false); }}
+                activeOpacity={0.8}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={{ fontSize: 15, fontWeight: '700', color: preferredSplit === 'auto' ? tc.primary : tc.textPrimary }}>
+                    Auto (recommended)
+                  </Text>
+                  {preferredSplit === 'auto' && <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 16 }}>✓</Text>}
+                </View>
+                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>
+                  Best split for your goal + training days.
+                </Text>
+              </TouchableOpacity>
+
+              {splitOptions.map(opt => {
+                const active = preferredSplit === opt.id;
+                return (
+                  <TouchableOpacity
+                    key={opt.id}
+                    style={[styles.splitCard, {
+                      borderColor: active ? tc.primary : opt.is_recommended ? tc.primary + '44' : tc.border,
+                      backgroundColor: active ? tc.primary + '12' : tc.surfaceRaised,
+                      marginBottom: 8,
+                    }]}
+                    onPress={() => { setPreferredSplit(opt.id); setSplitModalVisible(false); }}
+                    activeOpacity={0.8}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: active ? tc.primary : tc.textPrimary }}>
+                          {opt.name}
+                        </Text>
+                        <View style={{ backgroundColor: tc.surface, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted }}>{opt.fit_score}%</Text>
+                        </View>
+                        {opt.is_recommended && (
+                          <View style={{ backgroundColor: tc.primary + '18', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                            <Text style={{ fontSize: 10, fontWeight: '800', color: tc.primary }}>BEST FIT</Text>
+                          </View>
+                        )}
+                      </View>
+                      {active && <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 16 }}>✓</Text>}
+                    </View>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 5, lineHeight: 17 }}>
+                      {opt.rationale}
+                    </Text>
+                    {/* Day preview pills */}
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+                      {opt.day_labels.map((label, i) => (
+                        <Text key={i} style={{
+                          fontSize: 10, fontWeight: '600',
+                          color: active ? tc.primary : tc.textMuted,
+                          backgroundColor: active ? tc.primary + '15' : tc.background,
+                          paddingHorizontal: 7, paddingVertical: 3, borderRadius: 5, overflow: 'hidden',
+                        }}>
+                          {label}
+                        </Text>
+                      ))}
+                    </View>
+                    {/* Stimulus detail */}
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 6, lineHeight: 15 }}>
+                      {opt.stimulus_note}
+                    </Text>
+                    {/* Pros / Cons */}
+                    <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
+                      <View style={{ flex: 1 }}>
+                        {opt.pros.map((p, i) => (
+                          <Text key={i} style={{ fontSize: 11, color: '#10B981', lineHeight: 16 }}>+ {p}</Text>
+                        ))}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        {opt.cons.map((c, i) => (
+                          <Text key={i} style={{ fontSize: 11, color: tc.textMuted, lineHeight: 16 }}>− {c}</Text>
+                        ))}
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── Modals ── */}
       <InputModal
         visible={currentWeightModalVisible}
@@ -2756,6 +2917,12 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   themePreviewPillText: { fontSize: 12, fontWeight: '700' },
 
   chipGroup:      { marginBottom: 16 },
+  splitCard: {
+    borderWidth: 1.5,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
   chipGroupLabel: { fontSize: 12, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8 },
   searchInput: {
     borderWidth: 1,

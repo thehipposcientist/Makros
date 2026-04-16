@@ -44,21 +44,38 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
   //   "30-45 min", "25-40 minutes"            → minutes (midpoint)
   // A plain number or rep-range like "6-8" falls back to the
   // 45s-per-set working estimate (normal strength set timing).
-  const parseWorkSecondsPerSet = (reps: unknown): number | null => {
+  const parseWorkSecondsPerSet = (reps: unknown, exerciseName?: string): number | null => {
     if (reps == null) return null;
     const s = String(reps).trim().toLowerCase();
     if (!s) return null;
+    // Explicit seconds: "30s", "45 sec", "30-45s"
     const secMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)$/);
     if (secMatch) {
       const lo = parseInt(secMatch[1], 10);
       const hi = secMatch[2] ? parseInt(secMatch[2], 10) : lo;
       return Math.round((lo + hi) / 2);
     }
+    // Explicit minutes: "5 min", "30-45 min", "42-52 min"
     const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)$/);
     if (minMatch) {
       const lo = parseInt(minMatch[1], 10);
       const hi = minMatch[2] ? parseInt(minMatch[2], 10) : lo;
       return Math.round(((lo + hi) / 2) * 60);
+    }
+    // Bare number heuristic: if the value is a plain number ≥ 20 AND
+    // the exercise looks like cardio (name contains cardio keywords),
+    // treat it as minutes. "60" on an elliptical = 60 min, not 60 reps.
+    // Below 20, it's almost certainly rep-based (squats × 15, etc.).
+    const bareNum = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (bareNum) {
+      const lo = parseInt(bareNum[1], 10);
+      const hi = bareNum[2] ? parseInt(bareNum[2], 10) : lo;
+      const mid = Math.round((lo + hi) / 2);
+      if (mid >= 20) {
+        const name = (exerciseName ?? '').toLowerCase();
+        const isCardio = ['elliptical', 'treadmill', 'bike', 'cycling', 'running', 'jogging', 'walk', 'rowing', 'stair', 'swim', 'cardio', 'zone'].some(k => name.includes(k));
+        if (isCardio) return mid * 60; // treat as minutes
+      }
     }
     return null;
   };
@@ -66,7 +83,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
   const estimatedSeconds = workout.exercises.reduce((total, ex) => {
     const sets = Number(ex.sets) || 3;
     const rest = Number((ex as any).restSeconds) || 60;
-    const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps);
+    const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
     if (timedWorkSec != null) {
       // Timed exercise: use the actual working time per set. Rest
       // between sets still counts (for interval work with rest

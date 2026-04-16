@@ -68,6 +68,20 @@ def _ensure_food_nutrition_extras_column() -> None:
         print(f"[migration] food_nutrition extras column add failed (non-fatal): {e}")
 
 
+def _ensure_workout_completion_stimulus_column() -> None:
+    """Add the `stimulus` column to workout_completions if missing."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS stimulus VARCHAR"
+            ))
+    except Exception as e:
+        print(f"[migration] workout_completions stimulus column add failed (non-fatal): {e}")
+
+
 def _backfill_custom_food_micronutrients() -> None:
     """One-shot backfill: walk every FoodNutrition row whose `extra_nutrients`
     is NULL/empty, look the food name up in the seed micronutrient table,
@@ -120,6 +134,7 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
     _ensure_food_nutrition_extras_column()
+    _ensure_workout_completion_stimulus_column()
     _backfill_custom_food_micronutrients()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:

@@ -345,6 +345,14 @@ function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSuggestion): 
         carbs:    routine.carbs    ?? fallback?.carbs    ?? 0,
         fat:      routine.fat      ?? fallback?.fat      ?? 0,
       };
+  const micros: Record<string, number> = {};
+  if (hasItems) {
+    for (const it of routine.items!) {
+      for (const [k, v] of Object.entries(it.micronutrients ?? {})) {
+        if (typeof v === 'number') micros[k] = (micros[k] ?? 0) + v;
+      }
+    }
+  }
   return {
     meal:     routine.name,
     items:    hasItems ? routine.items : undefined,
@@ -356,6 +364,7 @@ function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSuggestion): 
     fat:      totals.fat,
     isRoutine: true,
     estimated_alignment: fallback?.estimated_alignment ?? '',
+    ...(Object.keys(micros).length > 0 ? { micronutrients: micros } : {}),
   } as MealSuggestion;
 }
 

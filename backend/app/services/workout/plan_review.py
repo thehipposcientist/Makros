@@ -351,6 +351,16 @@ Look for:
 - **Obviously wrong rep ranges for the goal** (5x5 for fat loss, 4x15 for strength)
 - **Any day with zero exercises**
 - **Duplicate exercises stacked in the same day**
+- **Respect the user's split choice** — if `user_preferred_split` is present (e.g. "ppl" \
+  for Push/Pull/Legs), the plan was built around that split intentionally. Do NOT propose \
+  change_focus patches that would turn a PPL day into an Upper/Lower day or vice versa. \
+  If you see a duplicate focus (e.g. two Push days), that's expected in PPL at 5+ days — \
+  only flag it if the duplicates are truly back-to-back with zero recovery between them.
+- **Skip patterns** — if `skipped_days_7d` is present and shows the user repeatedly \
+  skipping the same focus (e.g. 2+ legs skips in the last week), consider whether the \
+  plan is scheduling that focus too aggressively for this user's schedule or motivation. \
+  You may propose a change_focus patch to swap a hard-to-attend focus for something the \
+  user actually does. Do NOT penalize one-off skips — only flag patterns (2+ of the same).
 
 CRITICAL RULES for the `status` field:
 - If the plan has ANY of the issues above → status MUST be "modify" AND you MUST \

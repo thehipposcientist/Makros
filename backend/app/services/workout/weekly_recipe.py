@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .archetypes import DayArchetype, archetype_to_focus_bucket
+from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family
 from .goal_profiles import GoalProfile
 
 
@@ -47,7 +47,13 @@ from .goal_profiles import GoalProfile
 def _lifting_recipe(profile: GoalProfile, split: str, days: int) -> list[DayArchetype]:
     """Translate a traditional split id (from `pick_split`) into a
     list of `LIFT_*` archetypes. Mirrors the old `build_day_templates`
-    dispatch but emits archetypes instead of slot lists."""
+    dispatch but emits archetypes instead of slot lists.
+
+    When enough lift days are available, stimulus variation is applied:
+    heavy/hypertrophy alternation for upper_lower (4+ days), volume
+    variants for PPL (6 days), and a strength session for full_body
+    (3+ days). Plans with fewer days keep the standard archetypes to
+    avoid overcrowding the week."""
     # Split constants now live in day_templates (responsibility
     # separation refactor). The lazy import stays so weekly_recipe
     # can be imported by tests without pulling in the full planner.
@@ -56,14 +62,62 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int) -> list[DayArch
         SPLIT_PPL_UL, SPLIT_BRO,
     )
 
+    # Check whether the profile allows stimulus-differentiated
+    # archetypes. Only inject them when the profile explicitly lists
+    # them (goal_profiles.py controls this).
+    _has_stimulus = DayArchetype.LIFT_UPPER_HEAVY in profile.allowed_archetypes
+
     if split == SPLIT_FULL_BODY:
+        if _has_stimulus and days >= 3:
+            # Day 1: strength, Day 2+: standard hypertrophy rotation
+            out = [DayArchetype.LIFT_FULL_BODY_STRENGTH]
+            for i in range(1, days):
+                out.append(DayArchetype.LIFT_FULL_BODY)
+            return out
         return [DayArchetype.LIFT_FULL_BODY] * days
 
     if split == SPLIT_UPPER_LOWER:
+        if _has_stimulus and days >= 3:
+            # Stimulus-alternated upper/lower with SAFE odd-day handling.
+            # Odd day counts (3, 5, 7) would repeat the cycle start and
+            # create an upper-upper adjacency after rotation. Instead,
+            # the odd day uses Full Body Strength — a neutral session
+            # that doesn't repeat either upper or lower family.
+            stimulus_cycle = [
+                DayArchetype.LIFT_UPPER_HEAVY,
+                DayArchetype.LIFT_LOWER_HEAVY,
+                DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            ]
+            result = [stimulus_cycle[i % len(stimulus_cycle)] for i in range(days)]
+            if days % 2 == 1 and _has_stimulus:
+                # Replace the odd tail (which repeats a family) with
+                # full-body strength so rotation can't create adjacency.
+                result[-1] = DayArchetype.LIFT_FULL_BODY_STRENGTH
+            return result
         cycle = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
-        return [cycle[i % 2] for i in range(days)]
+        result = [cycle[i % 2] for i in range(days)]
+        if days % 2 == 1:
+            result[-1] = DayArchetype.LIFT_FULL_BODY
+        return result
 
     if split == SPLIT_PPL:
+        if _has_stimulus and days >= 4:
+            # Use volume variants for the extra days so PPL at 4-5 days
+            # doesn't duplicate the same focus. Instead of [Push, Pull,
+            # Legs, Push] (bad), produce [Push, Pull, Legs, Push Volume]
+            # (different stimulus, different exercises, no focus clash).
+            base = [
+                DayArchetype.LIFT_PUSH,
+                DayArchetype.LIFT_PULL,
+                DayArchetype.LIFT_LEGS,
+            ]
+            volume = [
+                DayArchetype.LIFT_PUSH_VOLUME,
+                DayArchetype.LIFT_PULL_VOLUME,
+                DayArchetype.LIFT_LEGS_VOLUME,
+            ]
+            return (base + volume)[:days]
         cycle = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
         return [cycle[i % 3] for i in range(days)]
 
@@ -173,6 +227,8 @@ def _lifting_plus_cardio_recipe(
     profile: GoalProfile,
     days: int,
     lifting_split: str,
+    *,
+    user_chose_split: bool = False,
 ) -> list[DayArchetype]:
     """Lifting-backbone plan with conditioning days interleaved.
 
@@ -232,9 +288,12 @@ def _lifting_plus_cardio_recipe(
     # where this specific pathology exists.
     from .day_templates import SPLIT_PPL, SPLIT_UPPER_LOWER
     effective_split = lifting_split
-    if lift_days == 4 and lifting_split == SPLIT_PPL:
+    # Only auto-convert PPL→UL at 4 lift days when the user did NOT
+    # explicitly choose PPL. If they picked it, respect the choice and
+    # let the duplicate-repair + intensity spacing handle any overlap.
+    if lift_days == 4 and lifting_split == SPLIT_PPL and not user_chose_split:
         print(
-            "[weekly_recipe] lift_days=4 on PPL → switching to upper_lower "
+            "[weekly_recipe] lift_days=4 on PPL (auto) → switching to upper_lower "
             "to avoid duplicate Push/Pull/Legs day"
         )
         effective_split = SPLIT_UPPER_LOWER
@@ -300,25 +359,40 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
     neighbors; if none, we look backward (excluding day 0 which is
     pinned by the rotation pass).
     """
-    from .archetypes import archetype_to_focus_bucket
+    from .archetypes import archetype_to_focus_family
     def _b(a):
         try:
-            return archetype_to_focus_bucket(a)
+            return archetype_to_focus_family(a)
         except KeyError:
             return None
+
+    def _safe_swap(lst, a, b):
+        """Return True if swapping positions a and b doesn't create
+        new adjacency conflicts at either position."""
+        test = list(lst)
+        test[a], test[b] = test[b], test[a]
+        for pos in (a, b):
+            fam = _b(test[pos])
+            if pos > 0 and _b(test[pos - 1]) == fam:
+                return False
+            if pos < len(test) - 1 and _b(test[pos + 1]) == fam:
+                return False
+        return True
 
     out = list(recipe)
     for i in range(1, len(out)):
         if _b(out[i]) != _b(out[i - 1]):
             continue
+        # Find a swap target that resolves THIS conflict without
+        # creating new ones at the target position.
         swap_idx = None
         for j in range(i + 1, len(out)):
-            if _b(out[j]) != _b(out[i - 1]) and _b(out[j]) != _b(out[i]):
+            if _b(out[j]) != _b(out[i]) and _safe_swap(out, i, j):
                 swap_idx = j
                 break
         if swap_idx is None:
             for j in range(i - 2, 0, -1):
-                if _b(out[j]) != _b(out[i - 1]) and _b(out[j]) != _b(out[i]):
+                if _b(out[j]) != _b(out[i]) and _safe_swap(out, i, j):
                     swap_idx = j
                     break
         if swap_idx is not None:
@@ -408,6 +482,78 @@ def _recovery_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
     return cycle[:days]
 
 
+# ── Intensity-cost spacing ─────────────────────────────────────────
+
+
+def _space_high_intensity_days(recipe: list[DayArchetype]) -> list[DayArchetype]:
+    """Post-recipe repair pass that prevents back-to-back high-intensity days.
+
+    Rules:
+      - intensity_cost 5 should NEVER be adjacent to another cost-5 day
+      - intensity_cost 4 should not be adjacent to cost 5 when avoidable
+      - Cost 1-3 days can be adjacent to anything
+      - Conditioning days (cost 2-3) are good spacers between lifting days
+
+    When two adjacent days both have intensity_cost >= 4, one of them is
+    swapped with the nearest lower-intensity day (cost <= 3). If no swap
+    target exists (all days are high intensity), the recipe is left as-is.
+    """
+    if len(recipe) < 2:
+        return recipe
+
+    out = list(recipe)
+
+    def _cost(a: DayArchetype) -> int:
+        return ARCHETYPE_META[a].intensity_cost
+
+    def _needs_spacing(cost_a: int, cost_b: int) -> bool:
+        """True when two adjacent costs represent a problematic pair."""
+        # Two cost-5 days: always bad
+        if cost_a == 5 and cost_b == 5:
+            return True
+        # Cost 4 next to cost 5: bad when avoidable
+        if (cost_a == 5 and cost_b >= 4) or (cost_a >= 4 and cost_b == 5):
+            return True
+        return False
+
+    for i in range(1, len(out)):
+        ca, cb = _cost(out[i - 1]), _cost(out[i])
+        if not _needs_spacing(ca, cb):
+            continue
+
+        # Find the nearest day with cost <= 3 to swap with out[i].
+        # Search forward first, then backward (skip the conflicting neighbor).
+        swap_idx = None
+        best_dist = len(out) + 1
+
+        for j in range(len(out)):
+            if j == i or j == i - 1:
+                continue
+            if _cost(out[j]) > 3:
+                continue
+            dist = abs(j - i)
+            if dist < best_dist:
+                best_dist = dist
+                swap_idx = j
+
+        if swap_idx is None:
+            # All days are high intensity — user asked for that many hard days
+            continue
+
+        old_i_val = out[i].value
+        old_swap_val = out[swap_idx].value
+        old_i_cost = _cost(out[i])
+        old_swap_cost = _cost(out[swap_idx])
+        out[i], out[swap_idx] = out[swap_idx], out[i]
+        print(
+            f"[weekly_recipe] intensity spacing: swapped day {i} "
+            f"({old_i_val}, cost={old_i_cost}) with day {swap_idx} "
+            f"({old_swap_val}, cost={old_swap_cost})"
+        )
+
+    return out
+
+
 # ── Public entry point ─────────────────────────────────────────────
 
 
@@ -428,31 +574,35 @@ def _recovery_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
 
 
 def _archetype_bucket(archetype: DayArchetype) -> str | None:
-    """Classify an archetype into one of the coarse focus buckets.
-    Delegates to the explicit `ARCHETYPE_TO_FOCUS_BUCKET` table in
-    archetypes.py — the single source of truth. Name-based
-    normalization is only used for USER INPUT (raw DB focus strings),
-    never for archetypes, because hybrid default_names like
-    "Upper + Intervals" misnormalize to 'cardio'."""
+    """Classify an archetype by FOCUS FAMILY (fine-grained: push ≠ pull).
+    Used by rotation and adjacency logic so PPL split identity is
+    preserved. Falls back to coarse stress bucket if not found."""
     try:
-        return archetype_to_focus_bucket(archetype)
+        return archetype_to_focus_family(archetype)
     except KeyError:
-        return None
+        try:
+            return archetype_to_focus_bucket(archetype)
+        except KeyError:
+            return None
 
 
 def _count_adjacent_duplicates(recipe: list[DayArchetype]) -> int:
-    """Count pairs of neighboring days that share a focus bucket.
+    """Count pairs of neighboring days that share a focus FAMILY.
     Used as the secondary score in rotation selection so we prefer
     rotations that keep Push/Pull/Legs spaced out."""
-    from .archetypes import archetype_to_focus_bucket
+    from .archetypes import archetype_to_focus_family
     dups = 0
     for i in range(1, len(recipe)):
         try:
-            if archetype_to_focus_bucket(recipe[i]) == archetype_to_focus_bucket(recipe[i - 1]):
+            if archetype_to_focus_family(recipe[i]) == archetype_to_focus_family(recipe[i - 1]):
                 dups += 1
         except KeyError:
             pass
     return dups
+
+
+_COARSE_BUCKETS = {"upper_body", "lower_body", "full_body", "cardio", "mobility", "recovery"}
+_FINE_FAMILIES = {"push", "pull", "legs", "upper", "lower", "full_body", "cardio", "mobility", "recovery"}
 
 
 def _rotate_recipe_to_avoid_recent(
@@ -461,22 +611,17 @@ def _rotate_recipe_to_avoid_recent(
     *,
     mode: str,
 ) -> list[DayArchetype]:
-    """Shift the recipe so day 0 isn't the same coarse bucket as any
-    of the user's last `recent_buckets`. Deterministic and
-    anchor-aware.
+    """Shift the recipe so day 0 isn't the same focus as any of the
+    user's most recent sessions. Deterministic and anchor-aware.
 
-    `recent_buckets` is a small sequence of already-normalized bucket
-    ids (e.g. `("lower_body", "upper_body")`), newest first. The
-    rotation tries to avoid ALL of them on day 0, then falls back to
-    just avoiding the most recent one if no rotation satisfies the
-    full set, then returns the original recipe unchanged when nothing
-    helps. This two-tier approach means:
-
-        - Best case: "Back yesterday + Legs today" → day 0 is neither
-          upper nor lower (e.g. full body or cardio day)
-        - Middle case: no such day exists in the recipe → day 0 is at
-          least not lower (most recent wins)
-        - Worst case: every day is the same bucket → return original
+    `recent_buckets` can contain EITHER coarse bucket ids
+    (`"lower_body"`, `"upper_body"`) OR fine family ids (`"push"`,
+    `"pull"`, `"legs"`). The function auto-detects which level by
+    checking if the values are in the coarse set or the fine set,
+    and uses the matching archetype classifier. This makes it work
+    correctly regardless of whether the caller passed coarse buckets
+    from `normalize_focus_to_bucket` or fine families from
+    `normalize_focus_to_family`.
 
     Modes with anchored day placement (`endurance`, `athletic`,
     `mobility`, `recovery`) return unchanged so we don't disturb
@@ -488,8 +633,21 @@ def _rotate_recipe_to_avoid_recent(
     if mode not in ("lifting", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
         return recipe
 
-    def _day_bucket(archetype: DayArchetype) -> str | None:
-        return _archetype_bucket(archetype)
+    # Auto-detect granularity: if ANY recent value is a coarse bucket
+    # (like "upper_body", "lower_body"), use coarse comparison. If all
+    # values are fine families ("push", "pull", "legs"), use fine.
+    use_coarse = any(b in _COARSE_BUCKETS and b not in _FINE_FAMILIES for b in recent)
+    # Shared values like "full_body", "cardio", "mobility", "recovery"
+    # exist in both sets. If we only have those, fine is correct.
+    if use_coarse:
+        def _day_bucket(archetype: DayArchetype) -> str | None:
+            try:
+                return archetype_to_focus_bucket(archetype)
+            except KeyError:
+                return None
+    else:
+        def _day_bucket(archetype: DayArchetype) -> str | None:
+            return _archetype_bucket(archetype)
 
     day0 = _day_bucket(recipe[0])
 
@@ -555,7 +713,9 @@ def generate_weekly_recipe(
     days_per_week: int,
     *,
     lifting_split: Optional[str] = None,
+    user_chose_split: bool = False,
     recent_focus_buckets: tuple[str, ...] | list[str] = (),
+    recent_focus_families: tuple[str, ...] | list[str] = (),
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -585,7 +745,7 @@ def generate_weekly_recipe(
     if mode == "lifting":
         recipe = _lifting_recipe(profile, lifting_split or "full_body", days)
     elif mode in ("fat_loss_mix", "lifting_plus_cardio"):
-        recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower")
+        recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower", user_chose_split=user_chose_split)
     elif mode == "endurance":
         recipe = _endurance_recipe(profile, days)
     elif mode == "athletic":
@@ -601,16 +761,24 @@ def generate_weekly_recipe(
         recipe = _maintain_recipe(profile, days)
 
     pre_rotation = [a.value for a in recipe]
+    # Use fine-grained focus families for rotation when available.
+    # Families preserve split identity (push != pull) while coarse
+    # buckets collapse both to "upper_body" -- which means the rotation
+    # pass can't distinguish "user just did push" from "user just did
+    # pull" and may fail to rotate away from the same split identity.
+    rotation_recent = list(recent_focus_families) if recent_focus_families else list(recent_focus_buckets)
     print(
         f"[weekly_recipe] mode={mode} days={days} split={lifting_split} "
         f"recent_buckets={list(recent_focus_buckets)} "
+        f"recent_families={list(recent_focus_families)} "
+        f"rotation_using={'families' if recent_focus_families else 'buckets'} "
         f"recipe_before={pre_rotation}"
     )
     # Avoid scheduling the same focus the user just completed on day 1
     # of the new week. Runs before the allowed-archetype filter so a
     # rotated day still passes through the safety check.
     recipe = _rotate_recipe_to_avoid_recent(
-        recipe, recent_focus_buckets, mode=mode,
+        recipe, rotation_recent, mode=mode,
     )
     # Rotation can reintroduce adjacent same-bucket duplicates that
     # the recipe generator already cleaned up (e.g. rotating
@@ -624,7 +792,13 @@ def generate_weekly_recipe(
     fallback = profile.anchor_archetypes[0] if profile.anchor_archetypes else DayArchetype.LIFT_FULL_BODY
     final = [a if a in profile.allowed_archetypes else fallback for a in recipe]
 
-    from .archetypes import ARCHETYPE_META
+    # Intensity-cost spacing: prevent back-to-back high-intensity days.
+    final = _space_high_intensity_days(final)
+    # Intensity spacing can reintroduce focus-family adjacency (e.g.
+    # swapping Legs with PushVolume to space intensity puts Push next
+    # to PushVolume). One more adjacency sweep to catch this.
+    final = _repair_adjacent_duplicates(final)
+
     exposures = {"lift": 0, "cardio": 0, "mobility": 0, "recovery": 0, "hybrid": 0}
     for a in final:
         cat = ARCHETYPE_META[a].category

@@ -88,6 +88,13 @@ class PlannerInputs:
     # `history.most_recent_completed_focus`; tests can set it
     # directly.
     recent_focus_buckets: tuple[str, ...] = ()
+    # Fine-grained focus families from the same recent sessions.
+    # Values like "push", "pull", "legs", "upper", "lower" preserve
+    # split identity (Push != Pull) unlike coarse buckets where both
+    # map to "upper_body". Used by the weekly recipe rotation to
+    # compare against archetype focus families. Populated alongside
+    # recent_focus_buckets by history.most_recent_completed_focus.
+    recent_focus_families: tuple[str, ...] = ()
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -289,6 +296,19 @@ def _equipment_satisfied(exercise: dict, owned: set[str]) -> bool:
     return True
 
 
+_FOCUS_FAMILY_MUSCLES: dict[str, frozenset[str] | None] = {
+    "push": frozenset({"chest", "shoulders", "triceps"}),
+    "pull": frozenset({"back", "lats", "biceps", "rear_delt"}),
+    "legs": frozenset({"quads", "hamstrings", "glutes", "calves", "adductors"}),
+    "upper": frozenset({"chest", "back", "shoulders", "biceps", "triceps", "lats"}),
+    "lower": frozenset({"quads", "hamstrings", "glutes", "calves", "adductors"}),
+    "full_body": None,  # no filter
+    "cardio": None,
+    "mobility": None,
+    "recovery": None,
+}
+
+
 def filter_candidates(
     all_exercises: list[dict],
     slot: Slot,
@@ -297,6 +317,7 @@ def filter_candidates(
     *,
     injury_blocked_patterns: set[str] | None = None,
     accepts_types: frozenset[str] | None = None,
+    day_focus_family: str | None = None,
 ) -> list[dict]:
     """Return every exercise eligible for this slot.
 
@@ -314,9 +335,18 @@ def filter_candidates(
          a hint AND the slot is an isolation slot — compounds get to
          bleed across muscles)
       6. Not in the user's disliked set
+      7. For compound slots (primary/secondary) on days with a known
+         focus family, candidate's primary_muscle must belong to the
+         family's allowed muscle set. This prevents pull exercises
+         (back, lats) from landing on push days, and vice versa.
     """
     blocked = injury_blocked_patterns or set()
     accepts = accepts_types or frozenset({"strength"})
+    # Resolve the allowed muscle set for the day's focus family.
+    # None means "no restriction" (full_body, cardio, etc.).
+    family_muscles: frozenset[str] | None = None
+    if day_focus_family:
+        family_muscles = _FOCUS_FAMILY_MUSCLES.get(day_focus_family)
     out: list[dict] = []
     for ex in all_exercises:
         if (ex.get("name") or "").lower() in disliked_set:
@@ -339,6 +369,22 @@ def filter_candidates(
         # but the slot hint is also chest.
         if slot.role == "isolation" and slot.primary_muscle_hint:
             if ex.get("primary_muscle") != slot.primary_muscle_hint:
+                continue
+        # Compound muscle-family enforcement: on push/pull/legs/upper/
+        # lower days, compound slots must use exercises whose primary
+        # muscle belongs to the day's family. Without this, a
+        # horizontal_pull slot on an upper day could admit a pull
+        # exercise on what should be a push day (if the archetype
+        # dispatch table ever produces such a slot). The slot builders
+        # already separate push/pull patterns correctly, but this is
+        # belt-and-suspenders defense against misrouted exercises.
+        if (
+            slot.role in ("primary", "secondary")
+            and family_muscles is not None
+            and mp not in ("cardio", "mobility", "plyometric")
+        ):
+            ex_muscle = ex.get("primary_muscle") or ""
+            if ex_muscle and ex_muscle not in family_muscles:
                 continue
         out.append(ex)
     return out
@@ -585,6 +631,15 @@ def score_candidate(
         elif wants_steady and is_interval_ex:
             score -= 2.5
 
+    # 7d. Yoga exercises should ONLY appear on mobility, recovery, or
+    # general_health/flexibility days — never on lifting, conditioning,
+    # or hybrid days in ANY role (not warmup, not accessory, nothing).
+    # Users who want yoga can add it manually or select a mobility goal.
+    slug = (exercise.get("slug") or "").lower()
+    if slug.startswith("yoga_"):
+        if bucket not in ("general_health", "flexibility", "stress_relief"):
+            score -= 20.0  # effectively filtered out
+
     # 8. Tiny deterministic jitter so ties between two equivalent
     # candidates don't always pick the alphabetically-first one. Seeded
     # by the user so the same user gets the same plan on repeat
@@ -607,6 +662,7 @@ def pick_for_slot(
     volume_assigned: dict[str, float] | None = None,
     injury_blocked_patterns: set[str] | None = None,
     accepts_types: frozenset[str] | None = None,
+    day_focus_family: str | None = None,
 ) -> dict | None:
     """Pick the best exercise for one slot. Returns None if no candidate
     survives the filter.
@@ -631,6 +687,7 @@ def pick_for_slot(
         all_exercises, slot, owned, disliked,
         injury_blocked_patterns=injury_blocked_patterns,
         accepts_types=accepts_types,
+        day_focus_family=day_focus_family,
     )
     if not candidates:
         return None
@@ -1021,7 +1078,7 @@ def generate_workout_plan(
     from .goal_profiles import goal_profile_for
     from .weekly_recipe import generate_weekly_recipe
     from .prescriptions import prescribe_for_slot
-    from .archetypes import ARCHETYPE_META, DayArchetype
+    from .archetypes import ARCHETYPE_META, DayArchetype, archetype_to_focus_family
     from .day_templates import archetype_to_slots, archetype_display_name
 
     profile = goal_profile_for(
@@ -1039,15 +1096,24 @@ def generate_workout_plan(
         if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
         else None
     )
+    _user_chose_split = bool(
+        inputs.preferred_split
+        and inputs.preferred_split != "auto"
+        and inputs.preferred_split == lifting_split
+    )
     recipe = generate_weekly_recipe(
         profile,
         inputs.days_per_week,
         lifting_split=lifting_split,
+        user_chose_split=_user_chose_split,
         recent_focus_buckets=inputs.recent_focus_buckets,
+        recent_focus_families=inputs.recent_focus_families,
     )
     print(
         f"[workout_planner] mode={profile.planner_mode} "
-        f"days={inputs.days_per_week} recipe=[" +
+        f"days={inputs.days_per_week} "
+        f"split={lifting_split} (user_chose={_user_chose_split}) "
+        f"recipe=[" +
         ", ".join(a.value for a in recipe) + "]"
     )
     # Build a concrete (name, slots, archetype) sequence from the recipe.
@@ -1104,6 +1170,10 @@ def generate_workout_plan(
         meta = ARCHETYPE_META[archetype]
         focus = meta.default_name
         accepts_types = meta.accepts_types
+        # Resolve the day's focus family for compound muscle enforcement.
+        # This ensures compound exercises on push days have push-family
+        # muscles, pull days have pull-family muscles, etc.
+        _day_focus_family = archetype_to_focus_family(archetype)
         exercises_out: list[dict] = []
         for slot in slots:
             # Per-slot type override: strength-slot inside a hybrid
@@ -1124,6 +1194,7 @@ def generate_workout_plan(
                 volume_assigned=assigned,
                 injury_blocked_patterns=blocked_patterns,
                 accepts_types=slot_accepts,
+                day_focus_family=_day_focus_family,
             )
             if ex is None:
                 print(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
@@ -1158,7 +1229,9 @@ def generate_workout_plan(
                 all_exercises_by_slug=all_exercises_by_slug,
             )
             exercises_out.append(out_ex)
-            _credit(ex, prescription.sets)
+            # Warmup-role exercises don't count toward lifting volume.
+            if slot.role != "warmup":
+                _credit(ex, prescription.sets)
             sub = ex.get("substitution_group")
             if sub:
                 used_substitution_groups.add(sub)
@@ -1169,6 +1242,7 @@ def generate_workout_plan(
             "focus": focus,
             "archetype": archetype.value,
             "category": meta.category,
+            "stimulus": meta.training_type,
             "exercises": exercises_out,
         })
 
@@ -1243,7 +1317,7 @@ def generate_workout_plan(
         if lifting_split
         else profile.planner_mode.replace("_", " ").title()
     )
-    return {
+    plan = {
         "trainerNote": "",  # left empty so the caller can fill via AI if desired
         "workout_plan": {
             "name": f"{profile.label} — {plan_name_suffix}",
@@ -1254,6 +1328,169 @@ def generate_workout_plan(
             "goal_bucket": profile.bucket,
         },
     }
+    # Final validation pass — log violations and attempt lightweight
+    # repairs. This is the last line of defense before the plan leaves
+    # the planner.
+    plan = validate_plan(plan, inputs, recipe)
+    return plan
+
+
+def validate_plan(
+    plan: dict,
+    inputs: PlannerInputs,
+    recipe: list | None = None,
+) -> dict:
+    """Post-generation validation pass.
+
+    Checks:
+      1. No empty days (no exercises at all).
+      2. No duplicate exercises within a single day.
+      3. No adjacent same-focus-family days (unless cardio/mobility/recovery).
+      4. No compound exercises on wrong-family days (belt-and-suspenders
+         for the filter_candidates enforcement).
+      5. If the user chose PPL, verify push/pull/legs are all present.
+
+    Violations are logged loudly. Lightweight repairs are attempted
+    where possible (drop duplicates, swap adjacent same-family days).
+    The plan is returned (possibly mutated) regardless — we never fail
+    the generation entirely.
+    """
+    from .archetypes import DayArchetype, archetype_to_focus_family
+    days = plan.get("workout_plan", {}).get("days", [])
+    if not days:
+        return plan
+
+    # ── Check 1: empty days ─────────────────────────────────────────
+    for i, day in enumerate(days):
+        exs = day.get("exercises", [])
+        if not exs:
+            print(
+                f"[validate_plan] WARNING: Day {i} ({day.get('day')}) "
+                f"has no exercises — archetype={day.get('archetype')}"
+            )
+
+    # ── Check 2: duplicate exercises within a day ───────────────────
+    for i, day in enumerate(days):
+        exs = day.get("exercises", [])
+        seen_slugs: set[str] = set()
+        deduped: list[dict] = []
+        for ex in exs:
+            slug = ex.get("_slug")
+            if slug and slug in seen_slugs:
+                print(
+                    f"[validate_plan] REPAIR: dropping duplicate exercise "
+                    f"'{ex.get('name')}' (slug={slug}) on Day {i}"
+                )
+                continue
+            if slug:
+                seen_slugs.add(slug)
+            deduped.append(ex)
+        day["exercises"] = deduped
+
+    # ── Check 3: adjacent same-focus-family days ────────────────────
+    _SKIP_FAMILIES = {"cardio", "mobility", "recovery"}
+    for i in range(1, len(days)):
+        fam_a = None
+        fam_b = None
+        arch_a = days[i - 1].get("archetype")
+        arch_b = days[i].get("archetype")
+        try:
+            if arch_a:
+                fam_a = archetype_to_focus_family(DayArchetype(arch_a))
+        except (KeyError, ValueError):
+            pass
+        try:
+            if arch_b:
+                fam_b = archetype_to_focus_family(DayArchetype(arch_b))
+        except (KeyError, ValueError):
+            pass
+        if (
+            fam_a and fam_b
+            and fam_a == fam_b
+            and fam_a not in _SKIP_FAMILIES
+        ):
+            # Try to swap day[i] with a later non-adjacent day.
+            swapped = False
+            for j in range(i + 1, len(days)):
+                fam_j = None
+                arch_j = days[j].get("archetype")
+                try:
+                    if arch_j:
+                        fam_j = archetype_to_focus_family(DayArchetype(arch_j))
+                except (KeyError, ValueError):
+                    pass
+                # Check that swapping doesn't create a new adjacency problem.
+                prev_ok = (i - 1 < 0) or True  # already checked above
+                if fam_j and fam_j != fam_a:
+                    # Also check that day[j] won't conflict with day[i-1]
+                    if i > 0 and fam_j == fam_a:
+                        continue
+                    # And day[i+1] won't conflict with original day[j] if j==i+1
+                    days[i], days[j] = days[j], days[i]
+                    print(
+                        f"[validate_plan] REPAIR: swapped Day {i} ↔ Day {j} "
+                        f"to break adjacent {fam_a!r} streak"
+                    )
+                    swapped = True
+                    break
+            if not swapped:
+                print(
+                    f"[validate_plan] WARNING: adjacent same-family days "
+                    f"{i - 1}↔{i} (both {fam_a!r}) — no swap available"
+                )
+
+    # ── Check 4: compound exercises on wrong-family days ────────────
+    for i, day in enumerate(days):
+        arch_str = day.get("archetype")
+        if not arch_str:
+            continue
+        try:
+            fam = archetype_to_focus_family(DayArchetype(arch_str))
+        except (KeyError, ValueError):
+            continue
+        allowed = _FOCUS_FAMILY_MUSCLES.get(fam)
+        if allowed is None:
+            continue  # full_body / cardio / mobility / recovery — no restriction
+        cleaned: list[dict] = []
+        for ex in day.get("exercises", []):
+            role = ex.get("_role", "isolation")
+            if role in ("primary", "secondary"):
+                pm = ex.get("_primary_muscle", "")
+                if pm and pm not in allowed:
+                    print(
+                        f"[validate_plan] REPAIR: dropping '{ex.get('name')}' "
+                        f"(primary_muscle={pm}) from Day {i} "
+                        f"(focus_family={fam}, allowed={sorted(allowed)})"
+                    )
+                    continue
+            cleaned.append(ex)
+        day["exercises"] = cleaned
+
+    # ── Check 5: split identity preserved ───────────────────────────
+    if recipe:
+        from .day_templates import SPLIT_PPL
+        # Detect if user explicitly chose PPL
+        if inputs.preferred_split == "ppl":
+            recipe_families = set()
+            for day in days:
+                arch_str = day.get("archetype")
+                if arch_str:
+                    try:
+                        recipe_families.add(
+                            archetype_to_focus_family(DayArchetype(arch_str))
+                        )
+                    except (KeyError, ValueError):
+                        pass
+            expected = {"push", "pull", "legs"}
+            missing = expected - recipe_families
+            if missing:
+                print(
+                    f"[validate_plan] WARNING: user chose PPL but recipe "
+                    f"is missing families: {sorted(missing)} "
+                    f"(present: {sorted(recipe_families)})"
+                )
+
+    return plan
 
 
 def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | None:

@@ -116,7 +116,17 @@
       "Read(//opt/homebrew/bin/**)",
       "Bash(command -v python)",
       "Bash(command -v uvicorn)",
-      "Bash(lsof -iTCP -sTCP:LISTEN -P)"
+      "Bash(lsof -iTCP -sTCP:LISTEN -P)",
+      "Bash(pip3 list *)",
+      "Bash(pip list *)",
+      "Bash(PYTHONPATH=. python3 tests/test_workout_planner.py)",
+      "Bash(PYTHONPATH=. python3 tests/test_workout_archetypes.py)",
+      "Bash(PYTHONPATH=. python3 tests/test_set_programming.py)",
+      "Bash(PYTHONPATH=. python3 tests/test_plan_review.py)",
+      "Bash(PYTHONPATH=. python3 tests/test_fitness_score.py)",
+      "Bash(PYTHONPATH=. python3 tests/test_in_workout_review.py)",
+      "Bash(/usr/local/bin/npx tsc *)",
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")"
     ]
   }
 }
