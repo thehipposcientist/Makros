@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from app.services.goal_nutrition_params import (
+from .goal_params import (
     CALORIES_PER_LB,
     FAT_LOSS,
     GENERAL_HEALTH,

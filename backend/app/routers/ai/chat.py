@@ -75,13 +75,37 @@ def ask_trainer_question(
 
     # Only send context relevant to this coach's domain — keep payload lean for speed
     profile_slim = body.profile or {}
-    # Drop heavy fields from profile context to reduce token count
+    # Extract foods list BEFORE dropping it from profile (nutritionist
+    # needs it for food-aware responses). Previously the list was
+    # dropped and the nutritionist couldn't reference the user's
+    # actual pantry.
+    foods_available = (profile_slim.get("foodsAvailable") or []) if isinstance(profile_slim, dict) else []
     if isinstance(profile_slim, dict):
         for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
             profile_slim.pop(drop_key, None)
     context_blob: dict = {"profile": profile_slim, "progress": body.progress}
     if is_nutritionist:
         context_blob["nutritionPlan"] = body.nutritionPlan
+        # Inject shared nutrition context so the chat knows bodyweight,
+        # experience, weight trend, recent adherence, and recent
+        # workouts — data the plan generator now also sees.
+        try:
+            from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+            bw = profile_slim.get("physicalStats", {}).get("weightLbs") if isinstance(profile_slim.get("physicalStats"), dict) else None
+            _nctx = build_nutrition_context(
+                goal=profile_slim.get("goal"),
+                secondary_goal=profile_slim.get("secondaryGoal"),
+                experience=profile_slim.get("experienceLevel"),
+                bodyweight_lbs=bw,
+                dietary_preference=profile_slim.get("dietaryPreference"),
+                allergies=profile_slim.get("allergies"),
+                foods_available=foods_available,
+            )
+            context_blob["nutritionContext"] = format_for_prompt(_nctx)
+            if foods_available:
+                context_blob["foodsAvailable"] = foods_available[:50]
+        except Exception as e:
+            print(f"[trainer-question] nutrition context enrichment failed: {e}")
     else:
         # Send full workout plan so the AI can return a complete updated plan
         # with all fields (equipment, restSeconds, etc.)
@@ -300,6 +324,14 @@ def ask_trainer_question(
         "set needs_plan_update=true and return the FULL updated plan reflecting the change. "
         "For example, if they say 'make it 6 days', return a complete 6-day plan. "
         "Do NOT just say you've made the change — you must actually return the updated plan.\n"
+        "CRITICAL PROMISE RULE: If your `answer` describes ANY change to the user's plan — "
+        "'I'll swap', 'I'll update', 'I'll move', 'I'll change tomorrow to X', 'making it push', "
+        "'swapped legs for push', 'moved your rest day', 'let's make it chest focus' — you MUST set "
+        "needs_plan_update=true AND return the complete updated plan object. "
+        "If you cannot produce a complete plan, DO NOT describe the change in your answer. "
+        "Never promise a change you aren't returning as structured data — that leaves the user with "
+        "a useless 'Apply' button. Either describe + return, or acknowledge that you can't make the "
+        "change right now without promising.\n"
         + (
             "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
             '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}'
@@ -426,6 +458,62 @@ def ask_trainer_question(
 
         result = _extract_json(raw)
         print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
+
+        # ── Intent-detection safety net ──────────────────────────────
+        # The LLM sometimes describes a plan change in `answer` ("yes,
+        # I'll update tomorrow to push") but forgets to set
+        # needs_plan_update or return the plan object. Without this
+        # fallback, the Apply banner never appears and the user sees
+        # a confirmation that silently does nothing.
+        #
+        # We pattern-match on a conservative list of phrases that
+        # strongly imply an applied change. Regex is deterministic so
+        # this is safe and auditable. False positives here are cheap
+        # (they just trigger phase-2 which generates the plan); false
+        # negatives are expensive (the user's promised change is lost).
+        import re as _re
+        answer_text = (result.get("answer") or "").lower()
+        # Focus keyword alternation shared across patterns. Must cover
+        # lifting splits AND non-lifting modalities — "add a cardio day"
+        # is just as much an apply-intent as "make it push". Missing
+        # keywords here → intent slips through → Apply banner never
+        # shows → user reports "the trainer said yes and did nothing."
+        _focus_kw = (
+            r"(?:push|pull|legs?|upper|lower|chest|back|full[- ]body|"
+            r"cardio|conditioning|zone[ -]?2|intervals?|hiit|tempo|"
+            r"sprint|mobility|stretch|recovery|rest|arms?|shoulders?|"
+            r"hypertrophy|strength)"
+        )
+        _intent_patterns = (
+            # Future-tense promises: "I'll update / I'll add / I'll swap"
+            r"\bi['\u2019]?ll (?:update|swap|change|move|replace|make|set|add|include|schedule|slot|put)\b",
+            # Past-tense declarations: "I've added / I updated / I swapped"
+            r"\bi['\u2019]?ve (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled|slotted|put)\b",
+            r"\bi (?:will|have|just) (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled)\b",
+            # Verb + target: "updated tomorrow", "added a pull day",
+            # "swapping tomorrow", "replacing the Wednesday session".
+            r"\b(?:updated|swapped|replaced|moved|changed|added|included|scheduled|slotted) (?:a |an |some )?(?:tomorrow|your|the|that|wednesday|thursday|friday|saturday|sunday|monday|tuesday|" + _focus_kw + r")",
+            r"\b(?:swapping|changing|moving|replacing|adding|including|scheduling|slotting) (?:a |an |some )?(?:tomorrow|your|the|that|" + _focus_kw + r")",
+            # "add a cardio day", "add a pull day", "added an upper day"
+            r"\b(?:add(?:ed|ing)?|includ(?:ed|ing)?|schedul(?:ed|ing)?) (?:a |an |another )?" + _focus_kw + r" (?:day|session|workout|block)\b",
+            # "tomorrow will be push", "tomorrow is now a cardio day"
+            r"\btomorrow(?:['\u2019]s)? (?:will (?:be|have)|is now|becomes|now has) ",
+            r"\b(?:making|made) (?:it|tomorrow|that day|wednesday|thursday|friday|saturday|sunday|monday|tuesday) (?:a |an )?" + _focus_kw,
+            r"\blet['\u2019]?s (?:make|swap|change|move|add|include|schedule)\b",
+            r"\bhere['\u2019]?s your (?:updated|new|revised) (?:plan|week|split|schedule)\b",
+            # Soft affirmatives immediately followed by a plan verb:
+            # "sure, I can add", "absolutely — adding a cardio day",
+            # "done, I've swapped tomorrow".
+            r"\b(?:sure|absolutely|done|got it|okay|ok|yes)[,!.\-\u2014 ]+ ?(?:i['\u2019]?(?:ll|ve)|i (?:can|will|have)|let['\u2019]?s|adding|swapping|updating|scheduling)\b",
+        )
+        intent_detected = any(_re.search(p, answer_text) for p in _intent_patterns)
+        if intent_detected and not result.get("needs_plan_update"):
+            print(
+                f"[trainer-question] intent-detection fired — answer describes a change "
+                f"but needs_plan_update was {result.get('needs_plan_update')}. "
+                f"Forcing needs_plan_update=true so phase-2 runs."
+            )
+            result["needs_plan_update"] = True
 
         # Phase 2: if a plan update was signalled but no plan included, do a dedicated plan-generation call
         needs_workout = not is_nutritionist and result.get("needs_plan_update") and not result.get("updated_workout_plan")

@@ -1,0 +1,1518 @@
+"""
+Algorithmic workout planner — top-level orchestrator.
+
+This file is intentionally small now. It owns:
+
+    Layer 1 — Input normalization         (PlannerInputs)
+    Layer 3 — Weekly volume targets       (weekly_set_targets)
+    Layer 5 — Exercise selection engine   (filter_candidates,
+                                           score_candidate, pick_for_slot)
+    Layer 6 — Prescription assembler      (prescribe_sets_reps)
+    Layer 7 — Top-level orchestrator      (generate_workout_plan)
+
+The big structural pieces moved to dedicated modules in the
+"responsibility separation" refactor so this file stops being a
+secret god object:
+
+    Slot + slot builders + density trimming  →  slots.py
+    Split constants + pick_split +                day_templates.py
+        archetype_to_slots + day naming
+    Cardio intensity classification          →  cardio.py
+    Goal profiles (training mix + allowed    →  goal_profiles.py
+        archetypes + planner mode)
+    Weekly archetype recipe                  →  weekly_recipe.py
+    Archetype-specific prescriptions         →  prescriptions.py
+    Day archetype enum + metadata            →  archetypes.py
+
+`generate_workout_plan` is the thin orchestrator that pulls those
+pieces together:
+
+    goal_profile_for → generate_weekly_recipe → archetype_to_slots
+    → filter_candidates → score_candidate → pick_for_slot
+    → prescribe_for_slot → (volume audit, optional focused-muscle
+    backfill if the planner mode supports it) → output
+
+Split selection is now a LIFTING SUBSYSTEM used only when the weekly
+recipe asks for a lifting-dominant schedule. Endurance, athletic,
+mobility, recovery, and maintain modes skip split selection entirely
+and go directly from archetype to slots.
+
+What stays AI in the plan pipeline:
+- Only the `trainerNote`, generated after the deterministic plan.
+- Trainer chat / "make Wednesday harder" edits.
+- Nothing inside this planner's structured output.
+"""
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field
+from typing import Iterable
+
+# Slot dataclass + every slot builder lives in `slots.py`. We import
+# what we need (plus the `Slot` type for `_find_best_accessory_host_day`
+# signatures) so removed Layer 4 block can stay removed.
+from .slots import Slot, density_adjust_slots  # noqa: F401
+from .cardio import classify_cardio
+
+# ─── Layer 1 — Inputs ────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PlannerInputs:
+    """Everything the planner needs to produce a plan.
+
+    Designed so callers can either build it from a `PlanRequest` (the
+    existing API model) or construct it directly in tests.
+    """
+    goal: str                              # "muscle_gain" | "fat_loss" | "strength" | "body_recomp" | ...
+    days_per_week: int                     # 1..7
+    session_minutes: int = 60              # rough budget per session
+    experience: str = "intermediate"       # "beginner" | "intermediate" | "advanced"
+    equipment_slugs: tuple[str, ...] = ()  # owned Equipment slugs
+    preferred_split: str | None = None     # "auto" | "full_body" | "upper_lower" | "ppl" | "bro"
+    focused_muscle: str | None = None      # optional emphasis (e.g. "glutes")
+    preferred_exercises: tuple[str, ...] = ()
+    disliked_exercises: tuple[str, ...] = ()
+    injuries: tuple[str, ...] = ()
+    # Seed for deterministic tie-breaking on candidate selection. Pass a
+    # stable per-user value (e.g. user_id) to keep plans consistent across
+    # regenerations when nothing else has changed.
+    rng_seed: int = 0
+    # Normalized focus buckets from the user's last ~2 completed
+    # sessions within the last ~36 hours, newest first. Each element
+    # is one of: "lower_body", "upper_body", "full_body", "cardio",
+    # "mobility", "recovery". Used by `generate_weekly_recipe` to
+    # rotate the week so day 1 isn't the same kind of day as the
+    # user's most recent sessions. Empty tuple when there's no
+    # recent data. Populated by `plans.py` via
+    # `history.most_recent_completed_focus`; tests can set it
+    # directly.
+    recent_focus_buckets: tuple[str, ...] = ()
+
+
+# ─── Goal bucket shim ────────────────────────────────────────────────────────
+#
+# Thin wrapper kept so legacy call sites inside this module don't have
+# to change their import path. Split constants and `pick_split` moved
+# to `day_templates.py` in the responsibility-separation refactor;
+# import them from there if you need the lifting subsystem.
+
+
+def _goal_bucket(goal: str) -> str:
+    """Thin shim over `goals.goal_bucket`. Kept for the legacy
+    `_WEEKLY_VOLUME` / `weekly_set_targets` path below. New code
+    should import `goal_bucket` directly from
+    `app.services.workout.goals`."""
+    from .goals import goal_bucket as _registry_bucket
+    return _registry_bucket(goal)
+
+
+# Re-export split constants + pick_split from day_templates so legacy
+# importers (`from app.services.workout.planner import SPLIT_FULL_BODY`)
+# keep working. Nothing in the planner service itself uses the
+# constants — they're imported via day_templates inside
+# `generate_workout_plan` when the weekly recipe asks for a split.
+from .day_templates import (  # noqa: E402,F401
+    SPLIT_FULL_BODY, SPLIT_UPPER_LOWER, SPLIT_PPL, SPLIT_BRO,
+    SPLIT_PPL_UL, SPLIT_ENDURANCE, SPLIT_HYBRID, _SPLIT_MIN_DAYS,
+    pick_split,
+    build_day_templates,
+    _day_meta,
+    _slots_for_day,
+)
+
+
+# ─── Layer 3 — Weekly volume targets ─────────────────────────────────────────
+
+
+# Sets per muscle group per week. Chosen to land in the "MEV+" range from
+# Renaissance Periodization volume landmarks — enough to drive growth
+# without leaving beginners or fat-loss users buried in junk volume.
+#
+# Indexed by (goal_bucket, experience). Numbers are TARGET working sets
+# per week for the listed muscle. Slot-based selection in Layer 4-5 will
+# distribute these across days; the volume target acts as a sanity bound.
+_WEEKLY_VOLUME: dict[tuple[str, str], dict[str, int]] = {
+    ("muscle_gain", "beginner"): {
+        "chest": 10, "back": 12, "shoulders": 8, "biceps": 6, "triceps": 6,
+        "quads": 10, "hamstrings": 8, "glutes": 8, "calves": 6, "core": 6,
+    },
+    ("muscle_gain", "intermediate"): {
+        "chest": 14, "back": 16, "shoulders": 12, "biceps": 10, "triceps": 10,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 8, "core": 6,
+    },
+    ("muscle_gain", "advanced"): {
+        "chest": 18, "back": 20, "shoulders": 14, "biceps": 12, "triceps": 12,
+        "quads": 16, "hamstrings": 14, "glutes": 14, "calves": 10, "core": 6,
+    },
+    ("strength", "beginner"): {
+        "chest": 8, "back": 10, "shoulders": 6, "biceps": 4, "triceps": 6,
+        "quads": 10, "hamstrings": 8, "glutes": 8, "calves": 4, "core": 6,
+    },
+    ("strength", "intermediate"): {
+        "chest": 10, "back": 12, "shoulders": 8, "biceps": 6, "triceps": 8,
+        "quads": 12, "hamstrings": 10, "glutes": 10, "calves": 6, "core": 8,
+    },
+    ("strength", "advanced"): {
+        "chest": 12, "back": 14, "shoulders": 10, "biceps": 8, "triceps": 10,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 6, "core": 8,
+    },
+    ("fat_loss", "beginner"): {
+        "chest": 8, "back": 10, "shoulders": 6, "biceps": 4, "triceps": 4,
+        "quads": 10, "hamstrings": 8, "glutes": 8, "calves": 4, "core": 8,
+    },
+    ("fat_loss", "intermediate"): {
+        "chest": 10, "back": 12, "shoulders": 8, "biceps": 6, "triceps": 6,
+        "quads": 12, "hamstrings": 10, "glutes": 10, "calves": 6, "core": 8,
+    },
+    ("fat_loss", "advanced"): {
+        "chest": 12, "back": 14, "shoulders": 10, "biceps": 8, "triceps": 8,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 6, "core": 8,
+    },
+    ("body_recomp", "beginner"): {
+        "chest": 10, "back": 12, "shoulders": 8, "biceps": 6, "triceps": 6,
+        "quads": 12, "hamstrings": 10, "glutes": 10, "calves": 6, "core": 6,
+    },
+    ("body_recomp", "intermediate"): {
+        "chest": 12, "back": 14, "shoulders": 10, "biceps": 8, "triceps": 8,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 8, "core": 6,
+    },
+    ("body_recomp", "advanced"): {
+        "chest": 14, "back": 16, "shoulders": 12, "biceps": 10, "triceps": 10,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 8, "core": 6,
+    },
+    # Endurance users train lifting for maintenance only. Volume is
+    # deliberately LOW per muscle so cardio recovery isn't compromised.
+    # Focused muscles still get the +30% bonus via `weekly_set_targets`.
+    ("endurance", "beginner"): {
+        "chest": 4, "back": 5, "shoulders": 3, "biceps": 3, "triceps": 3,
+        "quads": 5, "hamstrings": 4, "glutes": 4, "calves": 3, "core": 6,
+    },
+    ("endurance", "intermediate"): {
+        "chest": 6, "back": 8, "shoulders": 4, "biceps": 4, "triceps": 4,
+        "quads": 6, "hamstrings": 5, "glutes": 5, "calves": 4, "core": 6,
+    },
+    ("endurance", "advanced"): {
+        "chest": 6, "back": 8, "shoulders": 4, "biceps": 4, "triceps": 4,
+        "quads": 6, "hamstrings": 5, "glutes": 5, "calves": 4, "core": 6,
+    },
+    # Athletic performance — moderate strength volume plus conditioning
+    # days. Prescription is driven by the hybrid split, not this table;
+    # the numbers here are used only for the volume-deficit scoring bias.
+    ("athletic_performance", "beginner"): {
+        "chest": 8, "back": 10, "shoulders": 6, "biceps": 5, "triceps": 6,
+        "quads": 10, "hamstrings": 8, "glutes": 8, "calves": 5, "core": 8,
+    },
+    ("athletic_performance", "intermediate"): {
+        "chest": 10, "back": 12, "shoulders": 8, "biceps": 6, "triceps": 8,
+        "quads": 12, "hamstrings": 10, "glutes": 10, "calves": 6, "core": 8,
+    },
+    ("athletic_performance", "advanced"): {
+        "chest": 12, "back": 14, "shoulders": 10, "biceps": 8, "triceps": 10,
+        "quads": 14, "hamstrings": 12, "glutes": 12, "calves": 8, "core": 10,
+    },
+}
+
+# Default fallback for any (bucket, experience) combo not explicitly
+# tabulated above. Mirrors the "general_health" intermediate band.
+_DEFAULT_VOLUME = {
+    "chest": 12, "back": 14, "shoulders": 10, "biceps": 8, "triceps": 8,
+    "quads": 12, "hamstrings": 10, "glutes": 10, "calves": 6, "core": 6,
+}
+
+
+def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
+    """Return a {muscle: target_working_sets_per_week} dict for this user.
+
+    Adds a +30% bonus to the user's `focused_muscle` if set, clamped at
+    the advanced-tier volume for the same (bucket, muscle) PLUS a
+    3-set focus allowance so the bonus isn't neutralized when the
+    advanced tier equals the intermediate tier for that muscle (e.g.
+    glutes in recomp where both tiers sit at 12). The allowance keeps
+    the boost meaningful for the user's declared focus while still
+    preventing runaway volume: max deliverable sets for any focused
+    muscle = advanced_tier + 3.
+    """
+    bucket = _goal_bucket(inputs.goal)
+    base = _WEEKLY_VOLUME.get((bucket, inputs.experience), _DEFAULT_VOLUME).copy()
+    if inputs.focused_muscle and inputs.focused_muscle in base:
+        boosted = round(base[inputs.focused_muscle] * 1.3)
+        # Cap at the same-bucket advanced-tier value PLUS a 3-set
+        # allowance so a muscle whose advanced tier equals the current
+        # tier (e.g. glutes/recomp at 12/12) still benefits from
+        # focusing. Without the +3 the boost gets fully neutralized.
+        cap_source = _WEEKLY_VOLUME.get((bucket, "advanced"), _DEFAULT_VOLUME)
+        cap = cap_source.get(inputs.focused_muscle, boosted) + 3
+        base[inputs.focused_muscle] = min(boosted, cap)
+    return base
+
+
+
+# ─── Layer 5 — Exercise selection engine ─────────────────────────────────────
+
+
+def _equipment_satisfied(exercise: dict, owned: set[str]) -> bool:
+    """True if the user can actually do this exercise with what they own.
+
+    Two modes:
+      - Bodyweight bucket: always allowed (push-ups need nothing).
+      - Anything else: every `required=True` equipment slug must be owned
+        AND at least one of the exercise's primary equipment slugs must
+        be owned (so a "dumbbells" bucket exercise where the dumbbell is
+        `required=False` doesn't sneak through for an empty-equipment user).
+    """
+    eq_entries = exercise.get("equipment") or []
+    bucket = exercise.get("equipment_bucket")
+
+    # Bodyweight bucket is always eligible regardless of what the user owns.
+    if bucket == "bodyweight":
+        # Still respect any required support equipment if present
+        # (e.g. decline_pushups requires plyo_box). Required gates win.
+        required = [e["slug"] for e in eq_entries if e.get("required")]
+        return all(s in owned for s in required)
+
+    # Non-bodyweight bucket: every required slug must be owned AND the
+    # user must own SOMETHING from the primary slugs so we don't
+    # recommend a "Dumbbell Squat" to a user with zero dumbbells.
+    # Also: if the user owns no equipment AT ALL, no non-bodyweight
+    # bucket exercise is eligible — even ones with empty equipment lists
+    # like "Chair Step-up" (bucket=home), because the bucket itself
+    # signals the user needs something we don't model as a slug.
+    if not owned:
+        return False
+    required = [e["slug"] for e in eq_entries if e.get("required")]
+    primary_slugs = [e["slug"] for e in eq_entries if e.get("role") == "primary"]
+    if required and not all(s in owned for s in required):
+        return False
+    if primary_slugs and not any(s in owned for s in primary_slugs):
+        return False
+    return True
+
+
+def filter_candidates(
+    all_exercises: list[dict],
+    slot: Slot,
+    owned_equipment: set[str],
+    disliked_set: set[str],
+    *,
+    injury_blocked_patterns: set[str] | None = None,
+    accepts_types: frozenset[str] | None = None,
+) -> list[dict]:
+    """Return every exercise eligible for this slot.
+
+    Filters:
+      1. Equipment satisfied
+      2. Exercise type is in the slot's `accepts_types` set (driven
+         by the archetype — lifting slots accept `{"strength"}`,
+         cardio slots accept `{"cardio"}`, mobility slots accept
+         `{"mobility"}`). Default is `{"strength"}` so every existing
+         lifting-slot caller keeps its old behavior.
+      3. Movement pattern matches the slot
+      4. Movement pattern is not in `injury_blocked_patterns` (which
+         the caller builds from `PlannerInputs.injuries`)
+      5. Primary muscle compatible with slot hint (when slot specifies
+         a hint AND the slot is an isolation slot — compounds get to
+         bleed across muscles)
+      6. Not in the user's disliked set
+    """
+    blocked = injury_blocked_patterns or set()
+    accepts = accepts_types or frozenset({"strength"})
+    out: list[dict] = []
+    for ex in all_exercises:
+        if (ex.get("name") or "").lower() in disliked_set:
+            continue
+        ex_type = ex.get("exercise_type") or "strength"
+        if ex_type not in accepts:
+            continue
+        if ex.get("power_type") in ("mobility",) and "mobility" not in accepts:
+            continue
+        if not _equipment_satisfied(ex, owned_equipment):
+            continue
+        mp = ex.get("movement_pattern")
+        if mp != slot.movement_pattern:
+            continue
+        if mp in blocked:
+            continue
+        # For isolation slots with a muscle hint, also require the
+        # primary muscle to match. Compounds skip this — a horizontal
+        # press slot accepts bench press even though its primary is chest
+        # but the slot hint is also chest.
+        if slot.role == "isolation" and slot.primary_muscle_hint:
+            if ex.get("primary_muscle") != slot.primary_muscle_hint:
+                continue
+        out.append(ex)
+    return out
+
+
+# Goal buckets that should feel "lift-focused". For these, bodyweight is
+# a fallback, not a default — the scorer and pick_for_slot both collapse
+# bodyweight picks below loaded picks on primary/secondary slots.
+_LIFT_FOCUSED_BUCKETS = {"body_recomp", "muscle_gain", "strength"}
+
+# Ordered primary-load preference. Barbell beats dumbbell beats machine
+# beats cable beats bodyweight when all are otherwise equal. Used as a
+# small tie-breaker INSIDE the loaded pool; the hard gate between loaded
+# and bodyweight lives in `pick_for_slot`.
+_PRIMARY_LOAD_TIER = {
+    "barbell": 4,
+    "ez_curl_bar": 4,
+    "trap_bar": 4,
+    "dumbbells": 3,
+    "kettlebell": 3,
+    # Machines / cable
+    "leg_press_machine": 2,
+    "chest_press_machine": 2,
+    "lat_pulldown_machine": 2,
+    "seated_row_machine": 2,
+    "smith_machine": 2,
+    "hack_squat_machine": 2,
+    "machine_row_station": 2,
+    "pec_deck_machine": 2,
+    "leg_extension_machine": 2,
+    "leg_curl_machine": 2,
+    "shoulder_press_machine": 2,
+    "cable_machine": 1,
+}
+
+
+def _exercise_load_tier(exercise: dict) -> int:
+    """Return 0 for bodyweight-bucket exercises, or the best
+    `_PRIMARY_LOAD_TIER` value found among the exercise's equipment
+    entries. Used both for the tier-split in `pick_for_slot` and for
+    scoring's load-preference term."""
+    if exercise.get("equipment_bucket") == "bodyweight":
+        return 0
+    best = 0
+    for e in exercise.get("equipment") or []:
+        if e.get("role") != "primary":
+            continue
+        t = _PRIMARY_LOAD_TIER.get(e.get("slug", ""), 0)
+        if t > best:
+            best = t
+    return best
+
+
+def score_candidate(
+    exercise: dict,
+    slot: Slot,
+    inputs: PlannerInputs,
+    used_substitution_groups: set[str],
+    used_exercise_slugs: set[str],
+    history_familiarity: dict[str, int] | None = None,
+    *,
+    volume_targets: dict[str, int] | None = None,
+    volume_assigned: dict[str, float] | None = None,
+) -> float:
+    """Score one candidate for one slot. Higher is better.
+
+    The scoring is intentionally simple and additive so it stays
+    debuggable. Each component is documented.
+    """
+    score = 0.0
+    name_lower = (exercise.get("name") or "").lower()
+    bucket = _goal_bucket(inputs.goal)
+    is_lift_focused = bucket in _LIFT_FOCUSED_BUCKETS
+    is_bodyweight = exercise.get("equipment_bucket") == "bodyweight"
+
+    # 1. Preference bonus — preferred exercises get a strong push.
+    if name_lower in {p.lower() for p in inputs.preferred_exercises}:
+        score += 5.0
+
+    # 2. Slot-role match.
+    role = slot.role
+    is_compound = exercise.get("is_compound", False)
+    if role == "primary" and is_compound:
+        score += 3.0
+    elif role == "secondary" and is_compound:
+        score += 1.5
+    elif role == "isolation" and not is_compound:
+        score += 2.0
+    elif role == "core":
+        # Core slot is fine with whatever the slot's pattern accepts.
+        score += 1.0
+
+    # 3. Difficulty match against experience.
+    diff = exercise.get("difficulty", "intermediate")
+    exp = inputs.experience
+    if exp == "beginner":
+        if diff == "beginner":
+            score += 2.0
+        elif diff == "advanced":
+            score -= 3.0
+    elif exp == "advanced":
+        if diff == "advanced":
+            score += 1.0
+        elif diff == "beginner":
+            score -= 0.5
+    else:
+        if diff == "intermediate":
+            score += 1.0
+
+    # 4. Primary muscle hint match (light bonus, even for compounds).
+    if slot.primary_muscle_hint and exercise.get("primary_muscle") == slot.primary_muscle_hint:
+        score += 1.0
+
+    # 5. Variety / continuity within the same plan. Penalize repeating
+    # the same substitution group within one week (variety) and the same
+    # exact exercise slug across days (no carbon copies).
+    sub_group = exercise.get("substitution_group")
+    if sub_group and sub_group in used_substitution_groups:
+        score -= 1.5
+    if exercise.get("slug") in used_exercise_slugs:
+        score -= 4.0
+
+    # 6. Load-preference for lift-focused goals. This replaces the old
+    # "free-weight primary bonus" with something explicit and larger so
+    # that a Barbell Squat can't lose to a Bodyweight Squat by random
+    # jitter on a recomp / muscle-gain / strength plan.
+    #
+    #   is_lift_focused AND primary/secondary slot:
+    #     +3.0 loaded      (enough to clear compound-tie margin)
+    #     -4.0 bodyweight  (pushes BW below any loaded candidate)
+    #     tier bonus 0.1 × tier for fine-grained barbell > DB > cable
+    #   is_lift_focused AND isolation slot:
+    #     +1.5 loaded / -1.5 bodyweight
+    #     (smaller, because isolation bodyweight can still be valid —
+    #      e.g. bodyweight calf raise — but loaded still wins ties)
+    #   not lift-focused (fat_loss / general_health / minimal equipment):
+    #     no penalty — bodyweight is fine when it fits the goal
+    if is_lift_focused and role in ("primary", "secondary"):
+        if is_bodyweight:
+            score -= 4.0
+        else:
+            score += 3.0
+            score += 0.1 * _exercise_load_tier(exercise)
+    elif is_lift_focused and role == "isolation":
+        if is_bodyweight:
+            score -= 1.5
+        else:
+            score += 1.5
+            score += 0.05 * _exercise_load_tier(exercise)
+    else:
+        # Preserve the old light "free-weight primary" bonus for the
+        # non-lift-focused goals so behavior there is unchanged.
+        if role == "primary" and not exercise.get("is_machine", False):
+            score += 0.5
+
+    # 7. Familiarity bonus from history, scaled by slot role so
+    # continuity feels intentional:
+    #   - Primary lifts are very sticky (1.3×) — once bench press is in
+    #     the plan it stays for a while, because users track strength
+    #     progress on those and hate seeing them rotate out.
+    #   - Secondary lifts use the base 1.0× bonus.
+    #   - Isolation / core slots get a reduced 0.6× bonus so variety
+    #     naturally rotates lateral raises, face pulls, curls, etc.
+    #     across regenerations instead of locking in the first pick.
+    if history_familiarity:
+        familiar = history_familiarity.get(exercise.get("slug", ""), 0)
+        if familiar > 0:
+            role_multiplier = {
+                "primary": 1.3,
+                "secondary": 1.0,
+                "isolation": 0.6,
+                "core": 0.6,
+            }.get(role, 1.0)
+            score += min(2.0, 0.5 * familiar) * role_multiplier
+
+    # 7b. Weekly-volume deficit bias. When we have a running tally of
+    # sets already assigned per muscle, nudge selection toward exercises
+    # that hit UNDER-allocated muscles and away from OVER-allocated ones.
+    # The ratio is computed as assigned/target on the exercise's primary
+    # muscle; scores are shifted ±1.5 max so it can tip ties without
+    # overriding goal/role match.
+    #
+    # Focused muscles benefit twice: their target gets a +30% bump from
+    # weekly_set_targets() AND any exercise hitting them wins more ties
+    # until the elevated target is satisfied.
+    if volume_targets and volume_assigned is not None:
+        primary_muscle = exercise.get("primary_muscle") or ""
+        target = volume_targets.get(primary_muscle, 0)
+        if target > 0:
+            assigned = volume_assigned.get(primary_muscle, 0.0)
+            ratio = assigned / target
+            if ratio < 0.6:
+                score += 1.5
+            elif ratio < 0.9:
+                score += 0.6
+            elif ratio > 1.4:
+                score -= 1.5
+            elif ratio > 1.1:
+                score -= 0.6
+
+    # 7c. Cardio intensity match — slot labels encode whether the day
+    # wants intervals, steady-state, or easy recovery cardio. The
+    # intensity classification lives in `cardio.classify_cardio` so
+    # nothing outside that module depends on the seed's `is_compound`
+    # field for cardio semantics.
+    if classify_cardio(exercise) != "not_cardio":
+        label_lower = (slot.label or "").lower()
+        intensity = classify_cardio(exercise)
+        is_interval_ex = intensity == "intervals"
+        is_easy_ex = intensity == "easy"
+        wants_intervals = (
+            "interval" in label_lower
+            or "sprint" in label_lower
+            or "main" in label_lower
+        )
+        wants_steady = (
+            "steady" in label_lower
+            or "warmup" in label_lower
+            or "cooldown" in label_lower
+            or "spin" in label_lower
+            or "zone 2" in label_lower
+            or "tempo" in label_lower
+        )
+        wants_easy = (
+            "easy" in label_lower
+            or "recovery" in label_lower
+            or "gentle" in label_lower
+        )
+        if wants_easy:
+            # Recovery / stress-relief labels hard-ban intervals. Easy
+            # cardio gets the biggest bonus; steady still fine.
+            if is_interval_ex:
+                score -= 5.0
+            elif is_easy_ex:
+                score += 3.0
+            else:
+                score += 1.5
+        elif wants_intervals and is_interval_ex:
+            score += 2.5
+        elif wants_intervals and not is_interval_ex:
+            score -= 2.5
+        elif wants_steady and not is_interval_ex:
+            score += 2.5
+        elif wants_steady and is_interval_ex:
+            score -= 2.5
+
+    # 8. Tiny deterministic jitter so ties between two equivalent
+    # candidates don't always pick the alphabetically-first one. Seeded
+    # by the user so the same user gets the same plan on repeat
+    # generations when nothing else has changed.
+    rng = random.Random(inputs.rng_seed + hash(exercise.get("slug", "")))
+    score += rng.random() * 0.1
+
+    return score
+
+
+def pick_for_slot(
+    all_exercises: list[dict],
+    slot: Slot,
+    inputs: PlannerInputs,
+    used_substitution_groups: set[str],
+    used_exercise_slugs: set[str],
+    history_familiarity: dict[str, int] | None = None,
+    *,
+    volume_targets: dict[str, int] | None = None,
+    volume_assigned: dict[str, float] | None = None,
+    injury_blocked_patterns: set[str] | None = None,
+    accepts_types: frozenset[str] | None = None,
+) -> dict | None:
+    """Pick the best exercise for one slot. Returns None if no candidate
+    survives the filter.
+
+    Tier-split rule:
+      For lift-focused goals (body_recomp, muscle_gain, strength) on
+      primary/secondary slots, loaded candidates and bodyweight
+      candidates are scored separately. The loaded pool is tried first.
+      Bodyweight only wins when the loaded pool is empty (e.g. the user
+      legitimately has no equipment). This guarantees a recomp user with
+      a full gym never gets "Bodyweight Squat" on their primary slot
+      just because the scoring margin was a jitter coin-flip.
+
+    For isolation/core slots — and for non-lift-focused goals like
+    fat_loss / general_health — the pool is NOT split; bodyweight and
+    loaded compete on score alone, because those contexts legitimately
+    allow bodyweight picks (bodyweight calf raise, planks, etc.).
+    """
+    owned = set(inputs.equipment_slugs)
+    disliked = {d.lower() for d in inputs.disliked_exercises}
+    candidates = filter_candidates(
+        all_exercises, slot, owned, disliked,
+        injury_blocked_patterns=injury_blocked_patterns,
+        accepts_types=accepts_types,
+    )
+    if not candidates:
+        return None
+
+    def _best_of(pool: list[dict]) -> dict | None:
+        if not pool:
+            return None
+        scored = [
+            (
+                score_candidate(
+                    c, slot, inputs,
+                    used_substitution_groups, used_exercise_slugs,
+                    history_familiarity,
+                    volume_targets=volume_targets,
+                    volume_assigned=volume_assigned,
+                ),
+                c,
+            )
+            for c in pool
+        ]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return scored[0][1]
+
+    bucket = _goal_bucket(inputs.goal)
+    is_lift_focused = bucket in _LIFT_FOCUSED_BUCKETS
+    split_pools = is_lift_focused and slot.role in ("primary", "secondary")
+
+    if split_pools:
+        loaded = [c for c in candidates if c.get("equipment_bucket") != "bodyweight"]
+        bodyweight = [c for c in candidates if c.get("equipment_bucket") == "bodyweight"]
+        return _best_of(loaded) or _best_of(bodyweight)
+
+    return _best_of(candidates)
+
+
+# ─── Layer 6 — Prescription assembler ────────────────────────────────────────
+
+
+@dataclass
+class Prescription:
+    sets: int
+    reps: str            # "6-8" / "10-15" / "30s" — free text for UI
+    rest_seconds: int
+    rir_target: float    # reps-in-reserve guidance
+
+
+def prescribe_sets_reps(
+    exercise: dict,
+    slot: Slot,
+    inputs: PlannerInputs,
+) -> Prescription:
+    """Assign sets, reps, rest, RIR for an exercise.
+
+    Reuses the rep-range logic from `WorkoutProgressionEngine._base_rep_range`
+    by re-implementing it inline so this module stays standalone. Numbers
+    chosen to match the engine exactly so live progression doesn't fight
+    the planner.
+    """
+    bucket = _goal_bucket(inputs.goal)
+    is_compound = exercise.get("is_compound", False)
+    is_isolation = not is_compound
+    role = slot.role
+
+    # ── Cardio short-circuit ──────────────────────────────────────────
+    # Cardio exercises live in a different units system (minutes /
+    # distance / rounds), not sets × reps × load. Dispatch by intensity
+    # via `classify_cardio` instead of reading `is_compound` here —
+    # that inference now lives in `cardio.py` and the rest of the
+    # planner stays ignorant of the seed's field encoding.
+    intensity = classify_cardio(exercise)
+    if intensity != "not_cardio":
+        if intensity == "intervals":
+            if role == "primary":
+                sets, reps, rest = 6, "30-45s", 90
+            elif role == "secondary":
+                sets, reps, rest = 3, "5 min", 60
+            else:  # cooldown
+                sets, reps, rest = 1, "3-5 min", 0
+            return Prescription(sets=sets, reps=reps, rest_seconds=rest, rir_target=1.0)
+        # Steady-state or easy cardio — single duration block.
+        if role == "primary":
+            sets, reps, rest = 1, "25-40 min", 0
+        elif role == "secondary":
+            sets, reps, rest = 1, "5-10 min", 0
+        else:  # cooldown / isolation slot
+            sets, reps, rest = 1, "3-5 min", 0
+        return Prescription(sets=sets, reps=reps, rest_seconds=rest, rir_target=1.0)
+
+    # ── Sets ───────────────────────────────────────────────────────────
+    if role == "primary" and is_compound:
+        sets = 4 if inputs.experience != "beginner" else 3
+    elif role == "primary":
+        sets = 3
+    elif role == "secondary":
+        sets = 3
+    elif role == "core":
+        sets = 3
+    else:  # isolation
+        sets = 3
+
+    # ── Reps ───────────────────────────────────────────────────────────
+    if bucket == "strength":
+        if is_compound and role == "primary":
+            reps = "4-6"
+            rest = 180
+            rir = 1.5
+        elif is_compound:
+            reps = "5-8"
+            rest = 150
+            rir = 2.0
+        else:
+            reps = "8-12"
+            rest = 90
+            rir = 2.0
+    elif bucket == "muscle_gain":
+        if is_compound and role == "primary":
+            reps = "6-8"
+            rest = 150
+            rir = 1.5
+        elif is_compound:
+            reps = "8-10"
+            rest = 120
+            rir = 2.0
+        else:
+            reps = "10-15"
+            rest = 75
+            rir = 1.5
+    elif bucket == "fat_loss":
+        if is_compound and role == "primary":
+            reps = "6-10"
+            rest = 120
+            rir = 2.0
+        elif is_compound:
+            reps = "8-12"
+            rest = 90
+            rir = 2.0
+        else:
+            reps = "12-15"
+            rest = 60
+            rir = 1.5
+    elif bucket == "endurance":
+        # Endurance strength-maintenance days — enough load to keep
+        # muscle mass without fighting recovery from cardio. Low sets,
+        # mid-rep hypertrophy range, short rest.
+        if is_compound and role == "primary":
+            reps = "6-10"
+            rest = 120
+            rir = 2.5
+        elif is_compound:
+            reps = "8-12"
+            rest = 90
+            rir = 2.5
+        else:
+            reps = "12-15"
+            rest = 60
+            rir = 2.0
+    elif bucket == "athletic_performance":
+        # Hybrid strength days inside an athletic plan lean on power
+        # and explosive compound work: low reps, longer rest, higher
+        # RIR buffer so quality stays high through the week's cardio
+        # and conditioning days.
+        if is_compound and role == "primary":
+            reps = "3-5"
+            rest = 180
+            rir = 2.0
+        elif is_compound:
+            reps = "5-8"
+            rest = 150
+            rir = 2.0
+        else:
+            reps = "8-12"
+            rest = 75
+            rir = 2.0
+    else:  # body_recomp / general_health / maintain
+        if is_compound and role == "primary":
+            reps = "6-8"
+            rest = 150
+            rir = 2.0
+        elif is_compound:
+            reps = "8-12"
+            rest = 90
+            rir = 2.0
+        else:
+            reps = "10-15"
+            rest = 60
+            rir = 1.5
+
+    # ── Override for time-based exercises ─────────────────────────────
+    if exercise.get("default_tracking_mode") == "time":
+        reps = "30-45s"
+    elif exercise.get("default_tracking_mode") == "distance":
+        reps = "20-30 yds"
+
+    # ── Focused-muscle set bump (goal-gated) ──────────────────────────
+    # When the user declared a focused muscle AND the exercise trains
+    # it as a primary or secondary mover AND the goal bucket is one
+    # where extra volume is productive (hypertrophy / recomp / strength),
+    # bump sets by +1 capped at 5. Not applied to cardio exercises,
+    # fat_loss (fatigue risk), endurance/athletic (different stimulus),
+    # or general_health/maintain (lower fatigue by design).
+    _FOCUS_SET_BUMP_BUCKETS = {"muscle_gain", "body_recomp", "strength"}
+    if (
+        inputs.focused_muscle
+        and bucket in _FOCUS_SET_BUMP_BUCKETS
+        and role in ("primary", "secondary")
+        and exercise.get("movement_pattern") != "cardio"
+    ):
+        primary_muscle = exercise.get("primary_muscle")
+        secondary_muscles = exercise.get("secondary_muscles") or []
+        hits_focus = (
+            primary_muscle == inputs.focused_muscle
+            or inputs.focused_muscle in secondary_muscles
+        )
+        if hits_focus:
+            sets = min(5, sets + 1)
+
+    # ── Beginner cap: never more than 3 working sets per exercise ─────
+    if inputs.experience == "beginner":
+        sets = min(sets, 3)
+
+    return Prescription(sets=sets, reps=reps, rest_seconds=rest, rir_target=rir)
+
+
+# ─── Layer 7 — Top-level orchestrator ────────────────────────────────────────
+
+
+def _equipment_label(exercise: dict) -> str:
+    """Build a human-readable equipment label for the planner output.
+
+    Old logic: `", ".join(slug for required) or "bodyweight"`.
+    Problem: many seed entries list dumbbells / barbell as `required:
+    False` (because the user could in theory go bodyweight), which made
+    Goblet Squat / Sumo Squat / Walking Lunges all label as "bodyweight"
+    in the output even though they're loaded movements.
+
+    New logic, in priority order:
+      1. Required primary or support slugs (the canonical needs)
+      2. Any primary slugs (even if `required=False`) — handles "Goblet
+         Squat → dumbbells" where the load is technically optional
+      3. Literal "bodyweight" only when the bucket is actually bodyweight
+      4. First slug in the equipment list as a last-resort fallback
+    """
+    eq = exercise.get("equipment") or []
+    required_named = [
+        e["slug"] for e in eq
+        if e.get("required") and e.get("role") in ("primary", "support")
+    ]
+    if required_named:
+        return ", ".join(required_named)
+    primary_named = [e["slug"] for e in eq if e.get("role") == "primary"]
+    if primary_named:
+        return ", ".join(primary_named)
+    if exercise.get("equipment_bucket") == "bodyweight":
+        return "bodyweight"
+    if eq:
+        return eq[0].get("slug", "bodyweight")
+    return "bodyweight"
+
+
+
+def _stamp_load_metadata(
+    out_ex: dict,
+    *,
+    exercise: dict,
+    prescription,
+    role: str,
+    goal_bucket: str,
+    experience: str,
+    perf_profiles: dict | None,
+    all_exercises_by_slug: dict | None,
+) -> None:
+    """Attach deterministic load recommendation + set-scheme metadata
+    to a planner output exercise dict IN PLACE.
+
+    Pulled out of `generate_workout_plan` so the main pipeline stays
+    readable. Silently no-ops when the caller didn't pass performance
+    profiles — in that case the plan still carries a set scheme (with
+    null target loads) so the UI can render set-role pills without
+    needing history.
+
+    Non-load exercises (cardio, mobility, recovery, bodyweight timed
+    holds) explicitly skip weight recommendation — there's no
+    sensible "target weight" for a zone-2 bike session or a 30s
+    plank, and leaving `target_weight_lbs` stamped made the plan
+    review prompt show nonsense like "Treadmill Intervals at 140 lb".
+    """
+    from .recommendation import recommend_starting_weight
+    from .set_programming import build_set_scheme, parse_rep_range
+
+    target_w: float | None = None
+    rec_source: str | None = None
+    rec_confidence: float | None = None
+    rec_reason: str | None = None
+
+    # Load recommendation only applies to lifting work. Skip outright
+    # for cardio / mobility / recovery / timed holds / bodyweight.
+    training_type = (exercise.get("training_type") or "").lower()
+    primary_muscle = (exercise.get("primary_muscle") or "").lower()
+    equipment_bucket = (exercise.get("equipment_bucket") or "").lower()
+    rep_range = parse_rep_range(prescription.reps or "")
+    is_cardio_or_mobility = (
+        training_type in ("conditioning", "cardio", "mobility", "recovery")
+        or primary_muscle == "cardio"
+        or equipment_bucket in ("treadmill", "stationary_bike", "rowing_machine", "jump_rope", "elliptical")
+    )
+    is_timed_only = rep_range is None  # "30s", "3-5 min", "25-40 min", etc.
+    skip_load = is_cardio_or_mobility or is_timed_only
+
+    if not skip_load and perf_profiles is not None and all_exercises_by_slug is not None:
+        try:
+            rec = recommend_starting_weight(
+                exercise,
+                perf_profiles,
+                all_exercises_by_slug,
+                target_reps=prescription.reps,
+                experience=experience,
+            )
+            if rec.weight_lbs > 0:
+                target_w = rec.weight_lbs
+            rec_source = rec.source
+            rec_confidence = rec.confidence
+            rec_reason = rec.reason
+        except Exception as exc:  # defensive — never crash the planner
+            print(f"[workout_planner] starting-weight recommendation failed for {exercise.get('slug')}: {exc}")
+
+    scheme = build_set_scheme(
+        exercise,
+        total_sets=prescription.sets,
+        reps=prescription.reps,
+        rir_target=prescription.rir_target,
+        target_weight_lbs=target_w,
+        goal_bucket=goal_bucket,
+        role=role,
+        experience=experience,
+    )
+
+    out_ex["targetWeightLbs"] = target_w
+    out_ex["weightRecommendationSource"] = rec_source
+    out_ex["weightRecommendationConfidence"] = rec_confidence
+    out_ex["weightRecommendationReason"] = rec_reason
+    out_ex["setScheme"] = [s.to_dict() for s in scheme]
+
+
+def generate_workout_plan(
+    inputs: PlannerInputs,
+    all_exercises: list[dict],
+    history_familiarity: dict[str, int] | None = None,
+    *,
+    perf_profiles: dict | None = None,
+) -> dict:
+    """Build a complete plan dict in the same shape `_call_workout_ai` returns:
+
+        {
+          "trainerNote": "",   # planner doesn't write copy — caller can fill
+          "workout_plan": {
+            "name": "...",
+            "totalDays": int,
+            "days": [
+              {
+                "day": "Day 1",
+                "focus": "Push",
+                "exercises": [
+                  {"name": ..., "sets": int, "reps": str, "restSeconds": int, "equipment": str},
+                  ...
+                ],
+              },
+              ...
+            ],
+          },
+        }
+
+    The caller (plans.py) can wrap the result in `canonicalize_workout_exercises`
+    if it wants the same equipment-string normalization the AI path uses,
+    though for this planner's output it's a no-op since names come straight
+    from the seed.
+    """
+    # ── Multi-goal planning pipeline ──────────────────────────────
+    # 1. Resolve a GoalProfile from the user's goal id.
+    # 2. Generate a weekly DayArchetype recipe from (profile, days).
+    # 3. For each archetype, get its slot list via the archetype
+    #    dispatch table (which reuses the lifting / cardio / mobility
+    #    slot builders below).
+    # 4. Prescription dispatch happens per slot via `prescribe_for_slot`
+    #    so cardio slots get duration-shaped reps, mobility slots get
+    #    holds/flows, lifting slots get sets × reps × rest.
+    # Everything else (history, volume audit, focused-muscle deficit
+    # pass, injury filtering) runs on top of this new structure.
+    from .goal_profiles import goal_profile_for
+    from .weekly_recipe import generate_weekly_recipe
+    from .prescriptions import prescribe_for_slot
+    from .archetypes import ARCHETYPE_META, DayArchetype
+    from .day_templates import archetype_to_slots, archetype_display_name
+
+    profile = goal_profile_for(
+        inputs.goal,
+        experience=inputs.experience,
+        days_per_week=inputs.days_per_week,
+        session_minutes=inputs.session_minutes,
+    )
+    # Split selection is a LIFTING SUBSYSTEM — only consulted when the
+    # weekly recipe needs a traditional split for lifting-dominant
+    # modes. Endurance / mobility / recovery / athletic modes build
+    # their archetype sequence directly in `generate_weekly_recipe`.
+    lifting_split = (
+        pick_split(inputs)
+        if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
+        else None
+    )
+    recipe = generate_weekly_recipe(
+        profile,
+        inputs.days_per_week,
+        lifting_split=lifting_split,
+        recent_focus_buckets=inputs.recent_focus_buckets,
+    )
+    print(
+        f"[workout_planner] mode={profile.planner_mode} "
+        f"days={inputs.days_per_week} recipe=[" +
+        ", ".join(a.value for a in recipe) + "]"
+    )
+    # Build a concrete (name, slots, archetype) sequence from the recipe.
+    # Density trimming is now archetype-aware: the `category` argument
+    # picks a role→minutes cost map per day type so a 30-min zone2
+    # session doesn't trim like a 30-min lifting session.
+    templates = []
+    for idx, archetype in enumerate(recipe):
+        meta = ARCHETYPE_META[archetype]
+        slots = archetype_to_slots(archetype, idx, inputs.days_per_week)
+        name = archetype_display_name(archetype, idx, recipe)
+        slots = density_adjust_slots(
+            slots, inputs.session_minutes, category=meta.category,
+        )
+        templates.append((name, slots, archetype))
+    targets = weekly_set_targets(inputs)
+    # Injury-aware movement-pattern blocklist. Built once from the
+    # user's injury tags and passed into every slot pick.
+    blocked_patterns = _injury_blocked_patterns(inputs.injuries)
+    if blocked_patterns:
+        print(f"[workout_planner] injury-blocked patterns: {sorted(blocked_patterns)}")
+    # Running tally of assigned working sets per primary muscle. The
+    # scorer reads this every pick and nudges selection toward muscles
+    # under target and away from muscles over target. Primary muscles
+    # count at 1.0, secondary muscles at 0.5 — standard practice since
+    # they receive real stimulus but less than the primary mover.
+    assigned: dict[str, float] = {}
+
+    def _credit(ex: dict, sets: int) -> None:
+        pm = ex.get("primary_muscle") or ""
+        if pm:
+            assigned[pm] = assigned.get(pm, 0.0) + float(sets)
+        for sm in ex.get("secondary_muscles") or []:
+            if not sm:
+                continue
+            assigned[sm] = assigned.get(sm, 0.0) + float(sets) * 0.5
+
+    used_substitution_groups: set[str] = set()
+    used_exercise_slugs: set[str] = set()
+
+    # Index once for load-recommendation lookups (transfer logic in
+    # recommend_starting_weight iterates over this dict). Tolerates
+    # missing slugs — rows without a slug simply can't be a source
+    # for transfer anyway.
+    all_exercises_by_slug: dict[str, dict] = {
+        ex["slug"]: ex for ex in all_exercises if ex.get("slug")
+    }
+    goal_bucket = profile.bucket
+
+    days_out: list[dict] = []
+    for day_idx, (day_name, slots, archetype) in enumerate(templates):
+        # Focus label comes from the archetype metadata, not from
+        # splitting the display name.
+        meta = ARCHETYPE_META[archetype]
+        focus = meta.default_name
+        accepts_types = meta.accepts_types
+        exercises_out: list[dict] = []
+        for slot in slots:
+            # Per-slot type override: strength-slot inside a hybrid
+            # circuit day still wants `{"strength"}`; a cardio
+            # finisher inside the same day wants `{"cardio"}`. The
+            # slot's movement_pattern tells us which one.
+            slot_accepts = (
+                frozenset({"cardio"}) if slot.movement_pattern == "cardio"
+                else frozenset({"mobility"}) if slot.movement_pattern == "mobility"
+                else frozenset({"strength"}) if "strength" in accepts_types
+                else accepts_types
+            )
+            ex = pick_for_slot(
+                all_exercises, slot, inputs,
+                used_substitution_groups, used_exercise_slugs,
+                history_familiarity,
+                volume_targets=targets,
+                volume_assigned=assigned,
+                injury_blocked_patterns=blocked_patterns,
+                accepts_types=slot_accepts,
+            )
+            if ex is None:
+                print(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
+                continue
+            prescription = prescribe_for_slot(archetype, slot, ex, inputs)
+            equipment_label = _equipment_label(ex)
+            out_ex = {
+                "name": ex["name"],
+                "sets": prescription.sets,
+                "reps": prescription.reps,
+                "restSeconds": prescription.rest_seconds,
+                "equipment": equipment_label,
+                # Internal metadata the canonicalizer + progression engine
+                # can read. Frontend ignores unknown keys.
+                "_slug": ex.get("slug"),
+                "_slot": slot.label,
+                "_role": slot.role,
+                "_rir_target": prescription.rir_target,
+                "_primary_muscle": ex.get("primary_muscle"),
+                "_secondary_muscles": list(ex.get("secondary_muscles") or []),
+                "_archetype": archetype.value,
+                "_training_type": meta.training_type,
+            }
+            _stamp_load_metadata(
+                out_ex,
+                exercise=ex,
+                prescription=prescription,
+                role=slot.role,
+                goal_bucket=goal_bucket,
+                experience=inputs.experience,
+                perf_profiles=perf_profiles,
+                all_exercises_by_slug=all_exercises_by_slug,
+            )
+            exercises_out.append(out_ex)
+            _credit(ex, prescription.sets)
+            sub = ex.get("substitution_group")
+            if sub:
+                used_substitution_groups.add(sub)
+            if ex.get("slug"):
+                used_exercise_slugs.add(ex["slug"])
+        days_out.append({
+            "day": day_name,
+            "focus": focus,
+            "archetype": archetype.value,
+            "category": meta.category,
+            "exercises": exercises_out,
+        })
+
+    # ── Focused-muscle deficit pass ───────────────────────────────────
+    # Only fires for lifting-oriented planner modes. Tacking a strength
+    # isolation accessory onto an endurance / mobility / recovery /
+    # maintain plan would undermine the plan's primary goal — a user
+    # asking for "glute focus" inside a flexibility plan doesn't want
+    # a bonus glute bridge on their stretch day. Athletic mode is
+    # included because it has real lifting days and bodybuilding-style
+    # muscle emphasis is coherent there.
+    _FOCUS_BACKFILL_MODES = {"lifting", "fat_loss_mix", "lifting_plus_cardio", "athletic"}
+    fm = inputs.focused_muscle
+    if (
+        fm
+        and targets.get(fm, 0) > 0
+        and profile.planner_mode in _FOCUS_BACKFILL_MODES
+    ):
+        deficit = targets[fm] - assigned.get(fm, 0.0)
+        if deficit >= 1.0:
+            host_day_idx = _find_best_accessory_host_day(days_out, fm)
+            if host_day_idx is not None:
+                slot = Slot("Focus Accessory", "isolation", fm, "isolation")
+                ex = pick_for_slot(
+                    all_exercises, slot, inputs,
+                    used_substitution_groups, used_exercise_slugs,
+                    history_familiarity,
+                    volume_targets=targets,
+                    volume_assigned=assigned,
+                    injury_blocked_patterns=blocked_patterns,
+                    accepts_types=frozenset({"strength"}),
+                )
+                if ex is not None:
+                    pres = prescribe_sets_reps(ex, slot, inputs)
+                    out_ex = {
+                        "name": ex["name"],
+                        "sets": pres.sets,
+                        "reps": pres.reps,
+                        "restSeconds": pres.rest_seconds,
+                        "equipment": _equipment_label(ex),
+                        "_slug": ex.get("slug"),
+                        "_slot": slot.label,
+                        "_role": slot.role,
+                        "_rir_target": pres.rir_target,
+                        "_primary_muscle": ex.get("primary_muscle"),
+                        "_secondary_muscles": list(ex.get("secondary_muscles") or []),
+                    }
+                    _stamp_load_metadata(
+                        out_ex,
+                        exercise=ex,
+                        prescription=pres,
+                        role=slot.role,
+                        goal_bucket=goal_bucket,
+                        experience=inputs.experience,
+                        perf_profiles=perf_profiles,
+                        all_exercises_by_slug=all_exercises_by_slug,
+                    )
+                    days_out[host_day_idx]["exercises"].append(out_ex)
+                    _credit(ex, pres.sets)
+
+    # Volume audit attached to the plan for transparency. Clients that
+    # don't read it ignore it; the test suite uses it to assert the
+    # volume balancer actually shifted something.
+    volume_audit = {
+        "targets": targets,
+        "assigned": {k: round(v, 1) for k, v in assigned.items()},
+        "focused_muscle": fm,
+    }
+
+    plan_name_suffix = (
+        lifting_split.replace("_", " ").title()
+        if lifting_split
+        else profile.planner_mode.replace("_", " ").title()
+    )
+    return {
+        "trainerNote": "",  # left empty so the caller can fill via AI if desired
+        "workout_plan": {
+            "name": f"{profile.label} — {plan_name_suffix}",
+            "totalDays": inputs.days_per_week,
+            "days": days_out,
+            "volume_audit": volume_audit,
+            "planner_mode": profile.planner_mode,
+            "goal_bucket": profile.bucket,
+        },
+    }
+
+
+def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | None:
+    """Pick which day should host an extra accessory set for `muscle`.
+
+    Preference ladder (lower priority number = preferred):
+
+      0. A day that hits the muscle as a SECONDARY mover (and not
+         primary). These days touch the muscle without being near MRV,
+         so adding an accessory distributes volume without stacking on
+         an already-heavy primary day.
+      1. A day that hits the muscle as a PRIMARY mover. Grouped
+         recovery, but closer to MRV — second choice.
+      2. A day that doesn't train the muscle at all. Last resort — we
+         still pick the least-loaded one to distribute session length.
+
+    Within each priority band, ties break on fewest total exercises so
+    we don't pile onto an already-full session. The old implementation
+    only checked `_primary_muscle` even though the docstring promised
+    primary-OR-secondary detection — that's the bug this fixes."""
+    if not days_out:
+        return None
+    scored: list[tuple[int, int, int]] = []  # (priority, ex_count, idx)
+    for idx, day in enumerate(days_out):
+        exs = day.get("exercises") or []
+        hits_primary = any(ex.get("_primary_muscle") == muscle for ex in exs)
+        hits_secondary = any(
+            muscle in (ex.get("_secondary_muscles") or []) for ex in exs
+        )
+        if hits_secondary and not hits_primary:
+            priority = 0
+        elif hits_primary:
+            priority = 1
+        else:
+            priority = 2
+        scored.append((priority, len(exs), idx))
+    scored.sort()
+    return scored[0][2]
+
+
+
+
+# Injury tags → movement patterns to exclude. Keys are lower-cased and
+# whitespace/punctuation is stripped before lookup. Prefix match is
+# also attempted so "left_knee" resolves via the "knee" entry.
+#
+# These are conservative defaults a real trainer would apply — not a
+# medical recommendation. Users can always override by toggling the
+# specific exercise off in their disliked list.
+_INJURY_BLOCKED_PATTERNS: dict[str, set[str]] = {
+    "shoulder":             {"vertical_press"},
+    "rotator_cuff":         {"vertical_press"},
+    "shoulder_impingement": {"vertical_press"},
+    "ac_joint":             {"vertical_press"},
+    "lower_back":           {"hinge"},
+    "low_back":             {"hinge"},
+    "lumbar":               {"hinge"},
+    "herniated_disc":       {"hinge", "squat"},
+    "sciatica":             {"hinge"},
+    "knee":                 {"lunge"},
+    "patellar":             {"lunge"},
+    "patellar_tendonitis":  {"lunge"},
+    "meniscus":             {"squat", "lunge"},
+    "acl":                  {"squat", "lunge"},
+    "mcl":                  {"lunge"},
+    "hip":                  {"hinge"},
+    "hip_flexor":           {"hinge"},
+    "ankle":                {"lunge"},
+    "achilles":             {"lunge"},
+    # Elbow / wrist are tracked so future scorer penalties can read
+    # them, but they don't block a whole movement pattern today.
+    "elbow":                set(),
+    "tennis_elbow":         set(),
+    "golfer_elbow":         set(),
+    "wrist":                set(),
+}
+
+
+def _injury_blocked_patterns(injuries: tuple[str, ...] | list[str] | None) -> set[str]:
+    """Return the union of movement patterns blocked by the user's
+    injury tags. Tags are normalized (lowercase, underscores) and
+    matched against `_INJURY_BLOCKED_PATTERNS` with a substring
+    fallback so `"left knee pain"` still resolves via `"knee"`."""
+    if not injuries:
+        return set()
+    blocked: set[str] = set()
+    for inj in injuries:
+        if not inj:
+            continue
+        key = "".join(
+            ch if ch.isalnum() or ch == "_" else "_"
+            for ch in str(inj).lower().strip()
+        )
+        # Exact match first
+        if key in _INJURY_BLOCKED_PATTERNS:
+            blocked |= _INJURY_BLOCKED_PATTERNS[key]
+            continue
+        # Substring fallback — "left_knee_pain" → "knee"
+        for known, patterns in _INJURY_BLOCKED_PATTERNS.items():
+            if known and known in key:
+                blocked |= patterns
+    return blocked
+
+
+# ─── Phase 2 placeholder — session-to-session progression ───────────────────
+
+
+def propose_session_targets_from_history(
+    next_plan: dict,
+    history: list[dict],
+    *,
+    goal_bucket: str = "muscle_gain",
+    experience: str = "intermediate",
+) -> dict:
+    """Stamp next-session target loads + set schemes onto `next_plan`
+    based on the user's recent completed sets.
+
+    `history` is a list of exercise-result dicts in this shape:
+
+        {
+          "slug": str,
+          "sets": [{"reps": int, "weight_lbs": float, "rir": float?}, ...],
+          "performed_on": date (optional, most-recent wins),
+        }
+
+    For every exercise in every day of `next_plan["workout_plan"]`, we
+    look up the most recent matching history entry by slug, run it
+    through `recommend_next_session_load`, and re-build the set scheme
+    with the new target load. Exercises without history are left
+    untouched (the `generate_workout_plan` starting-weight pass may
+    have already stamped a target; if not, the set scheme will carry
+    null loads and the frontend falls back to the live
+    `/recommend-weight` endpoint at session start).
+
+    This function MUTATES `next_plan` for convenience (matching the
+    pattern in `propagate_session_targets` in history.py) and also
+    returns it so callers can chain.
+    """
+    from .set_programming import (
+        build_set_scheme,
+        parse_rep_range,
+        recommend_next_session_load,
+    )
+
+    if not isinstance(next_plan, dict) or "workout_plan" not in next_plan:
+        return next_plan
+
+    # Index history by slug → most-recent entry.
+    latest_by_slug: dict[str, dict] = {}
+    for entry in history or []:
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        prev = latest_by_slug.get(slug)
+        if prev is None:
+            latest_by_slug[slug] = entry
+            continue
+        a = entry.get("performed_on") or 0
+        b = prev.get("performed_on") or 0
+        if a and b:
+            if a > b:
+                latest_by_slug[slug] = entry
+        elif a and not b:
+            latest_by_slug[slug] = entry
+
+    days = next_plan.get("workout_plan", {}).get("days", [])
+    for day in days:
+        for ex_out in day.get("exercises", []):
+            slug = ex_out.get("_slug")
+            if not slug or slug not in latest_by_slug:
+                continue
+            last_sets = latest_by_slug[slug].get("sets") or []
+            if not last_sets:
+                continue
+
+            # Reconstruct a minimal "exercise dict" for the load
+            # helpers. The planner output already stores the fields
+            # they need (equipment_bucket lives on the seed row, but
+            # we recover is_compound via role + primary_muscle).
+            exercise_stub = {
+                "slug": slug,
+                "name": ex_out.get("name"),
+                "equipment_bucket": ex_out.get("_equipment_bucket") or _infer_bucket(ex_out.get("equipment", "")),
+                "primary_muscle": ex_out.get("_primary_muscle"),
+                "movement_pattern": ex_out.get("_movement_pattern"),
+                "is_compound": ex_out.get("_role") in ("primary", "compound"),
+            }
+
+            rng = parse_rep_range(ex_out.get("reps") or "")
+            # Build a synthetic "planned set 1" from the current exercise
+            # output so the next-session helper can read its progression
+            # mode off the FIRST set of the scheme.
+            scheme_dicts = ex_out.get("setScheme") or []
+            if scheme_dicts:
+                first = scheme_dicts[0]
+                from .set_programming import PlannedSet  # local import — avoid cycles
+                planned_first = PlannedSet(
+                    set_number=1,
+                    set_type=first.get("setType", "volume"),
+                    target_reps=first.get("targetReps", ex_out.get("reps", "")),
+                    target_rir=first.get("targetRir", ex_out.get("_rir_target", 2.0)),
+                    target_weight_lbs=first.get("targetWeightLbs"),
+                    progression_mode=first.get("progressionMode", "reps_first"),
+                )
+            else:
+                from .set_programming import PlannedSet
+                planned_first = PlannedSet(
+                    set_number=1,
+                    set_type="volume",
+                    target_reps=ex_out.get("reps", ""),
+                    target_rir=float(ex_out.get("_rir_target") or 2.0),
+                    target_weight_lbs=ex_out.get("targetWeightLbs"),
+                    progression_mode="reps_first",
+                )
+
+            new_w, action, reason = recommend_next_session_load(
+                exercise=exercise_stub,
+                planned_set=planned_first,
+                last_session_sets=last_sets,
+                rep_range=rng,
+            )
+
+            # Re-build the set scheme with the new anchor weight so the
+            # heavy-top / backoff loads reflect the update.
+            scheme = build_set_scheme(
+                exercise_stub,
+                total_sets=int(ex_out.get("sets") or 1),
+                reps=ex_out.get("reps", ""),
+                rir_target=float(ex_out.get("_rir_target") or 2.0),
+                target_weight_lbs=new_w,
+                goal_bucket=goal_bucket,
+                role=ex_out.get("_role", "accessory"),
+                experience=experience,
+            )
+
+            ex_out["targetWeightLbs"] = new_w
+            ex_out["weightRecommendationSource"] = "exact_history"
+            ex_out["weightRecommendationConfidence"] = 0.85
+            ex_out["weightRecommendationReason"] = reason
+            ex_out["progressionAction"] = action
+            ex_out["setScheme"] = [s.to_dict() for s in scheme]
+
+    return next_plan
+
+
+def _infer_bucket(equipment_label: str) -> str:
+    """Best-effort equipment bucket inference from a comma-joined
+    equipment label. Used only by `propose_session_targets_from_history`
+    when the planner's internal `_equipment_bucket` wasn't preserved.
+    """
+    s = (equipment_label or "").lower()
+    if "barbell" in s:
+        return "barbell"
+    if "dumbbell" in s:
+        return "dumbbell"
+    if "cable" in s:
+        return "cable"
+    if "machine" in s or "plate loaded" in s:
+        return "machine"
+    if "bodyweight" in s or not s:
+        return "bodyweight"
+    return "other"

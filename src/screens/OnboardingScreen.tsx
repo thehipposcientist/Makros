@@ -1406,7 +1406,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderAppleHealthStep = () => (
     <View>
       <Text style={styles.stepTitle}>Do you use an Apple Watch?</Text>
-      <Text style={styles.hint}>Connect Apple Health to get recovery insights, a health-enhanced fitness score, and readiness tracking based on your heart rate, sleep, and activity data.</Text>
+      <Text style={styles.hint}>Connect Apple Health to unlock recovery + readiness from your HR, sleep, and activity.</Text>
 
       <View style={{ gap: 12, marginTop: 16 }}>
         <TouchableOpacity

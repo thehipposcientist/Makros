@@ -199,7 +199,32 @@ export async function saveWorkoutSummary(summary: StoredWorkoutSummary): Promise
   try {
     const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
     const existing: StoredWorkoutSummary[] = raw ? JSON.parse(raw) : [];
-    existing.unshift(summary);
+    // Upsert by id so writing the same summary twice (e.g. initial
+    // save followed by feedback patch) doesn't create a duplicate row.
+    const idx = summary.id ? existing.findIndex(s => s.id === summary.id) : -1;
+    if (idx >= 0) {
+      existing[idx] = { ...existing[idx], ...summary };
+    } else {
+      existing.unshift(summary);
+    }
+    await AsyncStorage.setItem(SUMMARIES_KEY, JSON.stringify(existing.slice(0, 100)));
+  } catch {}
+}
+
+/** Patch fields onto an existing workout summary by id. No-op if the
+ *  summary doesn't exist yet. Used by handleSubmitFeedback to stamp
+ *  feedback onto a summary that was saved earlier in handleFinish. */
+export async function updateWorkoutSummary(
+  id: string,
+  patch: Partial<StoredWorkoutSummary>,
+): Promise<void> {
+  if (!id) return;
+  try {
+    const raw = await AsyncStorage.getItem(SUMMARIES_KEY);
+    const existing: StoredWorkoutSummary[] = raw ? JSON.parse(raw) : [];
+    const idx = existing.findIndex(s => s.id === id);
+    if (idx < 0) return;
+    existing[idx] = { ...existing[idx], ...patch };
     await AsyncStorage.setItem(SUMMARIES_KEY, JSON.stringify(existing.slice(0, 100)));
   } catch {}
 }

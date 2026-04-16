@@ -51,10 +51,108 @@ def _cleanup_orphaned_plan_jobs() -> None:
         print(f"[startup] orphan cleanup failed: {e}")
 
 
+def _startup_enrich_food_micros():
+    """Ensure every FoodNutrition row has the Layer 2 micronutrient
+    panel present in `extra_nutrients`. Runs on server startup as a
+    background thread so it never blocks boot.
+
+    Idempotent + incremental — only enriches rows missing Layer 2
+    keys. Gated by `STARTUP_ENRICH_FOODS_ENABLED=1` env var (on by
+    default; set to 0 to disable during testing)."""
+    import os
+    if os.getenv("STARTUP_ENRICH_FOODS_ENABLED", "1") != "1":
+        print("[startup] food micro enrichment DISABLED (set STARTUP_ENRICH_FOODS_ENABLED=1 to enable)")
+        return
+    import threading
+    def _worker():
+        try:
+            from sqlmodel import Session, select
+            from app.database import engine
+            from app.models import Food, FoodNutrition
+            from openai import OpenAI
+            from app.routers.ai.utils import get_openai_api_key
+
+            REQUIRED = [
+                "cholesterol", "saturated_fat", "monounsaturated_fat",
+                "polyunsaturated_fat", "omega_3", "omega_6",
+                "potassium", "calcium", "iron", "magnesium",
+                "vitamin_c", "vitamin_d", "vitamin_b12",
+            ]
+
+            with Session(engine) as db:
+                rows = db.exec(select(FoodNutrition)).all()
+                thin = [n for n in rows if any(k not in (n.extra_nutrients or {}) for k in REQUIRED)]
+                if not thin:
+                    print(f"[startup] food enrichment: {len(rows)} rows already complete, nothing to do")
+                    return
+                print(f"[startup] food enrichment: {len(thin)}/{len(rows)} rows missing Layer 2 data — starting background enrichment")
+
+            api_key = get_openai_api_key()
+            if not api_key:
+                print("[startup] food enrichment: no OpenAI key, skipping")
+                return
+            client = OpenAI(api_key=api_key)
+
+            # Import the enrichment helper from the script so we don't
+            # duplicate the prompt + sanity-check logic.
+            import sys
+            sys.path.insert(0, "/app")
+            try:
+                from enrich_food_micros import _ai_enrich_batch, BATCH_SIZE
+            except Exception as e:
+                print(f"[startup] food enrichment: failed to import helper: {e}")
+                return
+
+            with Session(engine) as db:
+                # Re-query in this session so the bind is attached.
+                rows = db.exec(select(FoodNutrition)).all()
+                thin_ids = {n.food_id for n in rows if any(k not in (n.extra_nutrients or {}) for k in REQUIRED)}
+                thin_foods = db.exec(select(Food).where(Food.id.in_(thin_ids))).all() if thin_ids else []
+                pairs = []
+                food_by_id = {f.id: f for f in thin_foods}
+                nut_by_id = {n.food_id: n for n in rows if n.food_id in thin_ids}
+                for fid in thin_ids:
+                    if fid in food_by_id and fid in nut_by_id:
+                        pairs.append((food_by_id[fid], nut_by_id[fid]))
+
+                enriched = 0
+                for start in range(0, len(pairs), BATCH_SIZE):
+                    batch = pairs[start : start + BATCH_SIZE]
+                    results = _ai_enrich_batch(client, batch)
+                    for food, nut in batch:
+                        micros = results.get(food.id)
+                        if not micros:
+                            continue
+                        extras = dict(getattr(nut, "extra_nutrients", None) or {})
+                        for k, v in micros.items():
+                            if k == "fiber":
+                                nut.fiber = v
+                            elif k == "sugar":
+                                nut.sugar = v
+                            elif k == "sodium":
+                                nut.sodium_mg = v
+                            else:
+                                extras[k] = v
+                        for k in REQUIRED:
+                            if k not in extras:
+                                extras[k] = 0.0
+                        nut.extra_nutrients = extras
+                        db.add(nut)
+                        enriched += 1
+                    db.commit()
+                print(f"[startup] food enrichment: DONE — enriched {enriched}/{len(pairs)} foods")
+        except Exception as e:
+            print(f"[startup] food enrichment failed (non-fatal): {e}")
+
+    threading.Thread(target=_worker, daemon=True, name="enrich-food-micros").start()
+    print("[startup] food enrichment kicked off in background thread")
+
+
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
     _cleanup_orphaned_plan_jobs()
+    _startup_enrich_food_micros()
 
 
 app.include_router(auth.router)

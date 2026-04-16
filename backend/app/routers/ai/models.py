@@ -152,6 +152,16 @@ class WeightRecommendRequest(BaseModel):
     allTimeBestReps: int | None = None
     lastSessionBestWeightLbs: float | None = None
     lastSessionBestReps: int | None = None
+    # Propagated next-session target from the deterministic workout
+    # planner. When present, this is the preferred anchor for the first
+    # set of the session — it already reflects the user's history + the
+    # goal-specific progression rules.
+    plannedTargetWeightLbs: float | None = None
+    # Optional canonical slug for the active exercise. When the client
+    # knows the slug (from the generated plan), passing it here lets the
+    # recommend-weight endpoint skip a `Exercise.name.ilike` lookup and
+    # run the layered performance profile / transfer pipeline directly.
+    exerciseSlug: str | None = None
 
 
 class TrainerQuestionRequest(BaseModel):
@@ -251,4 +261,45 @@ class WorkoutSummaryRequest(BaseModel):
     durationSeconds: int
     focus: str
     goal: str
+    weightLbs: float = 150.0
+
+
+class WarmupRequest(BaseModel):
+    focus: str
+    exercises: list[dict]                   # each has name + equipment
+    injuries: list[str] = []
+    experience: str | None = None
+    durationMinutes: int | None = 60
+
+
+class ValidateFoodMacrosRequest(BaseModel):
+    """Request to verify a single food's macros + micros against USDA
+    reference values. Used to upgrade a `custom_foods` entry from
+    `ai_estimated` to `ai_validated` (or to flag it as wrong)."""
+    name: str
+    servingLabel: str                       # e.g. "6 oz", "1 cup cooked"
+    calories: float
+    protein: float
+    carbs: float
+    fat: float
+    micronutrients: dict | None = None      # optional current values
+
+
+class PreSetRecommendRequest(BaseModel):
+    """Request body for `/ai/pre-set-recommendation`.
+
+    Sent when the user opens a set card BEFORE logging — no actual reps
+    yet. We return a structured SetRecommendation so the UI can show the
+    recommended weight/reps + the set's intent + a one-sentence rationale.
+    """
+    exerciseName: str
+    exerciseSlug: str | None = None
+    plannedSetNumber: int                   # 1-indexed; which set the user is about to do
+    plannedSets: list[dict] = []            # all PlannedSet dicts for the exercise
+    priorSetsThisSession: list[dict] = []   # CompletedSets for prior sets this session
+    lastSessionSets: list[dict] = []        # CompletedSets from most-recent comparable session
+    goal: str | None = None
+    experienceLevel: str | None = None
+    feelFromLastSet: str | None = None      # easy|good|hard|failure|pain
+    equipment: str | None = None
     weightLbs: float = 150.0

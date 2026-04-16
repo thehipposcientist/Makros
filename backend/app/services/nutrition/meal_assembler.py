@@ -247,12 +247,64 @@ def build_skeleton_prompt(
             f"across {variety_n} days."
         )
 
-    routine_block = ""
+    # Routine awareness. Two possible sources:
+    #   (a) `req.mealRoutine` — free-text the user typed during onboarding
+    #   (b) `req.routineMacros` + `req.routineSlots` — structured pinned
+    #       meals from the in-app routine UI. The macros are already
+    #       SUBTRACTED from the target the AI sees, and the meal COUNT
+    #       the AI is asked to generate is ALREADY reduced by the number
+    #       of pinned routines.
+    # Either way, the AI must NOT recreate the routine meals — they're
+    # overlaid onto the plan by the client after generation. We pass the
+    # info in purely as context so the AI picks complementary meals.
+    routine_parts: list[str] = []
+    structured_routine_count = len(getattr(req, "routineSlots", None) or [])
+    structured_routine_macros = getattr(req, "routineMacros", None) or {}
+    if structured_routine_count > 0 or structured_routine_macros:
+        rc_cal  = int(structured_routine_macros.get("calories", 0) or 0)
+        rc_prot = int(structured_routine_macros.get("protein", 0) or 0)
+        rc_carb = int(structured_routine_macros.get("carbs", 0) or 0)
+        rc_fat  = int(structured_routine_macros.get("fat", 0) or 0)
+        routine_parts.append(
+            f"\nPINNED ROUTINE MEALS (handled separately — do NOT recreate them):\n"
+            f"- The user has {structured_routine_count} fixed meal(s) already pinned "
+            f"that will be added to the final plan automatically.\n"
+            f"- Those pinned meals account for {rc_cal} cal / {rc_prot}g P / "
+            f"{rc_carb}g C / {rc_fat}g F already.\n"
+            f"- The macro target and meals-per-day count shown below are ALREADY "
+            f"reduced to account for these pinned meals. Your job is to generate "
+            f"the REMAINING meals that complement them — no duplicates, no similar "
+            f"concepts to fill the same role. If you see 'chicken rice bowl' as a "
+            f"routine and you pick 'chicken rice plate', that's a duplicate; pick "
+            f"a different protein/carb combination instead.\n"
+        )
     if req.mealRoutine:
-        routine_block = (
-            f"\nUSER'S FIXED MEAL ROUTINE (must appear verbatim in every template):\n"
+        routine_parts.append(
+            f"\nUSER'S MEAL HABIT NOTES (context only, describe what they normally eat):\n"
             f"{req.mealRoutine}\n"
         )
+    routine_block = "".join(routine_parts)
+
+    # Shared nutrition context — adds bodyweight, experience, secondary
+    # goal, weight trend, recent macro adherence, and last 3 days of
+    # completed workouts so the meal AI can make smarter picks (e.g.
+    # higher carbs on a day following a heavy legs session).
+    from .context import build_nutrition_context, format_for_prompt
+    # The active goal model: primaryGoal + targetFocus. Modifiers and
+    # secondaryGoal are deprecated (always empty).
+    _target_focus = getattr(req.goalSelection, "targetFocus", None) if req.goalSelection else getattr(req, "focusedMuscleGroup", None)
+    _nctx = build_nutrition_context(
+        goal=req.goalSelection.primaryGoal if req.goalSelection else req.goal,
+        secondary_goal=_target_focus,
+        experience=getattr(req, "experienceLevel", None),
+        bodyweight_lbs=getattr(getattr(req, "physicalStats", None), "weightLbs", None) if hasattr(req, "physicalStats") else getattr(req, "weightLbs", None),
+        target_weight_lbs=getattr(getattr(req, "goalDetails", None), "targetWeightLbs", None) if hasattr(req, "goalDetails") else None,
+        pace=getattr(getattr(req, "goalDetails", None), "pace", None) if hasattr(req, "goalDetails") else None,
+        dietary_preference=getattr(req, "dietaryPreference", None),
+        allergies=getattr(req, "allergies", None),
+        foods_available=allowed_foods,
+    )
+    user_context_block = format_for_prompt(_nctx)
 
     return f"""You are a registered dietitian. Pick meal concepts ONLY — no macros, no grams, no portions.
 
@@ -263,6 +315,7 @@ USER:
 - Goal: {req.goalSelection.primaryGoal if req.goalSelection else req.goal}
 - Daily targets (for context only, do NOT compute macros): {t_cal} cal / {t_prot}g P / {t_carbs}g C / {t_fat}g F
 {diet_context}
+{user_context_block}
 {routine_block}
 AVAILABLE FOODS — use ONLY these names, no substitutions, no additions:
 {foods_str}
@@ -1217,6 +1270,15 @@ def assemble_nutrition_response(
     meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     generate_count = max(0, meals_per_day - routine_count)
 
+    # Always log the inputs the assembler saw so it's obvious from the
+    # server log whether routines made it through the client → backend
+    # → worker hand-off. Pairs with [plan-gen] routine inputs in plans.py.
+    print(
+        f"[meal_assembler] INPUTS — mealsPerDay={meals_per_day} "
+        f"routineCount={routine_count} routineMacros=(cal={r_cal},p={r_prot},c={r_carb},f={r_fat}) "
+        f"→ generate_count={generate_count}"
+    )
+
     if r_cal > 0 or routine_count > 0:
         print(
             f"[meal_assembler] routine offset: -{r_cal} cal / -{r_prot}P / "
@@ -1306,6 +1368,44 @@ def assemble_nutrition_response(
             "carbs":    t_carbs,
             "fat":      t_fat,
         }
+
+    # Loud guarantee check — every outgoing template must contain exactly
+    # `generate_count` meals. Anything else means the skeleton builder or
+    # validator miscounted. Client overlays `routine_count` routines on
+    # top, so the final displayed count lands on `meals_per_day`.
+    for idx, tpl_out in enumerate(plans_list):
+        actual = len(tpl_out.get("meals") or [])
+        # Micronutrient coverage audit — count how many of the outgoing
+        # meals actually carry non-zero micros, and which fields are
+        # populated most/least. If coverage is low, the insight engine
+        # on the client has nothing to work with.
+        meals_with_micros = 0
+        micro_field_fills: dict[str, int] = {}
+        for m in tpl_out.get("meals") or []:
+            micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
+            nonzero = {k: v for k, v in micros.items() if isinstance(v, (int, float)) and v > 0}
+            if nonzero:
+                meals_with_micros += 1
+            for k in nonzero:
+                micro_field_fills[k] = micro_field_fills.get(k, 0) + 1
+        total_meals = max(1, len(tpl_out.get("meals") or []))
+        top_fields = sorted(micro_field_fills.items(), key=lambda kv: -kv[1])[:6]
+        print(
+            f"[meal_assembler] OUT template {idx}: meals={actual} "
+            f"(expected={generate_count}, +{routine_count} routine overlay), "
+            f"micro coverage={meals_with_micros}/{total_meals} meals, "
+            f"top micros={[f'{k}:{v}' for k, v in top_fields]}"
+        )
+        if actual != generate_count:
+            print(
+                f"[meal_assembler] WARN template {idx} meal count mismatch: "
+                f"expected {generate_count}, got {actual}"
+            )
+        if meals_with_micros == 0 and total_meals > 0:
+            print(
+                f"[meal_assembler] WARN template {idx} has ZERO micronutrient data — "
+                f"check enrichment path + DB seed (extra_nutrients JSON)"
+            )
 
     print(
         f"[meal_assembler] assembled {len(plans_list)} template(s) "

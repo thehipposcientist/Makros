@@ -102,7 +102,21 @@
       "Bash(/opt/homebrew/bin/npx tsc:*)",
       "Read(//usr/local/bin/**)",
       "Bash(find / -name node -type f)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(mkdir -p workout nutrition coach)",
+      "Bash(touch workout/__init__.py nutrition/__init__.py coach/__init__.py)",
+      "Bash(sed -i '' '225,780d' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(sed -n '220,235p' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(sed -i '' '846,949d' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(sed -n '840,855p' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(sed -i '' '1121,1178d' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(sed -n '1115,1130p' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/planner.py)",
+      "Bash(wc *)",
+      "Bash(pip3 show *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(command -v python)",
+      "Bash(command -v uvicorn)",
+      "Bash(lsof -iTCP -sTCP:LISTEN -P)"
     ]
   }
 }

@@ -13,6 +13,7 @@ import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore } from '../utils/mealTracker';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
+import { humanizeToken } from '../utils/exerciseGuide';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -50,31 +51,6 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-function strengthForSession(session: WorkoutSession): number {
-  return session.exercises.reduce((total, ex) => {
-    if (ex.sets.length === 0) return total;
-    const bestSet = ex.sets.reduce((best, set) => {
-      const bestScore = best.weightLbs * best.reps;
-      const setScore = set.weightLbs * set.reps;
-      return setScore > bestScore ? set : best;
-    }, ex.sets[0]);
-    return total + bestSet.weightLbs * bestSet.reps;
-  }, 0);
-}
-
-function buildStrengthTrend(history: WorkoutSession[]): StrengthPoint[] {
-  const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
-  const recent = sorted.slice(-8);
-  return recent.map(s => {
-    const d = new Date(s.date);
-    return {
-      key: s.id,
-      label: `${d.getMonth() + 1}/${d.getDate()}`,
-      score: Math.round(strengthForSession(s)),
-    };
-  });
 }
 
 /** Returns all data points for a specific exercise across history: {date, bestWeightLbs, totalVolume} */
@@ -121,7 +97,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
+  // Diet score now always exists (mealTracker returns a zeroed
+  // empty-state object instead of null). The card always renders so
+  // fresh users see "log a meal to start tracking" instead of nothing.
   const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
+  const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -135,6 +115,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         getProgressionInsights(authToken, p[0].exerciseName)
           .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
           .catch(() => null);
+      }
+      // Fetch estimated 1RMs for showcase compound lifts. Returns an
+      // empty array for users with no recent compound-lift history;
+      // the card handles the empty state.
+      if (authToken) {
+        import('../services/api').then(({ getOneRepMaxShowcase }) =>
+          getOneRepMaxShowcase(authToken)
+            .then(setOneRepMaxLifts)
+            .catch(() => setOneRepMaxLifts([]))
+        );
       }
     });
     if (authToken) {
@@ -238,61 +228,42 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
   };
 
-  const strengthTrend = buildStrengthTrend(history);
+  // Legacy per-session top-set aggregation left behind for any
+  // remaining references. New strength tracking is the pillar on the
+  // main fitness score card (backed by `build_performance_profile`
+  // Epley 1RMs and relative-to-bodyweight thresholds).
+  const strengthTrend: StrengthPoint[] = [];
   const overallStrength = strengthTrend.length
     ? Math.round(strengthTrend.reduce((sum, p) => sum + p.score, 0) / strengthTrend.length)
     : 0;
 
-  // ── Fitness Score (0–100) ──────────────────────────────────────────────────
-  const fitnessScore = (() => {
-    if (history.length === 0) return null;
-
-    // 1. Consistency (0–30): workouts in last 14 days vs target
-    const twoWeeksAgo = Date.now() - 14 * 86400000;
-    const recentCount = history.filter(s => +new Date(s.date) >= twoWeeksAgo && s.completed).length;
-    const target14 = (userProfile.daysPerWeek ?? 4) * 2;
-    const consistencyScore = Math.min(30, Math.round((recentCount / Math.max(1, target14)) * 30));
-
-    // 2. Strength Trend (0–25): are lifts going up?
-    let trendScore = 12; // neutral
-    if (strengthTrend.length >= 3) {
-      const firstHalf = strengthTrend.slice(0, Math.floor(strengthTrend.length / 2));
-      const secondHalf = strengthTrend.slice(Math.floor(strengthTrend.length / 2));
-      const avgFirst = firstHalf.reduce((s, p) => s + p.score, 0) / firstHalf.length;
-      const avgSecond = secondHalf.reduce((s, p) => s + p.score, 0) / secondHalf.length;
-      const pctChange = avgFirst > 0 ? ((avgSecond - avgFirst) / avgFirst) * 100 : 0;
-      trendScore = Math.min(25, Math.max(0, Math.round(12 + pctChange * 2)));
-    }
-
-    // 3. Volume (0–20): total sets in recent sessions
-    const recentSessions = history.filter(s => +new Date(s.date) >= twoWeeksAgo && s.completed);
-    const totalSets = recentSessions.reduce((sum, s) => sum + s.exercises.reduce((es, e) => es + e.sets.length, 0), 0);
-    const volumeScore = Math.min(20, Math.round((totalSets / Math.max(1, target14 * 16)) * 20));
-
-    // 4. Variety (0–15): unique exercises in last 14 days
-    const uniqueExercises = new Set(recentSessions.flatMap(s => s.exercises.map(e => e.name.toLowerCase())));
-    const varietyScore = Math.min(15, Math.round((uniqueExercises.size / 12) * 15));
-
-    // 5. Duration adherence (0–10): avg session near target
-    const targetMins = userProfile.workoutDurationMinutes ?? 60;
-    const avgDuration = recentSessions.length > 0
-      ? recentSessions.reduce((s, sess) => s + sess.durationSeconds, 0) / recentSessions.length / 60
-      : 0;
-    const durationRatio = targetMins > 0 ? avgDuration / targetMins : 0;
-    const durationScore = Math.min(10, Math.round(Math.max(0, 10 - Math.abs(1 - durationRatio) * 15)));
-
-    const total = consistencyScore + trendScore + volumeScore + varietyScore + durationScore;
-    return {
-      total: Math.min(100, total),
-      consistency: consistencyScore,
-      trend: trendScore,
-      volume: volumeScore,
-      variety: varietyScore,
-      duration: durationScore,
-      recentCount,
-      uniqueExercises: uniqueExercises.size,
-    };
-  })();
+  // ── 4-pillar composite fitness score ─────────────────────────────────────
+  // Deterministic score computed server-side from the user's
+  // performance profile + recent completions + bodyweight + sleep/RPE.
+  // See `backend/app/services/workout/fitness_score.py`. The old
+  // ad-hoc 5-component score (consistency/trend/volume/variety/duration)
+  // was removed because its pillars weren't grounded in anything — a
+  // user could hit "100" by logging 20 random exercises without ever
+  // getting stronger or doing cardio.
+  const [compositeFitness, setCompositeFitness] = useState<import('../services/api').FitnessCompositeScore | null>(null);
+  // Track the composite-fitness fetch state so the Records tab can
+  // show a skeleton while it's in flight instead of an empty flash.
+  const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
+  useEffect(() => {
+    if (!authToken) { setCompositeFitnessLoading(false); return; }
+    setCompositeFitnessLoading(true);
+    import('../services/api').then(({ getFitnessCompositeScore }) =>
+      getFitnessCompositeScore(authToken, {
+        daysPerWeek: userProfile.daysPerWeek,
+        bodyweightLbs: userProfile.physicalStats?.weightLbs,
+        recentSleepHours: healthSummary?.lastNightSleepHours ?? undefined,
+        avgSessionRpe: undefined,  // TODO wire DayState.session_rpe_avg once plumbed
+      })
+        .then(setCompositeFitness)
+        .catch(() => setCompositeFitness(null))
+        .finally(() => setCompositeFitnessLoading(false))
+    );
+  }, [authToken, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -342,8 +313,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>📊</Text>
-              <Text style={styles.emptyTitle}>No data yet</Text>
-              <Text style={styles.emptyBody}>Complete workouts and log sets to see your progress charts.</Text>
+              <Text style={styles.emptyTitle}>Log 3 workouts to unlock</Text>
+              <Text style={styles.emptyBody}>Charts load after your first few sessions with logged sets.</Text>
             </View>
           ) : (
             <>
@@ -435,9 +406,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : tab === 'prs' ? (
-        <ScrollView contentContainerStyle={styles.content}>
-          {/* ── Fitness Score Card ── */}
-          {fitnessScore && (
+        <ScrollView contentContainerStyle={styles.content} style={{ backgroundColor: tc.background }}>
+          {/* Skeleton placeholder while the fitness score is fetching.
+              Without this, tapping into Records flashes an empty tab
+              for the duration of the network round-trip. */}
+          {compositeFitnessLoading && !compositeFitness && (
+            <View style={[styles.fitnessScoreCard, { alignItems: 'center', justifyContent: 'center', minHeight: 200 }]}>
+              <ActivityIndicator color={tc.primary} />
+              <Text style={{ marginTop: 10, color: tc.textMuted, fontSize: 12 }}>
+                Loading your fitness score…
+              </Text>
+            </View>
+          )}
+          {/* ── 4-Pillar Fitness Score Card ── */}
+          {compositeFitness && (
             <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.fitnessScoreCard}>
               {/* Logo for share/export */}
@@ -446,42 +428,82 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 style={styles.shareCardLogo}
                 resizeMode="contain"
               />
+              {/* Plain-language verdict — never show a score without
+                  a one-line read the user can act on. */}
+              <Text style={styles.fitnessVerdict}>
+                {compositeFitness.total >= 80 ? "You're in elite shape."
+                  : compositeFitness.total >= 65 ? "You're trending strong."
+                  : compositeFitness.total >= 45 ? "You're building — keep going."
+                  : compositeFitness.total >= 25 ? "Early days. Consistency is the lever."
+                  : "Let's get moving."}
+              </Text>
               <View style={styles.fitnessScoreHeader}>
                 <View>
-                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE</Text>
-                  <Text style={styles.fitnessScoreSubtext}>Based on your last 14 days</Text>
+                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE · 14 DAYS</Text>
+                  <Text style={styles.fitnessScoreSubtext}>4-pillar composite</Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
-                  <Text style={styles.fitnessScoreValue}>{fitnessScore.total}</Text>
+                  <Text style={styles.fitnessScoreValue}>{Math.round(compositeFitness.total)}</Text>
                 </View>
               </View>
 
-              {/* Score rating */}
+              {/* Score rating — comes directly from the backend so the
+                  thresholds stay in one place (fitness_score._rating_for). */}
               <Text style={styles.fitnessScoreRating}>
-                {fitnessScore.total >= 80 ? '🔥 Elite' : fitnessScore.total >= 60 ? '💪 Strong' : fitnessScore.total >= 40 ? '📈 Building' : fitnessScore.total >= 20 ? '🌱 Starting' : '🏁 Get Moving'}
+                {compositeFitness.rating === 'Elite' ? '🔥 Elite'
+                  : compositeFitness.rating === 'Strong' ? '💪 Strong'
+                  : compositeFitness.rating === 'Solid' ? '📈 Solid'
+                  : compositeFitness.rating === 'Building' ? '🌱 Building'
+                  : '🏁 Starting'}
               </Text>
 
-              {/* Breakdown bars */}
+              {/* Pillar breakdown — each pillar is a 0-100 subscore
+                  with a human-readable reason string so the user can
+                  see *what* is pulling their score. Data quality dims
+                  partial/missing pillars so users know which inputs
+                  are sparse. */}
               <View style={styles.fitnessBreakdown}>
-                {([
-                  { label: 'Consistency', value: fitnessScore.consistency, max: 30, detail: `${fitnessScore.recentCount} workouts` },
-                  { label: 'Strength Trend', value: fitnessScore.trend, max: 25, detail: fitnessScore.trend >= 15 ? 'Improving' : fitnessScore.trend >= 10 ? 'Stable' : 'Declining' },
-                  { label: 'Volume', value: fitnessScore.volume, max: 20, detail: `Total sets logged` },
-                  { label: 'Variety', value: fitnessScore.variety, max: 15, detail: `${fitnessScore.uniqueExercises} exercises` },
-                  { label: 'Session Length', value: fitnessScore.duration, max: 10, detail: 'vs target' },
-                ] as const).map(item => (
-                  <View key={item.label} style={styles.fitnessBarRow}>
+                {compositeFitness.pillars.map(p => (
+                  <View key={p.name} style={styles.fitnessBarRow}>
                     <View style={styles.fitnessBarLabel}>
-                      <Text style={styles.fitnessBarLabelText}>{item.label}</Text>
-                      <Text style={styles.fitnessBarDetail}>{item.detail}</Text>
+                      <Text style={[
+                        styles.fitnessBarLabelText,
+                        p.dataQuality === 'missing' && { opacity: 0.55 },
+                      ]}>
+                        {p.name}
+                      </Text>
+                      <Text style={[
+                        styles.fitnessBarDetail,
+                        p.dataQuality === 'missing' && { opacity: 0.55 },
+                      ]} numberOfLines={2}>
+                        {p.reason}
+                      </Text>
                     </View>
                     <View style={styles.fitnessBarTrack}>
-                      <View style={[styles.fitnessBarFill, { width: `${Math.round((item.value / item.max) * 100)}%` as any }]} />
+                      <View style={[
+                        styles.fitnessBarFill,
+                        { width: `${Math.round(p.score)}%` as any },
+                        p.dataQuality === 'missing' && { opacity: 0.35 },
+                      ]} />
                     </View>
-                    <Text style={styles.fitnessBarScore}>{item.value}/{item.max}</Text>
+                    <Text style={styles.fitnessBarScore}>{Math.round(p.score)}</Text>
                   </View>
                 ))}
               </View>
+
+              {/* Apple Health not connected — quiet CTA so the user
+                  knows exactly what unlocks recovery instead of a
+                  silent gap. */}
+              {!healthScore && (
+                <View style={[styles.recoverySection, { borderTopColor: tc.border }]}>
+                  <View style={styles.recoveryHeader}>
+                    <Text style={styles.recoverySectionTitle}>Recovery</Text>
+                  </View>
+                  <Text style={[styles.recoveryAdvice, { color: tc.textMuted }]}>
+                    Connect Apple Health to track recovery, sleep, and resting HR.
+                  </Text>
+                </View>
+              )}
 
               {/* Recovery Marker (Apple Health) */}
               {healthScore && (
@@ -555,10 +577,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               users treat diet adherence with the same weight as workouts. */}
           {dietScore && (
             <View style={styles.fitnessScoreCard}>
+              <Text style={styles.fitnessVerdict}>
+                {dietScore.total >= 80 ? "Nutrition is dialed in."
+                  : dietScore.total >= 60 ? "Nutrition is on track."
+                  : dietScore.total >= 40 ? `${dietScore.mealsChecked} of ${dietScore.mealsExpected} meals logged — keep going.`
+                  : dietScore.total >= 20 ? "Log one more meal today to build the habit."
+                  : "Log a meal to unlock insights."}
+              </Text>
               <View style={styles.fitnessScoreHeader}>
                 <View>
-                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY</Text>
-                  <Text style={styles.fitnessScoreSubtext}>Based on your last 14 days</Text>
+                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY · 14 DAYS</Text>
+                  <Text style={styles.fitnessScoreSubtext}>
+                    {dietScore.mealsChecked} / {dietScore.mealsExpected} meals logged
+                  </Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
                   <Text style={styles.fitnessScoreValue}>{dietScore.total}</Text>
@@ -679,6 +710,51 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             )}
           </View>
 
+          {/* Estimated 1RM showcase — deterministic Epley estimates
+              from recent logged sessions for the main compound lifts.
+              Hidden when the user has no recent compound-lift data. */}
+          {oneRepMaxLifts.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
+              <View style={{
+                backgroundColor: tc.surfaceRaised,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: tc.border,
+                padding: 14,
+                gap: 10,
+              }}>
+                {oneRepMaxLifts.map(lift => (
+                  <View key={lift.slug} style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                  }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+                        {lift.name}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                        Top set: {lift.topWeightLbs} lb × {lift.topReps}
+                        {' · '}{lift.sessionCount} session{lift.sessionCount !== 1 ? 's' : ''}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
+                        {Math.round(lift.oneRepMaxLbs)}
+                      </Text>
+                      <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: -2 }}>lb 1RM</Text>
+                    </View>
+                  </View>
+                ))}
+                <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 2 }}>
+                  Epley estimates from your recent logged sets. Gets sharper as you log more sessions.
+                </Text>
+              </View>
+            </View>
+          )}
+
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>🏋️</Text>
@@ -738,19 +814,41 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View style={styles.emptyBox}>
                     <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
-                ) : filteredPrs.map((pr, i) => (
-                  <View key={i} style={styles.prCard}>
-                    <View style={styles.prLeft}>
-                      <Text style={styles.prName}>{pr.exerciseName}</Text>
-                      <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
+                ) : filteredPrs.map((pr, i) => {
+                  // Inline Epley 1RM only for compound lifts. Showing
+                  // an estimated 1RM on a 25 lb lateral raise or a
+                  // 12 lb cable curl is misleading — Epley breaks
+                  // down badly above 10 reps and isolation work
+                  // doesn't really map to a "1RM" in any meaningful
+                  // way. Pattern-match the exercise name against a
+                  // compound vocabulary and skip everything else.
+                  const lower = pr.exerciseName.toLowerCase();
+                  const isCompound = (
+                    /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
+                    && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
+                  );
+                  const est1rm = isCompound && pr.weightLbs > 0 && pr.reps > 0 && pr.reps <= 12
+                    ? Math.round(pr.weightLbs * (1 + pr.reps / 30))
+                    : null;
+                  return (
+                    <View key={i} style={styles.prCard}>
+                      <View style={styles.prLeft}>
+                        <Text style={styles.prName}>{pr.exerciseName}</Text>
+                        <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
+                        {est1rm != null && (
+                          <Text style={[styles.prMeta, { marginTop: 2, fontWeight: '600', color: tc.textPrimary }]}>
+                            ~{est1rm} lb est 1RM
+                          </Text>
+                        )}
+                      </View>
+                      <View style={styles.prRight}>
+                        <Text style={styles.prWeight}>{pr.weightLbs}</Text>
+                        <Text style={styles.prUnit}>lbs</Text>
+                        <Text style={styles.prReps}>{pr.reps} reps</Text>
+                      </View>
                     </View>
-                    <View style={styles.prRight}>
-                      <Text style={styles.prWeight}>{pr.weightLbs}</Text>
-                      <Text style={styles.prUnit}>lbs</Text>
-                      <Text style={styles.prReps}>{pr.reps} reps</Text>
-                    </View>
-                  </View>
-                ))}
+                  );
+                })}
               </>
             );
           })()}
@@ -765,29 +863,24 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              <View style={styles.graphCard}>
-                <View style={styles.graphHeader}>
-                  <Text style={styles.graphTitle}>Overall Strength</Text>
-                  <Text style={styles.graphScore}>{overallStrength}</Text>
-                </View>
-                <Text style={styles.graphSubtitle}>Combined top-set score per session (weight × reps)</Text>
-                <View style={styles.graphBars}>
-                  {strengthTrend.map(point => {
-                    const maxScore = Math.max(...strengthTrend.map(p => p.score), 1);
-                    const h = Math.max(8, Math.round((point.score / maxScore) * 88));
-                    return (
-                      <View key={point.key} style={styles.graphBarCol}>
-                        <Text style={styles.graphBarValue}>{point.score}</Text>
-                        <View style={[styles.graphBar, { height: h }]} />
-                        <Text style={styles.graphBarLabel}>{point.label}</Text>
-                      </View>
-                    );
-                  })}
-                </View>
-              </View>
+              {/* The old "Overall Strength" graph card was removed —
+                  its per-session top-set score was an ad-hoc
+                  aggregation that didn't mean much in isolation.
+                  The new Strength pillar on the main fitness score
+                  card (PRs tab) uses relative-to-bodyweight 1RM
+                  ratios against intermediate thresholds, which is
+                  both more meaningful and more comparable across
+                  users. See backend/app/services/workout/fitness_score.py. */}
 
-              <Text style={styles.sectionLabel}>{history.length} sessions logged</Text>
-              {history.map((session, i) => {
+              <Text style={styles.sectionLabel}>
+                {history.length} session{history.length !== 1 ? 's' : ''} logged
+                {history.length > 30 ? ' · showing most recent 30' : ''}
+              </Text>
+              {/* Display cap: show the 30 most recent sessions. Older
+                  entries still live in AsyncStorage (loadWorkoutHistory
+                  is untouched) — just not rendered to keep the list
+                  scannable. */}
+              {history.slice(0, 30).map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
                 const handleDeleteSession = () => {
                   Alert.alert(
@@ -864,7 +957,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const e = new Date(entry.endedAt);
             return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
           }).map((entry, i) => {
-            const goalLabel = meta.goals.find(g => g.value === entry.goal)?.label ?? entry.goal;
+            // Goal label preference: registered meta label → humanized
+            // fallback (e.g. "body_recomp" → "Body Recomp"). Previously
+            // the fallback was the raw enum value, so any goal not in
+            // the meta registry rendered as snake_case in the history list.
+            const goalLabel = meta.goals.find(g => g.value === entry.goal)?.label ?? humanizeToken(entry.goal);
             const start = new Date(entry.startedAt);
             const end = entry.endedAt ? new Date(entry.endedAt) : null;
             const days = end
@@ -885,7 +982,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 </View>
                 <View style={styles.sessionStats}>
-                  <Text style={styles.sessionStat}>Pace: {entry.pace}</Text>
+                  <Text style={styles.sessionStat}>Pace: {humanizeToken(entry.pace)}</Text>
                   {entry.startWeightLbs ? (
                     <>
                       <Text style={styles.sessionStatDot}>·</Text>
@@ -897,15 +994,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })}
 
-          {/* Workout Summaries */}
-          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Workout Summaries</Text>
+          {/* Workout Summaries — display cap 30 so the list stays
+              scannable. Older summaries remain in storage, they just
+              aren't rendered. */}
+          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
+            Workout Summaries
+            {summaries.length > 30 ? ` · showing most recent 30 of ${summaries.length}` : ''}
+          </Text>
           {summaries.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>🏆</Text>
               <Text style={styles.emptyTitle}>No summaries yet</Text>
               <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
             </View>
-          ) : summaries.map((s, i) => (
+          ) : summaries.slice(0, 30).map((s, i) => (
             <View key={s.id ?? i} style={[styles.sessionCard, { gap: 8 }]}>
               <View style={styles.sessionHeader}>
                 <View style={{ flex: 1 }}>
@@ -956,18 +1058,87 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   ))}
                 </View>
               )}
+              {/* End-of-workout feedback the user filled in on the
+                  summary modal. Optional — older summaries predate
+                  this field and just don't render the block. */}
+              {s.feedback && (
+                <View style={{
+                  marginTop: 8,
+                  paddingTop: 10,
+                  borderTopWidth: 1,
+                  borderTopColor: tc.border,
+                  gap: 4,
+                }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                    How it felt
+                  </Text>
+                  <Text style={{ fontSize: 13, color: tc.textPrimary }}>
+                    {s.feedback.feeling} · intensity {s.feedback.intensity}/5
+                    {s.feedback.sorenessAreas?.length ? ` · sore: ${s.feedback.sorenessAreas.join(', ')}` : ''}
+                  </Text>
+                  {s.feedback.notes ? (
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, fontStyle: 'italic' }}>
+                      "{s.feedback.notes}"
+                    </Text>
+                  ) : null}
+                </View>
+              )}
+              {/* Full per-exercise detail — exactly what the user
+                  did. Only shown for summaries that include the
+                  exercises array (all new summaries going forward). */}
+              {s.exercises && s.exercises.length > 0 && (
+                <View style={{
+                  marginTop: 8,
+                  paddingTop: 10,
+                  borderTopWidth: 1,
+                  borderTopColor: tc.border,
+                  gap: 8,
+                }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                    What you did
+                  </Text>
+                  {s.exercises.map((sx, xi) => (
+                    <View key={xi} style={{ gap: 2 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                        {sx.name}
+                      </Text>
+                      {sx.sets.length === 0 ? (
+                        <Text style={{ fontSize: 12, color: tc.textMuted }}>no sets logged</Text>
+                      ) : (
+                        sx.sets.map((set, si) => {
+                          const hasDuration = (set as any).durationSeconds != null;
+                          const durMin = hasDuration ? Math.floor((set as any).durationSeconds / 60) : 0;
+                          const durSec = hasDuration ? (set as any).durationSeconds % 60 : 0;
+                          const line = hasDuration
+                            ? `Set ${set.setNumber}: ${durMin}:${String(durSec).padStart(2, '0')}`
+                            : `Set ${set.setNumber}: ${set.weightLbs} lb × ${set.reps}${set.feedback ? ` · ${set.feedback}` : ''}`;
+                          return (
+                            <Text key={si} style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+                              {line}
+                            </Text>
+                          );
+                        })
+                      )}
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
           ))}
 
-          {/* Plan Change History */}
-          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Plan Change History</Text>
+          {/* Plan Change History — display cap 20. The full log still
+              lives in storage for audit / debug purposes. */}
+          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
+            Plan Change History
+            {planChanges.length > 20 ? ` · showing most recent 20 of ${planChanges.length}` : ''}
+          </Text>
           {planChanges.length === 0 ? (
             <View style={[styles.emptyBox, { marginBottom: 24 }]}>
               <Text style={styles.emptyIcon}>📋</Text>
               <Text style={styles.emptyTitle}>No plan changes yet</Text>
               <Text style={styles.emptyBody}>When your trainer or nutritionist updates your plan via chat, the changes will be logged here.</Text>
             </View>
-          ) : planChanges.map((c, i) => {
+          ) : planChanges.slice(0, 20).map((c, i) => {
             const d = new Date(c.changedAt);
             const label = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
             return (
@@ -1153,7 +1324,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   tabTextActive: { color: colors.background },
 
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  content: { padding: 16, paddingBottom: 40 },
+  // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px +
+  // safe area). Otherwise the bottom of the content (sign-out,
+  // delete-last-entry, etc.) sits under the tab bar.
+  content: { padding: 16, paddingBottom: 140 },
 
   sectionLabel: {
     fontSize: 11, fontWeight: '700', color: colors.textSecondary,
@@ -1343,6 +1517,13 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 1.2,
+  },
+  fitnessVerdict: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginBottom: 10,
+    lineHeight: 22,
   },
   fitnessScoreSubtext: {
     fontSize: 11,

@@ -17,6 +17,7 @@ import {
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
+import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -52,6 +53,11 @@ interface HomeScreenProps {
   onViewProgress: () => void;
   onViewAccount: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
+  /** Optional: push local AsyncStorage state to the backend. Called by
+   *  the trainer-chat Apply flow so plan changes persist cross-device
+   *  (the old flow only wrote to local storage and silently drifted
+   *  on the next login). */
+  onBackendSync?: () => Promise<void>;
   onWeeklyRefresh?: (review: { adherence: number; energy: number; notes?: string; pendingChanges?: any[] }) => void;
   onCancelPlanGen?: () => void;
   // Wraps the parent's full profile-save handler so the inline tab
@@ -828,7 +834,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1127,7 +1133,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // opened), which made in-progress plan generation look like it was
     // restarting. `loadPlans` reads from AsyncStorage, not from `meta`, so
     // there's no functional need to depend on it here.
-  }, [userProfile, authToken, planRefreshKey]);
+    //
+    // Dep list is narrowed to plan-relevant userProfile fields ONLY —
+    // NOT the whole userProfile object. Using the full object caused
+    // theme/UI-only changes (themePreference) to retrigger loadPlans
+    // and clobber `nutritionPlansByDate`, making theme selection
+    // flash the meals section like a plan was regenerating.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    userProfile?.goal,
+    userProfile?.daysPerWeek,
+    userProfile?.mealsPerDay,
+    userProfile?.mealVariety,
+    userProfile?.foodsAvailable?.length,
+    userProfile?.customFoods?.length,
+    userProfile?.mealRoutine,
+    authToken,
+    planRefreshKey,
+  ]);
 
   useEffect(() => {
     let mounted = true;
@@ -1274,6 +1297,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       return meals.length > 0 && meals.some(m => (m?.calories ?? 0) > 0);
     };
 
+    /** Returns true if the plan has Layer 2 micronutrient data on at
+     *  least one meal. Used to reject stale saved plans from before
+     *  the micronutrient expansion so the fresh rotating templates win. */
+    const hasLayer2Micros = (plan: DailyNutritionPlan | null | undefined): boolean => {
+      if (!plan) return false;
+      const meals = plan.meals ?? [];
+      const LAYER2 = ['saturated_fat', 'omega_3', 'potassium', 'calcium', 'iron', 'magnesium', 'vitamin_d', 'vitamin_b12'];
+      return meals.some(m => {
+        const micro: any = (m as any)?.micronutrients;
+        if (!micro) return false;
+        return LAYER2.some(k => typeof micro[k] === 'number' && micro[k] > 0);
+      });
+    };
+
     // Load routine meals once for the whole day loop. Any meal the user has
     // pinned as a routine gets overlaid on every day's plan so it appears
     // verbatim across the rotation.
@@ -1300,23 +1337,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const normalize = (p: any): DailyNutritionPlan =>
           normalizeServingUnitsInPlan(migrateNutritionPlanShape(p)) as DailyNutritionPlan;
 
+        // Precedence override: if the rotating template has Layer 2
+        // micros, prefer it over saved/remote plans that don't. Stale
+        // per-day saves from before the micronutrient expansion have
+        // macros but no micros, and would otherwise shadow the fresh
+        // data forever.
+        const freshTemplate = rotatingTemplates.length > 0 ? rotatingTemplates[i % rotatingTemplates.length] : null;
+        const templateHasMicros = hasLayer2Micros(freshTemplate);
+        const pickedPathRef: { name: string } = { name: 'none' };
+
         const saved = await getSavedNutritionPlan(d.key);
-        if (saved && hasMealMacros(saved) && stampOk(saved)) {
+        const savedIsUsable = saved && hasMealMacros(saved) && stampOk(saved) && (hasLayer2Micros(saved) || !templateHasMicros);
+        if (savedIsUsable) {
           picked = normalize(saved);
+          pickedPathRef.name = 'saved';
         }
         if (!picked && authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
-          if (remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan)) {
+          const remoteOk = remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan) && (hasLayer2Micros(remote.nutrition_plan) || !templateHasMicros);
+          if (remoteOk) {
             picked = normalize(remote.nutrition_plan);
+            pickedPathRef.name = 'remote';
           }
         }
-        if (!picked && rotatingTemplates.length > 0) {
-          const template = rotatingTemplates[i % rotatingTemplates.length];
-          if (hasMealMacros(template)) picked = normalize(template);
+        if (!picked && freshTemplate && hasMealMacros(freshTemplate)) {
+          picked = normalize(freshTemplate);
+          pickedPathRef.name = 'template';
         }
         if (!picked) {
           picked = normalize(generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key));
+          pickedPathRef.name = 'fallback';
         }
+        // Diagnostic — first meal's micronutrient key count so we can
+        // see whether data actually reached the UI layer.
+        const firstMeal: any = picked?.meals?.[0];
+        const firstMicros: any = firstMeal?.micronutrients ?? {};
+        const microKeyCount = typeof firstMicros === 'object' ? Object.keys(firstMicros).length : 0;
+        console.log(`[loadPlans] ${d.key}: path=${pickedPathRef.name} meals=${picked?.meals?.length ?? 0} micros_on_first_meal=${microKeyCount}`);
         // Stamp picked with the current templates version so subsequent
         // edits (rename, reorder, add meal) carry it forward into the
         // per-day save and remote day-state. Without the stamp, the
@@ -1324,6 +1381,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (picked && currentVersion != null) {
           (picked as any)._templatesVersion = currentVersion;
         }
+        // ── Diagnostic: count meals coming out of the template picker ──
+        const countBeforeOverlay = (picked.meals ?? []).length;
+
         // Order of layering:
         //   1. Routines first — they're the "every day" template and set
         //      up routine-backed extras with _routineId.
@@ -1336,6 +1396,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (routines.length > 0) {
           picked = applyRoutines(picked, routines);
         }
+        const countAfterRoutines = (picked.meals ?? []).length;
+
         const preserved = await getPreservedMeals(d.key);
         if (preserved.length > 0) {
           // Merge preserved checked meals into the unified meals[] list,
@@ -1363,6 +1425,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             picked = { ...picked, meals: [...currentMeals, ...toAdd] };
             if (routines.length > 0) picked = applyRoutines(picked, routines);
           }
+        }
+        const countAfterPreserved = (picked.meals ?? []).length;
+
+        // ── Hard guard: enforce meals-per-day budget ──
+        // The invariant is: displayed_meals == mealsPerDay + any user-added
+        // extras. The backend should already reduce generate_count by the
+        // routine count so routine overlay lands cleanly. If we land above
+        // mealsPerDay + routines (i.e., the backend didn't reduce), trim
+        // the tail so the UI stays sane. Also log loudly so the backend
+        // bug can still be diagnosed.
+        const expectedCount = (profile?.mealsPerDay ?? 3) + (preserved?.length ?? 0);
+        const currentCount = (picked.meals ?? []).length;
+        if (currentCount > expectedCount) {
+          console.warn(
+            `[loadPlans] ${d.key}: meal count overage — template=${countBeforeOverlay}, ` +
+            `afterRoutines=${countAfterRoutines}, afterPreserved=${countAfterPreserved}, ` +
+            `expected<=${expectedCount} (mealsPerDay=${profile?.mealsPerDay ?? 3}, ` +
+            `routines=${routines.length}, preserved=${preserved.length}). Trimming tail.`,
+          );
+          // Trim strategy: keep all routine-tagged and preserved (local-id)
+          // meals first; then fill up to `expectedCount` with non-routine
+          // meals from the head of the list. This preserves user-visible
+          // intent (routines + logged meals win) while dropping the
+          // overflow generated meals.
+          const meals = picked.meals ?? [];
+          const routineMeals = meals.filter(m => !!(m as any)._routineId);
+          const preservedMeals = meals.filter(m => !(m as any)._routineId && !!(m as any)._localId);
+          const regularMeals = meals.filter(m => !(m as any)._routineId && !(m as any)._localId);
+          const slotsLeft = Math.max(0, expectedCount - routineMeals.length - preservedMeals.length);
+          const trimmed = [...regularMeals.slice(0, slotsLeft), ...preservedMeals, ...routineMeals];
+          picked = { ...picked, meals: trimmed };
+        } else if (countBeforeOverlay !== undefined) {
+          console.log(
+            `[loadPlans] ${d.key}: ok — template=${countBeforeOverlay}, ` +
+            `afterRoutines=${countAfterRoutines}, afterPreserved=${countAfterPreserved}, ` +
+            `mealsPerDay=${profile?.mealsPerDay ?? 3}, routines=${routines.length}, preserved=${preserved.length}`,
+          );
         }
         return [d.key, picked] as const;
       })
@@ -1933,9 +2032,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           setWorkoutPlan(updatedPlan);
           await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
         } else {
-          setActiveChat(prev => [...prev, { role: 'assistant', content: 'The plan changes didn\'t come through correctly. Try asking again.' }]);
+          // Invalid plan structure — surface a clear error instead of
+          // silently closing the banner. The user needs to know the
+          // assistant promised a change it couldn't deliver.
+          console.warn('[applyPendingUpdate] plan failed isValid check:', updatedPlan);
+          setActiveChat(prev => [...prev, {
+            role: 'assistant',
+            content: 'I said I\'d update the plan but the response came back malformed. Please try rephrasing the request — something like "make tomorrow a push day" or "swap legs on day 3 for pull".',
+          }]);
           return;
         }
+      } else if (canUpdateWorkout && !resp.updated_workout_plan && resp.needs_plan_update) {
+        // needs_plan_update=true but no plan dict present — this is
+        // the exact failure mode the intent-detection safety net on
+        // the backend was added to prevent. If it still slips through,
+        // tell the user rather than silently no-op.
+        console.warn('[applyPendingUpdate] needs_plan_update=true but no updated_workout_plan in response');
+        setActiveChat(prev => [...prev, {
+          role: 'assistant',
+          content: 'I described a change but didn\'t return the actual updated plan. Could you ask again with more specific detail about the change you want?',
+        }]);
+        return;
       }
       if (canUpdateNutrition && resp.updated_nutrition_plan) {
         const today = todayKey();
@@ -1963,6 +2080,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onProfileUpdate(profileChanges, true); // skipRegen — plan already applied
       }
 
+      // Push the applied plan to the backend so it persists
+      // cross-device. Without this, the trainer-chat apply flow only
+      // wrote to local AsyncStorage and the next device login
+      // silently reverted to the pre-apply state. Fire-and-forget —
+      // a failed sync is logged but doesn't block the apply.
+      if (onBackendSync) {
+        try {
+          await onBackendSync();
+        } catch (e) {
+          console.warn('[applyPendingUpdate] backend sync failed (non-fatal):', e);
+        }
+      }
+
       const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
       const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
       const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
@@ -1981,7 +2111,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setIsChatPlanUpdating(false);
     }
-  }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, summarizeTrainerUpdate]);
+  }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, onBackendSync, summarizeTrainerUpdate]);
 
   const dismissPendingUpdate = useCallback(() => {
     const setActiveChat = pendingUpdate?.coachMode === 'trainer' ? setWorkoutChat : setNutritionChat;
@@ -2285,11 +2415,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
+  //
+  // The preserved check MUST run before the isRest short-circuit. Previously
+  // we bailed on isRest first, which broke this scenario: user finishes a
+  // workout on Tuesday on a 6-day plan, then reduces to a 4-day plan that
+  // doesn't have Tuesday as a training day. The new schedule marks Tuesday
+  // as rest, the overlay saw isRest and returned without restoring the
+  // preserved card, and the user saw "Rest day" where they'd just trained.
+  // Now: if a date has a preserved completed workout, it ALWAYS shows as
+  // a (non-rest) completed training day regardless of what the new schedule
+  // thinks the day should be.
   const schedule = scheduleRaw.map(item => {
-    if (item.isRest) return item;
     const k = dateKey(item.date);
     const preserved = preservedWorkouts[k];
-    if (preserved) return { ...item, workout: preserved };
+    if (preserved) {
+      return { ...item, workout: preserved, isRest: false };
+    }
     return item;
   });
   const mealDays = getNextMealDays(7);
@@ -2396,21 +2537,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           is rendered underneath. Uses safe-area insets so it sits cleanly
           below the gradient header on any device. */}
       {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-          <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
-          <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
-          <SubTabBtn label="Equipment" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textMuted} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+            <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+            <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+            <SubTabBtn label="Equipment" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+          </View>
         </View>
       )}
 
       {/* Fixed meals sub-tab bar — same pattern. */}
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 72, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('plan')} />
-          <SubTabBtn label="Foods"       active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('foods')} />
-          <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('supplements')} />
-          <SubTabBtn label="Macros"      active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textMuted} onPress={() => setMealsSubTab('macros')} />
+        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
+            <SubTabBtn label="Foods"       active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
+            <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn label="Macros"      active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('macros')} />
+          </View>
         </View>
       )}
 
@@ -2450,9 +2595,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Sub-tab bar moved to a fixed position above — see top of
                 file. The fixed bar stays visible regardless of scroll. */}
 
-            {/* Equipment sub-tab renders the workout editor inline */}
+            {/* Equipment sub-tab renders the workout editor inline.
+                The wrapper sets a solid background so the remount
+                frame doesn't flash-through to the previous tab's
+                content or the edit screen's unstyled chrome. */}
             {workoutSubTab === 'equipment' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110 }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110, backgroundColor: themeColors.background }}>
                 <EditProfileScreen
                   authToken={authToken}
                   profile={userProfile}
@@ -2577,9 +2725,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <>
             {/* Sub-tab bar moved to a fixed position above — see top of file. */}
 
-            {/* Non-Plan sub-tabs render EditProfileScreen mealplan inline */}
+            {/* Non-Plan sub-tabs render EditProfileScreen mealplan inline.
+                The wrapper sets a solid background so the remount
+                frame (triggered by the `key` prop below) doesn't
+                flash-through to the previous tab's content. */}
             {mealsSubTab !== 'plan' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110 }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110, backgroundColor: themeColors.background }}>
                 <EditProfileScreen
                   key={`meal-${mealsSubTab}`}
                   authToken={authToken}
@@ -2593,6 +2744,52 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             )}
+
+            {/* Daily target banner — shows the user's computed calorie +
+                macro targets at the top of the Plan view so they can see
+                their goal without opening the daily modal. Pulls from
+                today's plan targets. */}
+            {mealsSubTab === 'plan' && (() => {
+              const todayPlan = nutritionPlansByDate[mealDays[0]?.key];
+              const t = todayPlan?.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+              if (!t.calories) return null;
+              const protPct = t.calories > 0 ? Math.round(((t.protein ?? 0) * 4 / t.calories) * 100) : 0;
+              const carbPct = t.calories > 0 ? Math.round(((t.carbs ?? 0) * 4 / t.calories) * 100) : 0;
+              const fatPct  = t.calories > 0 ? Math.round(((t.fat ?? 0) * 9 / t.calories) * 100) : 0;
+              const goalLabel = userProfile.goalSelection?.primaryGoal
+                ? userProfile.goalSelection.primaryGoal.replace(/_/g, ' ')
+                : userProfile.goal?.replace(/_/g, ' ') ?? '';
+              return (
+                <View style={[styles.dailyTargetBanner, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Daily target
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                      {goalLabel}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '800', color: mealPalette.strong }}>{t.calories}</Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>cal</Text>
+                    </View>
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '800', color: themeColors.primary }}>{t.protein ?? 0}g</Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>protein · {protPct}%</Text>
+                    </View>
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '800', color: '#F59E0B' }}>{t.carbs ?? 0}g</Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>carbs · {carbPct}%</Text>
+                    </View>
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '800', color: '#A78BFA' }}>{t.fat ?? 0}g</Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>fat · {fatPct}%</Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            })()}
 
             {/* Nutritionist plan note — only shows on the Plan sub-tab. */}
             {mealsSubTab === 'plan' && nutritionistNote ? (
@@ -2838,6 +3035,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showCheckin}
         authToken={authToken}
         onClose={() => setShowCheckin(false)}
+        themeName={userProfile.themePreference}
       />
 
       {/* Meal edit modal */}
@@ -2905,7 +3103,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           already set. Only a thin back header appears when the user
           drills into a specific exercise or muscle detail. */}
       {showExerciseLibrary && (
-        <View style={[styles.libraryInlineWrap, { top: insets.top + 72 + 44, backgroundColor: themeColors.background }]}>
+        <View style={[styles.libraryInlineWrap, { top: insets.top + 70 + 52, backgroundColor: themeColors.background }]}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
 
             {/* Back header — only when drilled into a detail view. */}
@@ -3381,13 +3579,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
                     : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
                 </Text>
-              ) : (
-                (coachMode === 'trainer' ? workoutChat : nutritionChat).map((m, idx) => (
-                  <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
-                    <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
-                  </View>
-                ))
-              )}
+              ) : (() => {
+                // Display cap: show the 50 most recent messages.
+                // Older turns remain in state so `conversation`
+                // context sent to /ai/trainer-question still carries
+                // the full history, just trimmed to the last 6 there.
+                // This cap is purely visual — prevents the scroll
+                // view from growing unbounded over a long session.
+                const fullChat = coachMode === 'trainer' ? workoutChat : nutritionChat;
+                const visibleChat = fullChat.length > 50 ? fullChat.slice(-50) : fullChat;
+                const hiddenCount = fullChat.length - visibleChat.length;
+                return (
+                  <>
+                    {hiddenCount > 0 && (
+                      <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, fontSize: 11, paddingVertical: 8 }]}>
+                        {hiddenCount} earlier message{hiddenCount !== 1 ? 's' : ''} hidden
+                      </Text>
+                    )}
+                    {visibleChat.map((m, idx) => (
+                      <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
+                        <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
+                      </View>
+                    ))}
+                  </>
+                );
+              })()}
               {trainerLoading && (
                 <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, alignSelf: 'flex-start', maxWidth: '95%', paddingVertical: 14, paddingHorizontal: 16 }]}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -3982,8 +4198,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={styles.noteModalHeader}>
               <Text style={[styles.noteModalIcon]}>🥗</Text>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>From Your Nutritionist</Text>
-                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this meal plan was chosen</Text>
+                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>Nutritionist note</Text>
+                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this plan</Text>
               </View>
               <TouchableOpacity onPress={() => setShowNutritionistNote(false)}>
                 <Text style={[styles.noteModalClose, { color: mealPalette.strong }]}>Done</Text>
@@ -3991,13 +4207,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             <ScrollView contentContainerStyle={styles.noteModalBody}>
               {nutritionistNote ? (
-                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{nutritionistNote}</Text>
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(nutritionistNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
                   <Text style={styles.noteModalEmptyIcon}>🌱</Text>
-                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>No note yet</Text>
+                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>Generate a plan to unlock</Text>
                   <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
-                    Once you generate an AI meal plan, your nutritionist will leave a note here explaining the calorie strategy and macro split rationale for your specific goal.
+                    Your nutritionist's rationale for your calories + macros lands here.
                   </Text>
                 </View>
               )}
@@ -4014,8 +4230,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={styles.noteModalHeader}>
               <Text style={[styles.noteModalIcon]}>🏋️</Text>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>From Your Trainer</Text>
-                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this workout plan was built this way</Text>
+                <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>Trainer note</Text>
+                <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this week</Text>
               </View>
               <TouchableOpacity onPress={() => setShowTrainerNote(false)}>
                 <Text style={[styles.noteModalClose, { color: workoutPalette.strong }]}>Done</Text>
@@ -4023,13 +4239,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             <ScrollView contentContainerStyle={styles.noteModalBody}>
               {trainerNote ? (
-                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{trainerNote}</Text>
+                <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(trainerNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
                   <Text style={styles.noteModalEmptyIcon}>🏗️</Text>
-                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>No note yet</Text>
+                  <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>Generate a plan to unlock</Text>
                   <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
-                    Once you generate an AI workout plan, your trainer will leave a note here explaining the structure, why they picked these exercises, and how it targets your specific goal.
+                    Your trainer's rationale for the split + exercise picks lands here.
                   </Text>
                 </View>
               )}
@@ -4098,13 +4314,29 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
   mutedColor: string;
   onPress: () => void;
 }) {
+  // Segmented-control-style tab: rounded pill segment that fills with
+  // the accent color when active. Reads as a filter/mode toggle, not
+  // a second navigation level stacked on the bottom tab bar.
   return (
     <TouchableOpacity
       onPress={onPress}
-      activeOpacity={0.7}
-      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-      style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: active ? tint : 'transparent' }}>
-      <Text style={{ fontSize: 13, fontWeight: '700', color: active ? tint : mutedColor, letterSpacing: 0.2 }}>
+      activeOpacity={0.75}
+      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+      style={{
+        flex: 1,
+        paddingVertical: 7,
+        paddingHorizontal: 10,
+        borderRadius: 7,
+        backgroundColor: active ? tint : 'transparent',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+      <Text style={{
+        fontSize: 12,
+        fontWeight: '700',
+        color: active ? '#fff' : mutedColor,
+        letterSpacing: 0.1,
+      }} numberOfLines={1}>
         {label}
       </Text>
     </TouchableOpacity>
@@ -4437,12 +4669,25 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    height: 44,
+    height: 52,
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
     zIndex: 6,
+  },
+  // iOS-style segmented control wrap. Contains the SubTabBtn segments
+  // as equal-width flex children and gives them a rounded-pill
+  // container. Visually distinct from the bottom nav tabs so users
+  // read it as a mode filter, not a second nav level.
+  segmentedWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    padding: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: 2,
   },
 
   // Next-checkin indicator on the workout Plan sub-tab.
@@ -4481,7 +4726,7 @@ const styles = StyleSheet.create({
   // padding from where the ScrollView begins.
   scrollContentBelowSubTab: {
     paddingHorizontal: 16,
-    paddingTop: 70,  // clears the fixed sub-tab bar + a small gap
+    paddingTop: 78,  // clears the fixed sub-tab bar + a small gap
     paddingBottom: 110,
   },
 
@@ -4754,6 +4999,12 @@ const styles = StyleSheet.create({
   exerciseSummaryName:   { fontSize: 13, color: colors.textPrimary, fontWeight: '500', flex: 1 },
   exerciseSummaryDetail: { fontSize: 12, color: colors.primary, fontWeight: '600' },
 
+  dailyTargetBanner: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 12,
+  },
   mealAccordionCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,

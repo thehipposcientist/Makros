@@ -14,7 +14,7 @@ trail will tell you which step diverged.
 """
 from __future__ import annotations
 
-from app.services.calorie_calculator import (
+from app.services.nutrition.calorie_calculator import (
     CalorieInputs,
     CustomMacroOverrides,
     calculate_reference_ranges,

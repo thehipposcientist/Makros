@@ -30,7 +30,7 @@ from app.models import (
     WorkoutExercise,
     WorkoutSession,
 )
-from app.services.plan import PlanSnapshot, get_plan_snapshot
+from .plan import PlanSnapshot, get_plan_snapshot
 
 WINDOWS: tuple[int, ...] = (7, 14, 28)
 ROLLUP_LOOKBACK_DAYS = 35  # enough history to populate the 28d window

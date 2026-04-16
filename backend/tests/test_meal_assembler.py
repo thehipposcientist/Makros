@@ -8,7 +8,7 @@ dinner labels). Tests verify count + content, not slot identity.
 """
 from __future__ import annotations
 
-from app.services.meal_assembler import (
+from app.services.nutrition.meal_assembler import (
     FoodMacros,
     MealSkeleton,
     TemplateSkeleton,

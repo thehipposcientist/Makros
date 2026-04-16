@@ -942,6 +942,14 @@ export default function Index() {
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
+        onBackendSync={async () => {
+          // Called by the trainer chat Apply flow after a plan is
+          // written to AsyncStorage. Pushes the updated state blob so
+          // the next device / next login sees the applied change.
+          if (authToken) {
+            await pushUserStateToBackend(authToken);
+          }
+        }}
         onProfileUpdate={async (changes, skipRegen) => {
           if (!userProfile || !authToken) return;
           const updated = { ...userProfile, ...changes };

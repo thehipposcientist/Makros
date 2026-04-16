@@ -19,10 +19,20 @@ from .utils import (
     get_openai_api_key, model_plan_generation, model_plan_update,
     _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     _log_openai_error, enrich_foods_with_macros, compute_tdee_and_targets,
+    map_goal_type, map_experience_level, map_progression_pace, map_recovery_level,
     SCHEMA_WORKOUT,
 )
 from .prompts import build_workout_prompt
-from app.services.meal_assembler import assemble_nutrition_response
+from app.services.nutrition.meal_assembler import assemble_nutrition_response
+from app.services.workout.planner import (
+    PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
+)
+from app.services.workout.history import (
+    build_history_familiarity, db_history_lookup, propagate_session_targets,
+)
+from app.services.workout.performance import build_performance_profile
+from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngine
+from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
 
 def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
@@ -277,6 +287,1030 @@ def canonicalize_workout_exercises(workout_data: dict, library: list[dict]) -> d
     return workout_data
 
 
+def _resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
+    """Translate the frontend's mixed equipment list (display names AND
+    legacy bucket strings) into a set of canonical Equipment slugs the
+    planner understands. Mirrors the logic inside
+    `build_user_exercise_library` so both the AI-prompt path and the
+    deterministic-planner path resolve equipment identically."""
+    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    valid_slugs = {e["slug"] for e in SEED_EQUIPMENT}
+    owned: set[str] = set()
+    for raw in (equipment or []):
+        if not raw:
+            continue
+        if raw in valid_slugs:
+            owned.add(raw)
+            continue
+        slug = name_to_slug.get(raw.lower())
+        if slug:
+            owned.add(slug)
+    # Legacy bucket pass-through so `equipment: ["bodyweight"]` still
+    # unlocks bodyweight exercises even though it isn't an Equipment slug.
+    for bucket in ("bodyweight", "home", "dumbbells", "gym", "other"):
+        if bucket in (equipment or []):
+            owned.add(bucket)
+    return owned
+
+
+class _PlanReviewDisabled(Exception):
+    """Sentinel raised inside `_build_deterministic_workout` when the
+    AI plan review feature flag is off. Caught and silently swallowed
+    so the deterministic plan ships unchanged. Not a real error."""
+
+
+def _build_deterministic_workout(
+    req: PlanRequest,
+    db: Session | None,
+    user_id: int | None,
+) -> dict:
+    """Build a workout plan deterministically from `workout_planner` and
+    decorate it with history-aware next-session targets.
+
+    Returns the same shape `_call_workout_ai` used to return:
+        {"trainerNote": "", "workout_plan": {...}}
+    except `trainerNote` is left blank — the caller fills it in with a
+    small AI call that sees the already-built plan.
+
+    `db` and `user_id` are optional so tests can call this without a
+    Session. When they're missing, history familiarity and next-session
+    target propagation are skipped gracefully (the planner still emits a
+    valid plan, just without continuity bias or target weights)."""
+    owned_slugs = _resolve_owned_equipment_slugs(req.equipment)
+    focused: str | None = None
+    if req.goalSelection is not None:
+        focused = getattr(req.goalSelection, "targetFocus", None) or req.focusedMuscleGroup
+    else:
+        focused = req.focusedMuscleGroup
+
+    # Query the user's most recent ~2 completed sessions (within the
+    # last 36 hours), normalized to coarse training buckets. The
+    # weekly recipe uses these to rotate day 0 away from anything
+    # the user already trained recently. Empty tuple = no recent
+    # signal; fresh week is fine.
+    recent_focus_buckets: tuple[str, ...] = ()
+    if db is not None and user_id is not None:
+        try:
+            from app.services.workout.history import most_recent_completed_focus
+            buckets = most_recent_completed_focus(user_id, db, hours=36, limit=2)
+            recent_focus_buckets = tuple(buckets)
+            if recent_focus_buckets:
+                print(
+                    f"[plan-gen workout] recent focus buckets (last 36h): "
+                    f"{list(recent_focus_buckets)}"
+                )
+            else:
+                print("[plan-gen workout] recent focus buckets (last 36h): none")
+        except Exception as e:
+            print(f"[plan-gen workout] recent-focus lookup failed (non-fatal): {e}")
+            recent_focus_buckets = ()
+
+    inputs = PlannerInputs(
+        goal=req.goal,
+        days_per_week=max(1, min(7, req.daysPerWeek)),
+        session_minutes=max(20, min(180, req.workoutDurationMinutes or 60)),
+        experience=(req.experienceLevel or "intermediate").lower(),
+        equipment_slugs=tuple(sorted(owned_slugs)),
+        preferred_split=req.preferredSplit,
+        focused_muscle=focused,
+        preferred_exercises=tuple(req.preferredExercises or ()),
+        disliked_exercises=tuple(req.dislikedExercises or ()),
+        injuries=tuple(req.injuriesOrLimitations or ()),
+        rng_seed=int(user_id or 0),
+        recent_focus_buckets=recent_focus_buckets,
+    )
+
+    history_familiarity: dict[str, int] = {}
+    perf_profiles_for_planner = None
+    if db is not None and user_id is not None:
+        try:
+            history_familiarity = build_history_familiarity(user_id, db)
+        except Exception as e:
+            print(f"[plan-gen workout] history familiarity lookup failed (non-fatal): {e}")
+            history_familiarity = {}
+        try:
+            # Performance profiles also power the in-planner
+            # starting-weight + set-scheme pass so the FIRST plan
+            # emitted already carries target loads for exercises with
+            # history. The downstream `propagate_session_targets`
+            # call below refines these using double-progression rules
+            # — it is NOT redundant, it runs on different inputs.
+            perf_profiles_for_planner = build_performance_profile(user_id, db)
+        except Exception as e:
+            print(f"[plan-gen workout] pre-plan performance profile lookup failed (non-fatal): {e}")
+            perf_profiles_for_planner = None
+
+    plan = planner_generate_workout_plan(
+        inputs,
+        SEED_EXERCISES,
+        history_familiarity=history_familiarity,
+        perf_profiles=perf_profiles_for_planner,
+    )
+
+    # Stamp each exercise with target_weight_lbs, progression_action,
+    # progression_reason, recommendation_source, recommendation_confidence,
+    # and recommendation_reason. The propagator uses the layered
+    # recommendation pipeline so exercises without exact history still
+    # get a transferred estimate from a substitution-group swap, a
+    # same-pattern lift, or a same-muscle / same-equipment fallback.
+    if db is not None and user_id is not None:
+        try:
+            profile = UserTrainingProfile(
+                primary_goal=map_goal_type(req.goal),
+                experience_level=map_experience_level(req.experienceLevel),
+                recovery_level=map_recovery_level(req.recoveryLevel),
+                progression_pace=map_progression_pace(None),
+            )
+            lookup = db_history_lookup(user_id, db)
+            perf_profiles = build_performance_profile(user_id, db)
+            all_by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+            propagate_session_targets(
+                plan,
+                profile=profile,
+                history_lookup=lookup,
+                engine=WorkoutProgressionEngine(),
+                perf_profiles=perf_profiles,
+                all_exercises_by_slug=all_by_slug,
+                experience=(req.experienceLevel or "intermediate"),
+            )
+        except Exception as e:
+            print(f"[plan-gen workout] propagate_session_targets failed (non-fatal): {e}")
+
+    # ── Recent-history query (unconditional) ───────────────────────
+    # MUST run regardless of whether the AI plan review is enabled,
+    # because the trainer-note LLM call reads it too. Previously this
+    # query lived inside the review try-block, so when review was
+    # disabled (or when the block raised early) the trainer note
+    # received `_recent_completed=None` and told the user they had
+    # no recent sessions even when they had three. The result is
+    # stashed on `plan["_recent_completed"]` so downstream consumers
+    # (trainer note, optional review, optional AI regenerate) all
+    # read from the same source.
+    recent_completed_rows: list[dict] = []
+    if db is not None and user_id is not None:
+        try:
+            from datetime import datetime, timedelta
+            from sqlmodel import select
+            from app.models import (
+                ExerciseSet as _ExerciseSet,
+                WorkoutCompletion as _WorkoutCompletion,
+                WorkoutExercise as _WorkoutExercise,
+                WorkoutSession as _WorkoutSession,
+            )
+            cutoff_date = (datetime.utcnow() - timedelta(hours=72)).date()
+
+            # Query BOTH tables and merge by date. The lightweight
+            # WorkoutCompletion row is the presence marker (every
+            # finished workout writes one); the structured
+            # WorkoutSession row carries per-exercise detail when the
+            # mobile app posts exercises in the /workouts/complete
+            # payload. Dropped the `completed_at IS NOT NULL` filter
+            # on WorkoutSession because some write paths leave it
+            # unset and that was hiding real data.
+            comp_rows = db.exec(
+                select(_WorkoutCompletion)
+                .where(_WorkoutCompletion.user_id == user_id)
+                .where(_WorkoutCompletion.workout_date >= cutoff_date)
+                .order_by(_WorkoutCompletion.completed_at.desc())
+                .limit(6)
+            ).all()
+            sess_rows = db.exec(
+                select(_WorkoutSession)
+                .where(_WorkoutSession.user_id == user_id)
+                .where(_WorkoutSession.workout_date >= cutoff_date)
+                .order_by(_WorkoutSession.workout_date.desc())
+                .limit(12)
+            ).all()
+
+            sessions_by_key: dict[tuple, _WorkoutSession] = {}
+            for s in sess_rows:
+                key = (s.workout_date, (s.focus or "").strip())
+                existing = sessions_by_key.get(key)
+                if existing is None or (
+                    (s.completed_at or s.created_at)
+                    > (existing.completed_at or existing.created_at)
+                ):
+                    sessions_by_key[key] = s
+
+            def _exercises_for_session(session_row) -> list[dict]:
+                ex_rows = db.exec(
+                    select(_WorkoutExercise)
+                    .where(_WorkoutExercise.session_id == session_row.id)
+                    .order_by(_WorkoutExercise.order_index.asc())
+                ).all()
+                out: list[dict] = []
+                for er in ex_rows:
+                    set_rows = db.exec(
+                        select(_ExerciseSet)
+                        .where(_ExerciseSet.workout_exercise_id == er.id)
+                        .order_by(_ExerciseSet.set_number.asc())
+                    ).all()
+                    kept_sets = []
+                    for sr in set_rows:
+                        reps = sr.actual_reps or 0
+                        weight = sr.actual_weight_lbs or 0
+                        if reps == 0 and weight == 0:
+                            continue
+                        kept_sets.append({
+                            "set_number": sr.set_number,
+                            "reps": reps,
+                            "weight_lbs": weight,
+                        })
+                    if kept_sets:
+                        out.append({
+                            "name": er.name,
+                            "equipment": er.equipment,
+                            "target_reps": er.target_reps_text,
+                            "sets": kept_sets,
+                        })
+                return out
+
+            enriched_hit = 0
+            for r in comp_rows:
+                key = (r.workout_date, (r.focus_label or "").strip())
+                matching_session = sessions_by_key.get(key)
+                ex_out: list[dict] = []
+                if matching_session is not None:
+                    ex_out = _exercises_for_session(matching_session)
+                    if ex_out:
+                        enriched_hit += 1
+                recent_completed_rows.append({
+                    "focus": r.focus_label,
+                    "workout_date": r.workout_date,
+                    "duration_seconds": r.duration_seconds,
+                    "exercises": ex_out,
+                })
+
+            # Belt-and-braces: any leftover sessions without a
+            # matching completion row (user used POST /workouts
+            # directly) get appended so the trainer note still
+            # sees them.
+            seen_keys = {(r["workout_date"], (r["focus"] or "").strip()) for r in recent_completed_rows}
+            for key, s in sessions_by_key.items():
+                if key in seen_keys:
+                    continue
+                ex_out = _exercises_for_session(s)
+                recent_completed_rows.append({
+                    "focus": s.focus,
+                    "workout_date": s.workout_date,
+                    "duration_seconds": None,
+                    "exercises": ex_out,
+                })
+                if ex_out:
+                    enriched_hit += 1
+
+            recent_completed_rows.sort(
+                key=lambda r: r.get("workout_date") or "",
+                reverse=True,
+            )
+            recent_completed_rows = recent_completed_rows[:6]
+
+            print(
+                f"[plan-gen workout] recent history: "
+                f"{len(recent_completed_rows)} days, "
+                f"{enriched_hit} with structured exercise data, "
+                f"sessions_indexed={len(sessions_by_key)}"
+            )
+        except Exception as e:
+            print(f"[plan-gen workout] recent history query failed (non-fatal): {e}")
+            recent_completed_rows = []
+
+    if not recent_completed_rows:
+        # Fallback: focus-bucket list already computed for the
+        # continuity-rotation path.
+        recent_completed_rows = [
+            {"focus": r, "workout_date": None, "duration_seconds": None, "exercises": []}
+            for r in (recent_focus_buckets or ())
+        ]
+
+    # Stash unconditionally so the trainer-note call downstream (which
+    # runs AFTER _build_deterministic_workout returns) reads real data
+    # whether or not the AI review/regenerate is enabled. Underscore-
+    # prefixed so nothing client-side renders it and the plan
+    # validators leave it alone.
+    plan["_recent_completed"] = recent_completed_rows
+    print(
+        f"[plan-gen workout] stashed _recent_completed: "
+        f"{len(recent_completed_rows)} entries "
+        f"(first focus={recent_completed_rows[0].get('focus') if recent_completed_rows else None!r})"
+    )
+
+    # ── AI plan review (final QA pass) — GATED BY ENV VAR ───────────
+    # Disabled by default; set `PLAN_REVIEW_ENABLED=1` in the backend
+    # env to re-enable. When enabled, the review call + AI regenerate
+    # fallback run against the same `recent_completed_rows` computed
+    # above. When disabled, only the deterministic plan ships.
+    import os as _os
+    _plan_review_enabled = _os.getenv("PLAN_REVIEW_ENABLED", "0") == "1"
+    if not _plan_review_enabled:
+        print("[plan-gen workout] AI plan review DISABLED (set PLAN_REVIEW_ENABLED=1 to re-enable)")
+
+    try:
+        if not _plan_review_enabled:
+            raise _PlanReviewDisabled()
+        from app.services.workout.plan_review import (
+            apply_patches,
+            build_plan_brief,
+            review_plan,
+        )
+
+        # Resolve focused muscle from the same precedence chain the
+        # deterministic planner uses: goalSelection.targetFocus wins
+        # if present, otherwise fall back to the legacy
+        # `focusedMuscleGroup` field. Previously this used
+        # `getattr(req, "focusedMuscle", None)` which is a field that
+        # DOES NOT EXIST on PlanRequest — so the AI review was always
+        # blind to the user's muscle focus.
+        _focused_for_ai: str | None = None
+        if req.goalSelection is not None:
+            _focused_for_ai = (
+                getattr(req.goalSelection, "targetFocus", None)
+                or req.focusedMuscleGroup
+            )
+        else:
+            _focused_for_ai = req.focusedMuscleGroup
+
+        # Extra goal context passed through so the reviewer can judge
+        # secondary goals + goal details in addition to the primary
+        # bucket. Secondary goal might be "maintain strength" on a fat
+        # loss plan, for example — changes what a balanced plan looks
+        # like to the reviewer.
+        # secondaryGoal is deprecated (always None). targetFocus is the
+        # only active "secondary" context the reviewer can use.
+        _secondary_goal = _focused_for_ai  # pass target focus as secondary context
+        _goal_details = None
+        try:
+            _goal_details = req.goalDetails.model_dump() if req.goalDetails else None
+        except Exception:
+            _goal_details = None
+
+        brief = build_plan_brief(
+            plan,
+            goal=req.goal or "muscle_gain",
+            days_per_week=int(req.daysPerWeek or 3),
+            experience=(req.experienceLevel or "intermediate"),
+            recent_completed=recent_completed_rows,
+            injuries=tuple(req.injuriesOrLimitations or ()),
+            focused_muscle=_focused_for_ai,
+            secondary_goal=_secondary_goal,
+            goal_details=_goal_details,
+        )
+        # Debug: full brief + AI verdict so we can iterate on the
+        # reviewer prompt and the plan's structural choices.
+        try:
+            import json as _json
+            print(
+                "[plan-review] brief →\n"
+                + _json.dumps(brief, indent=2, default=str)
+            )
+        except Exception:
+            print(f"[plan-review] brief (unprintable): {brief}")
+
+        review = review_plan(brief)
+        print(
+            f"[plan-review] AI verdict: status={review.status} "
+            f"patches={len(review.patches)} error={review.error!r}"
+        )
+        print(f"[plan-review] AI notes: {review.notes}")
+        for i, p in enumerate(review.patches):
+            print(
+                f"[plan-review] patch {i}: action={p.action} "
+                f"day={p.day_index} ex={p.exercise_index} "
+                f"new_name={p.new_name!r} new_sets={p.new_sets} "
+                f"new_reps={p.new_reps!r} reason={p.reason!r}"
+            )
+        if review.status == "modify" and review.patches:
+            # Belt-and-braces: any plan_day whose focus matches a
+            # session the user ALREADY completed today gets blocked
+            # from patches. The prompt is told to skip these, but the
+            # AI occasionally ignores the rule — filter defensively.
+            completed_today = set(brief.get("completed_today_focuses") or [])
+            blocked_day_indices: set[int] = set()
+            if completed_today:
+                for day_meta in brief.get("plan_days") or []:
+                    plan_focus = (day_meta.get("focus") or "").strip().lower()
+                    if plan_focus in completed_today:
+                        idx = day_meta.get("index")
+                        if isinstance(idx, int):
+                            blocked_day_indices.add(idx)
+                if blocked_day_indices:
+                    print(
+                        f"[plan-review] blocking patches on day_indices "
+                        f"{sorted(blocked_day_indices)} — user already "
+                        f"completed those focuses today"
+                    )
+            _, applied = apply_patches(
+                plan, review.patches,
+                blocked_day_indices=blocked_day_indices,
+            )
+            for msg in applied:
+                print(f"[plan-gen workout] review patch: {msg}")
+            # Re-stamp load metadata on any patched exercises so the
+            # new exercises inherit set schemes + target weights.
+            try:
+                from app.services.workout.planner import _stamp_load_metadata
+                from app.services.workout.set_programming import build_set_scheme
+                goal_bucket = plan.get("workout_plan", {}).get("goal_bucket") or "muscle_gain"
+                all_by_slug_local = {ex["slug"]: ex for ex in SEED_EXERCISES if ex.get("slug")}
+                for day in plan.get("workout_plan", {}).get("days", []) or []:
+                    for ex_out in day.get("exercises", []) or []:
+                        if not ex_out.get("_review_patched"):
+                            continue
+                        # Minimal exercise stub for set-scheme logic —
+                        # swapped-in exercises from AI may not match a
+                        # seed row, so we fall back to conservative
+                        # defaults (isolation dumbbell) for the scheme.
+                        exercise_stub = {
+                            "slug": None,
+                            "equipment_bucket": "dumbbell",
+                            "is_compound": ex_out.get("_role") in ("primary", "compound"),
+                            "movement_pattern": None,
+                            "primary_muscle": ex_out.get("_primary_muscle"),
+                        }
+                        scheme = build_set_scheme(
+                            exercise_stub,
+                            total_sets=int(ex_out.get("sets") or 3),
+                            reps=ex_out.get("reps", "8-12"),
+                            rir_target=float(ex_out.get("_rir_target") or 2.0),
+                            target_weight_lbs=ex_out.get("targetWeightLbs"),
+                            goal_bucket=goal_bucket,
+                            role=ex_out.get("_role") or "accessory",
+                            experience=(req.experienceLevel or "intermediate"),
+                        )
+                        ex_out["setScheme"] = [s.to_dict() for s in scheme]
+            except Exception as e:
+                print(f"[plan-gen workout] re-stamp after patch failed (non-fatal): {e}")
+        plan.setdefault("workout_plan", {})["review"] = {
+            "status": review.status,
+            "notes": review.notes,
+            "patch_count": len(review.patches),
+            "error": review.error,
+        }
+        # Attach the FULL brief + verdict + patches to the response
+        # under `_debug.review` so the client can log it directly from
+        # its own console. Backend also prints the same data so you
+        # can cross-reference server-side logs. The field name is
+        # underscore-prefixed so the frontend treats it as a debug
+        # sidecar and ignores it when rendering.
+        plan["_debug"] = {
+            "review": {
+                "brief": brief,
+                "verdict": {
+                    "status": review.status,
+                    "notes": review.notes,
+                    "error": review.error,
+                    "patches": [
+                        {
+                            "action": p.action,
+                            "day_index": p.day_index,
+                            "exercise_index": p.exercise_index,
+                            "new_name": p.new_name,
+                            "new_equipment": p.new_equipment,
+                            "new_sets": p.new_sets,
+                            "new_reps": p.new_reps,
+                            "new_rest_seconds": p.new_rest_seconds,
+                            "new_focus": p.new_focus,
+                            "reason": p.reason,
+                        }
+                        for p in review.patches
+                    ],
+                },
+            },
+        }
+
+        # ── AI plan regenerate fallback ────────────────────────────
+        # When the reviewer flags the deterministic plan as broken —
+        # either status=modify (patches emitted) OR status=ok with
+        # contradictory complaints in notes — ask the AI to build a
+        # replacement plan from the equipment catalog. This is the
+        # escape hatch for when the deterministic planner's output
+        # is wrong in a way surgical patches can't fix (e.g. "5
+        # lifting days for fat loss but no cardio"). AI success
+        # replaces the plan wholesale; AI failure keeps the
+        # deterministic (and possibly patched) plan.
+        should_regenerate = (
+            review.status == "modify"
+            or (review.error or "").startswith("ok-with-complaints")
+        )
+        if should_regenerate:
+            try:
+                from app.services.workout.plan_ai_regenerate import (
+                    regenerate_plan_with_ai,
+                )
+                regen = regenerate_plan_with_ai(
+                    failed_plan=plan,
+                    review_notes=review.notes,
+                    goal=req.goal or "muscle_gain",
+                    days_per_week=int(req.daysPerWeek or 3),
+                    experience=(req.experienceLevel or "intermediate"),
+                    injuries=tuple(req.injuriesOrLimitations or ()),
+                    # Same focus resolution as the review brief above.
+                    focused_muscle=_focused_for_ai,
+                    secondary_goal=_secondary_goal,
+                    goal_details=_goal_details,
+                    session_minutes=getattr(req, "workoutDurationMinutes", None),
+                    recent_completed=recent_completed_rows,
+                    all_exercises=SEED_EXERCISES,
+                    owned_equipment_slugs=owned_slugs,
+                )
+            except Exception as e:
+                print(f"[plan-gen workout] AI regenerate failed (non-fatal): {e}")
+                regen = None
+
+            if regen is not None:
+                print(
+                    f"[plan-gen workout] AI regenerate accepted — "
+                    f"replacing deterministic plan with AI plan "
+                    f"({len(regen.plan['workout_plan']['days'])} days)"
+                )
+                # Preserve the debug sidecar from the original review
+                # so the client can still log what triggered the
+                # regeneration.
+                old_debug = plan.get("_debug")
+                plan = regen.plan
+                if old_debug:
+                    plan["_debug"] = old_debug
+                    plan["_debug"]["regenerated"] = {
+                        "reason": "review flagged issues",
+                        "notes": regen.notes,
+                        "source": "ai_regenerate",
+                    }
+                # Re-stamp load metadata so set schemes and target
+                # weights land on the AI-generated exercises (using
+                # the same perf_profiles we loaded earlier for the
+                # deterministic pass).
+                try:
+                    from app.services.workout.planner import _stamp_load_metadata
+                    from app.seed_exercises_data import SEED_EXERCISES as _seed
+                    from app.routers.ai.utils import infer_exercise_category  # noqa: F401 (touch to ensure import path)
+                    _all_by_slug = {ex["slug"]: ex for ex in _seed if ex.get("slug")}
+                    class _PresStub:
+                        __slots__ = ("sets", "reps", "rest_seconds", "rir_target")
+                        def __init__(self, s, r, rs, rir):
+                            self.sets, self.reps, self.rest_seconds, self.rir_target = s, r, rs, rir
+                    for day in plan.get("workout_plan", {}).get("days", []) or []:
+                        for ex_out in day.get("exercises", []) or []:
+                            slug = ex_out.get("_slug")
+                            seed_ex = _all_by_slug.get(slug, {})
+                            pres = _PresStub(
+                                s=int(ex_out.get("sets") or 3),
+                                r=str(ex_out.get("reps") or "8-12"),
+                                rs=int(ex_out.get("restSeconds") or 90),
+                                rir=float(ex_out.get("_rir_target") or 2.0),
+                            )
+                            _stamp_load_metadata(
+                                ex_out,
+                                exercise=seed_ex,
+                                prescription=pres,
+                                role=ex_out.get("_role") or "accessory",
+                                goal_bucket=req.goal or "muscle_gain",
+                                experience=(req.experienceLevel or "intermediate"),
+                                perf_profiles=perf_profiles_for_planner,
+                                all_exercises_by_slug=_all_by_slug,
+                            )
+                except Exception as e:
+                    print(f"[plan-gen workout] re-stamp after AI regenerate failed (non-fatal): {e}")
+            else:
+                print(
+                    "[plan-gen workout] AI regenerate rejected — "
+                    "keeping deterministic plan"
+                )
+    except _PlanReviewDisabled:
+        pass  # Silently skip — the disabled log already fired above.
+    except Exception as e:
+        print(f"[plan-gen workout] plan review failed (non-fatal): {e}")
+
+    days = plan.get("workout_plan", {}).get("days") or []
+    print(
+        f"[plan-gen workout] deterministic — goal={req.goal} days={len(days)} "
+        f"history_exercises={len(history_familiarity)} "
+        f"owned_eq={sorted(owned_slugs)[:6]}{'...' if len(owned_slugs) > 6 else ''}"
+    )
+    return plan
+
+
+def _generate_trainer_note(
+    client: OpenAI,
+    req: PlanRequest,
+    plan: dict,
+    model: str | None = None,
+) -> str:
+    """Small LLM call that writes a 120-180 word note describing the
+    already-built deterministic plan. Keeping this as an LLM call (vs. a
+    template) because it's the one piece of the response users actually
+    read, and a personalized description reads very differently from a
+    "Day 1: Push / 5 exercises / progressive overload" string.
+
+    Failure here is non-fatal — we return an empty string and the client
+    falls back to the deterministic plan on its own. The plan itself is
+    the contract; the note is a bonus."""
+    try:
+        wp = plan.get("workout_plan", {})
+        days_summary: list[str] = []
+        for d in wp.get("days", [])[:7]:
+            ex_names = ", ".join(
+                (ex.get("name") or "").strip()
+                for ex in d.get("exercises", [])[:6]
+            )
+            days_summary.append(f"  {d.get('day', '?')} ({d.get('focus', '?')}): {ex_names}")
+        days_block = "\n".join(days_summary) if days_summary else "  (no days)"
+
+        # ── Recent 3-day history block ──────────────────────────────
+        # Pulled from plan["_recent_completed"] which is stamped by
+        # _build_deterministic_workout. Contains focus label, date,
+        # duration, AND per-exercise sets (reps × weight) when the
+        # user logged them via the structured completion path.
+        recent = plan.get("_recent_completed") or []
+        print(
+            f"[plan-gen trainer-note] received {len(recent)} recent history entries "
+            f"(first focus={recent[0].get('focus') if recent else None!r})"
+        )
+        recent_lines: list[str] = []
+        for r in recent[:3]:
+            focus = r.get("focus") or "?"
+            date = str(r.get("workout_date") or "")
+            dur = r.get("duration_seconds")
+            dur_str = f" ({round(dur / 60)} min)" if dur else ""
+            exs = r.get("exercises") or []
+            if exs:
+                ex_bits: list[str] = []
+                for e in exs[:6]:
+                    sets = e.get("sets") or []
+                    if sets:
+                        top = max(sets, key=lambda s: (s.get("weight_lbs") or 0, s.get("reps") or 0))
+                        ex_bits.append(
+                            f"{e.get('name')} {len(sets)}×"
+                            f"top {int(top.get('reps') or 0)}@{int(top.get('weight_lbs') or 0)}lb"
+                        )
+                    else:
+                        ex_bits.append(str(e.get('name') or ''))
+                recent_lines.append(f"  {date} {focus}{dur_str}: {'; '.join(ex_bits)}")
+            else:
+                recent_lines.append(f"  {date} {focus}{dur_str}: (per-set data not captured)")
+        recent_block = "\n".join(recent_lines) if recent_lines else "  (no recent sessions)"
+
+        goal = (
+            req.goalSelection.primaryGoal
+            if req.goalSelection is not None
+            else req.goal
+        )
+        injuries = ", ".join(req.injuriesOrLimitations or []) or "none"
+        prompt = (
+            "Write a 120-180 word explanation of this pre-built training plan to the user.\n\n"
+            f"Goal: {goal}\n"
+            f"Days/week: {req.daysPerWeek}\n"
+            f"Session length: {req.workoutDurationMinutes or 60} min (INCLUDES warm-up — the deterministic planner reserves ~5 min of warm-up/ramp-up time inside every session's budget, so the user should NOT add extra time on top)\n"
+            f"Experience: {req.experienceLevel or 'intermediate'}\n"
+            f"Injuries/limits: {injuries}\n"
+            f"Split: {wp.get('name', 'custom split')}\n"
+            f"Days:\n{days_block}\n\n"
+            f"Recent 3-day history (what they actually trained):\n{recent_block}\n\n"
+            "Cover: (1) WHY this split fits their goal and weekly frequency, "
+            "(2) WHY the chosen exercises work for their equipment and any injuries — name 2 exercises, "
+            "(3) HOW progression will work over the next 4 weeks, "
+            "(4) what the user should FEEL by the end of a session so they can self-assess, "
+            "(5) briefly reference ONE recent session to show you looked at their history "
+            "(e.g. 'since you hit pull yesterday, day 1 leads with legs'). "
+            "Speak directly to the user ('you'). No generic platitudes. "
+            "FORMATTING: Return a SINGLE flowing paragraph of plain prose. "
+            "No markdown, bold, headings, bullet points, numbered lists, or line "
+            "breaks inside the note. One paragraph, 120-180 words. "
+            'Return JSON: {"trainerNote": "..."}'
+        )
+        kwargs = _build_chat_kwargs(
+            model or model_plan_generation(),
+            [
+                {"role": "system", "content": "You are an expert fitness coach. Be concise. Return only the required JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=450,
+            timeout_secs=45,
+        )
+        response = _chat_create(client, **kwargs)
+        raw = response.choices[0].message.content
+        data = _extract_json(raw)
+        note = (data or {}).get("trainerNote") or ""
+        return str(note).strip()
+    except Exception as e:
+        print(f"[plan-gen trainer-note] failed (non-fatal): {e}")
+        return ""
+
+
+def _generate_nutritionist_note(
+    client: OpenAI,
+    req: PlanRequest,
+    nutrition_data: dict,
+    target_macros: tuple[int, int, int, int],
+    review_summary: list[dict] | None = None,
+    model: str | None = None,
+) -> str:
+    """Parallel to `_generate_trainer_note`. Writes a 120-180 word
+    nutritionist note grounded in: (1) the deterministic targets from
+    `compute_tdee_and_targets`, (2) a per-meal summary of the FIRST
+    finalized template (post-review, post-normalize), (3) any patches
+    the nutrition reviewer applied so the note can acknowledge the fix,
+    (4) the user's goal / secondary goal / diet preference / allergies,
+    (5) training load (days/week) so the note can connect fueling to
+    the workout volume.
+
+    Failure here is non-fatal — returns an empty string and the caller
+    keeps whatever note the meal assembler already produced."""
+    try:
+        tgt_cal, tgt_prot, tgt_carbs, tgt_fat = target_macros
+        plans_list = nutrition_data.get("nutrition_plans") or []
+        first_np = plans_list[0] if plans_list else {}
+        meals_in = first_np.get("meals") if isinstance(first_np, dict) else None
+        if not isinstance(meals_in, list):
+            meals_in = []
+
+        meal_lines: list[str] = []
+        for m in meals_in[:6]:
+            if not isinstance(m, dict):
+                continue
+            name = m.get("name") or m.get("label") or "meal"
+            cal = int(round(float(m.get("calories") or 0)))
+            prot = int(round(float(m.get("protein") or 0)))
+            carbs = int(round(float(m.get("carbs") or 0)))
+            fat = int(round(float(m.get("fat") or 0)))
+            items = m.get("items") or []
+            item_names = ", ".join(
+                str(it.get("name") or "") for it in items[:4] if isinstance(it, dict)
+            )
+            meal_lines.append(
+                f"  {name}: {cal} cal / {prot}p / {carbs}c / {fat}f"
+                + (f" — {item_names}" if item_names else "")
+            )
+        meals_block = "\n".join(meal_lines) if meal_lines else "  (no meals)"
+
+        # ── Compute strengths + gaps from micronutrient totals ──
+        # Mirror of the client-side nutritionLayers.ts rules. Sums the
+        # first template's micronutrients and identifies anything notably
+        # low (fiber, omega3, potassium, calcium, magnesium) or high
+        # (sodium, saturated fat) so the note can cite real numbers.
+        def _sum_micros(template: dict) -> dict[str, float]:
+            """Sum micronutrients across meals. Reads BOTH snake_case
+            (canonical backend) and camelCase (legacy) keys so we never
+            miss data regardless of which path generated the meal."""
+            totals: dict[str, float] = {}
+            # Map canonical display keys → list of source keys to try.
+            # The first match wins per-meal.
+            KEY_MAP: dict[str, list[str]] = {
+                "fiber":        ["fiber"],
+                "sodium":       ["sodium"],
+                "sugar":        ["sugar"],
+                "saturated_fat":["saturated_fat", "saturatedFat"],
+                "omega_3":      ["omega_3", "omega3"],
+                "potassium":    ["potassium"],
+                "calcium":      ["calcium"],
+                "magnesium":    ["magnesium"],
+                "iron":         ["iron"],
+                "vitamin_d":    ["vitamin_d", "vitaminD"],
+                "vitamin_c":    ["vitamin_c", "vitaminC"],
+                "vitamin_b12":  ["vitamin_b12", "vitaminB12"],
+            }
+            for m in template.get("meals") or []:
+                if not isinstance(m, dict):
+                    continue
+                micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
+                for canonical, alts in KEY_MAP.items():
+                    val = 0.0
+                    # Check top-level meal keys first (fiber/sodium/sugar
+                    # live there), then nested micronutrients dict.
+                    for alt in alts:
+                        v = m.get(alt) if alt in ("fiber", "sodium", "sugar") else None
+                        if v is None:
+                            v = micros.get(alt)
+                        if v is not None:
+                            try:
+                                val = float(v)
+                            except (TypeError, ValueError):
+                                val = 0.0
+                            break
+                    totals[canonical] = totals.get(canonical, 0.0) + val
+            return totals
+
+        MIN_TARGETS = {  # daily target: higher-is-better nutrients
+            "fiber": 28, "omega_3": 1600, "potassium": 3400,
+            "calcium": 1000, "magnesium": 400, "vitamin_d": 15,
+        }
+        MAX_TARGETS = {  # lower-is-better
+            "sodium": 2300, "saturated_fat": 20, "sugar": 50,
+        }
+        LABELS = {
+            "fiber": "fiber", "omega_3": "omega-3", "potassium": "potassium",
+            "calcium": "calcium", "magnesium": "magnesium", "vitamin_d": "vitamin D",
+            "sodium": "sodium", "saturated_fat": "saturated fat", "sugar": "sugar",
+        }
+
+        micros = _sum_micros(first_np) if isinstance(first_np, dict) else {}
+        strengths: list[str] = []
+        gaps: list[str] = []
+        for key, target in MIN_TARGETS.items():
+            actual = micros.get(key, 0.0)
+            if actual <= 0:
+                continue
+            if actual >= target * 1.15:
+                strengths.append(f"{LABELS[key]} {int(round(actual))}")
+            elif actual < target * 0.70:
+                gaps.append(f"{LABELS[key]} {int(round(actual))} (target {target})")
+        for key, target in MAX_TARGETS.items():
+            actual = micros.get(key, 0.0)
+            if actual <= 0:
+                continue
+            if actual > target * 1.15:
+                gaps.append(f"{LABELS[key]} {int(round(actual))} (over {target})")
+
+        strengths_line = "; ".join(strengths[:2]) if strengths else "none stand out"
+        gaps_line      = "; ".join(gaps[:2])      if gaps      else "none significant"
+
+        review_block = ""
+        if review_summary:
+            patch_bits: list[str] = []
+            for rs in review_summary[:3]:
+                patches_applied = rs.get("patches_applied") or 0
+                if patches_applied:
+                    patch_bits.append(
+                        f"template {rs.get('template_index', '?')}: "
+                        f"{patches_applied} fix(es) — {rs.get('notes', '')[:140]}"
+                    )
+            if patch_bits:
+                review_block = (
+                    "\n\nNutrition review corrections applied:\n  "
+                    + "\n  ".join(patch_bits)
+                    + "\n(You may briefly reference that the plan was reviewed and tuned.)"
+                )
+
+        goal = (
+            req.goalSelection.primaryGoal
+            if req.goalSelection is not None
+            else req.goal
+        )
+        # The active goal model uses primaryGoal + targetFocus only.
+        # secondaryGoal and modifiers are deprecated (always empty).
+        target_focus = (
+            getattr(req.goalSelection, "targetFocus", None)
+            if req.goalSelection is not None
+            else getattr(req, "focusedMuscleGroup", None)
+        )
+        diet = getattr(req, "dietaryPreference", None) or "no specific preference"
+        allergens = ", ".join(getattr(req, "allergies", None) or []) or "none"
+        goal_details = None
+        try:
+            goal_details = req.goalDetails.model_dump() if req.goalDetails else None
+        except Exception:
+            goal_details = None
+
+        # Precompute derived numbers so the AI narrates real values
+        # instead of drifting into generic "high protein" language.
+        bw = float(getattr(req, "weightLbs", 0) or 0)
+        prot_per_lb = round(tgt_prot / bw, 2) if bw > 0 else None
+        total_cal_from_macros = (tgt_prot * 4) + (tgt_carbs * 4) + (tgt_fat * 9)
+        pct_prot = round((tgt_prot * 4) / tgt_cal * 100) if tgt_cal else 0
+        pct_carbs = round((tgt_carbs * 4) / tgt_cal * 100) if tgt_cal else 0
+        pct_fat = round((tgt_fat * 9) / tgt_cal * 100) if tgt_cal else 0
+
+        # Goal-specific rationale the AI should lean on so the note
+        # isn't a generic "balanced nutrition" blurb. One short line
+        # per goal that the prompt tells the AI to *expand on*, not
+        # parrot verbatim.
+        goal_key = (goal or "").lower()
+        if "fat" in goal_key or "loss" in goal_key or "cut" in goal_key:
+            goal_rationale = (
+                f"{tgt_cal} kcal creates a moderate deficit for fat loss without "
+                f"nuking training quality; {tgt_prot}g protein "
+                f"({prot_per_lb or '?'} g/lb) preserves muscle while calories are low."
+            )
+        elif "gain" in goal_key or "bulk" in goal_key or "muscle" in goal_key:
+            goal_rationale = (
+                f"{tgt_cal} kcal gives a controlled surplus for lean muscle gain; "
+                f"{tgt_prot}g protein ({prot_per_lb or '?'} g/lb) drives synthesis on "
+                f"a {req.daysPerWeek or 3}-day lifting schedule."
+            )
+        elif "recomp" in goal_key:
+            goal_rationale = (
+                f"{tgt_cal} kcal is set near maintenance so you can add muscle and "
+                f"drop fat simultaneously; high protein ({tgt_prot}g / "
+                f"{prot_per_lb or '?'} g/lb) is the lever that makes recomp possible."
+            )
+        else:
+            goal_rationale = (
+                f"{tgt_cal} kcal is set at maintenance; {tgt_prot}g protein "
+                f"({prot_per_lb or '?'} g/lb) supports performance on a "
+                f"{req.daysPerWeek or 3}-day training schedule."
+            )
+
+        # Build supplement stack summary for the note. The skeleton AI
+        # generates a supplementStack on every plan gen; the note should
+        # reference the top 2-3 supplements so the user sees WHY they're
+        # recommended.
+        supp_stack = nutrition_data.get("supplementStack") or []
+        if isinstance(supp_stack, list) and supp_stack:
+            supp_lines = []
+            for s in supp_stack[:3]:
+                if isinstance(s, dict):
+                    supp_lines.append(
+                        f"  {s.get('name', '?')}: {s.get('dose', '?')}, "
+                        f"{s.get('timing', '?')} — {s.get('purpose', '?')}"
+                    )
+            supp_block = "\n".join(supp_lines) if supp_lines else "  (none)"
+        else:
+            supp_block = "  (none generated)"
+
+        # Build shared nutrition context (bodyweight, adherence, etc.)
+        user_context_block = ""
+        try:
+            from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+            _nctx = build_nutrition_context(
+                goal=goal,
+                secondary_goal=target_focus,
+                experience=getattr(req, "experienceLevel", None),
+                bodyweight_lbs=bw,
+                dietary_preference=diet,
+                allergies=getattr(req, "allergies", None),
+            )
+            user_context_block = format_for_prompt(_nctx)
+        except Exception:
+            pass
+
+        prompt = (
+            "Write a 150-220 word grounded nutrition explanation for this user. "
+            "This note must READ LIKE A REGISTERED DIETITIAN explaining a plan "
+            "tailored to THEIR specific goal and numbers — not generic meal-plan prose.\n\n"
+            "=== USER CONTEXT ===\n"
+            f"Primary goal: {goal}\n"
+            + (f"Target muscle focus: {target_focus} (user wants extra emphasis here)\n" if target_focus else "") +
+            f"Goal details: {goal_details}\n"
+            f"Bodyweight: {bw or '?'} lbs\n"
+            f"Diet preference: {diet}\n"
+            f"Allergies: {allergens}\n"
+            f"Training: {req.daysPerWeek or 3} lifting days/week, "
+            f"{req.workoutDurationMinutes or 60} min/session\n"
+            + (f"\n{user_context_block}\n" if user_context_block else "") +
+            "\n=== DAILY TARGETS (the numbers the user sees) ===\n"
+            f"Calories: {tgt_cal} kcal\n"
+            f"Protein:  {tgt_prot} g  ({pct_prot}% of kcal, {prot_per_lb or '?'} g/lb bodyweight)\n"
+            f"Carbs:    {tgt_carbs} g  ({pct_carbs}% of kcal)\n"
+            f"Fat:      {tgt_fat} g  ({pct_fat}% of kcal)\n"
+            f"(Sanity: macros add up to {total_cal_from_macros} kcal — within rounding of target.)\n\n"
+            "=== GOAL-SPECIFIC RATIONALE (expand on this, do not parrot) ===\n"
+            f"{goal_rationale}\n\n"
+            "=== FIRST TEMPLATE MEALS (post-review, post-normalize — these exact numbers show in the UI) ===\n"
+            f"{meals_block}\n\n"
+            "=== REAL STRENGTHS + GAPS FROM THIS TEMPLATE'S MICRONUTRIENTS ===\n"
+            f"Strengths: {strengths_line}\n"
+            f"Gaps: {gaps_line}\n"
+            f"{review_block}\n\n"
+            "=== SUPPLEMENT STACK (AI-recommended for this goal) ===\n"
+            f"{supp_block}\n\n"
+            "=== REQUIREMENTS FOR THE NOTE ===\n"
+            f"1. Lead with the goal by name and the EXACT calorie target ({tgt_cal} kcal) "
+            f"and EXACT protein target ({tgt_prot}g) — the user must see their own numbers "
+            "in the first two sentences.\n"
+            f"2. Explain the protein choice using the g/lb bodyweight ratio "
+            f"({prot_per_lb or '?'} g/lb) — why this range is right for their goal.\n"
+            f"3. Explain the carb/fat split ({pct_carbs}% carbs / {pct_fat}% fat of total "
+            "calories) in terms of training fuel + recovery + satiety for THIS goal.\n"
+            "4. Name ONE specific meal from the list above by its exact name and explain "
+            "why it is built that way for this goal (cite its calories or protein).\n"
+            "5. Name ONE strength from the Strengths line above by nutrient name with its number.\n"
+            "6. Name ONE gap from the Gaps line above with its number AND suggest one "
+            "concrete food fix (e.g. 'add a cup of spinach', 'two salmon fillets per week'). "
+            "If gaps_line says 'none significant', skip this requirement entirely.\n"
+            "7. Reference 1-2 supplements from the stack above and explain in one clause "
+            "WHY they're included (e.g. 'creatine for strength output on a 4-day lifting "
+            "schedule', 'omega-3 because your plan's fish intake is low'). If the stack "
+            "is empty, skip this.\n"
+            "8. Tell the user what they should FEEL in the first 2 weeks (energy, hunger, "
+            "gym performance) so they can self-assess whether it's working.\n"
+            "9. One practical adjustment if they're hungry or flat (specific, not 'eat more').\n\n"
+            "BANNED: generic phrases like 'balanced nutrition', 'supports your goals', "
+            "'fuel your workouts', 'clean eating'. Every sentence must cite a number, "
+            "a named meal, a named supplement, or a nutrient from above. No filler.\n\n"
+            "FORMATTING: Return a SINGLE flowing paragraph of plain prose. "
+            "Do NOT use markdown, bold (**), headings (#), bullet points (- or *), "
+            "numbered lists (1., 2.), or line breaks inside the note. One paragraph, "
+            "150-220 words, plain text. The UI renders it as a single Text block.\n\n"
+            'Return JSON: {"nutritionistNote": "..."}'
+        )
+        kwargs = _build_chat_kwargs(
+            model or model_plan_generation(),
+            [
+                {"role": "system", "content": "You are a registered dietitian and sports nutritionist. Be concise and direct. Return only the required JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=450,
+            timeout_secs=45,
+        )
+        response = _chat_create(client, **kwargs)
+        raw = response.choices[0].message.content
+        data = _extract_json(raw)
+        note = (data or {}).get("nutritionistNote") or ""
+        return str(note).strip()
+    except Exception as e:
+        print(f"[plan-gen nutritionist-note] failed (non-fatal): {e}")
+        return ""
+
+
 def _call_workout_ai(client: OpenAI, prompt: str, model: str | None = None, max_tokens: int = 2000) -> dict:
     """Synchronous OpenAI call for the workout plan (run in a thread)."""
     last_error: Exception | None = None
@@ -508,25 +1542,55 @@ def _build_custom_foods(
                     if isinstance(macros, dict):
                         plan_food_macros[str(name).lower()] = macros
 
+    # Canonical micronutrient fields we'll copy through when the
+    # enrichment path supplied them. Clients store these alongside
+    # macros so the insight engine has day-level rollup data.
+    _MICRO_KEYS = (
+        "fiber", "sugar", "sodium", "cholesterol",
+        "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
+        "omega_3", "omega_6",
+        "potassium", "calcium", "iron", "magnesium",
+        "vitamin_c", "vitamin_d", "vitamin_b12",
+    )
+
     custom_foods: list[dict] = []
     for name_lower in all_unknown:
         # Try enriched data first, then plan-extracted macros
         info = enriched_lookup.get(name_lower) or plan_food_macros.get(name_lower)
         if info:
-            custom_foods.append({
+            micros: dict[str, float] = {}
+            for k in _MICRO_KEYS:
+                v = info.get(k)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                    if fv != 0:
+                        micros[k] = fv
+                except (TypeError, ValueError):
+                    continue
+            entry = {
                 "name": info.get("name", name_lower.title()),
                 "unit": info.get("serving") or info.get("quantity") or "1 serving",
                 "calories": info.get("calories", 0),
                 "protein": info.get("protein", 0),
                 "carbs": info.get("carbs", 0),
                 "fat": info.get("fat", 0),
-            })
+                # Tag verification status so the client's UI can show
+                # a badge and the validate endpoint knows whether this
+                # food has already been through verification.
+                "verificationStatus": "ai_estimated",
+            }
+            if micros:
+                entry["micronutrients"] = micros
+            custom_foods.append(entry)
         else:
             # No macro data available — include with zeros so frontend knows about it
             custom_foods.append({
                 "name": name_lower.title(),
                 "unit": "1 serving",
                 "calories": 0, "protein": 0, "carbs": 0, "fat": 0,
+                "verificationStatus": "insufficient_data",
             })
 
     return custom_foods
@@ -794,7 +1858,12 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
 
-async def run_full_plan_generation(req: PlanRequest) -> dict:
+async def run_full_plan_generation(
+    req: PlanRequest,
+    *,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict:
     """Shared plan-generation pipeline. Callable from both the sync /plans
     endpoint and the async background job worker. No auth, no HTTP — pure
     data in, data out. Raises ValueError on validation / generation errors.
@@ -815,17 +1884,26 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     client = OpenAI(api_key=api_key)
     _m = model_plan_generation()
     print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
+    # Loud diagnostic — routine accounting inputs. If this prints
+    # `routineMacros=None routineSlots=[] mealRoutine=None` when the
+    # user expects routines, the client → backend plumbing dropped
+    # them and the assembler will build a full-target plan.
+    print(
+        f"[plan-gen] routine inputs — mealsPerDay={getattr(req, 'mealsPerDay', None)} "
+        f"routineMacros={getattr(req, 'routineMacros', None)} "
+        f"routineSlots={getattr(req, 'routineSlots', None)} "
+        f"mealRoutine={bool(getattr(req, 'mealRoutine', None))}"
+    )
 
-    # Build the canonical exercise library for this user. Without this the
-    # AI invents exercise names ("Squats") and equipment strings ("Leg Press
-    # on the leg extension machine"). With it, the AI is constrained to a
-    # closed set and we canonicalize the response below.
-    workout_library = build_user_exercise_library(req.equipment)
-    if not req.exerciseLibrary and workout_library:
-        req.exerciseLibrary = [
-            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
-        ]
-    workout_prompt = build_workout_prompt(req)
+    # Workout plan is now built deterministically from `workout_planner`,
+    # seeded with the user's id for stable tie-breaking and decorated with
+    # history-aware next-session targets. The LLM is used for the trainer
+    # note below AND for the plan-review + AI-regenerate passes inside
+    # `_build_deterministic_workout`. Those inner AI calls are SYNC
+    # (openai SDK's blocking API), so we must wrap the whole function in
+    # `asyncio.to_thread` or the background task hogs the event loop and
+    # poll requests from the client start timing out at 30s.
+    workout_data = await asyncio.to_thread(_build_deterministic_workout, req, db, user_id)
 
     # Deterministic target macros (source of truth for the assembler).
     targets_for_check = compute_tdee_and_targets(req)
@@ -839,10 +1917,9 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     variety_n = max(1, min(7, int(getattr(req, "mealVariety", 3) or 3)))
 
     # Hybrid nutrition pipeline: AI picks meal skeletons, algorithm solves
-    # portions and hits macro targets. Runs in parallel with enrichment +
-    # workout generation. `assemble_nutrition_response` needs the enriched
-    # data, so we do enrichment first then assembly, while workout runs
-    # independently in its own thread.
+    # portions and hits macro targets. Runs in parallel with the trainer
+    # note LLM call so the two AI round-trips overlap instead of
+    # serializing.
     async def _run_nutrition() -> dict:
         enriched_local = await asyncio.to_thread(
             enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
@@ -853,16 +1930,15 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
         )
         return {"enriched": enriched_local, "nutrition": nut}
 
-    nutrition_bundle, workout_data = await asyncio.gather(
+    nutrition_bundle, trainer_note = await asyncio.gather(
         _run_nutrition(),
-        asyncio.to_thread(_call_workout_ai, client, workout_prompt, _m, 1800),
+        asyncio.to_thread(_generate_trainer_note, client, req, workout_data, _m),
     )
     enriched = nutrition_bundle["enriched"]
     nutrition_data = nutrition_bundle["nutrition"]
-
-    # Canonicalize the AI workout response against the seed library so the
-    # client always sees real seed names + equipment instead of AI freeform.
-    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
+    workout_data["trainerNote"] = trainer_note
+    # Deterministic planner already emits canonical names and equipment
+    # labels straight from the seed — no canonicalization pass needed.
 
     plans_list = nutrition_data.get("nutrition_plans") or []
     # Back-compat fallback in case the model still emits the legacy A/B/C keys.
@@ -879,6 +1955,85 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
     # the meals back UP and undo the routine subtraction. The full target is
     # still used for the `targets` field on each template so the UI shows
     # the user's actual daily goal.
+    # ── AI nutrition-plan review (runs BEFORE normalization) ──
+    # Gated by NUTRITION_REVIEW_ENABLED. Catches per-item macro
+    # nonsense (e.g. "50 cal ribeye 8oz") so the numbers the user
+    # sees reflect reality. Fixes propagate through normalization.
+    import os as _os_n
+    _nutrition_review_enabled = _os_n.getenv("NUTRITION_REVIEW_ENABLED", "0") == "1"
+    _nutrition_review_summary: list[dict] = []
+    if not _nutrition_review_enabled:
+        print("[plan-gen nutrition] AI nutrition review DISABLED (set NUTRITION_REVIEW_ENABLED=1 to re-enable)")
+    else:
+        try:
+            from app.services.nutrition.plan_review import (
+                apply_nutrition_patches,
+                build_nutrition_brief,
+                review_nutrition_plan,
+            )
+            tgt_cal, tgt_prot, tgt_carbs, tgt_fat = nutrition_target_macros
+            for idx, np_ in enumerate(plans_list):
+                if not isinstance(np_, dict):
+                    continue
+                if np_.get("nutrition_validation", {}).get("ok"):
+                    continue
+                # Build shared nutrition context for the reviewer so it
+                # knows bodyweight, experience, weight trend, adherence,
+                # and recent workouts. Same blob the skeleton AI now sees.
+                _review_ctx_str = ""
+                try:
+                    from app.services.nutrition.context import build_nutrition_context, format_for_prompt
+                    _review_nctx = build_nutrition_context(
+                        goal=req.goal,
+                        secondary_goal=target_focus,  # target focus is the only active "secondary" context
+                        experience=getattr(req, "experienceLevel", None),
+                        bodyweight_lbs=getattr(getattr(req, "physicalStats", None), "weightLbs", None) if hasattr(req, "physicalStats") else None,
+                        dietary_preference=getattr(req, "dietaryPreference", None),
+                        allergies=getattr(req, "allergies", None),
+                        db=db,
+                        user_id=user_id,
+                    )
+                    _review_ctx_str = format_for_prompt(_review_nctx)
+                except Exception:
+                    pass
+                brief = build_nutrition_brief(
+                    np_,
+                    goal=req.goal or "muscle_gain",
+                    target_calories=tgt_cal,
+                    target_protein=tgt_prot,
+                    target_carbs=tgt_carbs,
+                    target_fat=tgt_fat,
+                    allowed_foods=req.foodsAvailable or [],
+                    allergens=getattr(req, "allergies", None) or [],
+                    diet_preference=getattr(req, "dietaryPreference", None),
+                    nutrition_context=_review_ctx_str,
+                )
+                review = review_nutrition_plan(brief)
+                print(
+                    f"[nutrition-review] template {idx}: status={review.status} "
+                    f"patches={len(review.patches)} error={review.error!r}"
+                )
+                print(f"[nutrition-review] notes: {review.notes}")
+                if review.status == "modify" and review.patches:
+                    _, applied = apply_nutrition_patches(np_, review.patches)
+                    for msg in applied:
+                        print(f"[nutrition-review] patch: {msg}")
+                np_["nutrition_validation"] = {
+                    "ok": review.status == "ok",
+                    "reviewer": "ai",
+                    "notes": review.notes,
+                    "patches_applied": len(review.patches) if review.status == "modify" else 0,
+                    "error": review.error,
+                }
+                _nutrition_review_summary.append({
+                    "template_index": idx,
+                    "status": review.status,
+                    "notes": review.notes,
+                    "patches_applied": len(review.patches) if review.status == "modify" else 0,
+                })
+        except Exception as exc:
+            print(f"[nutrition-review] skipped due to error: {exc}")
+
     norm_target = _adjusted_target_for_normalization(req, nutrition_target_macros)
     t_kcal, t_prot, t_carbs, t_fat = norm_target
     for idx, np_ in enumerate(plans_list):
@@ -886,6 +2041,33 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
             if summary:
                 print(f"[plan-gen] normalized template {idx}: {summary}")
+
+    # ── Grounded nutritionist note (mirrors the trainer note) ──
+    # Regenerate the nutritionist note now that templates are reviewed
+    # + normalized, so the note can reference the FINAL macros + meals
+    # the user will actually see, plus any reviewer corrections. Falls
+    # back to whatever the assembler produced if this call fails.
+    try:
+        grounded_note = await asyncio.to_thread(
+            _generate_nutritionist_note,
+            client,
+            req,
+            {"nutrition_plans": plans_list},
+            nutrition_target_macros,
+            _nutrition_review_summary,
+            _m,
+        )
+        if grounded_note:
+            nutrition_data["nutritionistNote"] = grounded_note
+            print(f"[plan-gen] grounded nutritionist note generated ({len(grounded_note)} chars)")
+            print(f"[plan-gen] note preview: {grounded_note[:200]}...")
+        else:
+            print("[plan-gen] grounded nutritionist note returned empty — keeping assembler's note")
+    except Exception as exc:
+        import traceback
+        print(f"[plan-gen] grounded nutritionist note FAILED: {exc}")
+        traceback.print_exc()
+
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
@@ -898,6 +2080,10 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
         "nutrition_plan_b": plans_list[1] if len(plans_list) > 1 else (plans_list[0] if plans_list else None),
         "nutrition_plan_c": plans_list[2] if len(plans_list) > 2 else (plans_list[-1] if plans_list else None),
     }
+    # Forward plan-review debug sidecar so the client can log what
+    # the reviewer saw + decided. Absent when the reviewer skipped.
+    if "_debug" in workout_data:
+        result["_debug"] = workout_data["_debug"]
     _validate_plans(result, req)   # raises ValueError
 
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
@@ -911,47 +2097,62 @@ async def run_full_plan_generation(req: PlanRequest) -> dict:
 async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     req: PlanRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """Sync plan generation (legacy). New client code should use the job
     queue at `/ai/plans/enqueue` so long-running work survives app kill."""
     try:
-        return await run_full_plan_generation(req)
+        return await run_full_plan_generation(req, db=db, user_id=current_user.id)
     except ValueError as e:
         print(f"[AI /plans] FAILED — {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
-async def run_workout_only_generation(plan_req: PlanRequest) -> dict:
-    """Shared workout-only generator — callable from sync endpoint and job worker."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise ValueError("OpenAI API key not configured")
-    client = OpenAI(api_key=api_key)
-    _m = model_plan_update()
+async def run_workout_only_generation(
+    plan_req: PlanRequest,
+    *,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict:
+    """Shared workout-only generator — callable from sync endpoint and job worker.
+
+    Same deterministic-planner pipeline as `run_full_plan_generation`.
+    The trainer note is generated by a small AI call that sees the
+    already-built plan; failures there are non-fatal and return an empty
+    string."""
     print(f"[plan-gen workout] goal={plan_req.goal}, days={plan_req.daysPerWeek}")
+    # Wrap the deterministic+review+regenerate pipeline in a thread so
+    # its internal SYNC OpenAI calls (plan_review, ai_regenerate) don't
+    # block the event loop — otherwise poll requests stack up behind
+    # the background task and the client hits its 30s abort. See the
+    # matching note in `run_full_plan_generation`.
+    workout_data = await asyncio.to_thread(_build_deterministic_workout, plan_req, db, user_id)
 
-    # Same library + canonicalize pipeline as the full plan generator.
-    workout_library = build_user_exercise_library(plan_req.equipment)
-    if not plan_req.exerciseLibrary and workout_library:
-        plan_req.exerciseLibrary = [
-            {"name": ex["name"], "equipment": ex["equipment_label"]} for ex in workout_library
-        ]
-
-    # 1800-token baseline (retry at 2300) — enough for a 6-day plan with the
-    # new verbose trainerNote. 800 was the old cap and was truncating on
-    # bigger plans, which turned into "failed after 2 attempts" errors.
-    workout_data = await asyncio.to_thread(_call_workout_ai, client, build_workout_prompt(plan_req), _m, 1800)
-    workout_data = canonicalize_workout_exercises(workout_data, workout_library)
-    return {
+    api_key = get_openai_api_key()
+    note = ""
+    if api_key:
+        client = OpenAI(api_key=api_key)
+        note = await asyncio.to_thread(
+            _generate_trainer_note, client, plan_req, workout_data, model_plan_update(),
+        )
+    workout_data["trainerNote"] = note
+    out = {
         "trainerNote":  workout_data.get("trainerNote", ""),
         "workout_plan": workout_data["workout_plan"],
     }
+    # Preserve the plan-review debug sidecar so the client can log
+    # what the reviewer saw and what it decided. Only present when
+    # the reviewer actually ran.
+    if "_debug" in workout_data:
+        out["_debug"] = workout_data["_debug"]
+    return out
 
 
 @router.post("/plans/workout")
 async def generate_workout_plan(
     req: WorkoutOnlyRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """Generate a workout plan only — called when equipment changes (sync legacy)."""
     plan_req = PlanRequest(
@@ -969,7 +2170,7 @@ async def generate_workout_plan(
         userContext=req.userContext,
     )
     try:
-        return await run_workout_only_generation(plan_req)
+        return await run_workout_only_generation(plan_req, db=db, user_id=current_user.id)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -1014,6 +2215,29 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
             if summary:
                 print(f"[plan-gen nutrition] normalized template {idx}: {summary}")
+    # ── Grounded nutritionist note (same as full plan gen path) ──
+    # Without this, nutrition-only regens keep the skeleton AI's generic
+    # note, which doesn't cite actual numbers, nutrients, or supplements.
+    try:
+        _focused = (
+            getattr(plan_req.goalSelection, "targetFocus", None)
+            if plan_req.goalSelection else plan_req.focusedMuscleGroup
+        )
+        grounded_note = await asyncio.to_thread(
+            _generate_nutritionist_note,
+            client,
+            plan_req,
+            {"nutrition_plans": plans_list, "supplementStack": nutrition_data.get("supplementStack", [])},
+            nutrition_target_macros,
+            [],  # no review summary on nutrition-only path
+            _m,
+        )
+        if grounded_note:
+            nutrition_data["nutritionistNote"] = grounded_note
+            print(f"[plan-gen nutrition] grounded note generated ({len(grounded_note)} chars)")
+    except Exception as exc:
+        print(f"[plan-gen nutrition] grounded note skipped: {exc}")
+
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
@@ -1198,11 +2422,11 @@ async def _run_plan_job(job_id: int) -> None:
             # pydantic BaseModel so .model_validate accepts a dict.
             req = PlanRequest.model_validate(req_dict)
             if job.kind == "workout":
-                result = await run_workout_only_generation(req)
+                result = await run_workout_only_generation(req, db=db, user_id=job.user_id)
             elif job.kind == "nutrition":
                 result = await run_nutrition_only_generation(req)
             else:
-                result = await run_full_plan_generation(req)
+                result = await run_full_plan_generation(req, db=db, user_id=job.user_id)
 
             # Re-check cancellation before saving — user might have cancelled
             # while the OpenAI call was in flight.

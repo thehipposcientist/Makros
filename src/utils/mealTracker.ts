@@ -27,19 +27,33 @@ export interface DietConsistencyScore {
 }
 
 /** Compute a diet-consistency score across the last `windowDays` days,
- *  using stored `mealChecks` as the source of truth. Returns `null` when
- *  there's no data at all — callers render a "no data" card in that case.
+ *  using stored `mealChecks` as the source of truth. Always returns a
+ *  valid score object — when no meals have been logged yet, returns a
+ *  zeroed score with mealsExpected populated so the card can render
+ *  an "empty state" instead of disappearing entirely. Previously this
+ *  returned null on an empty store, which made the diet score card
+ *  invisible for fresh users.
  *
- *  This mirrors how `fitnessScore` is computed in ProgressScreen — same
- *  14-day window, same 0–100 scale, same "consistency + trend" breakdown
- *  so the two scores can sit side-by-side and feel comparable. */
+ *  This mirrors how the fitness score is computed in ProgressScreen —
+ *  same 14-day window, same 0–100 scale — so the two scores sit
+ *  side-by-side and feel comparable. */
 export async function computeDietConsistency(
   mealsPerDay: number,
   windowDays: number = 14,
-): Promise<DietConsistencyScore | null> {
+): Promise<DietConsistencyScore> {
+  const per = Math.max(1, Math.min(10, Math.round(mealsPerDay || 3)));
+  const emptyScore: DietConsistencyScore = {
+    total: 0,
+    adherence: 0,
+    streak: 0,
+    spread: 0,
+    daysTracked: 0,
+    mealsChecked: 0,
+    mealsExpected: per * windowDays,
+  };
   try {
     const raw = await AsyncStorage.getItem(CHECKS_KEY);
-    if (!raw) return null;
+    if (!raw) return emptyScore;
     const all: Record<string, MealChecks> = JSON.parse(raw);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -56,7 +70,8 @@ export async function computeDietConsistency(
       windowKeys.push(`${yyyy}-${mm}-${dd}`);
     }
 
-    const per = Math.max(1, Math.min(10, Math.round(mealsPerDay || 3)));
+    // `per` already declared at the top of the function for the
+    // empty-state object — reuse it here.
     let mealsChecked = 0;
     const daysWithChecks: boolean[] = [];
     for (const key of windowKeys) {
@@ -106,7 +121,7 @@ export async function computeDietConsistency(
       mealsExpected,
     };
   } catch {
-    return null;
+    return emptyScore;
   }
 }
 

@@ -23,6 +23,10 @@ _TEST_MODULES = (
     "tests.test_calorie_calculator",
     "tests.test_meal_assembler",
     "tests.test_workout_planner",
+    "tests.test_set_programming",
+    "tests.test_plan_review",
+    "tests.test_in_workout_review",
+    "tests.test_fitness_score",
 )
 
 

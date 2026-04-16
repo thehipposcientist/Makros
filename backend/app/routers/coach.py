@@ -26,11 +26,15 @@ from app.models import (
     UserFlag,
     UserRollup,
 )
-from app.services.checkin_ai import CheckinAIError, call_checkin_llm
-from app.services.decision_rules import gate
-from app.services.flags import evaluate_flags
-from app.services.payload import build_micro_payload, build_weekly_payload
-from app.services.rollups import recompute_user
+from app.services.coach.checkin_ai import CheckinAIError, call_checkin_llm
+from app.services.coach.checkin_evaluator import (
+    evaluate_week,
+    recommend_from_evaluation,
+)
+from app.services.coach.decision_rules import gate
+from app.services.coach.flags import evaluate_flags
+from app.services.coach.payload import build_micro_payload, build_weekly_payload
+from app.services.coach.rollups import recompute_user
 
 router = APIRouter(prefix="/coach", tags=["coach"])
 
@@ -196,6 +200,38 @@ def post_checkin(
     else:
         payload = build_micro_payload(db, current_user.id, feedback_dict)
 
+    # 2b. Deterministic weekly evaluation — pulls prior commitments from
+    # CoachMemory (event_type="commitment") and grades them against actual
+    # logged sessions + sets this week. The AI prompt consumes this as
+    # ground truth so it phrases a verdict instead of re-interpreting data.
+    if body.checkin_type == "weekly":
+        prior = db.exec(
+            select(CoachMemory)
+            .where(
+                CoachMemory.user_id == current_user.id,
+                CoachMemory.event_type == "commitment",
+            )
+            .order_by(CoachMemory.created_at.desc())
+            .limit(1)
+        ).first()
+        prior_commitments: list[dict] = []
+        if prior and isinstance(prior.details, dict):
+            items = prior.details.get("items") or []
+            if isinstance(items, list):
+                prior_commitments = [i for i in items if isinstance(i, dict)]
+        evaluation = evaluate_week(
+            db=db,
+            user_id=current_user.id,
+            prior_commitments=prior_commitments,
+        )
+        recommendation = recommend_from_evaluation(evaluation)
+        payload["evaluation"] = evaluation.to_dict()
+        payload["recommendation"] = recommendation
+        print(
+            f"[coach/checkin] weekly eval: adherence={evaluation.adherence_pct:.0f}% "
+            f"counts={evaluation.counts()} → recommendation={recommendation}"
+        )
+
     # 3. Call LLM.
     try:
         ai_response = call_checkin_llm(payload)
@@ -235,6 +271,21 @@ def post_checkin(
                 "feedback": feedback_dict,
             },
         ))
+        # Persist next-week commitments if the AI proposed any. The
+        # evaluator will pick these up on next week's check-in. Shape:
+        #   details = {"items": [{"kind": "...", "label": "...", ...}, ...]}
+        if body.checkin_type == "weekly":
+            next_commitments = ai_response.get("next_commitments") if isinstance(ai_response, dict) else None
+            if isinstance(next_commitments, list) and next_commitments:
+                clean = [c for c in next_commitments if isinstance(c, dict)]
+                if clean:
+                    db.add(CoachMemory(
+                        user_id=current_user.id,
+                        event_type="commitment",
+                        summary=f"{len(clean)} commitments for week starting today",
+                        details={"items": clean, "source": "ai_checkin"},
+                    ))
+                    print(f"[coach/checkin] persisted {len(clean)} commitments for next week")
         db.commit()
         db.refresh(decision)
         decision_id = decision.id
