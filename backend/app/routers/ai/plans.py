@@ -2604,7 +2604,7 @@ User said: "{body.text}"
 
 Return a JSON array of workout sessions. For each workout mentioned:
 - "date": ISO date string (YYYY-MM-DD). "today" = {today}, "yesterday" = the day before, etc.
-- "focus": short description of the workout focus (e.g. "Legs", "Upper Body", "Recovery", "Cardio")
+- "focus": EXACTLY what the user said. Use their exact words for the focus. Common values: "Push", "Pull", "Legs", "Upper Body", "Lower Body", "Chest", "Back", "Shoulders", "Arms", "Full Body", "Cardio", "Recovery". Do NOT change or reinterpret the user's words — if they said "push", the focus is "Push".
 - "completed": true (they did it)
 - "durationSeconds": estimated duration in seconds (default 3600 if not mentioned)
 - "exercises": array of exercises if mentioned, each with:

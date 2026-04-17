@@ -18,7 +18,8 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange } from '../utils/workoutHistory';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey } from '../utils/workoutHistory';
+import LogActivityModal from '../components/LogActivityModal';
 import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore } from '../utils/mealTracker';
 import { getGoalEstimate } from '../utils/goalEstimate';
@@ -84,6 +85,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const meta = useMetaData();
   const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'body'>('history');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+  const [showLogActivity, setShowLogActivity] = useState(false);
   const fitnessScoreRef = useRef<ViewShot>(null);
   const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
@@ -980,8 +982,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 return (
                   <FadeInView delay={0}>
                   <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, flexShrink: 1 }}>
                         This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
                       </Text>
                       {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
@@ -991,10 +993,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 );
               })()}
 
-              <Text style={styles.sectionLabel}>
-                {history.length} workout{history.length !== 1 ? 's' : ''}
-                {history.length > 30 ? ' · showing most recent 30' : ''}
-              </Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <Text style={styles.sectionLabel}>
+                  {history.length} workout{history.length !== 1 ? 's' : ''}
+                  {history.length > 30 ? ' · most recent 30' : ''}
+                </Text>
+                <TouchableOpacity
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.primary + '15' }}
+                  onPress={() => setShowLogActivity(true)}>
+                  <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Log Activity</Text>
+                </TouchableOpacity>
+              </View>
               {history.slice(0, 30).map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
                 const isExpanded = expandedSessionId === session.id;
@@ -1436,6 +1446,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : null}
+      <LogActivityModal
+        visible={showLogActivity}
+        onClose={() => setShowLogActivity(false)}
+        themeName={themeName}
+        onSave={async (session) => {
+          await saveWorkoutSession(session);
+          // Also log to backend
+          if (authToken) {
+            try {
+              const { logWorkoutDone } = await import('../services/api');
+              const dk = dateKey(new Date(session.date));
+              await logWorkoutDone(authToken, dk, session.focus, session.durationSeconds);
+            } catch {}
+          }
+          // Refresh history
+          const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
+          setHistory(h);
+          setSummaries(s);
+          import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+        }}
+      />
     </View>
   );
 }

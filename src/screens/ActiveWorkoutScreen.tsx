@@ -211,11 +211,11 @@ const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
 
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
     // Warm-up state
-    const [warmupDone, setWarmupDone] = useState(false);
+    const [warmupDone, setWarmupDone] = useState(true);
     // When the user has started the workout, the warm-up card collapses
     // into a small header at the top of the exercise list that can be
     // tapped to re-expand if they want to re-read the steps mid-session.
-    const [warmupExpanded, setWarmupExpanded] = useState(false);
+    const [warmupExpanded, setWarmupExpanded] = useState(true);
     // AI-generated warm-up steps cached by (day + focus) for the SAME
     // day — visiting the same workout twice in one day reuses the
     // cached steps; the next calendar day regenerates. Falls back to

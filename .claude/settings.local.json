@@ -126,7 +126,8 @@
       "Bash(PYTHONPATH=. python3 tests/test_fitness_score.py)",
       "Bash(PYTHONPATH=. python3 tests/test_in_workout_review.py)",
       "Bash(/usr/local/bin/npx tsc *)",
-      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")"
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")",
+      "Bash(pip3 install *)"
     ]
   }
 }

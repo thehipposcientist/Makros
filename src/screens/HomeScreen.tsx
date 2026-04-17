@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
 import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
+import LogActivityModal from '../components/LogActivityModal';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
@@ -1105,7 +1106,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const chatProgressAnim = useRef(new Animated.Value(0)).current;
   const [attachedImage, setAttachedImage] = useState<{ base64: string; uri: string } | null>(null);
   const [workoutChat, setWorkoutChat] = useState<TrainerChatMessage[]>([]);
-  const [nutritionChat, setNutritionChat] = useState<TrainerChatMessage[]>([]);
+  const nutritionChat = workoutChat;
+  const setNutritionChat = setWorkoutChat;
   const [workoutUpdateSummary, setWorkoutUpdateSummary] = useState<string | null>(null);
   const [nutritionUpdateSummary, setNutritionUpdateSummary] = useState<string | null>(null);
 
@@ -1209,6 +1211,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const nutritionistNote = nutritionistNoteProp;
   const [showNutritionistNote, setShowNutritionistNote] = useState(false);
   const [showTrainerNote, setShowTrainerNote] = useState(false);
+  const [showLogActivity, setShowLogActivity] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
   // Days until the next weekly AI check-in. Computed from `weekStartDate`
   // on mount + whenever the plan refreshes. Negative means overdue. Null
@@ -2013,9 +2016,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setActiveChat(prev => [...prev, { role: 'assistant', content: combined }]);
       setTrainerLoading(false);
 
-      // Enforce mode boundary — trainer can only update workout, nutritionist can only update nutrition
-      const canUpdateWorkout   = coachMode === 'trainer';
-      const canUpdateNutrition = coachMode === 'nutritionist';
+      // Unified coach can update both workout and nutrition
+      const canUpdateWorkout   = true;
+      const canUpdateNutrition = true;
       const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
       console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
 
@@ -2688,17 +2691,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
         style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: themeColors.border }]}>
-        <View style={styles.headerLogoWrap}>
-          <Image
-            source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
-            style={bgIsDark(themeColors.background) ? styles.headerLogoDark : styles.headerLogo}
-            resizeMode="contain"
-          />
-        </View>
-        <View style={{ flex: 1 }} />
-        {/* Ask AI button — solid filled pill, always visible against
-            the gradient header. Replaces the hamburger AND the floating
-            purple FAB from the previous design. */}
+        <Image
+          source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+          style={{ height: 50, width: 160 }}
+          resizeMode="contain"
+        />
         <TouchableOpacity
           style={[styles.askAiBtn, { backgroundColor: aiPalette.strong }]}
           onPress={() => {
@@ -2726,7 +2723,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {(isWorkoutUpdating && isNutritionUpdating) ? (
         <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
           <FadeInView delay={0}>
-            <Ionicons name="barbell-outline" size={40} color={themeColors.primary} style={{ alignSelf: 'center', marginBottom: 12 }} />
+            <Image
+              source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+              style={{ width: 240, height: 54, alignSelf: 'center', marginBottom: 24 }}
+              resizeMode="contain"
+            />
           </FadeInView>
           <FadeInView delay={200}>
             <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
@@ -2882,7 +2883,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             )}
 
-            {/* Plan actions row — Why + Edit */}
+            {/* Plan actions row — Why + Log + Edit */}
             {workoutSubTab === 'plan' && (
               <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
                 {trainerNote ? (
@@ -2897,7 +2898,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </TouchableOpacity>
                 ) : null}
                 <TouchableOpacity
-                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: trainerNote ? 0 : 1 }]}
+                  style={[styles.planNoteLink, { borderColor: themeColors.primary + '44' }]}
+                  onPress={() => setShowLogActivity(true)}
+                  activeOpacity={0.7}>
+                  <Ionicons name="add-circle-outline" size={14} color={themeColors.primary} />
+                  <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]}>
+                    Log Activity
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44' }]}
                   onPress={() => setWorkoutSubTab('equipment')}
                   activeOpacity={0.7}>
                   <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
@@ -3169,7 +3179,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
       {activeTab === 'goals' && (
-        <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+        <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
           <EditProfileScreen
             authToken={authToken}
             profile={userProfile}
@@ -3342,6 +3352,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         authToken={authToken}
         onClose={() => setShowCheckin(false)}
         themeName={userProfile.themePreference}
+      />
+
+      {/* Log Activity modal */}
+      <LogActivityModal
+        visible={showLogActivity}
+        onClose={() => setShowLogActivity(false)}
+        themeName={userProfile.themePreference}
+        onSave={async (session) => {
+          const { saveWorkoutSession, dateKey: dk } = await import('../utils/workoutHistory');
+          await saveWorkoutSession(session);
+          if (authToken) {
+            try {
+              const { logWorkoutDone } = await import('../services/api');
+              await logWorkoutDone(authToken, dk(new Date(session.date)), session.focus, session.durationSeconds);
+            } catch {}
+          }
+          import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+        }}
       />
 
       {/* Meal edit modal */}
@@ -3779,63 +3807,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             </FadeInView>
 
-            {/* Mode picker */}
-            <View style={[styles.coachModePicker, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-              <TouchableOpacity
-                style={[styles.coachModeBtn, coachMode === 'trainer' && { backgroundColor: workoutPalette.strong }]}
-                onPress={() => { setCoachMode('trainer'); setChatTopic(null); }}
-                activeOpacity={0.8}>
-                <Text style={[styles.coachModeBtnText, { color: coachMode === 'trainer' ? '#FFFFFF' : themeColors.textSecondary }]}>
-                  Workout Plan
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.coachModeBtn, coachMode === 'nutritionist' && { backgroundColor: mealPalette.strong }]}
-                onPress={() => { setCoachMode('nutritionist'); setChatTopic(null); }}
-                activeOpacity={0.8}>
-                <Text style={[styles.coachModeBtnText, { color: coachMode === 'nutritionist' ? '#FFFFFF' : themeColors.textSecondary }]}>
-                  Meal Plan
-                </Text>
-              </TouchableOpacity>
-            </View>
-
             {chatTopic === null ? (
-              /* ── Topic Picker ──────────────────────────────────── */
+              /* ── Topic Picker — unified coach, no mode toggle ── */
               <View style={{ flex: 1, paddingHorizontal: 16, paddingTop: 16 }}>
                 <Text style={[styles.trainerHint, { color: themeColors.textSecondary, marginBottom: 16 }]}>
-                  What would you like help with?
+                  What can I help with?
                 </Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center' }}>
-                  {(coachMode === 'trainer'
-                    ? [
-                        { key: 'change_plan', label: 'Change My Plan', icon: '\u270F\uFE0F' },
-                        { key: 'log_activity', label: 'Log Activity', icon: '\uD83D\uDCDD' },
-                        { key: 'report_injury', label: 'Report Injury', icon: '\uD83E\uDE79' },
-                        { key: 'general', label: 'General Question', icon: '\uD83D\uDCAC' },
-                      ]
-                    : [
-                        { key: 'change_meals', label: 'Change My Meals', icon: '\uD83C\uDF7D\uFE0F' },
-                        { key: 'log_food', label: 'Log Food', icon: '\uD83D\uDCDD' },
-                        { key: 'general', label: 'General Question', icon: '\uD83D\uDCAC' },
-                      ]
-                  ).map(t => (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center' }}>
+                  {([
+                    { key: 'change_plan', label: 'Modify Workout', icon: 'barbell-outline' as const, mode: 'trainer' as const },
+                    { key: 'change_meals', label: 'Modify Meals', icon: 'nutrition-outline' as const, mode: 'nutritionist' as const },
+                    { key: 'log_activity', label: 'Log Activity', icon: 'create-outline' as const, mode: 'trainer' as const },
+                    { key: 'log_food', label: 'Log Food', icon: 'cafe-outline' as const, mode: 'nutritionist' as const },
+                    { key: 'report_injury', label: 'Report Injury', icon: 'bandage-outline' as const, mode: 'trainer' as const },
+                    { key: 'general', label: 'Ask Anything', icon: 'chatbubble-outline' as const, mode: 'trainer' as const },
+                  ]).map(t => (
                     <TouchableOpacity
                       key={t.key}
                       style={{
-                        width: '46%',
-                        paddingVertical: 18,
+                        width: '47%',
+                        paddingVertical: 16,
                         paddingHorizontal: 12,
-                        borderRadius: 14,
+                        borderRadius: 12,
                         backgroundColor: themeColors.surfaceRaised,
                         borderWidth: 1,
                         borderColor: themeColors.border,
                         alignItems: 'center',
+                        gap: 6,
                       }}
                       activeOpacity={0.7}
-                      onPress={() => setChatTopic(t.key)}
+                      onPress={() => { setCoachMode(t.mode); setChatTopic(t.key); }}
                     >
-                      <Text style={{ fontSize: 28, marginBottom: 6 }}>{t.icon}</Text>
-                      <Text style={{ color: themeColors.textPrimary, fontSize: 14, fontWeight: '600', textAlign: 'center' }}>{t.label}</Text>
+                      <Ionicons name={t.icon} size={24} color={themeColors.primary} />
+                      <Text style={{ color: themeColors.textPrimary, fontSize: 13, fontWeight: '600', textAlign: 'center' }}>{t.label}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
@@ -4933,13 +4937,14 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           ) : (
             <>
               <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000}>
-              <View style={[styles.actionRow, { marginBottom: 14 }]}>
                 <PressableScale
-                  style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}
+                  style={{ marginBottom: 14 }}
                   onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}>
-                  <Text style={styles.startWorkoutBtnText}><Ionicons name="play" size={14} color="#fff" />  Start Workout</Text>
+                  <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
+                    <Ionicons name="play-circle" size={22} color="#fff" />
+                    <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
+                  </View>
                 </PressableScale>
-              </View>
               </PulseView>
               <WorkoutCard workout={item.workout!} themeName={themeName} />
               {isToday && (
@@ -4984,10 +4989,10 @@ const styles = StyleSheet.create({
   checkinCardSub: { fontSize: 12 },
   checkinCardChevron: { fontSize: 22, marginLeft: 8, fontWeight: '300' },
 
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 0, borderBottomWidth: 1 },
-  headerLogoWrap: { width: 260, height: 60, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
-  headerLogo: { width: 260, height: 60 },
-  headerLogoDark: { width: 260, height: 60 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 12, paddingRight: 16, paddingBottom: 10, borderBottomWidth: 1 },
+  headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
+  headerLogo: { width: 280, height: 70 },
+  headerLogoDark: { width: 280, height: 70 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
@@ -5388,8 +5393,8 @@ const styles = StyleSheet.create({
   skipLinkText:    { fontSize: 12, fontWeight: '400', textDecorationLine: 'underline' },
   unskipBtn:       { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.primary, flex: 1 },
   unskipBtnText:   { color: colors.primary, fontSize: 13, fontWeight: '700' },
-  startWorkoutBtn: { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', flex: 1 },
-  startWorkoutBtnText: { color: colors.background, fontSize: 15, fontWeight: '700', letterSpacing: 0.3 },
+  startWorkoutBtn: { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  startWorkoutBtnText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800', letterSpacing: 0.3 },
 
   exerciseSummaryList:   { gap: 8 },
   exerciseSummaryRow:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },

@@ -73,18 +73,15 @@ def ask_trainer_question(
 
     is_nutritionist = body.mode == "nutritionist"
 
-    # Only send context relevant to this coach's domain — keep payload lean for speed
+    # Unified coach — send both workout and nutrition context regardless of mode
     profile_slim = body.profile or {}
-    # Extract foods list BEFORE dropping it from profile (nutritionist
-    # needs it for food-aware responses). Previously the list was
-    # dropped and the nutritionist couldn't reference the user's
-    # actual pantry.
     foods_available = (profile_slim.get("foodsAvailable") or []) if isinstance(profile_slim, dict) else []
     if isinstance(profile_slim, dict):
         for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
             profile_slim.pop(drop_key, None)
     context_blob: dict = {"profile": profile_slim, "progress": body.progress}
-    if is_nutritionist:
+    # Always include both plans so the unified coach can reference either
+    if body.nutritionPlan:
         context_blob["nutritionPlan"] = body.nutritionPlan
         # Inject shared nutrition context so the chat knows bodyweight,
         # experience, weight trend, recent adherence, and recent
@@ -222,77 +219,28 @@ def ask_trainer_question(
         "This keeps the deterministic planner as the source of truth for future weeks.\n"
     )
 
-    # Schema differs by mode — AI can only update its own side
-    if is_nutritionist:
-        plan_schema = (
-            '  "updated_workout_plan": null,\n'
-            '  "updated_nutrition_plan": <full nutrition plan object matching original structure, or null>\n'
-        )
-        system_prompt = (
-            "You are an expert registered dietitian and sports nutritionist. "
-            "Give detailed, personalised nutritional advice referencing specific foods, quantities, and macros from their plan. "
-            "Use realistic ingredient amounts (e.g. '150g chicken breast', '1 cup cooked oats'). "
-            "If the user asks to modify meals or swap foods, "
-            "set needs_plan_update=true and return the COMPLETE updated nutrition plan. "
-            "MACRO TARGET CHANGES: When the user asks to change a macro target (e.g. 'set protein to 130g', "
-            "'lower my calories to 1800', 'I want 40% carbs'), set `updated_macros` with the new values. "
-            "Only include the fields being changed — omit unchanged fields. The app will persist these as "
-            "the user's custom macro preferences and regenerate meals automatically. You do NOT need to "
-            "rebuild the full nutrition plan for a macro-only change — just set updated_macros. "
-            "Preserve isRoutine=true meals exactly as-is. "
-            "updated_workout_plan must always be null. Return JSON only."
-            + _capability_instructions +
-            "As a nutritionist you CANNOT modify the workout plan — if they ask about exercises or training, "
-            "tell them to switch to the Trainer chat for that."
-        )
-    else:
-        plan_schema = (
-            '  "updated_workout_plan": <full workout plan object matching original structure, or null>,\n'
-            '  "updated_nutrition_plan": null\n'
-        )
-        system_prompt = (
-            "You are an expert strength and conditioning coach. "
-            "You have access to the user's full profile, workout plan, progress history, and activity log. "
-            "Give detailed, personalised training advice. Always reference specific exercises, sets, "
-            "reps, and weights from their actual plan. "
-            "Always check the profile's 'injuries' and 'injuryEntries' fields first — if injuries are present, "
-            "remove or substitute any exercises that stress those areas. "
-            "SCHEDULE MAPPING: The context includes a 'scheduleMapping' array that maps plan days to "
-            "calendar dates. When the user says 'tomorrow' or 'today' or a weekday name, use this mapping "
-            "to identify which plan day (Day 1, Day 2, etc.) they mean, then modify THAT day. "
-            "REBALANCING: When a user changes a day's focus (e.g. 'make tomorrow back day'), you MUST "
-            "rebalance the ENTIRE week to account for the change. Consider: "
-            "(1) Don't schedule the same muscle group on consecutive days — ensure adequate recovery. "
-            "(2) If the changed day duplicates another day's focus, swap or adjust the other day. "
-            "(3) If a recovery/rest day was replaced with training, consider adding recovery elsewhere. "
-            "(4) Keep the total number of training days the same unless the user asked to change it. "
-            "(5) Maintain balanced muscle group coverage across the week. "
-            "Think of yourself as reprogramming the whole week, not just editing one slot. "
-            "If the user asks for plan changes, exercise swaps, or injury modifications, "
-            "set needs_plan_update=true and return the COMPLETE updated workout plan "
-            "(all days, all exercises — not just the changed ones). "
-            "The workout plan uses this exact structure: { name, totalDays, days: [{ day, focus, exercises: [{ name, sets, reps, restSeconds, equipment }] }] }. "
-            "Return the full plan in this exact format — do NOT use 'workoutDays' key, use 'days'. "
-            "INJURY HANDLING: If the user mentions pain, discomfort, or injury, "
-            "and you don't already have enough info (body part, type of pain, when it occurs), "
-            "ask ONE clarifying question in your answer and set injury_clarification_needed=true. "
-            "Once you have enough info, set updated_injuries with the new/updated entries "
-            "(each with id=new UUID or existing id, description, bodyPart, status='active'|'recovering'|'resolved', notes). "
-            "When updating injuries, also update the workout plan to avoid the injured area. "
-            "If pain/injury red flags are present, advise reducing load and seeing a clinician. "
-            "IMPORTANT: updated_nutrition_plan must always be null — you only manage training. "
-            "WORKOUT LOGGING: If the user tells you they completed a workout, trained a muscle group, "
-            "did cardio, or any physical activity (today or recently), set logged_workouts with session data. "
-            "Each entry needs: date (YYYY-MM-DD), focus (e.g. 'Legs', 'Upper Body', 'Cardio'), "
-            "durationSeconds (estimate if not stated, default 3600), and exercises array "
-            "(each with name and sets [{weightLbs, reps}] if mentioned). "
-            "If they just say 'I did legs today' with no details, log it with an empty exercises array. "
-            "Do NOT log workouts if the user is just asking about future plans or hypotheticals. "
-            "Return JSON only."
-            + _capability_instructions +
-            "As a trainer you CANNOT modify the meal plan — if they ask about food or nutrition, "
-            "tell them to switch to the Nutritionist chat for that."
-        )
+    # Unified coach — can update both workout and nutrition plans
+    plan_schema = (
+        '  "updated_workout_plan": <full workout plan object or null>,\n'
+        '  "updated_nutrition_plan": <full nutrition plan object or null>\n'
+    )
+    system_prompt = (
+        "You are an expert fitness coach, strength trainer, and registered dietitian — a single unified coach. "
+        "You handle BOTH workout programming AND nutrition advice in the same conversation. "
+        "Reference specific exercises, foods, macros, and plan details from the user's actual data. "
+        "WORKOUT CHANGES: If the user asks to modify workouts, swap exercises, change days, or report injuries, "
+        "set needs_plan_update=true and return the COMPLETE updated_workout_plan. "
+        "Use structure: { name, totalDays, days: [{ day, focus, stimulus, exercises: [{ name, sets, reps, restSeconds, equipment }] }] }. "
+        "NUTRITION CHANGES: If the user asks to modify meals, swap foods, or adjust nutrition, "
+        "set needs_plan_update=true and return the COMPLETE updated_nutrition_plan. "
+        "Preserve isRoutine=true meals exactly as-is. "
+        "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
+        "INJURY HANDLING: ask ONE clarifying question if needed, set injury_clarification_needed=true. "
+        "Once you have info, set updated_injuries and update the workout plan to avoid the area. "
+        "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
+        "Return JSON only."
+        + _capability_instructions
+    )
 
     workout_log_schema = (
         '  "logged_workouts": [{"date": "YYYY-MM-DD", "focus": "...", "durationSeconds": 3600, "exercises": [{"name": "...", "sets": [{"weightLbs": 0, "reps": 0}]}]}] or null,\n'

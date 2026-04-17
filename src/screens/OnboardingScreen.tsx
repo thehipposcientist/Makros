@@ -17,6 +17,8 @@ import {
   UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import FadeInView from '../components/FadeInView';
+import PressableScale from '../components/PressableScale';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -639,7 +641,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     return (
       <View style={styles.stepContainer}>
         <Text style={styles.stepTitle}>What's Your Goal?</Text>
-        <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style.</Text>
+        <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style. You can change this anytime.</Text>
 
         {/* Live description of the currently-selected goal. Kept near the
             top so users see what they're committing to without scrolling. */}
@@ -969,28 +971,33 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const renderTrainingDaysStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Training Schedule</Text>
-      <Text style={styles.stepDescription}>How many days per week can you realistically train?</Text>
-      <View style={styles.inlineInput}>
-        <TextInput
-          style={[styles.input, { flex: 1 }]}
-          placeholder="3"
-          placeholderTextColor={colors.textMuted}
-          keyboardType="number-pad"
-          value={daysPerWeek}
-          onChangeText={setDaysPerWeek}
-          maxLength={1}
-        />
-        <Text style={styles.unit}>days/week</Text>
+      <Text style={styles.stepDescription}>How many days per week can you realistically train? Easy to adjust later.</Text>
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+        {[1, 2, 3, 4, 5, 6, 7].map(d => {
+          const active = parseInt(daysPerWeek) === d;
+          return (
+            <TouchableOpacity
+              key={d}
+              onPress={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setDaysPerWeek(String(d)); }}
+              style={{
+                flex: 1, paddingVertical: 14, borderRadius: 10,
+                backgroundColor: active ? colors.primary : colors.surface,
+                borderWidth: active ? 0 : 1,
+                borderColor: colors.border,
+                alignItems: 'center',
+              }}>
+              <Text style={{ fontSize: 18, fontWeight: '800', color: active ? '#fff' : colors.textPrimary }}>{d}</Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
-      {parseInt(daysPerWeek) >= 5 ? (
-        <Text style={[styles.hint, { color: colors.warning }]}>
-          {parseInt(daysPerWeek) >= 6
-            ? 'That\'s a serious commitment — make sure you\'re getting enough sleep and recovery.'
-            : '5 days works great if you manage recovery well. The AI will schedule rest days strategically.'}
-        </Text>
-      ) : (
-        <Text style={styles.hint}>3–4 days is ideal for most people — quality over quantity.</Text>
-      )}
+      <Text style={{ fontSize: 12, color: colors.textMuted, textAlign: 'center', marginBottom: 16 }}>
+        {parseInt(daysPerWeek) >= 6 ? 'Serious commitment — recovery matters at this volume.'
+          : parseInt(daysPerWeek) >= 5 ? '5 days works great with good recovery.'
+          : parseInt(daysPerWeek) >= 3 ? '3–4 days is ideal for most people.'
+          : parseInt(daysPerWeek) >= 1 ? 'Every session counts — the AI maximizes each one.'
+          : 'Tap a number above.'}
+      </Text>
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>How long per session?</Text>
@@ -1013,7 +1020,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Equipment</Text>
       <Text style={styles.stepDescription}>
-        The AI only programmes exercises you can actually do.
+        Select what you have access to. You can update this anytime.
         {selectedEquipment.length > 0 ? `  ·  ${selectedEquipment.length} selected` : ''}
       </Text>
 
@@ -1149,7 +1156,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Kitchen</Text>
       <Text style={styles.stepDescription}>
-        Your meal plan is built from foods you actually eat — no mystery ingredients.
+        Pick a preset or select individual foods. You can always add more later.
         {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
       </Text>
 
@@ -1185,12 +1192,13 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
               key={p.id}
               style={[styles.templateChip, active && styles.templateChipActive]}
               onPress={() => {
-                setSelectedFoodPreset(p.id);
-                setFoodsAvailable(prev => {
-                  const next = [...prev];
-                  for (const name of p.items) { if (!next.includes(name)) next.push(name); }
-                  return next;
-                });
+                if (selectedFoodPreset === p.id) {
+                  setSelectedFoodPreset(null);
+                  setFoodsAvailable([]);
+                } else {
+                  setSelectedFoodPreset(p.id);
+                  setFoodsAvailable([...p.items]);
+                }
               }}
               activeOpacity={0.75}>
               <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{p.label}</Text>
@@ -1568,20 +1576,26 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         {renderStep()}
 
         <View style={styles.buttons}>
-          <TouchableOpacity
-            style={[styles.backButton, currentStep === 0 && styles.buttonDisabled]}
-            onPress={handleBack}
-            disabled={currentStep === 0}
-          >
-            <Text style={styles.backButtonText}>Back</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.nextButton, currentStep === totalSteps - 1 && styles.nextButtonFinal]}
-            onPress={handleNext}>
-            <Text style={[styles.nextButtonText, currentStep === totalSteps - 1 && styles.nextButtonTextFinal]}>
-              {currentStep === totalSteps - 1 ? 'Get Started' : 'Next'}
-            </Text>
-          </TouchableOpacity>
+          {currentStep > 0 ? (
+            <View style={{ flex: 1 }}>
+              <PressableScale
+                style={styles.backButton}
+                onPress={handleBack}>
+                <Ionicons name="arrow-back" size={16} color={colors.textSecondary} />
+                <Text style={styles.backButtonText}>Back</Text>
+              </PressableScale>
+            </View>
+          ) : <View style={{ flex: 1 }} />}
+          <View style={{ flex: currentStep === totalSteps - 1 ? 2 : 1 }}>
+            <PressableScale
+              style={[styles.nextButton, currentStep === totalSteps - 1 && styles.nextButtonFinal]}
+              onPress={handleNext}>
+              <Text style={[styles.nextButtonText, currentStep === totalSteps - 1 && styles.nextButtonTextFinal]}>
+                {currentStep === totalSteps - 1 ? 'Get Started' : 'Next'}
+              </Text>
+              {currentStep < totalSteps - 1 && <Ionicons name="arrow-forward" size={16} color={colors.background} />}
+            </PressableScale>
+          </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -1594,7 +1608,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 24, paddingBottom: 200 },
   header: { marginTop: 20, marginBottom: 20 },
-  logo: { width: 340, height: 136 },
+  logo: { width: 360, height: 160 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 
   progressBar: { flexDirection: 'row', gap: 6, marginBottom: 32 },
@@ -1726,11 +1740,11 @@ const styles = StyleSheet.create({
   scanModalConfirmText: { fontSize: 15, color: '#fff', fontWeight: '700' },
 
   buttons: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  backButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.surface, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+  backButton: { flexDirection: 'row', gap: 6, paddingVertical: 18, borderRadius: radius.md, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
   buttonDisabled: { opacity: 0.4 },
   backButtonText: { fontSize: 16, fontWeight: '600', color: colors.textSecondary },
-  nextButton: { flex: 1, paddingVertical: 16, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center' },
-  nextButtonFinal: { flex: 2, paddingVertical: 18, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 5 },
+  nextButton: { flexDirection: 'row', gap: 6, paddingVertical: 18, borderRadius: radius.md, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  nextButtonFinal: { paddingVertical: 20, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 5 },
   nextButtonText: { fontSize: 16, fontWeight: '600', color: colors.background },
   nextButtonTextFinal: { fontSize: 18, fontWeight: '700', letterSpacing: 0.4 },
 
