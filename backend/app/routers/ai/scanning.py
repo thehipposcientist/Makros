@@ -358,13 +358,12 @@ def generate_meal_instructions(
         f"INGREDIENTS:\n{ingredients_block}\n\n"
         f"USER CONTEXT:\n{context_block}\n"
         f"{variation_block}\n"
-        "Return a short, practical recipe:\n"
-        "  - 2-4 sentence intro describing the dish.\n"
-        "  - Numbered steps (3-8 steps). Keep each step on one line.\n"
-        "  - Total time estimate and 1 simple swap suggestion at the bottom.\n"
-        "  - Plain text, no markdown headers, no bullet characters.\n"
-        "Match the user's cooking skill — basic terms for beginners, more "
-        "technique for advanced. Stay under 200 words total."
+        "Return a SHORT recipe — 100 words max:\n"
+        "  - 1 sentence describing the dish.\n"
+        "  - 3-5 numbered steps, one line each.\n"
+        "  - Time estimate at the end.\n"
+        "  - Plain text, no markdown.\n"
+        "Be direct. No filler. Example step: '1. Season chicken with salt and pepper.'"
     )
 
     try:

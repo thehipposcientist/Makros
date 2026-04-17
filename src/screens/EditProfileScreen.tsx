@@ -1462,7 +1462,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
           {/* ── Training Split ── */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>🏋️  Training Split</Text>
+            <Text style={styles.chipGroupLabel}>Training Split</Text>
             {(() => {
               const selected = splitOptions.find(o => o.id === preferredSplit);
               const recommended = splitOptions.find(o => o.is_recommended);

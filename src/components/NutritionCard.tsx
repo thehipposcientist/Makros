@@ -1,5 +1,10 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
@@ -126,9 +131,9 @@ export default function NutritionCard({
           style={styles.microBtn}
           onPress={() => setShowMicroModal(true)}
           activeOpacity={0.7}>
-          <Text style={styles.microBtnIcon}>📊</Text>
+          <Ionicons name="bar-chart-outline" size={13} color={section.strong} />
           <Text style={styles.microBtnText}>Nutrition Details</Text>
-          <Text style={styles.microBtnArrow}>›</Text>
+          <Ionicons name="chevron-forward" size={14} color={section.strong} />
         </TouchableOpacity>
 
         <Modal
@@ -141,7 +146,7 @@ export default function NutritionCard({
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Daily Nutrition Breakdown</Text>
                 <TouchableOpacity onPress={() => { setShowMicroModal(false); setDrillNutrient(null); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-                  <Text style={styles.modalClose}>✕</Text>
+                  <Ionicons name="close" size={22} color={colors.textMuted} />
                 </TouchableOpacity>
               </View>
 
@@ -184,7 +189,7 @@ export default function NutritionCard({
                   if (insights.length === 0) return null;
                   return (
                     <View style={{ marginBottom: 8 }}>
-                      <Text style={styles.modalSectionTitle}>What to watch</Text>
+                      <Text style={styles.modalSectionTitle}>Key Gaps</Text>
                       {insights.map(ins => (
                         <NutritionInsightCard
                           key={ins.key}
@@ -246,7 +251,7 @@ export default function NutritionCard({
                           {displayLabel} Sources
                         </Text>
                         <TouchableOpacity onPress={() => setDrillNutrient(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                          <Text style={{ fontSize: 18, color: colors.textMuted, fontWeight: '600' }}>✕</Text>
+                          <Ionicons name="close" size={18} color={colors.textMuted} />
                         </TouchableOpacity>
                       </View>
                       {contributions.length === 0 ? (
@@ -340,11 +345,11 @@ export default function NutritionCard({
                   </View>
                   <View style={styles.legendItem}>
                     <View style={[styles.legendDot, { backgroundColor: '#F59E0B' }]} />
-                    <Text style={styles.legendText}>Low — eat more</Text>
+                    <Text style={styles.legendText}>Below target</Text>
                   </View>
                   <View style={styles.legendItem}>
                     <View style={[styles.legendDot, { backgroundColor: colors.error }]} />
-                    <Text style={styles.legendText}>Over limit</Text>
+                    <Text style={styles.legendText}>Above target</Text>
                   </View>
                 </View>
               </ScrollView>
@@ -392,7 +397,8 @@ export default function NutritionCard({
               replacing the old top-of-card header button. */}
           {onAddSnack && (
             <TouchableOpacity style={styles.addMealInline} onPress={onAddSnack} activeOpacity={0.7}>
-              <Text style={styles.addMealInlineText}>+ Add Meal</Text>
+              <Ionicons name="add-circle-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
+              <Text style={styles.addMealInlineText}>Add Meal</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -456,8 +462,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
-  // Build the structured item list once — used both for display and
-  // implicit "is there detail to show".
+  const [itemsExpanded, setItemsExpanded] = useState(false);
   const withItems = ensureItems(meal);
   const itemRows = withItems.items && withItems.items.length > 0
     ? withItems.items.map((it, i) => ({
@@ -515,24 +520,24 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         </View>
         {/* Trailing icon strip — reorder + actions, all icon-only. */}
         <View style={styles.iconStrip}>
-          {onMoveUp && (
-            <TouchableOpacity onPress={onMoveUp} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Text style={styles.iconBtnText}>↑</Text>
-            </TouchableOpacity>
-          )}
-          {onMoveDown && (
-            <TouchableOpacity onPress={onMoveDown} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Text style={styles.iconBtnText}>↓</Text>
+          {onEdit && (
+            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Ionicons name="create-outline" size={16} color={mealAccent.strong} />
             </TouchableOpacity>
           )}
           {onShowRecipe && (
             <TouchableOpacity onPress={() => onShowRecipe(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Text style={styles.iconBtnText}>🍳</Text>
+              <Ionicons name="restaurant-outline" size={15} color={colors.textMuted} />
             </TouchableOpacity>
           )}
-          {onEdit && (
-            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Text style={[styles.iconBtnText, { color: mealAccent.strong }]}>✎</Text>
+          {onMoveUp && (
+            <TouchableOpacity onPress={onMoveUp} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Ionicons name="chevron-up" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
+          {onMoveDown && (
+            <TouchableOpacity onPress={onMoveDown} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
+              <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
             </TouchableOpacity>
           )}
           {onRemove && (
@@ -542,33 +547,41 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
               delayLongPress={500}
               hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
               style={styles.iconBtn}>
-              <Text style={[styles.iconBtnText, { color: colors.error }]}>✕</Text>
+              <Ionicons name="close" size={16} color={colors.error} />
             </TouchableOpacity>
           )}
         </View>
       </View>
 
-      {/* Item list — indented under the title, more compact than before. */}
-      {itemRows.length > 0 && (
-        <View style={styles.mealFoodsDetail}>
-          {itemRows.map(r => (
-            <View key={r.key} style={styles.mealFoodRow}>
-              <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1 }]}>
-                {r.name}
-              </Text>
-              {r.amount ? (
-                <Text style={styles.mealFoodAmount}>{r.amount}</Text>
-              ) : null}
-            </View>
-          ))}
-          {meal.instructions && (
-            <View style={styles.recipeBox}>
-              <Text style={styles.recipeLabel}>How to make it</Text>
-              <Text style={styles.recipeText}>{meal.instructions}</Text>
-            </View>
-          )}
-        </View>
-      )}
+      {/* Item list — collapsed by default, tap to expand */}
+      {itemRows.length > 0 && !itemsExpanded ? (
+        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3 }}>
+          <Text style={{ fontSize: 12, color: colors.textMuted }}>
+            {itemRows.length} item{itemRows.length !== 1 ? 's' : ''} · tap to see details
+          </Text>
+        </TouchableOpacity>
+      ) : itemRows.length > 0 ? (
+        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(false); }} activeOpacity={0.9}>
+          <View style={styles.mealFoodsDetail}>
+            {itemRows.map(r => (
+              <View key={r.key} style={styles.mealFoodRow}>
+                <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1 }]}>
+                  {r.name}
+                </Text>
+                {r.amount ? (
+                  <Text style={styles.mealFoodAmount}>{r.amount}</Text>
+                ) : null}
+              </View>
+            ))}
+            {meal.instructions && (
+              <View style={styles.recipeBox}>
+                <Text style={styles.recipeLabel}>Recipe</Text>
+                <Text style={styles.recipeText} numberOfLines={3}>{meal.instructions}</Text>
+              </View>
+            )}
+          </View>
+        </TouchableOpacity>
+      ) : null}
 
       {/* Macro pills — Layer 1 only. Sugar/sodium show ONLY when
           notably high so the row stays uncluttered. Thresholds are
@@ -585,9 +598,9 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
             <MacroPill label="p"   value={Math.round(meal.protein)}  color={colors.primary}    styles={styles} />
             <MacroPill label="c"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
             <MacroPill label="f"   value={Math.round(meal.fat ?? 0)}   color="#A78BFA"         styles={styles} />
-            {fiber > 0 && <MacroPill label="fib" value={fiber} color="#10B981" styles={styles} />}
-            {highSugar && <MacroPill label="sug" value={sugar} color="#EF4444" styles={styles} />}
-            {highSodium && <MacroPill label="Na" value={sodium} color="#EF4444" styles={styles} />}
+            {fiber > 0 && <MacroPill label="fiber" value={fiber} color="#10B981" styles={styles} />}
+            {highSugar && <MacroPill label="sugar" value={sugar} color="#EF4444" styles={styles} />}
+            {highSodium && <MacroPill label="sodium" value={sodium} color="#EF4444" styles={styles} />}
           </View>
         );
       })()}

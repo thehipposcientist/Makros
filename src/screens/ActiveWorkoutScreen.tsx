@@ -3,6 +3,7 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
@@ -754,6 +755,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       newSet = { setNumber: setSlot + 1, reps: repsNum, weightLbs: weightNum };
     }
 
+    // Haptic feedback on set log
+    import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+
     const targetSetCount = getTargetSetCount(ex.targetSets);
     // Effective total includes user-added extras minus removed sets, so
     // rest timers + AI tips still fire for sets added beyond the base target.
@@ -1006,7 +1010,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (remaining === 0) {
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
-        Vibration.vibrate([0, 300, 150, 300, 150, 300]);
+        import('../utils/feedback').then(f => {
+          f.vibrateRestDone();
+          f.hapticHeavy();
+        }).catch(() => Vibration.vibrate([0, 300, 150, 300, 150, 300]));
         cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
         restNotificationIds.current = null;
         // Fire an immediate notification so the system plays its alert sound
@@ -2344,18 +2351,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         <Text style={styles.shareStatLabel}>Duration</Text>
                       </View>
                       <View style={styles.shareStatTile}>
-                        <Text style={styles.shareStatIcon}>📊</Text>
+                        <Text style={styles.shareStatIcon}><Ionicons name="barbell" size={14} /></Text>
                         <Text style={styles.shareStatValue}>{finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0}</Text>
                         <Text style={styles.shareStatLabel}>Sets</Text>
                       </View>
                       <View style={styles.shareStatTile}>
-                        <Text style={styles.shareStatIcon}>💪</Text>
+                        <Text style={styles.shareStatIcon}><Ionicons name="fitness" size={14} /></Text>
                         <Text style={styles.shareStatValue}>{completedCount}/{exercises.length}</Text>
                         <Text style={styles.shareStatLabel}>Exercises</Text>
                       </View>
                       {summaryData?.caloriesBurned ? (
                         <View style={styles.shareStatTile}>
-                          <Text style={styles.shareStatIcon}>🔥</Text>
+                          <Text style={styles.shareStatIcon}><Ionicons name="flame" size={14} /></Text>
                           <Text style={styles.shareStatValue}>~{summaryData.caloriesBurned}</Text>
                           <Text style={styles.shareStatLabel}>Calories</Text>
                         </View>
@@ -2404,13 +2411,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <View style={styles.summarySection}>
                     {summaryData?.comparison ? (
                       <>
-                        <Text style={styles.summarySectionTitle}>📊  vs. Last Time</Text>
+                        <Text style={styles.summarySectionTitle}>vs. Last Time</Text>
                         <Text style={styles.summaryItem}>{cleanAiText(summaryData.comparison)}</Text>
                       </>
                     ) : null}
                     {summaryData?.coachingPoint ? (
                       <>
-                        <Text style={[styles.summarySectionTitle, { marginTop: 10 }]}>🎯  Next Time</Text>
+                        <Text style={[styles.summarySectionTitle, { marginTop: 10 }]}>Next Time</Text>
                         <Text style={styles.summaryItem}>{cleanAiText(summaryData.coachingPoint)}</Text>
                       </>
                     ) : null}

@@ -59,8 +59,8 @@ function getItemValue(micros: Record<string, any> | undefined, key: string): num
 export default function NutritionInsightCard({ insight, themeColors, meals }: Props) {
   const [expanded, setExpanded] = useState(false);
   const accent =
-    insight.severity === 'critical' ? '#EF4444' :
-    insight.severity === 'notable'  ? '#F59E0B' :
+    insight.severity === 'critical' ? '#F59E0B' :
+    insight.severity === 'notable'  ? '#9CA3AF' :
     '#6B7280';
   const fix = FIX_SUGGESTIONS[insight.key];
   const directionWord = insight.direction === 'min' ? 'low' : 'high';
@@ -106,7 +106,7 @@ export default function NutritionInsightCard({ insight, themeColors, meals }: Pr
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
           <Text style={[styles.severity, { color: accent }]}>
-            {insight.severity === 'critical' ? 'FIX THIS' : 'HEADS UP'}
+            {insight.severity === 'critical' ? 'LOW' : 'WATCH'}
           </Text>
           <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{expanded ? '▲' : '▼'}</Text>
         </View>

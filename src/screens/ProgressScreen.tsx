@@ -4,6 +4,12 @@ import {
   TextInput, Alert, Image,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { Ionicons } from '@expo/vector-icons';
+import { LayoutAnimation, UIManager, Platform } from 'react-native';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -72,7 +78,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'body'>('prs');
+  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'body'>('history');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const fitnessScoreRef = useRef<ViewShot>(null);
   const bodyScanShareRef = useRef<ViewShot>(null);
@@ -291,10 +297,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       <View style={styles.tabs}>
         {([
-          ['prs', 'Records'],
-          ['charts', 'Charts'],
           ['history', 'History'],
-          ['body', 'Body'],
+          ['prs', 'PRs'],
+          ['charts', 'Charts'],
+          ['body', 'Body Check'],
         ] as const).map(([key, label]) => (
           <TouchableOpacity
             key={key}
@@ -313,9 +319,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         <ScrollView contentContainerStyle={styles.content}>
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>📊</Text>
-              <Text style={styles.emptyTitle}>Log 3 workouts to unlock</Text>
-              <Text style={styles.emptyBody}>Charts load after your first few sessions with logged sets.</Text>
+              <Ionicons name="analytics-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
+              <Text style={styles.emptyTitle}>Complete 3 workouts to see charts</Text>
+              <Text style={styles.emptyBody}>Charts appear after your first few sessions with logged sets.</Text>
             </View>
           ) : (
             <>
@@ -451,11 +457,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {/* Score rating — comes directly from the backend so the
                   thresholds stay in one place (fitness_score._rating_for). */}
               <Text style={styles.fitnessScoreRating}>
-                {compositeFitness.rating === 'Elite' ? '🔥 Elite'
-                  : compositeFitness.rating === 'Strong' ? '💪 Strong'
-                  : compositeFitness.rating === 'Solid' ? '📈 Solid'
-                  : compositeFitness.rating === 'Building' ? '🌱 Building'
-                  : '🏁 Starting'}
+                {compositeFitness.rating === 'Elite' ? 'Elite'
+                  : compositeFitness.rating === 'Strong' ? 'Strong'
+                  : compositeFitness.rating === 'Solid' ? 'Solid'
+                  : compositeFitness.rating === 'Building' ? 'Building'
+                  : 'Starting'}
               </Text>
 
               {/* Pillar breakdown — each pillar is a 0-100 subscore
@@ -573,9 +579,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.fitnessScoreRating}>
                 {dietScore.total >= 80 ? '🥗 Dialed In'
                   : dietScore.total >= 60 ? '🍽️ On Track'
-                  : dietScore.total >= 40 ? '📊 Building'
-                  : dietScore.total >= 20 ? '🌱 Starting'
-                  : '🏁 Log a Meal'}
+                  : dietScore.total >= 40 ? 'Building'
+                  : dietScore.total >= 20 ? 'Starting'
+                  : 'Log a Meal'}
               </Text>
               <View style={styles.fitnessBreakdown}>
                 {([
@@ -732,7 +738,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>🏋️</Text>
+              <Ionicons name="trophy-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
               <Text style={styles.emptyTitle}>No PRs yet</Text>
               <Text style={styles.emptyBody}>Complete a workout and log your sets to start tracking personal records.</Text>
             </View>
@@ -926,14 +932,38 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
           {history.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>📋</Text>
+              <Ionicons name="calendar-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
               <Text style={styles.emptyTitle}>No workouts yet</Text>
               <Text style={styles.emptyBody}>Start a workout from the home screen to build your history.</Text>
             </View>
           ) : (
             <>
+              {/* Weekly summary strip */}
+              {(() => {
+                const now = new Date();
+                const dow = now.getDay();
+                const mondayOffset = dow === 0 ? -6 : 1 - dow;
+                const monday = new Date(now);
+                monday.setDate(now.getDate() + mondayOffset);
+                monday.setHours(0, 0, 0, 0);
+                const thisWeek = history.filter(s => {
+                  if (!s.date || s.skipped) return false;
+                  const d = new Date(s.date);
+                  return d >= monday;
+                });
+                const totalMin = Math.round(thisWeek.reduce((s, w) => s + (w.durationSeconds || 0), 0) / 60);
+                const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
+                return thisWeek.length > 0 ? (
+                  <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary }}>
+                      This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
+                    </Text>
+                  </View>
+                ) : null;
+              })()}
+
               <Text style={styles.sectionLabel}>
-                {history.length} session{history.length !== 1 ? 's' : ''} logged
+                {history.length} workout{history.length !== 1 ? 's' : ''}
                 {history.length > 30 ? ' · showing most recent 30' : ''}
               </Text>
               {history.slice(0, 30).map((session, i) => {
@@ -945,16 +975,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     key={session.id ?? i}
                     style={styles.sessionCard}
                     activeOpacity={0.8}
-                    onPress={() => setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`))}>
+                    onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`)); }}>
                     <View style={styles.sessionHeader}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.sessionFocus}>{session.focus}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={styles.sessionFocus}>{session.focus}</Text>
+                          {summary?.totalSets != null && summary.totalSets > 0 && (
+                            <View style={{ backgroundColor: tc.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                              <Text style={{ fontSize: 9, fontWeight: '700', color: tc.primary }}>
+                                {summary.totalSets > 25 ? 'VOLUME' : summary.totalSets < 15 ? 'STRENGTH' : 'HYPERTROPHY'}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                         <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
                       </View>
                       <View style={styles.sessionBadge}>
                         <Text style={styles.sessionBadgeText}>{formatDuration(session.durationSeconds)}</Text>
                       </View>
-                      <Text style={{ fontSize: 12, color: tc.textMuted, marginLeft: 8 }}>{isExpanded ? '▾' : '▸'}</Text>
+                      <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={tc.textMuted} style={{ marginLeft: 6 }} />
                     </View>
                     <View style={styles.sessionStats}>
                       <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>
@@ -1248,8 +1287,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         <ScrollView contentContainerStyle={styles.content}>
           {/* Scan buttons */}
           <View style={styles.bodyScanPrompt}>
-            <Text style={{ fontSize: 36, textAlign: 'center' }}>📸</Text>
-            <Text style={styles.bodyScanPromptTitle}>AI Body Scan</Text>
+            <Ionicons name="body-outline" size={40} color={tc.primary} style={{ alignSelf: 'center' }} />
+            <Text style={styles.bodyScanPromptTitle}>Body Check</Text>
             <Text style={styles.bodyScanPromptText}>
               Take a front-facing photo to estimate body fat percentage, muscle mass, and get personalized feedback.
             </Text>
@@ -1258,17 +1297,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 style={[styles.bodyScanBtn, { flex: 1 }]}
                 onPress={() => handleBodyScan('camera')}
                 disabled={bodyScanLoading}>
-                <Text style={styles.bodyScanBtnText}>📷 Camera</Text>
+                <Text style={styles.bodyScanBtnText}><Ionicons name="camera-outline" size={16} /> Camera</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }]}
                 onPress={() => handleBodyScan('library')}
                 disabled={bodyScanLoading}>
-                <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>🖼 Library</Text>
+                <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}><Ionicons name="images-outline" size={16} /> Library</Text>
               </TouchableOpacity>
             </View>
             <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
-              For best results: front-facing, good lighting, minimal clothing. This is an AI estimate only.
+              For best results: front-facing, good lighting, minimal clothing. Accuracy varies with lighting and angle.
             </Text>
           </View>
 
@@ -1276,7 +1315,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {bodyScanLoading && (
             <View style={{ alignItems: 'center', paddingVertical: 30, gap: 10 }}>
               <ActivityIndicator size="large" color={tc.primary} />
-              <Text style={{ fontSize: 13, color: tc.textSecondary }}>Analyzing your physique…</Text>
+              <Text style={{ fontSize: 13, color: tc.textSecondary }}>Analyzing...</Text>
             </View>
           )}
 

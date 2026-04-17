@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import * as ImagePicker from 'expo-image-picker';
+import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
@@ -1005,6 +1010,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Meals:    plan | foods     | supplements | macros
   const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'exercises' | 'muscles' | 'equipment'>('plan');
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
+  const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
+  useEffect(() => { import('../utils/feedback').then(f => f.loadSettings()).then(setFeedbackSettings).catch(() => {}); }, []);
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
   // re-loaded when the user changes tabs to profile so a fresh scan
@@ -2303,6 +2310,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [pendingUpdate]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
+    import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
     const current = checkedMealsByDate[date] ?? {};
     const wasChecked = !!current[mealType];
     const next = { ...current, [mealType]: !wasChecked };
@@ -3038,11 +3046,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: MEALS_ACCENT, marginBottom: 0 }]} />}
                   <TouchableOpacity
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
-                    onPress={() => setExpandedMealDays(prev => {
-                      const next = new Set(prev);
-                      if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
-                      return next;
-                    })}
+                    onPress={() => {
+                      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                      setExpandedMealDays(prev => {
+                        const next = new Set(prev);
+                        if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
+                        return next;
+                      });
+                    }}
                     activeOpacity={0.8}
                   >
                     <View style={{ flex: 1 }}>
@@ -3220,6 +3232,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </TouchableOpacity>
               );
             })}
+          </View>
+
+          {/* Feedback Settings */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK</Text>
+          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            {([
+              { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
+              { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends' },
+              { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
+            ]).map(opt => (
+              <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>{opt.label}</Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{opt.desc}</Text>
+                </View>
+                <Switch
+                  value={feedbackSettings[opt.key]}
+                  onValueChange={async (v) => {
+                    const { saveSettings } = await import('../utils/feedback');
+                    const updated = await saveSettings({ [opt.key]: v });
+                    setFeedbackSettings(updated);
+                  }}
+                  trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                  thumbColor={feedbackSettings[opt.key] ? themeColors.primary : themeColors.textMuted}
+                />
+              </View>
+            ))}
           </View>
 
           {/* Account + Sign out */}
@@ -3876,7 +3915,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <View style={styles.attachPreviewRow}>
                 <Image source={{ uri: attachedImage.uri }} style={styles.attachPreview} />
                 <TouchableOpacity onPress={() => setAttachedImage(null)} style={styles.attachRemoveBtn}>
-                  <Text style={styles.attachRemoveText}>✕</Text>
+                  <Ionicons name="close-circle" size={18} color={themeColors.error} />
                 </TouchableOpacity>
                 <Text style={styles.attachLabel}>Photo attached</Text>
               </View>
@@ -3909,7 +3948,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     },
                   ]);
                 }}>
-                <Text style={styles.trainerAttachIcon}>📷</Text>
+                <Ionicons name="camera-outline" size={20} color={themeColors.textSecondary} />
               </TouchableOpacity>
               <TextInput
                 value={trainerInput}
@@ -4282,7 +4321,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingHorizontal: 13, justifyContent: 'center', borderWidth: 1, borderColor: themeColors.border }}
                       onPress={handleSuppPhotoSearch}
                       disabled={suppAiLoading}>
-                      <Text style={{ fontSize: 18 }}>📷</Text>
+                      <Ionicons name="camera-outline" size={20} color={themeColors.textSecondary} />
                     </TouchableOpacity>
                   </View>
                   <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Type a name or take a photo of any supplement label</Text>
@@ -4299,7 +4338,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {suppAiResult && (
                   <View style={{ marginHorizontal: 16, marginBottom: 12, backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, borderWidth: 1, borderColor: themeColors.border, padding: 14, gap: 10 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-                      <Text style={{ fontSize: 26 }}>💊</Text>
+                      <Ionicons name="medkit-outline" size={28} color={themeColors.primary} />
                       <View style={{ flex: 1 }}>
                         <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>{suppAiResult.name}</Text>
                         <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 2, lineHeight: 17 }}>{suppAiResult.tagline}</Text>
@@ -4456,7 +4495,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(nutritionistNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                  <Text style={styles.noteModalEmptyIcon}>🌱</Text>
+                  <Ionicons name="leaf-outline" size={36} color={themeColors.textMuted} />
                   <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>Generate a plan to unlock</Text>
                   <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
                     Your nutritionist's rationale for your calories + macros lands here.
@@ -4474,7 +4513,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.noteModalSheet, { backgroundColor: themeColors.surface, borderTopColor: workoutPalette.strong + '60' }]}>
             <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
             <View style={styles.noteModalHeader}>
-              <Text style={[styles.noteModalIcon]}>🏋️</Text>
+              <Ionicons name="barbell-outline" size={28} color={themeColors.primary} />
               <View style={{ flex: 1 }}>
                 <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>Trainer note</Text>
                 <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this week</Text>
@@ -4509,7 +4548,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       <View style={[styles.bottomBar, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
         <BottomTabButton
           label="Goals"
-          icon="🎯"
+          iconName="flag-outline"
           active={activeTab === 'goals'}
           tint={themeColors.primary}
           mutedColor={themeColors.textMuted}
@@ -4517,7 +4556,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         />
         <BottomTabButton
           label="Workouts"
-          icon="🏋️"
+          iconName="barbell-outline"
           active={activeTab === 'workout'}
           tint={workoutPalette.strong}
           mutedColor={themeColors.textMuted}
@@ -4525,7 +4564,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         />
         <BottomTabButton
           label="Meals"
-          icon="🍽️"
+          iconName="nutrition-outline"
           active={activeTab === 'meals'}
           tint={mealPalette.strong}
           mutedColor={themeColors.textMuted}
@@ -4533,7 +4572,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         />
         <BottomTabButton
           label="Progress"
-          icon="📈"
+          iconName="trending-up-outline"
           active={activeTab === 'progress'}
           tint={themeColors.primary}
           mutedColor={themeColors.textMuted}
@@ -4541,7 +4580,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         />
         <BottomTabButton
           label="Profile"
-          icon="👤"
+          iconName="person-outline"
           active={activeTab === 'profile'}
           tint={themeColors.primary}
           mutedColor={themeColors.textMuted}
@@ -4591,10 +4630,10 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
 
 // ── BottomTabButton ───────────────────────────────────────────────────────────
 function BottomTabButton({
-  label, icon, active, tint, mutedColor, onPress,
+  label, iconName, active, tint, mutedColor, onPress,
 }: {
   label: string;
-  icon: string;
+  iconName: string;
   active: boolean;
   tint: string;
   mutedColor: string;
@@ -4603,10 +4642,15 @@ function BottomTabButton({
   return (
     <TouchableOpacity
       style={btStyles.btn}
-      onPress={onPress}
+      onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); onPress(); }}
       activeOpacity={0.7}
       hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}>
-      <Text style={[btStyles.icon, !active && { opacity: 0.55 }]}>{icon}</Text>
+      <Ionicons
+        name={(active ? iconName.replace('-outline', '') : iconName) as any}
+        size={20}
+        color={active ? tint : mutedColor}
+        style={{ marginBottom: 2, opacity: active ? 1 : 0.7 }}
+      />
       <Text style={[btStyles.label, { color: active ? tint : mutedColor }]} numberOfLines={1}>
         {label}
       </Text>
