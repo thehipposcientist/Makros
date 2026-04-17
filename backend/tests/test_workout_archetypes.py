@@ -643,7 +643,7 @@ def test_body_recomp_has_real_cardio_days_at_4plus_days() -> None:
         (3, 0),  # 3 days still pure lifting
         (4, 1),  # 4 days gets 1 cardio
         (5, 1),  # 5 days gets 1 cardio
-        (6, 2),  # 6 days gets 2 cardio
+        (6, 1),  # 6 days gets 1 cardio (reduced to preserve lifting rotation)
     ]
     for days, expected_cardio in cases:
         inputs = PlannerInputs(
@@ -660,7 +660,7 @@ def test_body_recomp_has_real_cardio_days_at_4plus_days() -> None:
             f"got {cardio_count} — "
             f"{[d['category'] for d in plan['workout_plan']['days']]}"
         )
-    _ok("body_recomp 3/4/5/6 days → 0/1/1/2 cardio days")
+    _ok("body_recomp 3/4/5/6 days → 0/1/1/1 cardio days")
 
 
 def test_strength_does_not_get_cardio_days() -> None:

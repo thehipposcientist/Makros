@@ -9,7 +9,7 @@ import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
-  LAUNCH_GOALS, GOAL_CATEGORIES, targetFocusesForGoal, goalCategory,
+  LAUNCH_GOALS, GOAL_CATEGORIES, goalCategory,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
@@ -232,7 +232,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Goal (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
-  const [selectedTargetFocus, setSelectedTargetFocus] = useState<string>(profile.goalSelection?.targetFocus ?? profile.focusedMuscleGroup ?? '');
+  const [selectedRegion, setSelectedRegion] = useState<string>(profile.priorityRegion ?? 'balanced');
   // Advanced-goal UI removed — only the 8 launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
@@ -282,6 +282,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>('all');
+  const [suppSearchQuery, setSuppSearchQuery] = useState('');
+  const [suppSearchLoading, setSuppSearchLoading] = useState(false);
+  const [suppSearchResult, setSuppSearchResult] = useState<any>(null);
   const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
   const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
 
@@ -405,7 +408,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         goal: selectedGoal,
         daysPerWeek,
         experienceLevel: profile.experienceLevel || 'intermediate',
-        targetFocus: selectedTargetFocus || undefined,
+        priorityRegion: selectedRegion || undefined,
       })
     ).then(res => {
       if (cancelled) return;
@@ -986,7 +989,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       primaryGoal: selectedGoal,
       category: cat,
       modifiers: selectedModifiers,
-      targetFocus: selectedTargetFocus || undefined,
     };
 
     const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
@@ -1008,6 +1010,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       ...profile,
       goal: selectedGoal,
       goalSelection: goalSel,
+      priorityRegion: selectedRegion,
       themePreference,
       goalDetails: {
         ...profile.goalDetails,
@@ -1070,7 +1073,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // toggleModifier + availableModifiers removed — modifiers are gone.
   const cat = goalCategory(selectedGoal);
-  const availableFocuses = targetFocusesForGoal(selectedGoal);
+  // targetFocusesForGoal removed — replaced by priorityRegion 3-option picker
   const weightGoalIds = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'build_muscle', 'lean_bulk', 'gain_weight']);
   const isWeightGoal   = weightGoalIds.has(selectedGoal);
   const eventCategories = new Set<string>(['strength', 'cardio_endurance', 'athletic_performance']);
@@ -1133,7 +1136,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </View>
       )}
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={[styles.content, noHeader && { paddingBottom: 16 }]} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
 
         {mode === 'goal' && (
         <>
@@ -1148,7 +1151,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 <TouchableOpacity
                   key={g.id}
                   style={[styles.goalCard, active && styles.goalCardActive]}
-                  onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setSelectedTargetFocus(''); setPace('moderate'); }}
+                  onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setPace('moderate'); }}
                   activeOpacity={0.75}>
                   <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
                   <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
@@ -1168,24 +1171,38 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             stored `selectedModifiers` array is kept on the saved profile
             shape (always empty going forward) for back-compat. */}
 
-        {/* ── Target Focus ── */}
-        {availableFocuses.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Target Focus <Text style={{ fontSize: 12, fontWeight: '400', color: tc.textMuted }}>(optional)</Text></Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {availableFocuses.map(tf => {
-                const active = selectedTargetFocus === tf.id;
-                return (
-                  <TouchableOpacity
-                    key={tf.id}
-                    style={[styles.chip, active && styles.chipActive]}
-                    onPress={() => setSelectedTargetFocus(prev => prev === tf.id ? '' : tf.id)}>
-                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{tf.label}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+        {/* ── Priority Region — only for lifting-focused goals ── */}
+        {['build_muscle', 'build_strength', 'body_recomp', 'lose_fat', 'muscle_gain', 'strength', 'fat_loss'].includes(selectedGoal) && (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Training Emphasis</Text>
+          <View style={{ gap: 8 }}>
+            {([
+              { id: 'balanced', label: 'Balanced', desc: 'Equal upper & lower volume' },
+              { id: 'upper_body', label: 'Upper Body', desc: 'More chest, back & shoulder work' },
+              { id: 'lower_body', label: 'Lower Body', desc: 'More glute, quad & hamstring work' },
+            ] as const).map(opt => {
+              const active = selectedRegion === opt.id;
+              return (
+                <TouchableOpacity
+                  key={opt.id}
+                  onPress={() => setSelectedRegion(opt.id)}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 10,
+                    backgroundColor: active ? tc.primary + '15' : tc.surface,
+                    borderWidth: active ? 1.5 : 1,
+                    borderColor: active ? tc.primary : tc.border,
+                  }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: active ? '700' : '500', color: active ? tc.primary : tc.textPrimary }}>{opt.label}</Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>{opt.desc}</Text>
+                  </View>
+                  {active && <Text style={{ fontSize: 16, color: tc.primary, fontWeight: '700' }}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
           </View>
+        </View>
         )}
 
         {/* ── Pace / Timeline ── */}
@@ -2198,8 +2215,80 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             My Supplements{(profile.supplementsAvailable ?? []).length > 0 ? `  ·  ${(profile.supplementsAvailable ?? []).length} selected` : ''}
           </Text>
           <Text style={styles.sectionHint}>
-            Select supplements you take. Your AI nutritionist factors these into your plan.
+            Select supplements you take or search for any supplement.
           </Text>
+          {/* AI supplement search */}
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+            <TextInput
+              style={{
+                flex: 1, backgroundColor: tc.surface, borderRadius: 10,
+                paddingHorizontal: 12, paddingVertical: 10, fontSize: 14,
+                color: tc.textPrimary, borderWidth: 1, borderColor: tc.border,
+              }}
+              placeholder="Search supplements (e.g. ashwagandha, zinc)"
+              placeholderTextColor={tc.textMuted}
+              value={suppSearchQuery}
+              onChangeText={setSuppSearchQuery}
+              returnKeyType="search"
+              onSubmitEditing={async () => {
+                if (!suppSearchQuery.trim() || !authToken) return;
+                setSuppSearchLoading(true);
+                try {
+                  const { lookupSupplement } = await import('../services/api');
+                  const res = await lookupSupplement(authToken, suppSearchQuery.trim());
+                  if (res.found && res.name) {
+                    const tag = '__supp__' + res.name;
+                    if (!foods.includes(tag)) {
+                      setFoods(prev => [...prev, tag]);
+                    }
+                    setSuppSearchResult(res);
+                  } else {
+                    setSuppSearchResult(null);
+                    Alert.alert('Not found', 'No supplement matched your search. Try a different name.');
+                  }
+                } catch { setSuppSearchResult(null); }
+                setSuppSearchLoading(false);
+              }}
+            />
+            <TouchableOpacity
+              style={{
+                backgroundColor: tc.primary, borderRadius: 10,
+                paddingHorizontal: 14, justifyContent: 'center',
+                opacity: suppSearchLoading || !suppSearchQuery.trim() ? 0.5 : 1,
+              }}
+              disabled={suppSearchLoading || !suppSearchQuery.trim()}
+              onPress={async () => {
+                if (!suppSearchQuery.trim() || !authToken) return;
+                setSuppSearchLoading(true);
+                try {
+                  const { lookupSupplement } = await import('../services/api');
+                  const res = await lookupSupplement(authToken, suppSearchQuery.trim());
+                  if (res.found && res.name) {
+                    const tag = '__supp__' + res.name;
+                    if (!foods.includes(tag)) setFoods(prev => [...prev, tag]);
+                    setSuppSearchResult(res);
+                  } else {
+                    setSuppSearchResult(null);
+                    Alert.alert('Not found', 'No supplement matched. Try a different name.');
+                  }
+                } catch { setSuppSearchResult(null); }
+                setSuppSearchLoading(false);
+              }}>
+              {suppSearchLoading
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
+              }
+            </TouchableOpacity>
+          </View>
+          {suppSearchResult && suppSearchResult.found && (
+            <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '33' }}>
+              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary }}>{suppSearchResult.name}</Text>
+              {suppSearchResult.tagline ? <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2 }}>{suppSearchResult.tagline}</Text> : null}
+              {suppSearchResult.dose ? <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>Dose: {suppSearchResult.dose}</Text> : null}
+              {suppSearchResult.timing ? <Text style={{ fontSize: 11, color: tc.textMuted }}>Timing: {suppSearchResult.timing}</Text> : null}
+              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4, fontStyle: 'italic' }}>Added to your supplements</Text>
+            </View>
+          )}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {[
               { key: 'all', label: 'All' },
@@ -2455,10 +2544,20 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </>
         )}
 
-        <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-          <Text style={styles.saveBtnText}>{saveLabel}</Text>
-        </TouchableOpacity>
+        {noHeader && (
+          <TouchableOpacity style={[styles.saveBtn, { marginTop: 20, marginBottom: 16 }]} onPress={handleSave}>
+            <Text style={styles.saveBtnText}>{saveLabel}</Text>
+          </TouchableOpacity>
+        )}
       </ScrollView>
+
+      {!noHeader && (
+        <View style={styles.stickyBottom}>
+          <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
+            <Text style={styles.saveBtnText}>{saveLabel}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* ── Split picker modal ── */}
       <Modal visible={splitModalVisible} transparent animationType="slide" onRequestClose={() => setSplitModalVisible(false)}>
@@ -2519,9 +2618,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                       </View>
                       {active && <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 16 }}>✓</Text>}
                     </View>
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 5, lineHeight: 17 }}>
-                      {opt.rationale}
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 4, lineHeight: 16 }}>
+                      {opt.description}
                     </Text>
+                    {opt.region_warning && (
+                      <View style={{ backgroundColor: '#F59E0B' + '18', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, marginTop: 6 }}>
+                        <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>⚠ {opt.region_warning}</Text>
+                      </View>
+                    )}
                     {/* Day preview pills */}
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
                       {opt.day_labels.map((label, i) => (
@@ -2800,7 +2904,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px + safe
   // area). Without this, the Save/Update button at the end of the form
   // sits under the tab bar and can't be scrolled into view.
-  content:      { padding: 16, paddingBottom: 140 },
+  content:      { padding: 16, paddingBottom: 24 },
+  stickyBottom: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 28, backgroundColor: colors.background, borderTopWidth: 1, borderTopColor: colors.border },
+  stickyBottomInline: { paddingTop: 6, paddingBottom: 4, borderTopWidth: 0 },
+  saveBtnInline: { paddingVertical: 11 },
   tabBar:       { flexDirection: 'row', marginBottom: 20, borderRadius: radius.lg, backgroundColor: colors.surface, padding: 3, gap: 2, borderWidth: 1, borderColor: colors.border },
   tab:          { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: radius.lg - 3 },
   tabActive:    { backgroundColor: colors.primary },
@@ -3069,7 +3176,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   scannedFoodCheck: { fontSize: 20, color: colors.textMuted, width: 24, textAlign: 'center' },
   scannedFoodCheckSelected: { color: colors.primary },
 
-  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', marginTop: 16, marginBottom: 8, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8, elevation: 4 },
+  saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8, elevation: 4 },
   saveBtnText: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.2 },
 
   // Toggle switch

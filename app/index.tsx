@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
@@ -249,7 +249,15 @@ export default function Index() {
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
-  const [activeWorkout, setActiveWorkout] = useState<WorkoutDay | null>(null);
+  const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
+  const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
+    setActiveWorkoutRaw(w);
+    if (w) {
+      AsyncStorage.setItem('activeWorkoutSession', JSON.stringify(w)).catch(() => {});
+    } else {
+      AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
+    }
+  }, []);
   const [trainerNote, setTrainerNote]     = useState<string | null>(null);
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
@@ -337,6 +345,18 @@ export default function Index() {
     if (tn) setTrainerNote(tn);
     if (nn) setNutritionistNote(nn);
     if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
+
+    // Restore active workout if user was mid-session when the app was killed
+    try {
+      const savedWorkout = await AsyncStorage.getItem('activeWorkoutSession');
+      if (savedWorkout) {
+        const parsed = JSON.parse(savedWorkout);
+        if (parsed && parsed.exercises) {
+          setActiveWorkoutRaw(parsed);
+          console.log('[initApp] restored active workout session');
+        }
+      }
+    } catch {}
 
     // NOTE: we intentionally do NOT clear the plan-gen marker on cold start.
     // Closing the app should not cancel an in-flight plan generation — the
@@ -865,6 +885,11 @@ export default function Index() {
 
   const handleWorkoutFinish = (_session: WorkoutSession) => {
     setActiveWorkout(null);
+    // Bump refresh key so HomeScreen re-checks workout status from
+    // the backend DB. Without this, todayDone stays false until the
+    // user manually reloads — even though logWorkoutDone already
+    // wrote the completion to the server inside ActiveWorkoutScreen.
+    setPlanRefreshKey(k => k + 1);
   };
 
   const handleUpdateWeight = async (weightLbs: number) => {

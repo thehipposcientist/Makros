@@ -212,7 +212,14 @@ def ask_trainer_question(
         "• Supplements → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.'\n"
         "• Meal routines → 'You can edit those from ☰ menu → Edit Meal Plan → Meal Routines.'\n"
         "• Theme/appearance → 'You can change that from ☰ menu → Themes.'\n"
+        "• Priority region / training emphasis → 'Head to Goals tab to change your priority region (Balanced / Lower Body / Upper Body).'\n"
         "For anything not listed above, give your best advice and suggest the appropriate menu path if needed.\n"
+        "\n"
+        "IMPORTANT — TEMPORARY vs PERMANENT CHANGES:\n"
+        "When you modify the workout plan in chat, tell the user: 'I've adjusted this week's plan. "
+        "This change applies to the current week only — your next generated plan will follow your "
+        "saved settings. For a permanent change, update your preferences in the Goals or Workout Settings tab.'\n"
+        "This keeps the deterministic planner as the source of truth for future weeks.\n"
     )
 
     # Schema differs by mode — AI can only update its own side
@@ -225,10 +232,13 @@ def ask_trainer_question(
             "You are an expert registered dietitian and sports nutritionist. "
             "Give detailed, personalised nutritional advice referencing specific foods, quantities, and macros from their plan. "
             "Use realistic ingredient amounts (e.g. '150g chicken breast', '1 cup cooked oats'). "
-            "If the user asks to modify meals, swap foods, change macro targets, or adjust calories/protein/carbs/fat, "
+            "If the user asks to modify meals or swap foods, "
             "set needs_plan_update=true and return the COMPLETE updated nutrition plan. "
-            "WHEN UPDATING MACRO TARGETS: update the 'targets' object with the new values, then adjust ALL meals "
-            "so their totals actually hit the new targets. Don't just change targets without changing meals. "
+            "MACRO TARGET CHANGES: When the user asks to change a macro target (e.g. 'set protein to 130g', "
+            "'lower my calories to 1800', 'I want 40% carbs'), set `updated_macros` with the new values. "
+            "Only include the fields being changed — omit unchanged fields. The app will persist these as "
+            "the user's custom macro preferences and regenerate meals automatically. You do NOT need to "
+            "rebuild the full nutrition plan for a macro-only change — just set updated_macros. "
             "Preserve isRoutine=true meals exactly as-is. "
             "updated_workout_plan must always be null. Return JSON only."
             + _capability_instructions +
@@ -311,6 +321,7 @@ def ask_trainer_question(
         '  "needs_plan_update": true|false,\n'
         '  "safety_note": "string or empty string",\n'
         '  "updated_goal": "fat_loss|muscle_gain|body_recomp|strength|endurance|athletic_performance|toning|maintain" or null,\n'
+        '  "updated_macros": {"calories": N, "protein": N, "carbs": N, "fat": N} or null,\n'
         + plan_schema
         + workout_log_schema
         + injury_schema +
@@ -318,6 +329,13 @@ def ask_trainer_question(
         "GOAL UPDATES: Set `updated_goal` ONLY when the user explicitly asks to change their fitness goal "
         "(e.g. 'I want to cut now', 'switch me to strength'). Otherwise leave it null. "
         "Never change the goal silently just because you think it would be better.\n"
+        "MACRO ADJUSTMENTS: When the user asks to change calorie or macro targets "
+        "(e.g. 'set protein to 130g', 'lower calories to 1800', 'bump carbs up'), "
+        "set `updated_macros` with ONLY the changed fields. Example: user says 'make my protein 130g' → "
+        '`"updated_macros": {"protein": 130}`. The app saves these as custom macro preferences '
+        "and triggers a nutrition regen. Do NOT rebuild the full meal plan for macro-only changes — "
+        "the app handles that automatically. You can still set needs_plan_update=true if you ALSO "
+        "want to change specific meals.\n"
         "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
         "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly.\n"
         "PLAN SETTING CHANGES: If the user asks to change training days, workout duration, or equipment, "
@@ -334,7 +352,11 @@ def ask_trainer_question(
         "change right now without promising.\n"
         + (
             "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
-            '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}'
+            '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "stimulus": "strength|hypertrophy|volume|conditioning|mixed", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}. '
+            "STIMULUS FIELD: Every day MUST include a `stimulus` field. Use 'strength' for heavy/low-rep days (3-5 reps), "
+            "'hypertrophy' for moderate rep days (6-10 reps), 'volume' for high-rep days (10-15 reps), "
+            "'conditioning' for cardio/circuit days, 'mixed' for combination days. "
+            "Copy from the original plan when the day's intent hasn't changed."
             if not is_nutritionist else
             "NUTRITION PLAN FORMAT: updated_nutrition_plan must use this exact structure: "
             '{"targets": {"calories": N, "protein": N, "carbs": N, "fat": N}, '

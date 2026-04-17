@@ -98,8 +98,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
+            # Active recovery option for 6+ day weeks
+            DayArchetype.MOBILITY_FLOW,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_PUSH,
@@ -125,6 +129,8 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
@@ -155,6 +161,8 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
@@ -202,6 +210,8 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),
@@ -272,6 +282,8 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
         }),

@@ -39,6 +39,7 @@ export default function NutritionCard({
   onMoveMeal,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
+  const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const section = theme.sections.meals;
@@ -134,49 +135,17 @@ export default function NutritionCard({
           visible={showMicroModal}
           transparent
           animationType="slide"
-          onRequestClose={() => setShowMicroModal(false)}>
+          onRequestClose={() => { setShowMicroModal(false); setDrillNutrient(null); }}>
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Daily Nutrition Breakdown</Text>
-                <TouchableOpacity onPress={() => setShowMicroModal(false)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <TouchableOpacity onPress={() => { setShowMicroModal(false); setDrillNutrient(null); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
                   <Text style={styles.modalClose}>✕</Text>
                 </TouchableOpacity>
               </View>
 
               <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-                {/* Plain-language verdict + calorie bar, above the macro grid */}
-                {(() => {
-                  const calPct = targets.calories > 0 ? (actual.calories / targets.calories) : 0;
-                  const proteinHit = targets.protein > 0 && actual.protein >= targets.protein * 0.95;
-                  const bars = Math.min(10, Math.max(0, Math.round(calPct * 10)));
-                  const verdict =
-                    targets.calories <= 0 ? 'Targets load with your plan.' :
-                    calPct < 0.75 ? 'Under-fed today. Add a meal or a shake.' :
-                    calPct > 1.15 ? 'Over target. Trim dinner or swap a starchy side.' :
-                    proteinHit ? 'On target. Protein locked in.' :
-                    'Calories on track. Protein is the gap.';
-                  const barColor =
-                    calPct < 0.75 || calPct > 1.15 ? '#F59E0B' :
-                    (calPct >= 0.95 && calPct <= 1.05) ? colors.primary :
-                    section.strong;
-                  return (
-                    <View style={{ marginBottom: 14 }}>
-                      <Text style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary, marginBottom: 6 }}>
-                        {verdict}
-                      </Text>
-                      <View style={{ flexDirection: 'row', gap: 3 }}>
-                        {Array.from({ length: 10 }).map((_, i) => (
-                          <View key={i} style={{
-                            flex: 1, height: 4, borderRadius: 2,
-                            backgroundColor: i < bars ? barColor : colors.border,
-                          }} />
-                        ))}
-                      </View>
-                    </View>
-                  );
-                })()}
-
                 {/* Macro summary at top */}
                 <View style={styles.modalMacroRow}>
                   <View style={styles.modalMacroItem}>
@@ -220,12 +189,15 @@ export default function NutritionCard({
                         <NutritionInsightCard
                           key={ins.key}
                           insight={ins}
+                          meals={allVisible.map(v => v.meal)}
                           themeColors={{
                             textPrimary: colors.textPrimary,
                             textSecondary: colors.textSecondary,
                             textMuted: colors.textMuted,
                             border: colors.border,
                             surface: colors.surface,
+                            primary: colors.primary,
+                            surfaceRaised: colors.surfaceRaised,
                           }}
                         />
                       ))}
@@ -233,40 +205,125 @@ export default function NutritionCard({
                   );
                 })()}
 
+                {/* Nutrient drill-down — full-width panel that replaces the grid when a chip is tapped */}
+                {drillNutrient && (() => {
+                  const spec = microFieldSpec.find(s => s.out === drillNutrient);
+                  if (!spec) return null;
+                  const contributions: Array<{ food: string; meal: string; amount: number }> = [];
+                  for (const { meal } of allVisible) {
+                    let mealItemContributed = false;
+                    for (const it of (meal.items ?? [])) {
+                      const mn: any = it.micronutrients ?? {};
+                      let val = 0;
+                      for (const k of spec.keys) {
+                        if (mn[k] != null) { val = Number(mn[k]) || 0; break; }
+                      }
+                      if (val > 0) {
+                        contributions.push({ food: it.name, meal: meal.meal, amount: val });
+                        mealItemContributed = true;
+                      }
+                    }
+                    if (!mealItemContributed) {
+                      const mn: any = meal.micronutrients ?? {};
+                      let val = 0;
+                      for (const k of spec.keys) {
+                        if (mn[k] != null) { val = Number(mn[k]) || 0; break; }
+                      }
+                      if (val > 0) {
+                        contributions.push({ food: meal.meal, meal: '', amount: val });
+                      }
+                    }
+                  }
+                  contributions.sort((a, b) => b.amount - a.amount);
+                  const total = contributions.reduce((s, c) => s + c.amount, 0);
+                  const displayLabel = spec.out.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+                  const unitStr = ['fiber', 'sugar', 'saturatedFat', 'monounsaturatedFat', 'polyunsaturatedFat'].includes(spec.out) ? 'g'
+                    : ['vitaminD', 'vitaminB12'].includes(spec.out) ? 'mcg' : 'mg';
+                  return (
+                    <View style={{ backgroundColor: colors.primary + '15', borderRadius: 12, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: colors.primary + '33' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: colors.textPrimary }}>
+                          {displayLabel} Sources
+                        </Text>
+                        <TouchableOpacity onPress={() => setDrillNutrient(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                          <Text style={{ fontSize: 18, color: colors.textMuted, fontWeight: '600' }}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                      {contributions.length === 0 ? (
+                        <Text style={{ fontSize: 13, color: colors.textMuted, lineHeight: 18 }}>
+                          Per-food breakdown will appear after your next plan regeneration. Current plans only have meal-level totals.
+                        </Text>
+                      ) : (
+                        <>
+                          {contributions.slice(0, 12).map((c, i) => {
+                            const pctOfTotal = total > 0 ? c.amount / total : 0;
+                            return (
+                              <View key={`${c.food}-${i}`} style={{ marginBottom: 10 }}>
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary, flex: 1 }} numberOfLines={1}>
+                                    {c.food}
+                                  </Text>
+                                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 }}>
+                                    {c.amount < 10 ? (Math.round(c.amount * 10) / 10) : Math.round(c.amount)}{unitStr}
+                                  </Text>
+                                </View>
+                                {c.meal ? (
+                                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
+                                    from {c.meal}
+                                  </Text>
+                                ) : null}
+                                <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
+                                  <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.primary, width: `${Math.round(pctOfTotal * 100)}%` as any }} />
+                                </View>
+                              </View>
+                            );
+                          })}
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 2, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}>
+                            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Total</Text>
+                            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>
+                              {total < 10 ? (Math.round(total * 10) / 10) : Math.round(total)}{unitStr}
+                            </Text>
+                          </View>
+                        </>
+                      )}
+                    </View>
+                  );
+                })()}
+
                 {/* Layer 1 — fiber, sugar, sodium, cholesterol */}
                 <Text style={styles.modalSectionTitle}>Essentials</Text>
                 <View style={styles.microGridLg}>
-                  <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${Math.round(dailyMicros.fiber)}g` : '—'} target="28g" pct={dailyMicros.fiber / 28} colors={colors} styles={styles} low={dailyMicros.fiber > 0 && dailyMicros.fiber < 20} />
-                  <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${Math.round(dailyMicros.sugar)}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} />
-                  <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${Math.round(dailyMicros.sodium)}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} />
-                  <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} />
+                  <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${Math.round(dailyMicros.fiber)}g` : '—'} target="28g" pct={dailyMicros.fiber / 28} colors={colors} styles={styles} low={dailyMicros.fiber > 0 && dailyMicros.fiber < 20} onPress={() => setDrillNutrient(drillNutrient === 'fiber' ? null : 'fiber')} />
+                  <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${Math.round(dailyMicros.sugar)}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} onPress={() => setDrillNutrient(drillNutrient === 'sugar' ? null : 'sugar')} />
+                  <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${Math.round(dailyMicros.sodium)}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} onPress={() => setDrillNutrient(drillNutrient === 'sodium' ? null : 'sodium')} />
+                  <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} onPress={() => setDrillNutrient(drillNutrient === 'cholesterol' ? null : 'cholesterol')} />
                 </View>
 
                 {/* Layer 2 — fats panel (sat / mono / poly / omega-3) */}
                 <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Fats panel</Text>
                 <View style={styles.microGridLg}>
-                  <MicroChipLg label="Saturated" value={dailyMicros.saturatedFat > 0 ? `${Math.round(dailyMicros.saturatedFat)}g` : '—'} target="<20g" pct={dailyMicros.saturatedFat > 0 ? Math.min(dailyMicros.saturatedFat / 20, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.saturatedFat > 20} />
-                  <MicroChipLg label="Mono" value={dailyMicros.monounsaturatedFat > 0 ? `${Math.round(dailyMicros.monounsaturatedFat)}g` : '—'} target="25g" pct={dailyMicros.monounsaturatedFat / 25} colors={colors} styles={styles} />
-                  <MicroChipLg label="Poly" value={dailyMicros.polyunsaturatedFat > 0 ? `${Math.round(dailyMicros.polyunsaturatedFat)}g` : '—'} target="15g" pct={dailyMicros.polyunsaturatedFat / 15} colors={colors} styles={styles} />
-                  <MicroChipLg label="Omega-3" value={dailyMicros.omega3 > 0 ? `${Math.round(dailyMicros.omega3)}mg` : '—'} target="1600mg" pct={dailyMicros.omega3 / 1600} colors={colors} styles={styles} low={dailyMicros.omega3 > 0 && dailyMicros.omega3 < 1000} />
+                  <MicroChipLg label="Saturated" value={dailyMicros.saturatedFat > 0 ? `${Math.round(dailyMicros.saturatedFat)}g` : '—'} target="<20g" pct={dailyMicros.saturatedFat > 0 ? Math.min(dailyMicros.saturatedFat / 20, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.saturatedFat > 20} onPress={() => setDrillNutrient(drillNutrient === 'saturatedFat' ? null : 'saturatedFat')} />
+                  <MicroChipLg label="Mono" value={dailyMicros.monounsaturatedFat > 0 ? `${Math.round(dailyMicros.monounsaturatedFat)}g` : '—'} target="25g" pct={dailyMicros.monounsaturatedFat / 25} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'monounsaturatedFat' ? null : 'monounsaturatedFat')} />
+                  <MicroChipLg label="Poly" value={dailyMicros.polyunsaturatedFat > 0 ? `${Math.round(dailyMicros.polyunsaturatedFat)}g` : '—'} target="15g" pct={dailyMicros.polyunsaturatedFat / 15} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'polyunsaturatedFat' ? null : 'polyunsaturatedFat')} />
+                  <MicroChipLg label="Omega-3" value={dailyMicros.omega3 > 0 ? `${Math.round(dailyMicros.omega3)}mg` : '—'} target="1600mg" pct={dailyMicros.omega3 / 1600} colors={colors} styles={styles} low={dailyMicros.omega3 > 0 && dailyMicros.omega3 < 1000} onPress={() => setDrillNutrient(drillNutrient === 'omega3' ? null : 'omega3')} />
                 </View>
 
                 {/* Layer 2 — minerals */}
                 <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Minerals</Text>
                 <View style={styles.microGridLg}>
-                  <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${Math.round(dailyMicros.potassium)}mg` : '—'} target="3400mg" pct={dailyMicros.potassium / 3400} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 2300} />
-                  <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${Math.round(dailyMicros.calcium)}mg` : '—'} target="1000mg" pct={dailyMicros.calcium / 1000} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 700} />
-                  <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${(Math.round(dailyMicros.iron * 10) / 10)}mg` : '—'} target="18mg" pct={dailyMicros.iron / 18} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 12} />
-                  <MicroChipLg label="Magnesium" value={dailyMicros.magnesium > 0 ? `${Math.round(dailyMicros.magnesium)}mg` : '—'} target="400mg" pct={dailyMicros.magnesium / 400} colors={colors} styles={styles} low={dailyMicros.magnesium > 0 && dailyMicros.magnesium < 280} />
+                  <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${Math.round(dailyMicros.potassium)}mg` : '—'} target="3400mg" pct={dailyMicros.potassium / 3400} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 2300} onPress={() => setDrillNutrient(drillNutrient === 'potassium' ? null : 'potassium')} />
+                  <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${Math.round(dailyMicros.calcium)}mg` : '—'} target="1000mg" pct={dailyMicros.calcium / 1000} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 700} onPress={() => setDrillNutrient(drillNutrient === 'calcium' ? null : 'calcium')} />
+                  <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${(Math.round(dailyMicros.iron * 10) / 10)}mg` : '—'} target="18mg" pct={dailyMicros.iron / 18} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 12} onPress={() => setDrillNutrient(drillNutrient === 'iron' ? null : 'iron')} />
+                  <MicroChipLg label="Magnesium" value={dailyMicros.magnesium > 0 ? `${Math.round(dailyMicros.magnesium)}mg` : '—'} target="400mg" pct={dailyMicros.magnesium / 400} colors={colors} styles={styles} low={dailyMicros.magnesium > 0 && dailyMicros.magnesium < 280} onPress={() => setDrillNutrient(drillNutrient === 'magnesium' ? null : 'magnesium')} />
                 </View>
 
                 {/* Layer 2 — vitamins */}
                 <Text style={[styles.modalSectionTitle, { marginTop: 18 }]}>Vitamins</Text>
                 <View style={styles.microGridLg}>
-                  <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${(Math.round(dailyMicros.vitaminD * 10) / 10)}mcg` : '—'} target="15mcg" pct={dailyMicros.vitaminD / 15} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 10} />
-                  <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${Math.round(dailyMicros.vitaminC)}mg` : '—'} target="90mg" pct={dailyMicros.vitaminC / 90} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 60} />
-                  <MicroChipLg label="Vitamin B12" value={dailyMicros.vitaminB12 > 0 ? `${(Math.round(dailyMicros.vitaminB12 * 10) / 10)}mcg` : '—'} target="2.4mcg" pct={dailyMicros.vitaminB12 / 2.4} colors={colors} styles={styles} low={dailyMicros.vitaminB12 > 0 && dailyMicros.vitaminB12 < 1.6} />
-                  <MicroChipLg label="Vitamin A" value={dailyMicros.vitaminA > 0 ? `${dailyMicros.vitaminA}%` : '—'} target="100% DV" pct={dailyMicros.vitaminA / 100} colors={colors} styles={styles} low={dailyMicros.vitaminA > 0 && dailyMicros.vitaminA < 50} />
+                  <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${(Math.round(dailyMicros.vitaminD * 10) / 10)}mcg` : '—'} target="15mcg" pct={dailyMicros.vitaminD / 15} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 10} onPress={() => setDrillNutrient(drillNutrient === 'vitaminD' ? null : 'vitaminD')} />
+                  <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${Math.round(dailyMicros.vitaminC)}mg` : '—'} target="90mg" pct={dailyMicros.vitaminC / 90} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 60} onPress={() => setDrillNutrient(drillNutrient === 'vitaminC' ? null : 'vitaminC')} />
+                  <MicroChipLg label="Vitamin B12" value={dailyMicros.vitaminB12 > 0 ? `${(Math.round(dailyMicros.vitaminB12 * 10) / 10)}mcg` : '—'} target="2.4mcg" pct={dailyMicros.vitaminB12 / 2.4} colors={colors} styles={styles} low={dailyMicros.vitaminB12 > 0 && dailyMicros.vitaminB12 < 1.6} onPress={() => setDrillNutrient(drillNutrient === 'vitaminB12' ? null : 'vitaminB12')} />
+                  <MicroChipLg label="Vitamin A" value={dailyMicros.vitaminA > 0 ? `${dailyMicros.vitaminA}%` : '—'} target="100% DV" pct={dailyMicros.vitaminA / 100} colors={colors} styles={styles} low={dailyMicros.vitaminA > 0 && dailyMicros.vitaminA < 50} onPress={() => setDrillNutrient(drillNutrient === 'vitaminA' ? null : 'vitaminA')} />
                 </View>
 
                 {!hasMicros && (
@@ -538,17 +595,20 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   );
 }
 
-function MicroChipLg({ label, value, target, pct, colors, styles, warn, low }: {
+function MicroChipLg({ label, value, target, pct, colors, styles, warn, low, onPress }: {
   label: string; value: string; target: string; pct: number;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   warn?: boolean; low?: boolean;
+  onPress?: () => void;
 }) {
   const barPct = Math.min(pct, 1);
   const noData = value === '—';
   const barColor = noData ? colors.border : warn ? colors.error : low ? '#F59E0B' : colors.primary;
+  const Wrapper = onPress ? TouchableOpacity : View;
+  const wrapperProps = onPress ? { onPress, activeOpacity: 0.7 } : {};
   return (
-    <View style={styles.microChipLg}>
+    <Wrapper {...wrapperProps} style={styles.microChipLg}>
       <View style={styles.microChipLgTop}>
         <Text style={[styles.microChipLgLabel, (warn || low) && { color: barColor }]}>{label}</Text>
         <Text style={[styles.microChipLgValue, noData ? { color: colors.textMuted } : (warn || low) && { color: barColor }]}>{value}</Text>
@@ -557,7 +617,7 @@ function MicroChipLg({ label, value, target, pct, colors, styles, warn, low }: {
         <View style={[styles.microChipLgBarFill, { width: `${Math.round(barPct * 100)}%` as any, backgroundColor: barColor }]} />
       </View>
       <Text style={[styles.microChipLgTarget, (warn || low) && { color: barColor }]}>{target}</Text>
-    </View>
+    </Wrapper>
   );
 }
 

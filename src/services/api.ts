@@ -420,18 +420,19 @@ export interface SplitOption {
   stimulus_note: string;
   pros: string[];
   cons: string[];
+  region_warning: string | null;
 }
 
 export async function getSplitOptions(
   token: string,
-  params: { goal: string; daysPerWeek: number; experienceLevel?: string; targetFocus?: string },
+  params: { goal: string; daysPerWeek: number; experienceLevel?: string; priorityRegion?: string },
 ): Promise<{ options: SplitOption[]; recommended: string | null }> {
   const qs = new URLSearchParams({
     goal: params.goal,
     daysPerWeek: String(params.daysPerWeek),
     experienceLevel: params.experienceLevel || 'intermediate',
   });
-  if (params.targetFocus) qs.set('targetFocus', params.targetFocus);
+  if (params.priorityRegion) qs.set('targetFocus', params.priorityRegion);
   return request(`/ai/plans/split-options?${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -449,7 +450,7 @@ export async function getAIPlans(
     goal:                   profile.goal,
     goalSelection:          profile.goalSelection ?? undefined,
     secondaryGoal:          profile.secondaryGoal,
-    focusedMuscleGroup:     profile.focusedMuscleGroup,
+    priorityRegion:         profile.priorityRegion || 'balanced',
     goalDetails:            profile.goalDetails,
     physicalStats:          profile.physicalStats,
     daysPerWeek:            profile.daysPerWeek,
@@ -506,7 +507,7 @@ export async function getAIWorkoutPlan(
   const payload: Record<string, any> = {
     goal:                   profile.goal,
     secondaryGoal:          profile.secondaryGoal,
-    focusedMuscleGroup:     profile.focusedMuscleGroup,
+    priorityRegion:         profile.priorityRegion || 'balanced',
     goalDetails:            profile.goalDetails,
     physicalStats:          profile.physicalStats,
     daysPerWeek:            profile.daysPerWeek,
@@ -864,6 +865,19 @@ export type LoggedExercisePayload = {
   sets: LoggedSetPayload[];
 };
 
+export async function logWorkoutStarted(
+  token: string,
+  workout_date: string,
+  focus_label: string,
+  stimulus?: string,
+) {
+  return request('/workouts/start', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ workout_date, focus_label, stimulus }),
+  }, 10000);
+}
+
 export async function logWorkoutDone(
   token: string,
   workout_date: string,
@@ -1154,6 +1168,17 @@ export async function getMealSwap(token: string, meal_type: string, foods: strin
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
+}
+
+/** Match a natural language fitness description to the best goal. No auth needed. */
+export async function matchGoal(
+  description: string,
+): Promise<{ goal_id: string; reason: string }> {
+  return request<any>('/ai/match-goal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ description }),
+  }, 12000);
 }
 
 /** Search food nutrition info by name using AI. */

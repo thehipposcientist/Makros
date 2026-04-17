@@ -70,7 +70,8 @@ class PlannerInputs:
     experience: str = "intermediate"       # "beginner" | "intermediate" | "advanced"
     equipment_slugs: tuple[str, ...] = ()  # owned Equipment slugs
     preferred_split: str | None = None     # "auto" | "full_body" | "upper_lower" | "ppl" | "bro"
-    focused_muscle: str | None = None      # optional emphasis (e.g. "glutes")
+    focused_muscle: str | None = None      # DEPRECATED — use priority_region instead
+    priority_region: str = "balanced"      # "balanced" | "lower_body" | "upper_body"
     preferred_exercises: tuple[str, ...] = ()
     disliked_exercises: tuple[str, ...] = ()
     injuries: tuple[str, ...] = ()
@@ -231,26 +232,34 @@ _DEFAULT_VOLUME = {
 def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
     """Return a {muscle: target_working_sets_per_week} dict for this user.
 
-    Adds a +30% bonus to the user's `focused_muscle` if set, clamped at
-    the advanced-tier volume for the same (bucket, muscle) PLUS a
-    3-set focus allowance so the bonus isn't neutralized when the
-    advanced tier equals the intermediate tier for that muscle (e.g.
-    glutes in recomp where both tiers sit at 12). The allowance keeps
-    the boost meaningful for the user's declared focus while still
-    preventing runaway volume: max deliverable sets for any focused
-    muscle = advanced_tier + 3.
-    """
+    Applies region-based volume multipliers when priority_region is set:
+    - lower_body: lower muscles get 1.2x, upper muscles get 0.9x
+    - upper_body: upper muscles get 1.2x, lower muscles get 0.9x
+    - balanced: no adjustment
+
+    Also supports legacy focused_muscle for backward compatibility."""
+    from .region_priority import normalize_region, region_volume_multipliers
     bucket = _goal_bucket(inputs.goal)
     base = _WEEKLY_VOLUME.get((bucket, inputs.experience), _DEFAULT_VOLUME).copy()
-    if inputs.focused_muscle and inputs.focused_muscle in base:
+
+    # Region priority volume adjustment (new system)
+    region = normalize_region(inputs.priority_region)
+    mults = region_volume_multipliers(region)
+    if mults:
+        cap_source = _WEEKLY_VOLUME.get((bucket, "advanced"), _DEFAULT_VOLUME)
+        for muscle, mult in mults.items():
+            if muscle in base:
+                adjusted = round(base[muscle] * mult)
+                cap = cap_source.get(muscle, adjusted) + 3
+                base[muscle] = min(adjusted, cap)
+
+    # Legacy focused_muscle support (deprecated — prefer priority_region)
+    if inputs.focused_muscle and inputs.focused_muscle in base and region == "balanced":
         boosted = round(base[inputs.focused_muscle] * 1.3)
-        # Cap at the same-bucket advanced-tier value PLUS a 3-set
-        # allowance so a muscle whose advanced tier equals the current
-        # tier (e.g. glutes/recomp at 12/12) still benefits from
-        # focusing. Without the +3 the boost gets fully neutralized.
         cap_source = _WEEKLY_VOLUME.get((bucket, "advanced"), _DEFAULT_VOLUME)
         cap = cap_source.get(inputs.focused_muscle, boosted) + 3
         base[inputs.focused_muscle] = min(boosted, cap)
+
     return base
 
 
@@ -585,6 +594,18 @@ def score_candidate(
             elif ratio > 1.1:
                 score -= 0.6
 
+    # 7b+. Direct focused-muscle scoring bonus. Large enough to change
+    # exercise selection from the very first pick — without this, two
+    # users with identical goals but different focus muscles get the
+    # same exercises because the deficit bias only diverges later.
+    if inputs.focused_muscle:
+        primary_muscle = exercise.get("primary_muscle") or ""
+        secondary_muscles = exercise.get("secondary_muscles") or []
+        if primary_muscle == inputs.focused_muscle:
+            score += 4.0
+        elif inputs.focused_muscle in secondary_muscles:
+            score += 2.0
+
     # 7c. Cardio intensity match — slot labels encode whether the day
     # wants intervals, steady-state, or easy recovery cardio. The
     # intensity classification lives in `cardio.classify_cardio` so
@@ -631,14 +652,23 @@ def score_candidate(
         elif wants_steady and is_interval_ex:
             score -= 2.5
 
-    # 7d. Yoga exercises should ONLY appear on mobility, recovery, or
-    # general_health/flexibility days — never on lifting, conditioning,
-    # or hybrid days in ANY role (not warmup, not accessory, nothing).
-    # Users who want yoga can add it manually or select a mobility goal.
+    # 7d. Yoga, mobility drills, and stretches should ONLY appear on
+    # mobility, recovery, or general_health/flexibility days — never on
+    # lifting, conditioning, or hybrid days in ANY role.
     slug = (exercise.get("slug") or "").lower()
-    if slug.startswith("yoga_"):
+    ex_name_lower = (exercise.get("name") or "").lower()
+    ex_type = (exercise.get("exercise_type") or "").lower()
+    is_mobility_stretch = (
+        slug.startswith("yoga_")
+        or slug.startswith("stretch_")
+        or slug.startswith("mobility_")
+        or ex_type == "mobility"
+        or "stretch" in ex_name_lower
+        or "mobility drill" in ex_name_lower
+    )
+    if is_mobility_stretch:
         if bucket not in ("general_health", "flexibility", "stress_relief"):
-            score -= 20.0  # effectively filtered out
+            score -= 20.0
 
     # 8. Tiny deterministic jitter so ties between two equivalent
     # candidates don't always pick the alphabetically-first one. Seeded
@@ -1037,6 +1067,7 @@ def generate_workout_plan(
     history_familiarity: dict[str, int] | None = None,
     *,
     perf_profiles: dict | None = None,
+    recent_muscle_exercises: dict[str, set[str]] | None = None,
 ) -> dict:
     """Build a complete plan dict in the same shape `_call_workout_ai` returns:
 
@@ -1108,6 +1139,7 @@ def generate_workout_plan(
         user_chose_split=_user_chose_split,
         recent_focus_buckets=inputs.recent_focus_buckets,
         recent_focus_families=inputs.recent_focus_families,
+        priority_region=inputs.priority_region,
     )
     print(
         f"[workout_planner] mode={profile.planner_mode} "
@@ -1123,7 +1155,7 @@ def generate_workout_plan(
     templates = []
     for idx, archetype in enumerate(recipe):
         meta = ARCHETYPE_META[archetype]
-        slots = archetype_to_slots(archetype, idx, inputs.days_per_week)
+        slots = archetype_to_slots(archetype, idx, inputs.days_per_week, focused_muscle=inputs.focused_muscle)
         name = archetype_display_name(archetype, idx, recipe)
         slots = density_adjust_slots(
             slots, inputs.session_minutes, category=meta.category,
@@ -1164,16 +1196,32 @@ def generate_workout_plan(
     goal_bucket = profile.bucket
 
     days_out: list[dict] = []
+    # Track which focus families have already had a day in this plan.
+    # When the same family comes up a second time (e.g., Legs day 2 in
+    # PPL×2), seed used_exercise_slugs with what was on the LAST real
+    # session of that family so exercise selection varies.
+    _focus_day_count: dict[str, int] = {}
+
     for day_idx, (day_name, slots, archetype) in enumerate(templates):
-        # Focus label comes from the archetype metadata, not from
-        # splitting the display name.
         meta = ARCHETYPE_META[archetype]
         focus = meta.default_name
         accepts_types = meta.accepts_types
-        # Resolve the day's focus family for compound muscle enforcement.
-        # This ensures compound exercises on push days have push-family
-        # muscles, pull days have pull-family muscles, etc.
         _day_focus_family = archetype_to_focus_family(archetype)
+
+        # Seed variety tracking from recent history by MUSCLE, not by
+        # focus family. If the user recently did back squats (quads),
+        # this day's quad slots will pick a different squat variant.
+        # Split-agnostic: works even when the user switches splits.
+        _focus_day_count[_day_focus_family] = _focus_day_count.get(_day_focus_family, 0) + 1
+        _temp_history_slugs: set[str] = set()
+        if recent_muscle_exercises:
+            day_muscles = {s.primary_muscle_hint for s in slots if s.primary_muscle_hint}
+            for muscle in day_muscles:
+                for slug in (recent_muscle_exercises.get(muscle) or set()):
+                    if slug not in used_exercise_slugs:
+                        _temp_history_slugs.add(slug)
+            if _temp_history_slugs:
+                used_exercise_slugs.update(_temp_history_slugs)
         exercises_out: list[dict] = []
         for slot in slots:
             # Per-slot type override: strength-slot inside a hybrid
@@ -1237,6 +1285,12 @@ def generate_workout_plan(
                 used_substitution_groups.add(sub)
             if ex.get("slug"):
                 used_exercise_slugs.add(ex["slug"])
+        # Remove temporary history-based slugs so they don't bleed
+        # into unrelated days. The real picks from THIS day are already
+        # in used_exercise_slugs via the loop above (line 1273).
+        if _temp_history_slugs:
+            used_exercise_slugs -= _temp_history_slugs
+
         days_out.append({
             "day": day_name,
             "focus": focus,
@@ -1246,14 +1300,10 @@ def generate_workout_plan(
             "exercises": exercises_out,
         })
 
-    # ── Focused-muscle deficit pass ───────────────────────────────────
-    # Only fires for lifting-oriented planner modes. Tacking a strength
-    # isolation accessory onto an endurance / mobility / recovery /
-    # maintain plan would undermine the plan's primary goal — a user
-    # asking for "glute focus" inside a flexibility plan doesn't want
-    # a bonus glute bridge on their stretch day. Athletic mode is
-    # included because it has real lifting days and bodybuilding-style
-    # muscle emphasis is coherent there.
+    # ── Quota-based focused-muscle fulfillment pass ─────────────────
+    # Multi-day pass that checks focus exposure quotas and adds
+    # accessories across multiple days until quotas are met or no
+    # safe host day exists. Replaces the old single-accessory backfill.
     _FOCUS_BACKFILL_MODES = {"lifting", "fat_loss_mix", "lifting_plus_cardio", "athletic"}
     fm = inputs.focused_muscle
     if (
@@ -1261,47 +1311,96 @@ def generate_workout_plan(
         and targets.get(fm, 0) > 0
         and profile.planner_mode in _FOCUS_BACKFILL_MODES
     ):
+        from .focus_profiles import get_focus_profile, focus_min_exposure_days
+        fp = get_focus_profile(fm)
+        min_accessories = fp.min_direct_accessories if fp else 1
+        min_exposure = focus_min_exposure_days(fp, inputs.days_per_week) if fp else 1
+        max_session_exercises = 8
+
+        # Count current focus exposure
+        def _count_focus_exposure():
+            days_with_exposure = 0
+            direct_accessories = 0
+            for day in days_out:
+                day_hits = False
+                for ex in day.get("exercises", []):
+                    pm = ex.get("_primary_muscle", "")
+                    sm = ex.get("_secondary_muscles") or []
+                    if pm == fm or fm in sm:
+                        day_hits = True
+                    if pm == fm and ex.get("_role") == "isolation":
+                        direct_accessories += 1
+                if day_hits:
+                    days_with_exposure += 1
+            return days_with_exposure, direct_accessories
+
+        exposure_days, direct_accs = _count_focus_exposure()
         deficit = targets[fm] - assigned.get(fm, 0.0)
-        if deficit >= 1.0:
-            host_day_idx = _find_best_accessory_host_day(days_out, fm)
-            if host_day_idx is not None:
-                slot = Slot("Focus Accessory", "isolation", fm, "isolation")
-                ex = pick_for_slot(
-                    all_exercises, slot, inputs,
-                    used_substitution_groups, used_exercise_slugs,
-                    history_familiarity,
-                    volume_targets=targets,
-                    volume_assigned=assigned,
-                    injury_blocked_patterns=blocked_patterns,
-                    accepts_types=frozenset({"strength"}),
-                )
-                if ex is not None:
-                    pres = prescribe_sets_reps(ex, slot, inputs)
-                    out_ex = {
-                        "name": ex["name"],
-                        "sets": pres.sets,
-                        "reps": pres.reps,
-                        "restSeconds": pres.rest_seconds,
-                        "equipment": _equipment_label(ex),
-                        "_slug": ex.get("slug"),
-                        "_slot": slot.label,
-                        "_role": slot.role,
-                        "_rir_target": pres.rir_target,
-                        "_primary_muscle": ex.get("primary_muscle"),
-                        "_secondary_muscles": list(ex.get("secondary_muscles") or []),
-                    }
-                    _stamp_load_metadata(
-                        out_ex,
-                        exercise=ex,
-                        prescription=pres,
-                        role=slot.role,
-                        goal_bucket=goal_bucket,
-                        experience=inputs.experience,
-                        perf_profiles=perf_profiles,
-                        all_exercises_by_slug=all_exercises_by_slug,
-                    )
-                    days_out[host_day_idx]["exercises"].append(out_ex)
-                    _credit(ex, pres.sets)
+        accessories_needed = max(0, min_accessories - direct_accs)
+        added = 0
+        max_adds = max(accessories_needed, 3)
+
+        # Try to add accessories across multiple days
+        tried_days: set[int] = set()
+        while (deficit >= 1.0 or accessories_needed > 0) and added < max_adds:
+            host_day_idx = _find_best_accessory_host_day(days_out, fm, exclude=tried_days)
+            if host_day_idx is None:
+                break
+            if len(days_out[host_day_idx].get("exercises", [])) >= max_session_exercises:
+                tried_days.add(host_day_idx)
+                continue
+            slot = Slot(f"Focus Accessory {added + 1}", "isolation", fm, "isolation")
+            ex = pick_for_slot(
+                all_exercises, slot, inputs,
+                used_substitution_groups, used_exercise_slugs,
+                history_familiarity,
+                volume_targets=targets,
+                volume_assigned=assigned,
+                injury_blocked_patterns=blocked_patterns,
+                accepts_types=frozenset({"strength"}),
+            )
+            if ex is None:
+                tried_days.add(host_day_idx)
+                continue
+            pres = prescribe_sets_reps(ex, slot, inputs)
+            out_ex = {
+                "name": ex["name"],
+                "sets": pres.sets,
+                "reps": pres.reps,
+                "restSeconds": pres.rest_seconds,
+                "equipment": _equipment_label(ex),
+                "_slug": ex.get("slug"),
+                "_slot": slot.label,
+                "_role": slot.role,
+                "_rir_target": pres.rir_target,
+                "_primary_muscle": ex.get("primary_muscle"),
+                "_secondary_muscles": list(ex.get("secondary_muscles") or []),
+            }
+            _stamp_load_metadata(
+                out_ex,
+                exercise=ex,
+                prescription=pres,
+                role=slot.role,
+                goal_bucket=goal_bucket,
+                experience=inputs.experience,
+                perf_profiles=perf_profiles,
+                all_exercises_by_slug=all_exercises_by_slug,
+            )
+            days_out[host_day_idx]["exercises"].append(out_ex)
+            _credit(ex, pres.sets)
+            added += 1
+            accessories_needed -= 1
+            deficit = targets[fm] - assigned.get(fm, 0.0)
+            tried_days.add(host_day_idx)
+
+        if added > 0:
+            exposure_days, direct_accs = _count_focus_exposure()
+            print(
+                f"[planner] focus fulfillment: added {added} {fm} accessories, "
+                f"exposure_days={exposure_days}/{min_exposure}, "
+                f"direct_accessories={direct_accs}/{min_accessories}, "
+                f"remaining_deficit={max(0, targets[fm] - assigned.get(fm, 0.0)):.1f}"
+            )
 
     # Volume audit attached to the plan for transparency. Clients that
     # don't read it ignore it; the test suite uses it to assert the
@@ -1490,10 +1589,78 @@ def validate_plan(
                     f"(present: {sorted(recipe_families)})"
                 )
 
+    # ── Check 6: focused-muscle exposure audit ──────────────────────
+    fm = inputs.focused_muscle
+    if fm and days:
+        from .focus_profiles import get_focus_profile, focus_min_exposure_days
+        fp = get_focus_profile(fm)
+        if fp:
+            # Count exposure
+            days_with_focus = 0
+            direct_accessories = 0
+            total_focus_sets = 0.0
+            for day in days:
+                day_hits = False
+                for ex in day.get("exercises", []):
+                    pm = ex.get("_primary_muscle", "")
+                    sm = ex.get("_secondary_muscles") or []
+                    if pm == fm:
+                        day_hits = True
+                        total_focus_sets += int(ex.get("sets") or 0)
+                        if ex.get("_role") == "isolation":
+                            direct_accessories += 1
+                    elif fm in sm:
+                        day_hits = True
+                        total_focus_sets += int(ex.get("sets") or 0) * 0.5
+                if day_hits:
+                    days_with_focus += 1
+
+            min_exp = focus_min_exposure_days(fp, len(days))
+            min_accs = fp.min_direct_accessories
+
+            audit = plan.get("workout_plan", {})
+            audit["focus_audit"] = {
+                "muscle": fm,
+                "days_with_exposure": days_with_focus,
+                "min_exposure_days": min_exp,
+                "direct_accessories": direct_accessories,
+                "min_direct_accessories": min_accs,
+                "total_focus_sets": round(total_focus_sets, 1),
+            }
+
+            if days_with_focus < min_exp:
+                print(
+                    f"[validate_plan] FOCUS WARNING: {fm} exposure on "
+                    f"{days_with_focus}/{len(days)} days, minimum is {min_exp}"
+                )
+            if direct_accessories < min_accs:
+                print(
+                    f"[validate_plan] FOCUS WARNING: {fm} has "
+                    f"{direct_accessories} direct accessories, minimum is {min_accs}"
+                )
+            if days_with_focus >= min_exp and direct_accessories >= min_accs:
+                print(
+                    f"[validate_plan] focus OK: {fm} — "
+                    f"exposure={days_with_focus}/{len(days)} days, "
+                    f"accessories={direct_accessories}, "
+                    f"total_sets={total_focus_sets:.1f}"
+                )
+
+    # ── Check 7: region priority audit ──────────────────────────────
+    from .region_priority import normalize_region, validate_region_exposure
+    region = normalize_region(inputs.priority_region)
+    if region != "balanced" and days:
+        audit = validate_region_exposure(region, days)
+        plan.get("workout_plan", {})["region_audit"] = audit
+        if audit["ok"]:
+            print(f"[validate_plan] region OK: {region} — lower={audit['lower_days']} upper={audit['upper_days']}")
+        else:
+            print(f"[validate_plan] REGION WARNING: {audit['message']}")
+
     return plan
 
 
-def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | None:
+def _find_best_accessory_host_day(days_out: list[dict], muscle: str, exclude: set[int] | None = None) -> int | None:
     """Pick which day should host an extra accessory set for `muscle`.
 
     Preference ladder (lower priority number = preferred):
@@ -1513,8 +1680,11 @@ def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | No
     primary-OR-secondary detection — that's the bug this fixes."""
     if not days_out:
         return None
+    _exclude = exclude or set()
     scored: list[tuple[int, int, int]] = []  # (priority, ex_count, idx)
     for idx, day in enumerate(days_out):
+        if idx in _exclude:
+            continue
         exs = day.get("exercises") or []
         hits_primary = any(ex.get("_primary_muscle") == muscle for ex in exs)
         hits_secondary = any(
@@ -1527,6 +1697,8 @@ def _find_best_accessory_host_day(days_out: list[dict], muscle: str) -> int | No
         else:
             priority = 2
         scored.append((priority, len(exs), idx))
+    if not scored:
+        return None
     scored.sort()
     return scored[0][2]
 

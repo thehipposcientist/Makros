@@ -21,12 +21,12 @@ import {
   Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { scanFoodsPhoto, scanEquipmentPhoto } from '../services/api';
+import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal } from '../services/api';
 import { isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import {
-  LAUNCH_GOALS, PRIMARY_GOALS,
-  targetFocusesForGoal, goalCategory,
+  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES,
+  goalCategory,
 } from '../constants/goalConfig';
 
 const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
@@ -340,11 +340,13 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
   // Step 1 — Goal selection (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState('build_muscle');
-  // Advanced-goal UI removed — only the 8 launch goals are exposed.
+  const [goalQuery, setGoalQuery] = useState('');
+  const [goalMatchLoading, setGoalMatchLoading] = useState(false);
+  const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
 
   // Step 2 — Goal refinement (modifiers + target focus + pace)
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
-  const [selectedTargetFocus, setSelectedTargetFocus] = useState('');
+  const [selectedRegion, setSelectedRegion] = useState('balanced');
   const [pace, setPace] = useState<GoalPace>('moderate');
   const [targetWeight, setTargetWeight] = useState('');
   const [targetEvent, setTargetEvent] = useState('');
@@ -401,7 +403,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     if (goalId !== selectedGoal) {
       setSelectedGoal(goalId);
       setSelectedModifiers([]); // reset modifiers when goal changes
-      setSelectedTargetFocus('');
+      setSelectedRegion('balanced');
     }
   };
 
@@ -479,7 +481,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       primaryGoal: selectedGoal,
       category: cat,
       modifiers: selectedModifiers,
-      targetFocus: selectedTargetFocus || undefined,
     };
 
     const goalDetails: GoalDetails = {
@@ -499,6 +500,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     onComplete({
       goal:               selectedGoal,
       goalSelection:      goalSel,
+      priorityRegion:     selectedRegion,
       goalDetails,
       physicalStats,
       daysPerWeek:            parseInt(daysPerWeek),
@@ -641,6 +643,62 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           </View>
         )}
 
+        {/* AI goal matcher — describe what you want in plain English */}
+        <View style={{ marginBottom: 16 }}>
+          <Text style={{ fontSize: 13, color: colors.textSecondary, marginBottom: 6 }}>Or describe what you want:</Text>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TextInput
+              style={{
+                flex: 1, backgroundColor: colors.surface, borderRadius: 10,
+                paddingHorizontal: 12, paddingVertical: 10, fontSize: 14,
+                color: colors.textPrimary, borderWidth: 1, borderColor: colors.border,
+              }}
+              placeholder="e.g. I want to lose my belly but keep muscle"
+              placeholderTextColor={colors.textMuted}
+              value={goalQuery}
+              onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); }}
+              returnKeyType="send"
+              onSubmitEditing={async () => {
+                if (!goalQuery.trim() || goalMatchLoading) return;
+                setGoalMatchLoading(true);
+                try {
+                  const res = await matchGoal(goalQuery.trim());
+                  selectGoal(res.goal_id);
+                  setGoalMatchReason(res.reason);
+                } catch {}
+                setGoalMatchLoading(false);
+              }}
+            />
+            <TouchableOpacity
+              style={{
+                backgroundColor: colors.primary, borderRadius: 10,
+                paddingHorizontal: 16, justifyContent: 'center',
+                opacity: goalMatchLoading || !goalQuery.trim() ? 0.5 : 1,
+              }}
+              disabled={goalMatchLoading || !goalQuery.trim()}
+              onPress={async () => {
+                if (!goalQuery.trim()) return;
+                setGoalMatchLoading(true);
+                try {
+                  const res = await matchGoal(goalQuery.trim());
+                  selectGoal(res.goal_id);
+                  setGoalMatchReason(res.reason);
+                } catch {}
+                setGoalMatchLoading(false);
+              }}>
+              {goalMatchLoading
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find</Text>
+              }
+            </TouchableOpacity>
+          </View>
+          {goalMatchReason && (
+            <Text style={{ fontSize: 12, color: colors.primary, marginTop: 6, fontStyle: 'italic' }}>
+              {goalMatchReason}
+            </Text>
+          )}
+        </View>
+
         {/* Launch goals — the 8 most common */}
         <Text style={styles.sectionHeading}>Most popular</Text>
         <View style={styles.goalGrid}>
@@ -671,7 +729,6 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     const goalDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
     const goalLabel = goalDef?.label ?? selectedGoal;
     const cat = goalCategory(selectedGoal);
-    const availableFocuses = targetFocusesForGoal(selectedGoal);
     const paceOpts = pacesForGoal(selectedGoal, meta.paces);
 
     // Show target weight for fat loss / muscle gain goals
@@ -698,27 +755,29 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         {/* Modifiers section removed — goals are now defined by the
             primary goal + an optional muscle/target focus only. */}
 
-        {/* Target focus */}
-        {availableFocuses.length > 0 && (
-          <View style={styles.fieldGroup}>
-            <Text style={styles.fieldLabel}>
-              Target focus <Text style={styles.optional}>(optional)</Text>
-            </Text>
-            <View style={styles.foodChips}>
-              {availableFocuses.map(tf => {
-                const active = selectedTargetFocus === tf.id;
-                return (
-                  <TouchableOpacity
-                    key={tf.id}
-                    style={[styles.foodChip, active && styles.foodChipActive]}
-                    onPress={() => setSelectedTargetFocus(prev => prev === tf.id ? '' : tf.id)}>
-                    <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{tf.label}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <Text style={styles.hint}>AI will emphasise this area in your plan.</Text>
+        {/* Training Emphasis — only for lifting-focused goals */}
+        {['build_muscle', 'build_strength', 'body_recomp', 'lose_fat', 'muscle_gain', 'strength', 'fat_loss'].includes(selectedGoal) && (
+        <View style={styles.fieldGroup}>
+          <Text style={styles.fieldLabel}>Training emphasis</Text>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            {([
+              { id: 'balanced', label: 'Balanced' },
+              { id: 'lower_body', label: 'Lower Body' },
+              { id: 'upper_body', label: 'Upper Body' },
+            ] as const).map(opt => {
+              const active = selectedRegion === opt.id;
+              return (
+                <TouchableOpacity
+                  key={opt.id}
+                  style={[styles.foodChip, { flex: 1, alignItems: 'center' as const }, active && styles.foodChipActive]}
+                  onPress={() => setSelectedRegion(opt.id)}>
+                  <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{opt.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
+          <Text style={styles.hint}>Biases your split and exercise selection toward the chosen region.</Text>
+        </View>
         )}
 
         {showTargetWeight && (

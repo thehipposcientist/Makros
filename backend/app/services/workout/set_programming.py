@@ -454,19 +454,39 @@ def recommend_next_set(
         )
 
     if missed:
-        # Only drop load if the user clearly hit failure (RIR 0) AND
-        # the weight they used was at least the planned load. Otherwise
-        # we hold — maybe they started heavy, maybe they'll rally.
-        planned_w = planned_set.target_weight_lbs or 0.0
-        if (rir is not None and rir <= 0.0) and weight >= planned_w:
-            new_w = round_to_increment(max(0.0, (weight or 0) - inc), inc) if inc > 0 else weight
+        # Scale the load drop proportionally to how badly the user
+        # missed. Hitting 5 reps when the target is 12-15 is a ~60%
+        # miss — dropping one increment (5 lbs) is inadequate. The
+        # drop scales with the gap so the next set has a realistic
+        # chance of landing in the target range.
+        miss_ratio = actual_reps / lo if lo > 0 else 1.0
+        if miss_ratio < 0.7 and weight > 0 and inc > 0:
+            # Severe miss (hit <70% of target bottom). Drop proportionally.
+            # E.g., target 12, hit 5 → miss_ratio=0.42 → scale=0.58 → drop ~42% of weight
+            # But cap the percentage drop at 40% to avoid absurd swings.
+            drop_pct = min(0.40, 1.0 - miss_ratio)
+            drop_lbs = max(inc, round_to_increment(weight * drop_pct, inc))
+            new_w = round_to_increment(max(inc, weight - drop_lbs), inc)
+            return NextSetRecommendation(
+                next_set_weight_lbs=new_w,
+                next_set_rep_target=f"{lo}-{hi}",
+                action="reduce_load",
+                explanation=(
+                    f"You hit {actual_reps} reps vs target {lo}-{hi} — "
+                    f"dropping to {int(new_w)} lb (−{int(drop_lbs)}) "
+                    f"so you can reach the rep range."
+                ),
+            )
+        if miss_ratio < 1.0 and weight > 0 and inc > 0:
+            # Moderate miss (hit 70-99% of target bottom). Drop one increment.
+            new_w = round_to_increment(max(0.0, weight - inc), inc)
             return NextSetRecommendation(
                 next_set_weight_lbs=new_w if new_w > 0 else None,
                 next_set_rep_target=f"{lo}-{hi}",
                 action="reduce_load",
                 explanation=(
-                    f"You missed {lo}-{hi} at {int(weight)} lb with no reps in "
-                    f"reserve — dropping {int(inc)} lb so you can hit the range."
+                    f"Short of {lo}-{hi} at {int(weight)} lb — "
+                    f"dropping {int(inc)} lb so you can hit the range."
                 ),
             )
         return NextSetRecommendation(

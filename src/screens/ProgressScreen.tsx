@@ -72,7 +72,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'summaries' | 'body'>('prs');
+  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'body'>('prs');
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const fitnessScoreRef = useRef<ViewShot>(null);
   const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
@@ -108,6 +109,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setPrs(p);
       setHistory(h);
       setSummaries(s);
+      console.log(`[Progress] history=${h.length} completed=${h.filter((x: any) => x.completed).length} summaries=${s.length} sample_date=${h[0]?.date ?? 'none'}`);
       setGoalHistory(g);
       setPlanChanges(c);
       setLoading(false);
@@ -292,7 +294,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           ['prs', 'Records'],
           ['charts', 'Charts'],
           ['history', 'History'],
-          ['summaries', 'Summaries'],
           ['body', 'Body'],
         ] as const).map(([key, label]) => (
           <TouchableOpacity
@@ -491,72 +492,46 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 ))}
               </View>
 
-              {/* Apple Health not connected — quiet CTA so the user
-                  knows exactly what unlocks recovery instead of a
-                  silent gap. */}
-              {!healthScore && (
-                <View style={[styles.recoverySection, { borderTopColor: tc.border }]}>
-                  <View style={styles.recoveryHeader}>
-                    <Text style={styles.recoverySectionTitle}>Recovery</Text>
+              {/* Apple Health metrics — compact row below the pillar breakdown.
+                  Recovery is already shown as a pillar above, so we only
+                  show the quick health stats here, not a second "Recovery" heading. */}
+              {healthSummary && (
+                <View style={{ marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border }}>
+                  <View style={styles.healthMetricsGrid}>
+                    {healthSummary.restingHeartRate != null && (
+                      <View style={styles.healthMetric}>
+                        <Text style={styles.healthMetricValue}>{healthSummary.restingHeartRate}</Text>
+                        <Text style={styles.healthMetricLabel}>Resting HR</Text>
+                      </View>
+                    )}
+                    {healthSummary.avgSteps7d != null && (
+                      <View style={styles.healthMetric}>
+                        <Text style={styles.healthMetricValue}>{Math.round(healthSummary.avgSteps7d / 1000)}k</Text>
+                        <Text style={styles.healthMetricLabel}>Avg Steps</Text>
+                      </View>
+                    )}
+                    {healthSummary.avgSleepHours7d != null && (
+                      <View style={styles.healthMetric}>
+                        <Text style={styles.healthMetricValue}>{healthSummary.avgSleepHours7d}h</Text>
+                        <Text style={styles.healthMetricLabel}>Avg Sleep</Text>
+                      </View>
+                    )}
+                    {healthSummary.workouts7d != null && (
+                      <View style={styles.healthMetric}>
+                        <Text style={styles.healthMetricValue}>{healthSummary.workouts7d}</Text>
+                        <Text style={styles.healthMetricLabel}>Workouts 7d</Text>
+                      </View>
+                    )}
                   </View>
-                  <Text style={[styles.recoveryAdvice, { color: tc.textMuted }]}>
-                    Connect Apple Health to track recovery, sleep, and resting HR.
+                  <Text style={styles.healthFetchedAt}>
+                    Updated {new Date(healthSummary.fetchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
                   </Text>
                 </View>
               )}
-
-              {/* Recovery Marker (Apple Health) */}
-              {healthScore && (
-                <View style={styles.recoverySection}>
-                  <View style={styles.recoveryHeader}>
-                    <Text style={styles.recoverySectionTitle}>Recovery Status</Text>
-                    <Text style={styles.recoveryBadge}>
-                      {RECOVERY_LABELS[healthScore.recoveryMarker].emoji} {RECOVERY_LABELS[healthScore.recoveryMarker].label}
-                    </Text>
-                  </View>
-                  <Text style={styles.recoveryAdvice}>{RECOVERY_LABELS[healthScore.recoveryMarker].advice}</Text>
-
-                  {/* Health-enhanced score */}
-                  <View style={styles.healthMetricsRow}>
-                    <Text style={styles.healthScoreLabel}>Health Score</Text>
-                    <Text style={styles.healthScoreValue}>{healthScore.fitnessScore}/100</Text>
-                  </View>
-
-                  {/* Quick metrics from Apple Health */}
-                  {healthSummary && (
-                    <View style={styles.healthMetricsGrid}>
-                      {healthSummary.restingHeartRate != null && (
-                        <View style={styles.healthMetric}>
-                          <Text style={styles.healthMetricValue}>{healthSummary.restingHeartRate}</Text>
-                          <Text style={styles.healthMetricLabel}>Resting HR</Text>
-                        </View>
-                      )}
-                      {healthSummary.avgSteps7d != null && (
-                        <View style={styles.healthMetric}>
-                          <Text style={styles.healthMetricValue}>{Math.round(healthSummary.avgSteps7d / 1000)}k</Text>
-                          <Text style={styles.healthMetricLabel}>Avg Steps</Text>
-                        </View>
-                      )}
-                      {healthSummary.avgSleepHours7d != null && (
-                        <View style={styles.healthMetric}>
-                          <Text style={styles.healthMetricValue}>{healthSummary.avgSleepHours7d}h</Text>
-                          <Text style={styles.healthMetricLabel}>Avg Sleep</Text>
-                        </View>
-                      )}
-                      {healthSummary.workouts7d != null && (
-                        <View style={styles.healthMetric}>
-                          <Text style={styles.healthMetricValue}>{healthSummary.workouts7d}</Text>
-                          <Text style={styles.healthMetricLabel}>Workouts 7d</Text>
-                        </View>
-                      )}
-                    </View>
-                  )}
-                  {healthSummary && (
-                    <Text style={styles.healthFetchedAt}>
-                      Updated {new Date(healthSummary.fetchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-                    </Text>
-                  )}
-                </View>
+              {!healthScore && !healthSummary && (
+                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 10 }}>
+                  Connect Apple Health for recovery tracking, sleep, and heart rate data.
+                </Text>
               )}
 
               {/* Share button */}
@@ -855,6 +830,100 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'history' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Month calendar — standard Sun-Sat grid for current month */}
+          {(() => {
+            const today = new Date();
+            const year = today.getFullYear();
+            const month = today.getMonth();
+            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            const firstDow = new Date(year, month, 1).getDay(); // 0=Sun
+
+            const toDateKey = (d: string) => {
+              if (!d) return '';
+              const p = new Date(d);
+              if (isNaN(p.getTime())) return d.slice(0, 10);
+              return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
+            };
+            const completedDates = new Set([
+              ...history.filter(s => s.date && !s.skipped).map(s => toDateKey(s.date)),
+              ...summaries.filter(s => s.date).map(s => toDateKey(s.date)),
+            ]);
+            const skippedDates = new Set(
+              history.filter(s => s.skipped && s.date).map(s => toDateKey(s.date))
+            );
+
+            // Build grid: 6 rows × 7 cols, empty cells for padding
+            const cells: Array<{ day: number; key: string; status: 'done' | 'skipped' | 'rest' | 'future' | 'empty' }> = [];
+            for (let i = 0; i < firstDow; i++) cells.push({ day: 0, key: `pad-${i}`, status: 'empty' });
+            for (let d = 1; d <= daysInMonth; d++) {
+              const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+              const isFuture = d > today.getDate();
+              const status = isFuture ? 'future' : completedDates.has(key) ? 'done' : skippedDates.has(key) ? 'skipped' : 'rest';
+              cells.push({ day: d, key, status });
+            }
+            while (cells.length % 7 !== 0) cells.push({ day: 0, key: `pad-end-${cells.length}`, status: 'empty' });
+
+            const rows: typeof cells[] = [];
+            for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7));
+
+            const doneCount = [...completedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
+            const skippedCount = [...skippedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
+
+            return (
+              <View style={{ marginBottom: 16, backgroundColor: tc.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: tc.border }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{monthNames[month]} {year}</Text>
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    {doneCount > 0 && <Text style={{ fontSize: 12, color: tc.primary, fontWeight: '600' }}>{doneCount} done</Text>}
+                    {skippedCount > 0 && <Text style={{ fontSize: 12, color: '#F59E0B', fontWeight: '600' }}>{skippedCount} skipped</Text>}
+                  </View>
+                </View>
+                {/* Day headers */}
+                <View style={{ flexDirection: 'row', marginBottom: 6 }}>
+                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+                    <Text key={d} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: '600', color: tc.textMuted }}>{d}</Text>
+                  ))}
+                </View>
+                {/* Calendar grid */}
+                {rows.map((row, ri) => (
+                  <View key={ri} style={{ flexDirection: 'row', marginBottom: 4 }}>
+                    {row.map(cell => {
+                      const isToday = cell.day === today.getDate() && cell.status !== 'empty';
+                      return (
+                        <View key={cell.key} style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                          {cell.status === 'empty' ? (
+                            <View style={{ width: 32, height: 32 }} />
+                          ) : (
+                            <View style={{
+                              width: 32, height: 32, borderRadius: 16,
+                              alignItems: 'center', justifyContent: 'center',
+                              backgroundColor:
+                                cell.status === 'done' ? tc.primary :
+                                cell.status === 'skipped' ? '#F59E0B' + '33' :
+                                cell.status === 'future' ? 'transparent' :
+                                'transparent',
+                              borderWidth: isToday ? 2 : 0,
+                              borderColor: isToday ? tc.primary : 'transparent',
+                            }}>
+                              <Text style={{
+                                fontSize: 13, fontWeight: isToday ? '800' : cell.status === 'done' ? '700' : '400',
+                                color: cell.status === 'done' ? '#fff'
+                                  : cell.status === 'skipped' ? '#F59E0B'
+                                  : cell.status === 'future' ? tc.textMuted + '55'
+                                  : tc.textSecondary,
+                              }}>{cell.day}</Text>
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                ))}
+              </View>
+            );
+          })()}
+
           {history.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>📋</Text>
@@ -863,44 +932,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {/* The old "Overall Strength" graph card was removed —
-                  its per-session top-set score was an ad-hoc
-                  aggregation that didn't mean much in isolation.
-                  The new Strength pillar on the main fitness score
-                  card (PRs tab) uses relative-to-bodyweight 1RM
-                  ratios against intermediate thresholds, which is
-                  both more meaningful and more comparable across
-                  users. See backend/app/services/workout/fitness_score.py. */}
-
               <Text style={styles.sectionLabel}>
                 {history.length} session{history.length !== 1 ? 's' : ''} logged
                 {history.length > 30 ? ' · showing most recent 30' : ''}
               </Text>
-              {/* Display cap: show the 30 most recent sessions. Older
-                  entries still live in AsyncStorage (loadWorkoutHistory
-                  is untouched) — just not rendered to keep the list
-                  scannable. */}
               {history.slice(0, 30).map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
-                const handleDeleteSession = () => {
-                  Alert.alert(
-                    'Delete this workout?',
-                    `${session.focus} — ${formatDate(session.date)}\n\nThis removes the session from your history. Usually you only need this if the AI logged it wrong.`,
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      {
-                        text: 'Delete',
-                        style: 'destructive',
-                        onPress: async () => {
-                          await deleteWorkoutSession(session.id);
-                          setHistory(prev => prev.filter(s => s.id !== session.id));
-                        },
-                      },
-                    ],
-                  );
-                };
+                const isExpanded = expandedSessionId === session.id;
+                const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
                 return (
-                  <View key={session.id ?? i} style={styles.sessionCard}>
+                  <TouchableOpacity
+                    key={session.id ?? i}
+                    style={styles.sessionCard}
+                    activeOpacity={0.8}
+                    onPress={() => setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`))}>
                     <View style={styles.sessionHeader}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.sessionFocus}>{session.focus}</Text>
@@ -909,38 +954,61 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={styles.sessionBadge}>
                         <Text style={styles.sessionBadgeText}>{formatDuration(session.durationSeconds)}</Text>
                       </View>
-                      <TouchableOpacity
-                        onPress={handleDeleteSession}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        style={{ marginLeft: 8, paddingHorizontal: 6, paddingVertical: 2 }}>
-                        <Text style={{ fontSize: 16, color: tc.error ?? '#EF4444' }}>✕</Text>
-                      </TouchableOpacity>
+                      <Text style={{ fontSize: 12, color: tc.textMuted, marginLeft: 8 }}>{isExpanded ? '▾' : '▸'}</Text>
                     </View>
                     <View style={styles.sessionStats}>
                       <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>
                       <Text style={styles.sessionStatDot}>·</Text>
-                      <Text style={styles.sessionStat}>{totalSets} sets logged</Text>
+                      <Text style={styles.sessionStat}>{totalSets} sets</Text>
+                      {summary && (
+                        <>
+                          <Text style={styles.sessionStatDot}>·</Text>
+                          <Text style={styles.sessionStat}>~{summary.caloriesBurned} kcal</Text>
+                        </>
+                      )}
                     </View>
-                    {session.exercises.filter(ex => ex.sets.length > 0).map((ex, ei) => {
-                      const best = ex.sets.reduce((b, s) => s.weightLbs > b.weightLbs ? s : b, ex.sets[0]);
-                      return (
-                        <View key={ei} style={styles.exRow}>
-                          <Text style={styles.exName}>{ex.name}</Text>
-                          <Text style={styles.exBest}>{best.weightLbs} lbs × {best.reps}</Text>
-                        </View>
-                      );
-                    })}
-                  </View>
+
+                    {isExpanded && (
+                      <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                        {session.exercises.filter(ex => ex.sets.length > 0).map((ex, ei) => {
+                          const best = ex.sets.reduce((b, s) => s.weightLbs > b.weightLbs ? s : b, ex.sets[0]);
+                          return (
+                            <View key={ei} style={styles.exRow}>
+                              <Text style={styles.exName}>{ex.name}</Text>
+                              <Text style={styles.exBest}>{best.weightLbs} lbs × {best.reps}</Text>
+                            </View>
+                          );
+                        })}
+                        {summary && (
+                          <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                            {summary.motivationMessage ? (
+                              <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19, marginBottom: 6 }}>{summary.motivationMessage}</Text>
+                            ) : null}
+                            {summary.achievements?.length > 0 && (
+                              <View style={{ gap: 2, marginBottom: 6 }}>
+                                {summary.achievements.map((a: string, ai: number) => (
+                                  <Text key={ai} style={{ fontSize: 12, color: tc.primary }}>★ {a}</Text>
+                                ))}
+                              </View>
+                            )}
+                            {summary.feedback && (
+                              <Text style={{ fontSize: 12, color: tc.textMuted }}>
+                                Felt {summary.feedback.feeling} · intensity {summary.feedback.intensity}/5
+                                {summary.feedback.sorenessAreas?.length ? ` · sore: ${summary.feedback.sorenessAreas.join(', ')}` : ''}
+                              </Text>
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </TouchableOpacity>
                 );
               })}
             </>
           )}
         </ScrollView>
-      ) : tab === 'summaries' ? (
-        /* ── Summaries + Goal History tab ─────────────────────────── */
+      ) : false ? (
         <ScrollView contentContainerStyle={styles.content}>
-
-          {/* Goal History */}
           <Text style={styles.sectionLabel}>Goal History</Text>
           {goalHistory.filter(entry => {
             if (!entry.endedAt) return true; // still active

@@ -35,6 +35,7 @@ class SplitOption:
     stimulus_note: str       # what the user can expect (heavy/hypertrophy alternation, etc.)
     pros: list[str]
     cons: list[str]
+    region_warning: str | None = None  # shown when split clashes with priority_region
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -427,12 +428,17 @@ def get_split_options(
         return []
 
     # Lifting goals: return traditional splits
+    from .region_priority import normalize_region, split_region_warning
+    region = normalize_region(target_focus)
+
     class _FakeInputs:
         def __init__(self):
             self.preferred_split = None
             self.days_per_week = days
             self.goal = goal
             self.experience = exp
+            self.focused_muscle = None
+            self.priority_region = region
     auto_pick = pick_split(_FakeInputs())
 
     options: list[SplitOption] = []
@@ -449,6 +455,7 @@ def get_split_options(
             ),
         )
 
+        warning = split_region_warning(region, split_id, days)
         options.append(SplitOption(
             id=split_id,
             name=defn["name"],
@@ -462,6 +469,7 @@ def get_split_options(
             stimulus_note=defn["stimulus_note"],
             pros=defn["pros"],
             cons=defn["cons"],
+            region_warning=warning,
         ))
 
     options.sort(key=lambda o: (-o.is_recommended, -o.fit_score))

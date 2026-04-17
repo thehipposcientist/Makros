@@ -36,6 +36,36 @@ interface Props {
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number; }
 
+const _WEIGHT_UNITS = new Set<FoodUnit>(['g', 'kg', 'oz', 'lb']);
+const _VOLUME_UNITS = new Set<FoodUnit>(['ml', 'l', 'fl_oz', 'cup', 'tbsp', 'tsp', 'pint', 'quart', 'gallon']);
+
+function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: number): number {
+  // Estimate a reasonable default quantity when switching between incompatible
+  // unit systems (e.g. serving→grams). The idea: 1 serving ≈ 100-150g for
+  // most foods. We pick sensible defaults so the user has a starting point.
+  const toWeight = _WEIGHT_UNITS.has(toUnit);
+  const toVolume = _VOLUME_UNITS.has(toUnit);
+  const fromCount = !_WEIGHT_UNITS.has(fromUnit) && !_VOLUME_UNITS.has(fromUnit);
+  const toCount = !toWeight && !toVolume;
+
+  if (fromCount && toWeight) {
+    // serving/piece → weight: assume 1 serving ≈ 100g
+    const perServing = toUnit === 'g' ? 100 : toUnit === 'oz' ? 3.5 : toUnit === 'kg' ? 0.1 : toUnit === 'lb' ? 0.22 : 100;
+    return Math.round(fromQty * perServing * 100) / 100;
+  }
+  if (fromCount && toVolume) {
+    // serving/piece → volume: assume 1 serving ≈ 1 cup
+    const perServing = toUnit === 'cup' ? 1 : toUnit === 'ml' ? 240 : toUnit === 'fl_oz' ? 8 : toUnit === 'tbsp' ? 16 : toUnit === 'tsp' ? 48 : toUnit === 'l' ? 0.24 : 1;
+    return Math.round(fromQty * perServing * 100) / 100;
+  }
+  if (toCount) {
+    // weight/volume → serving/piece: assume 100g or 1 cup = 1 serving
+    return Math.max(1, Math.round(fromQty > 0 ? 1 : 1));
+  }
+  // weight ↔ volume: can't convert without density, keep quantity as-is
+  return fromQty;
+}
+
 /** Sum macros directly from the structured item list. Each item carries its
  *  own snapshotted macros so we don't need to look anything up here.
  *
@@ -340,22 +370,38 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       // 1. Unit-only change: convert the quantity to the new unit so
       //    the physical amount is preserved. Macros stay the same
       //    (1 cup of milk == 8 fl oz of milk == same calories). When
-      //    the conversion crosses systems (e.g. cup → piece), keep
-      //    the quantity unchanged and just relabel.
+      //    the conversion crosses systems (e.g. serving → g), use a
+      //    reasonable default weight and reset the baseline so future
+      //    quantity edits scale correctly in the new unit.
       if (patch.unit != null && patch.unit !== current.unit && patch.quantity == null) {
         const converted = convertQuantity(current.quantity, current.unit, patch.unit);
-        const newQty = converted ?? current.quantity;
-        // Roll the baseline forward too, so the next quantity edit
-        // scales off the same physical amount in the new unit.
-        const baseConverted = current.baseQuantity != null
-          ? (convertQuantity(current.baseQuantity, current.unit, patch.unit) ?? current.baseQuantity)
-          : current.baseQuantity;
-        next[idx] = {
-          ...current,
-          unit: patch.unit,
-          quantity: Math.round(newQty * 100) / 100,
-          baseQuantity: baseConverted != null ? Math.round(baseConverted * 100) / 100 : current.baseQuantity,
-        };
+        if (converted != null) {
+          const baseConverted = current.baseQuantity != null
+            ? (convertQuantity(current.baseQuantity, current.unit, patch.unit) ?? current.baseQuantity)
+            : current.baseQuantity;
+          next[idx] = {
+            ...current,
+            unit: patch.unit,
+            quantity: Math.round(converted * 100) / 100,
+            baseQuantity: baseConverted != null ? Math.round(baseConverted * 100) / 100 : current.baseQuantity,
+          };
+        } else {
+          // Cross-system switch (e.g. serving→g, piece→oz). We can't
+          // convert the quantity so we estimate a reasonable default in
+          // the new unit and reset the baseline. Macros stay frozen at
+          // their current values — the user adjusts quantity from here.
+          const defaultQty = _crossSystemDefault(current.unit, patch.unit, current.quantity);
+          next[idx] = {
+            ...current,
+            unit: patch.unit,
+            quantity: defaultQty,
+            baseQuantity: defaultQty,
+            baseCalories: current.calories,
+            baseProtein:  current.protein,
+            baseCarbs:    current.carbs,
+            baseFat:      current.fat,
+          };
+        }
         return next;
       }
 
@@ -367,6 +413,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       if (patch.quantity != null && patch.quantity !== current.quantity) {
         const baseQty = current.baseQuantity && current.baseQuantity > 0 ? current.baseQuantity : 1;
         const ratio = patch.quantity / baseQty;
+        const scaledMicros = current.micronutrients
+          ? Object.fromEntries(
+              Object.entries(current.micronutrients).map(([k, v]) =>
+                [k, typeof v === 'number' ? Math.round((v / (current.quantity || 1)) * (patch.quantity ?? current.quantity) * 100) / 100 : v]
+              )
+            )
+          : undefined;
         next[idx] = {
           ...current,
           ...patch,
@@ -374,6 +427,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           protein:  Math.round((current.baseProtein  ?? current.protein)  * ratio),
           carbs:    Math.round((current.baseCarbs    ?? current.carbs)    * ratio),
           fat:      Math.round((current.baseFat      ?? current.fat)      * ratio),
+          ...(scaledMicros ? { micronutrients: scaledMicros } : {}),
         };
       } else {
         next[idx] = { ...current, ...patch };
@@ -446,16 +500,23 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   }, [foodCategories, search, items]);
 
   const handleSave = () => {
-    // Keep legacy foods[]/amounts[] in sync with items[] on save so older
-    // readers (backend, other screens) still see correct data until the full
-    // schema migration lands. Also persist any fetched prep instructions on
-    // the meal so we don't re-pay the AI call next open.
-    // Every meal can be renamed — the recipe name IS the meal's identity.
+    // Recompute meal-level micronutrients from per-item micros so the
+    // nutrition details modal reflects edits immediately.
+    const resummedMicros: Record<string, number> = {};
+    for (const it of items) {
+      if (!it.micronutrients) continue;
+      for (const [k, v] of Object.entries(it.micronutrients)) {
+        if (typeof v === 'number') resummedMicros[k] = (resummedMicros[k] ?? 0) + v;
+      }
+    }
     const finalMeal: MealSuggestion = {
       ...meal,
       meal: mealName.trim() || meal.meal || 'Meal',
       items,
       ...(instructions ? { instructions } : {}),
+      ...(Object.keys(resummedMicros).length > 0
+        ? { micronutrients: { ...(meal.micronutrients ?? {}), ...resummedMicros } }
+        : {}),
     };
     const synced = syncLegacyFieldsFromItems(finalMeal);
     onSave(synced);

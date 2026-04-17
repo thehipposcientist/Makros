@@ -53,7 +53,7 @@ export interface GoalSelection {
   primaryGoal: string;          // id from PRIMARY_GOALS
   category: string;             // GoalCategoryId — derived from primaryGoal
   modifiers: string[];          // up to 2 modifier ids
-  targetFocus?: string;         // optional target focus id
+  targetFocus?: string;         // @deprecated — use priorityRegion on UserProfile instead
 }
 
 export interface CustomFoodItem {
@@ -135,9 +135,12 @@ export interface UserProfile {
   goalSelection?: GoalSelection; // full hierarchical selection (category + modifiers + target focus)
   goalDetails: GoalDetails;
 
-  // ── Legacy (kept for backward compat — ignored when goalSelection exists) ──
-  secondaryGoal?: Goal;          // @deprecated — replaced by modifiers
-  focusedMuscleGroup?: string;   // @deprecated — replaced by goalSelection.targetFocus
+  // Training emphasis: "balanced" | "lower_body" | "upper_body"
+  priorityRegion?: string;
+
+  // ── Legacy (kept for backward compat) ──
+  secondaryGoal?: Goal;          // @deprecated
+  focusedMuscleGroup?: string;   // @deprecated — replaced by priorityRegion
 
   themePreference?: AppThemeName;
   physicalStats: PhysicalStats;

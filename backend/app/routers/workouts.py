@@ -136,6 +136,45 @@ def progression_insights(
     }
 
 
+# ─── Workout start marker ─────────────────────────────────────────────────────
+
+
+class WorkoutStartRequest(BaseModel):
+    workout_date: date
+    focus_label: str
+    stimulus: str | None = None
+
+
+@router.post("/start", status_code=201)
+def mark_workout_started(
+    body: WorkoutStartRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Mark a workout as started (in-progress). Creates a WorkoutCompletion
+    row immediately so getWorkoutStatus returns done=true even if the
+    finish call never arrives (app crash, phone dies, etc.).
+
+    The finish endpoint upserts the same row with final duration."""
+    existing = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == body.workout_date)
+    ).first()
+    if existing:
+        return {"ok": True, "already_exists": True}
+    db.add(WorkoutCompletion(
+        user_id=current_user.id,
+        workout_date=body.workout_date,
+        focus_label=body.focus_label,
+        duration_seconds=0,
+        stimulus=body.stimulus,
+        completed_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+    return {"ok": True, "already_exists": False}
+
+
 # ─── Workout completion ───────────────────────────────────────────────────────
 
 @router.post("/complete", status_code=201)

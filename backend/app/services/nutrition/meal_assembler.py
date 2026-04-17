@@ -334,6 +334,11 @@ For every meal, return:
   - food_refs: 2-4 food names copied EXACTLY from the available-foods list above.
                Every string in food_refs MUST match a name in that list.
 
+IMPORTANT: There is NO minimum or maximum calorie limit per meal. Meals can be any size —
+a 200-cal snack or a 900-cal feast are both fine. What matters is that all meals
+together hit the daily target. Vary meal sizes naturally (a lighter breakfast and
+a bigger dinner is fine, or equal-sized meals — whatever suits the foods).
+
 Also return:
   - nutritionistNote: 120-180 words, spoken directly to the user. Cover
     why the calorie target fits their goal, why the protein is set where it
@@ -966,10 +971,10 @@ def solve_portions(
             # which the user wouldn't expect); ceiling prevents the
             # solver from running away to absurd portions on a single food.
             # The ceiling is generous on purpose — see docstring.
-            if m[j] < 0.1:
-                m[j] = 0.1
-            elif m[j] > 12.0:
-                m[j] = 12.0
+            if m[j] < 0.05:
+                m[j] = 0.05
+            elif m[j] > 15.0:
+                m[j] = 15.0
     return m
 
 
@@ -1079,6 +1084,12 @@ def assemble_meal(
         item_pro = food.protein * mult
         item_cb  = food.carbs   * mult
         item_ft  = food.fat     * mult
+        item_micros = {}
+        for k, v in (food.micros or {}).items():
+            if k in total_micros:
+                scaled = v * mult
+                if scaled > 0:
+                    item_micros[k] = round(scaled, 2)
         items.append({
             "name": food.name,
             "quantity": round(food.serving_quantity * mult, 2),
@@ -1087,6 +1098,7 @@ def assemble_meal(
             "protein": round(item_pro, 1),
             "carbs": round(item_cb, 1),
             "fat": round(item_ft, 1),
+            **({"micronutrients": item_micros} if item_micros else {}),
         })
         total_cal += item_cal
         total_pro += item_pro

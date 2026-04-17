@@ -560,27 +560,37 @@ function get7DaySchedule(
   daysPerWeek: number,
   skippedDates?: Set<string>,
   droppedSkipDates?: Set<string>,
+  completedDates?: Set<string>,
 ): ScheduleItem[] {
   if (!workoutPlan?.days?.length) return [];
   const trainingSet = new Set(TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]);
   const today = new Date();
+  const totalDays = workoutPlan.days.length;
   const todayDow = today.getDay();
   const daysFromMon = todayDow === 0 ? 6 : todayDow - 1;
 
-  // Count training days earlier this week that were NOT skipped
-  // (or were dropped — dropped skips still advance the index)
+  // Count how many workouts were ACTUALLY completed or consumed
+  // (done + dropped skips) earlier this week. This determines where
+  // we are in the recipe rotation. Using actual completions instead
+  // of calendar training-day counting ensures PPL stays in order:
+  // if the user did Push on Thursday, Friday shows Pull (not Legs).
   let weekOffset = 0;
   for (let i = 0; i < daysFromMon; i++) {
-    const dow = (i + 1) % 7;
-    if (trainingSet.has(dow)) {
-      const pastDate = new Date(today);
-      pastDate.setDate(today.getDate() - (daysFromMon - i));
-      const key = dateKey(pastDate);
-      // Advance index if: not skipped at all, OR was a "drop" skip
-      // (skip entirely = the workout slot is consumed, just not done)
-      if (!skippedDates?.has(key) || droppedSkipDates?.has(key)) {
-        weekOffset++;
-      }
+    const pastDate = new Date(today);
+    pastDate.setDate(today.getDate() - (daysFromMon - i));
+    const key = dateKey(pastDate);
+    const wasCompleted = completedDates?.has(key);
+    const wasDropped = droppedSkipDates?.has(key);
+    const wasSkipped = skippedDates?.has(key);
+    // Advance rotation index for: completed workouts, dropped skips,
+    // and training days that passed without being skipped (assumed done
+    // or the user just didn't log).
+    if (wasCompleted || wasDropped) {
+      weekOffset++;
+    } else if (!wasSkipped && trainingSet.has(((i + 1) % 7))) {
+      // Training day that wasn't skipped or completed — still advance
+      // so the rotation doesn't stall on missed days
+      weekOffset++;
     }
   }
 
@@ -591,11 +601,8 @@ function get7DaySchedule(
     date.setDate(today.getDate() + i);
     const dow = date.getDay();
     if (trainingSet.has(dow)) {
-      schedule.push({ date, workout: workoutPlan.days[workoutIdx % workoutPlan.days.length], isRest: false });
+      schedule.push({ date, workout: workoutPlan.days[workoutIdx % totalDays], isRest: false });
       const key = dateKey(date);
-      // 'push' skip: hold index (workout pushes to next training day)
-      // 'drop' skip: advance index (workout slot consumed, just missed)
-      // not skipped: advance index (normal)
       if (!skippedDates?.has(key) || droppedSkipDates?.has(key)) {
         workoutIdx++;
       }
@@ -1143,6 +1150,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
+  const [completedDates, setCompletedDates] = useState<Set<string>>(new Set());
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
   // Dropped skips = user chose "skip entirely" (don't push to tomorrow).
   // get7DaySchedule advances the workout index for these dates.
@@ -1318,25 +1326,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setSkippedDates(skipped);
     setCheckedMealsByDate(checkMap);
 
-    // Load skip reasons from local history
+    // Load skip reasons + completed dates from local history
     const history = await loadWorkoutHistory();
     const reasonMap: Record<string, string> = {};
+    const completed = new Set<string>();
     for (const s of history) {
       if (s.skipped && s.skipReason) reasonMap[s.date] = s.skipReason;
+      if (s.completed && s.date) {
+        const dKey = s.date.slice(0, 10);
+        completed.add(dKey);
+      }
     }
     setSkipReasonsByDate(reasonMap);
+    setCompletedDates(completed);
 
-    // Check workout completion from backend DB (not AsyncStorage)
+    // Check workout completion from BOTH backend DB and local history.
+    // Either source being true means the workout is done — this handles
+    // the race where logWorkoutDone hasn't finished writing to the DB
+    // yet but saveWorkoutSession already persisted locally.
+    let done = false;
     try {
       if (authToken) {
         const status = await getWorkoutStatus(authToken, today);
-        setTodayDone(status.done);
-      } else {
-        // Fallback to local if no token
-        setTodayDone(await isTodayWorkoutDone());
+        done = status.done;
       }
-    } catch {
-      setTodayDone(await isTodayWorkoutDone());
+    } catch {}
+    if (!done) {
+      done = await isTodayWorkoutDone();
+    }
+    setTodayDone(done);
+    if (done) {
+      setCompletedDates(prev => { const next = new Set(prev); next.add(today); return next; });
     }
 
     // Load today's stored workout summary
@@ -1977,7 +1997,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
 
       const hasStructuredGoal = typeof (resp as any).updated_goal === 'string' && (resp as any).updated_goal.trim().length > 0;
-      if ((resp.needs_plan_update && hasUpdate) || hasStructuredGoal) {
+      const hasMacroUpdate = !!(resp as any).updated_macros && typeof (resp as any).updated_macros === 'object' && Object.keys((resp as any).updated_macros).length > 0;
+      if ((resp.needs_plan_update && hasUpdate) || hasStructuredGoal || hasMacroUpdate) {
         // Detect profile changes from the plan diff + user question
         const profileChanges: Partial<UserProfile> = {};
         const summaryParts: string[] = [];
@@ -2030,6 +2051,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           profileChanges.goal = matchedGoal.id as any;
           summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${matchedGoal.label}`);
         }
+
+        // Macro target adjustments — AI returns partial {calories?, protein?, carbs?, fat?}
+        const updatedMacros = (resp as any).updated_macros;
+        if (updatedMacros && typeof updatedMacros === 'object') {
+          const current = userProfile?.customMacros ?? {};
+          const merged = { ...current };
+          if (updatedMacros.calories != null) merged.calories = updatedMacros.calories;
+          if (updatedMacros.protein != null) merged.protein = updatedMacros.protein;
+          if (updatedMacros.carbs != null) merged.carbs = updatedMacros.carbs;
+          if (updatedMacros.fat != null) merged.fat = updatedMacros.fat;
+          profileChanges.customMacros = merged as any;
+          const parts: string[] = [];
+          if (updatedMacros.calories != null) parts.push(`${updatedMacros.calories} cal`);
+          if (updatedMacros.protein != null) parts.push(`${updatedMacros.protein}g protein`);
+          if (updatedMacros.carbs != null) parts.push(`${updatedMacros.carbs}g carbs`);
+          if (updatedMacros.fat != null) parts.push(`${updatedMacros.fat}g fat`);
+          if (parts.length > 0) summaryParts.push(`Macros → ${parts.join(', ')}`);
+        }
+
         const summary = summaryParts.length > 0 ? summaryParts.join(' · ') : (coachMode === 'trainer' ? 'Workout plan updated' : 'Meal plan updated');
         // Store as pending — wait for user approval
         setPendingUpdate({ resp, question: q, coachMode, profileChanges, summary });
@@ -2142,6 +2182,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (isValid) {
           if (prevWorkout?.name && !updatedPlan.name) updatedPlan.name = prevWorkout.name;
           if (!updatedPlan.totalDays) updatedPlan.totalDays = updatedPlan.days.length;
+          // Merge deterministic metadata from original plan that the AI
+          // doesn't know about: stimulus, setScheme, targetWeightLbs,
+          // progressionAction, weightRecommendationSource. Without this,
+          // AI plan updates strip all training-type tags and progression data.
+          if (prevWorkout?.days) {
+            updatedPlan = {
+              ...updatedPlan,
+              days: updatedPlan.days.map((day: any, di: number) => {
+                const origDay = prevWorkout.days[di];
+                const merged = { ...day };
+                if (!merged.stimulus && origDay?.stimulus) merged.stimulus = origDay.stimulus;
+                if (Array.isArray(merged.exercises)) {
+                  merged.exercises = merged.exercises.map((ex: any) => {
+                    const origEx = origDay?.exercises?.find(
+                      (o: any) => o.name?.toLowerCase() === ex.name?.toLowerCase()
+                    );
+                    if (!origEx) return ex;
+                    return {
+                      ...ex,
+                      setScheme: ex.setScheme ?? origEx.setScheme,
+                      targetWeightLbs: ex.targetWeightLbs ?? origEx.targetWeightLbs,
+                      weightRecommendationSource: ex.weightRecommendationSource ?? origEx.weightRecommendationSource,
+                      progressionAction: ex.progressionAction ?? origEx.progressionAction,
+                    };
+                  });
+                }
+                return merged;
+              }),
+            };
+          }
           setWorkoutPlan(updatedPlan);
           await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
         } else {
@@ -2551,7 +2621,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
     ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
     ?? userProfile.goal;
-  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates) : [];
+  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates) : [];
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -2692,9 +2762,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
-            <SubTabBtn label="Foods"       active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
-            <SubTabBtn label="Macros"      active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('macros')} />
+            <SubTabBtn label="My Foods"    active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
+            <SubTabBtn label="Supps"       active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn label="Targets"     active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('macros')} />
           </View>
         </View>
       )}
@@ -2740,7 +2810,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 frame doesn't flash-through to the previous tab's
                 content or the edit screen's unstyled chrome. */}
             {workoutSubTab === 'equipment' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110, backgroundColor: themeColors.background }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
                 <EditProfileScreen
                   authToken={authToken}
                   profile={userProfile}
@@ -2870,7 +2940,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 frame (triggered by the `key` prop below) doesn't
                 flash-through to the previous tab's content. */}
             {mealsSubTab !== 'plan' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: -110, backgroundColor: themeColors.background }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
                 <EditProfileScreen
                   key={`meal-${mealsSubTab}`}
                   authToken={authToken}
@@ -3030,7 +3100,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
       {activeTab === 'goals' && (
-        <View style={{ flex: 1, paddingBottom: 88 }}>
+        <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
           <EditProfileScreen
             authToken={authToken}
             profile={userProfile}

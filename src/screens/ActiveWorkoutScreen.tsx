@@ -13,7 +13,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
@@ -40,13 +40,7 @@ interface WorkoutCoachMessage {
 
 type SetFeedback = 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
 
-const FEEDBACK_OPTIONS: Array<{ value: SetFeedback; label: string }> = [
-  { value: 'easy',    label: 'Easy' },
-  { value: 'good',    label: 'Good' },
-  { value: 'hard',    label: 'Hard' },
-  { value: 'failure', label: 'Failure' },
-  { value: 'pain',    label: 'Pain' },
-];
+// Feedback buttons removed — recommendations derive from actual vs target reps.
 
 const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: string) => string }> = [
   { label: 'Form question', template: (name) => `Form check on ${name}: what 2-3 cues should I focus on next set?` },
@@ -170,25 +164,36 @@ function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string |
 
 function buildWarmupPlan(workout: WorkoutDay): string[] {
   const focus = (workout.focus || '').toLowerCase();
-  const primer = /leg|lower/.test(focus)
-    ? '3-5 minutes easy bike or treadmill, then ankle, hip, and squat mobility.'
-    : /pull|back/.test(focus)
-      ? '3-5 minutes light cardio, then band pull-aparts, scap retractions, and shoulder prep.'
-      : /push|chest|shoulder|upper/.test(focus)
-        ? '3-5 minutes light cardio, then shoulder circles, band external rotations, and light pressing prep.'
-        : '3-5 minutes of light cardio followed by dynamic mobility for the joints you will use most.';
+  const firstEx = workout.exercises[0]?.name;
 
-  const firstExercise = workout.exercises[0]?.name;
-  const secondExercise = workout.exercises[1]?.name;
-  const ramp = firstExercise
-    ? `Do 2-3 lighter ramp-up sets for ${firstExercise}${secondExercise ? `, then one feeler set for ${secondExercise}` : ''}.`
-    : 'Do 2-3 lighter ramp-up sets before your first working set.';
-
+  if (/leg|lower|glute|hinge/.test(focus)) {
+    return [
+      '3 min easy bike or walk',
+      'Hip circles + ankle rocks (10 each)',
+      'Bodyweight squats × 10',
+      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
+    ];
+  }
+  if (/pull|back/.test(focus)) {
+    return [
+      '3 min light cardio',
+      'Band pull-aparts × 15',
+      'Scap push-ups × 10',
+      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
+    ];
+  }
+  if (/push|chest|shoulder|upper/.test(focus)) {
+    return [
+      '3 min light cardio',
+      'Arm circles + band dislocates × 10',
+      'Push-ups × 10',
+      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
+    ];
+  }
   return [
-    primer,
-    'Keep warm-up reps smooth and stop well before fatigue.',
-    ramp,
-    'If a joint feels off, slow down and add one more lighter set before starting work sets.',
+    '3 min light cardio',
+    'Dynamic stretches for major joints',
+    firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
   ];
 }
 
@@ -365,12 +370,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [logWeight, setLogWeight] = useState('');
   const [logReps, setLogReps] = useState('');
 
-  // Edit logged set modal
+  // Edit logged set modal (legacy — kept for backward compat)
   const [editSetVisible, setEditSetVisible] = useState(false);
   const [editSetExIdx, setEditSetExIdx] = useState(0);
   const [editSetIdx, setEditSetIdx] = useState(0);
   const [editSetWeight, setEditSetWeight] = useState('');
   const [editSetReps, setEditSetReps] = useState('');
+
+  // Inline edit of logged sets — tap directly on the weight/reps field
+  const [editingSetKey, setEditingSetKey] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<{ weight?: string; reps?: string }>({});
+  const editCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Track whether we've sent the "workout started" signal to the backend
+  const workoutStartedRef = useRef(false);
 
   // Auto rest timer between sets
   const [restRemaining, setRestRemaining] = useState(0);
@@ -633,6 +646,63 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setEditSetVisible(true);
   }, [exercises]);
 
+  const commitInlineEdit = useCallback((exIdx: number, setIdx: number) => {
+    if (editCommitTimer.current) clearTimeout(editCommitTimer.current);
+    editCommitTimer.current = setTimeout(() => {
+      const w = parseFloat(editDraft.weight ?? '');
+      const r = parseInt(editDraft.reps ?? '', 10);
+      const ex = exercises[exIdx];
+      const existingSet = ex?.sets[setIdx];
+      if (!existingSet) { setEditingSetKey(null); setEditDraft({}); return; }
+      const newWeight = !isNaN(w) && w >= 0 ? w : existingSet.weightLbs;
+      const newReps = !isNaN(r) && r > 0 ? r : existingSet.reps;
+      if (newWeight === existingSet.weightLbs && newReps === existingSet.reps) {
+        setEditingSetKey(null);
+        setEditDraft({});
+        return;
+      }
+      const updatedSets = ex.sets.map((s, si) =>
+        si === setIdx ? { ...s, weightLbs: newWeight, reps: newReps } : s
+      );
+      setExercises(prev => prev.map((e, idx) =>
+        idx === exIdx ? { ...e, sets: updatedSets } : e
+      ));
+      setEditingSetKey(null);
+      setEditDraft({});
+      // Retrigger recommendation with a delay so the user can finish editing
+      if (authToken && updatedSets.length > 0) {
+        const targetSetCount = getTargetSetCount(ex.targetSets);
+        const extras = extraSetCounts[exIdx] ?? 0;
+        const removed = removedSetCounts[exIdx] ?? 0;
+        const effectiveTotal = Math.max(targetSetCount + extras - removed, updatedSets.length);
+        if (updatedSets.length < effectiveTotal) {
+          setAiLoadingIdx(exIdx);
+          getExerciseBests(ex.name).catch(() => null).then(bests => {
+            getWeightRecommendation(authToken, ex.name, goal, updatedSets, updatedSets.length + 1, {
+              targetSets: ex.targetSets,
+              targetReps: ex.targetReps,
+              progressionPace: 'moderate',
+              experienceLevel: 'intermediate',
+              recoveryLevel: 'normal',
+              phase: 'accumulation',
+              workoutFocus: workout.focus,
+              weekNumber: 1,
+              incrementLbs: 5,
+              allTimeBestWeightLbs: bests?.allTime?.weightLbs,
+              allTimeBestReps: bests?.allTime?.reps,
+              lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
+              lastSessionBestReps: bests?.lastSession?.reps,
+            }).then(rec => {
+              const tip = `Set ${updatedSets.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
+              setExercises(prev => prev.map((e, idx) => idx === exIdx ? { ...e, aiRecommendation: tip } : e));
+              setAiLoadingIdx(null);
+            }).catch(() => setAiLoadingIdx(null));
+          });
+        }
+      }
+    }, 800);
+  }, [editDraft, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
+
   const handleSaveEditedSet = useCallback(() => {
     const w = parseFloat(editSetWeight);
     const r = parseInt(editSetReps, 10);
@@ -700,6 +770,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const updatedExercises = exercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
     setExercises(updatedExercises);
     setAiErrorIdx(null);
+
+    // Mark workout as started in the backend DB on first logged set.
+    // This ensures getWorkoutStatus returns done=true immediately,
+    // even if the user never taps Finish (app crash, phone dies).
+    if (!workoutStartedRef.current && authToken) {
+      workoutStartedRef.current = true;
+      logWorkoutStarted(authToken, dateKey(new Date()), workout.focus, workout.stimulus).catch(() => {});
+    }
 
     // Auto-advance to next incomplete exercise when all effective sets are done
     if (cleanSets.length >= effectiveTotal) {
@@ -1943,43 +2021,58 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
                               <TextInput
                                 style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
-                                value={isLogged ? String(logged.weightLbs) : input.weight}
+                                value={isLogged ? (editingSetKey === inputKey ? (editDraft.weight ?? String(logged.weightLbs)) : String(logged.weightLbs)) : input.weight}
                                 onChangeText={v => {
-                                  if (!isLogged) {
+                                  if (isLogged) {
+                                    setEditingSetKey(inputKey);
+                                    setEditDraft(prev => ({ ...prev, weight: v }));
+                                  } else {
                                     setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, weight: v } }));
                                   }
                                 }}
-                                onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
+                                onEndEditing={() => {
+                                  if (isLogged && editingSetKey === inputKey) {
+                                    commitInlineEdit(i, slot);
+                                  } else if (!isLogged) {
+                                    handleLogSetInline(i, slot, true);
+                                  }
+                                }}
                                 keyboardType="decimal-pad"
                                 placeholder="lbs"
                                 placeholderTextColor={themeColors.textMuted}
-                                editable={!isLogged}
                                 selectTextOnFocus
                               />
                               <TextInput
                                 style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
-                                value={isLogged ? String(logged.reps) : input.reps}
+                                value={isLogged ? (editingSetKey === inputKey ? (editDraft.reps ?? String(logged.reps)) : String(logged.reps)) : input.reps}
                                 onChangeText={v => {
-                                  if (!isLogged) {
+                                  if (isLogged) {
+                                    setEditingSetKey(inputKey);
+                                    setEditDraft(prev => ({ ...prev, reps: v }));
+                                  } else {
                                     setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, reps: v } }));
                                   }
                                 }}
-                                onEndEditing={() => { if (!isLogged) handleLogSetInline(i, slot, true); }}
+                                onEndEditing={() => {
+                                  if (isLogged && editingSetKey === inputKey) {
+                                    commitInlineEdit(i, slot);
+                                  } else if (!isLogged) {
+                                    handleLogSetInline(i, slot, true);
+                                  }
+                                }}
                                 keyboardType="number-pad"
                                 placeholder="reps"
                                 placeholderTextColor={themeColors.textMuted}
-                                editable={!isLogged}
                                 selectTextOnFocus
                               />
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               <TouchableOpacity
                                 style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
                                 onPress={() => {
-                                  if (isLogged) { openEditSet(i, slot); }
-                                  else { handleLogSetInline(i, slot, false); }
+                                  if (!isLogged) { handleLogSetInline(i, slot, false); }
                                 }}>
                                 <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                  {isLogged ? '✏' : '○'}
+                                  {isLogged ? '✓' : '○'}
                                 </Text>
                               </TouchableOpacity>
                               {isLastSlot && (
@@ -1998,35 +2091,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     );
                   })()}
 
-                  {/* ── Feedback for last logged set ── */}
-                  {ex.sets.length > 0 && ex.sets.length < targetSetCount && (
-                    <View style={styles.feedbackCard}>
-                      <Text style={styles.feedbackTitle}>Last set felt?</Text>
-                      <View style={styles.feedbackRow}>
-                        {FEEDBACK_OPTIONS.map((option) => {
-                          const active = ex.sets[ex.sets.length - 1]?.feedback === option.value;
-                          const isPain = option.value === 'pain';
-                          return (
-                            <TouchableOpacity
-                              key={option.value}
-                              style={[
-                                styles.feedbackChip,
-                                active && styles.feedbackChipActive,
-                                isPain && styles.feedbackChipPain,
-                                active && isPain && styles.feedbackChipPainActive,
-                              ]}
-                              onPress={() => handleSetFeedback(i, option.value)}>
-                              <Text style={[
-                                styles.feedbackChipText,
-                                active && styles.feedbackChipTextActive,
-                                isPain && styles.feedbackChipTextPain,
-                              ]}>{option.label}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    </View>
-                  )}
+                  {/* Feedback buttons removed — recommendations now derive
+                      from actual reps vs target reps automatically. */}
 
                   {(() => {
                     const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;

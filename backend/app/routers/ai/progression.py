@@ -223,29 +223,15 @@ def recommend_weight(
         rep_max    = int(rec.target_rep_max or rep_min)
         rec_reps   = max(1, round((rep_min + rep_max) / 2))
 
-        # ── Feel gating + AI review for intra-workout recs ──────────
-        # Product rule: "the recommendation shouldn't say anything
-        # until good/easy/etc is filled out as well". When the user
-        # has logged a set this session but hasn't tapped a feel chip
-        # yet, return a sentinel so the frontend hides the rec card.
-        # The deterministic values are still included for logging /
-        # debugging — the client keys off `awaitingFeel` to render.
-        last_logged_feel: str | None = None
+        # ── Performance-based recommendation (feel buttons removed) ──
+        # Recommendations now derive from actual reps vs target reps.
+        # No feel-gating — the rec fires immediately after each set.
         last_logged = body.lastSets[-1] if body.lastSets else None
-        if last_logged is not None:
-            last_logged_feel = (getattr(last_logged, "feedback", None) or None)
+        last_logged_feel = (getattr(last_logged, "feedback", None) or None) if last_logged else None
 
-        awaiting_feel = bool(body.lastSets and not last_logged_feel)
-
-        # When feel IS filled, run the deterministic engine's result
-        # through the AI-reviewed next-set wrapper. Suspicion rules
-        # (feel-vs-reps conflict, big overshoot/undershoot, pain,
-        # first session) trigger a compact AI call that can override
-        # the recommendation; otherwise we ship the deterministic
-        # result unchanged.
         reviewed_source = "deterministic"
         reviewed_reasons: list[str] = []
-        if last_logged is not None and last_logged_feel and not awaiting_feel:
+        if last_logged is not None:
             try:
                 from app.services.workout.in_workout_review import (
                     reviewed_next_set_recommendation,
@@ -285,7 +271,7 @@ def recommend_weight(
                     feel=last_logged_feel,
                     previous_sets_this_session=prev_sets_this,
                     last_session_sets=[],  # live DB query skipped here — cheap path
-                    require_feel=True,
+                    require_feel=False,
                 )
                 if reviewed is not None:
                     reviewed_source = reviewed.source
@@ -333,8 +319,8 @@ def recommend_weight(
             # `source`: "deterministic" | "ai_override" | "ai_confirmed"
             #           — lets the UI tag an "AI" label on overrides.
             # `suspicionReasons`: debug list of why the reviewer fired.
-            "awaitingFeel": awaiting_feel,
-            "source": "awaiting_feel" if awaiting_feel else reviewed_source,
+            "awaitingFeel": False,
+            "source": reviewed_source,
             "suspicionReasons": reviewed_reasons,
         }
     except Exception as e:
@@ -842,23 +828,14 @@ _WARMUP_SCHEMA = {
 
 def _deterministic_warmup(focus: str, first: str | None, second: str | None) -> list[str]:
     focus_l = (focus or "").lower()
-    if any(k in focus_l for k in ("leg", "lower", "squat")):
-        primer = "3-5 minutes easy bike or treadmill, then ankle, hip, and squat-pattern mobility."
-    elif any(k in focus_l for k in ("pull", "back", "row")):
-        primer = "3-5 minutes light cardio, then band pull-aparts, scap retractions, and shoulder prep."
-    elif any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
-        primer = "3-5 minutes light cardio, then shoulder circles, band external rotations, and light pressing prep."
-    else:
-        primer = "3-5 minutes of light cardio followed by dynamic mobility for the joints you'll use most."
-    ramp = (
-        f"Do 2-3 lighter ramp-up sets for {first}" + (f", then one feeler set for {second}." if second else ".")
-    ) if first else "Do 2-3 lighter ramp-up sets before your first working set."
-    return [
-        primer,
-        "Keep warm-up reps smooth and stop well before fatigue.",
-        ramp,
-        "If a joint feels off, slow down and add one more lighter set before starting work sets.",
-    ]
+    ramp = f"2 light sets of {first}" if first else "2 ramp-up sets at 50%"
+    if any(k in focus_l for k in ("leg", "lower", "squat", "glute", "hinge")):
+        return ["3 min easy bike or walk", "Hip circles + ankle rocks (10 each)", "Bodyweight squats × 10", ramp]
+    if any(k in focus_l for k in ("pull", "back", "row")):
+        return ["3 min light cardio", "Band pull-aparts × 15", "Scap push-ups × 10", ramp]
+    if any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
+        return ["3 min light cardio", "Arm circles + band dislocates × 10", "Push-ups × 10", ramp]
+    return ["3 min light cardio", "Dynamic stretches for major joints", ramp]
 
 
 @router.post("/warmup")
@@ -884,25 +861,19 @@ def generate_warmup(
         ) or "  (no exercises)"
         injuries_line = ", ".join(body.injuries) if body.injuries else "none"
         prompt = (
-            "Write a tailored warm-up for the user's workout today. The warm-up "
-            "should take ~5 minutes and prepare the specific joints/muscles used "
-            "by the exercises below.\n\n"
+            "Write a simple 3-4 step warm-up for today's workout. "
+            "Each step must be SHORT — under 8 words, like a gym whiteboard. "
+            "No paragraphs, no explanations.\n\n"
             f"Focus: {body.focus}\n"
-            f"Experience: {body.experience or 'intermediate'}\n"
-            f"Session length: {body.durationMinutes or 60} min\n"
-            f"Injuries / limitations to respect (avoid ranges that aggravate these): {injuries_line}\n"
+            f"Injuries to avoid: {injuries_line}\n"
+            f"First exercise: {first_ex or 'compound lift'}\n"
             f"Today's exercises:\n{ex_lines}\n\n"
-            "Return 4-6 warm-up steps as an ordered list in the `steps` array. "
-            "Each step is ONE sentence of plain prose, no markdown, no bullets, "
-            "no numbering inside the string (the UI adds its own numbers). Cover: "
-            "(1) general primer (light cardio + mobility for the muscles hit), "
-            "(2) joint-specific prep referencing the actual exercises above, "
-            "(3) one or two ramp-up set cues naming the first exercise by name, "
-            "(4) an injury-aware reminder if injuries are listed (else a form cue). "
-            "If injuries include 'knee', avoid deep flexion in the primer. If "
-            "'shoulder', avoid overhead cable movements. If 'lower back', avoid "
-            "loaded spinal flexion.\n\n"
-            'Return JSON: {"steps": ["...", "...", ...]}'
+            "Format: action + reps/duration. Examples:\n"
+            '  "3 min easy bike"\n'
+            '  "Hip circles × 10 each"\n'
+            '  "Band pull-aparts × 15"\n'
+            '  "2 light sets of Bench Press"\n\n'
+            'Return JSON: {"steps": ["...", "...", "...", "..."]}'
         )
         messages = [
             {"role": "system", "content": "You are a strength coach writing a tailored warm-up. Be concise, specific, and injury-aware. Return only the required JSON."},

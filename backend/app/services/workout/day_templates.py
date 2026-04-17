@@ -59,6 +59,20 @@ from .slots import (
     _pull_volume_slots,
     _legs_volume_slots,
     _full_body_strength_slots,
+    # PPL heavy variants
+    _push_heavy_slots,
+    _pull_heavy_slots,
+    _legs_heavy_slots,
+    _legs_heavy_glute_slots,
+    # Focus-aware variants
+    _lower_heavy_glute_slots,
+    _lower_hypertrophy_glute_slots,
+    _legs_glute_slots,
+    _legs_volume_glute_slots,
+    _full_body_glute_slots,
+    _upper_chest_focus_slots,
+    _upper_back_focus_slots,
+    _upper_shoulders_focus_slots,
 )
 
 
@@ -92,32 +106,16 @@ _SPLIT_MIN_DAYS = {
 # ─── Split selector (lifting subsystem) ─────────────────────────────
 
 
-def pick_split(inputs) -> str:
+def pick_split(inputs, focused_muscle: str | None = None) -> str:
     """Choose a training split from (days_per_week, goal_bucket,
-    experience). Only consulted when the weekly recipe asks for a
-    lifting-dominant schedule — the multi-goal planner routes
-    endurance / athletic / mobility / recovery modes directly into
-    their own archetype recipes without ever calling this function.
+    experience, priority_region).
 
-    Rules (in order of evaluation):
+    Region-aware: when priority_region is lower_body or upper_body,
+    the split selection biases toward structures with higher frequency
+    for that region. Used by both the planner's auto-pick AND the
+    split-options UI's is_recommended flag.
 
-    1. Explicit `preferred_split` override — honored if the split has
-       enough days and is known to `_SPLIT_MIN_DAYS`.
-    2. 1-2 days/week → full body (not enough sessions to split).
-    3. Beginners stay simple: full body through 3 days, upper/lower
-       at 4+ days.
-    4. 3 days intermediate+: PPL for lifting-dominant buckets,
-       full body for fat-loss-style goals that benefit from higher
-       per-muscle frequency.
-    5. 4 days intermediate+: upper/lower — the workhorse split.
-    6. 5 days intermediate+: `ppl_upper_lower` for hypertrophy-heavy
-       goals, upper/lower cycle for everyone else (avoids the
-       "5x full body" default that over-compounds recovery).
-    7. 6+ days: bro split for advanced muscle_gain users, PPL for
-       everyone else.
-
-    Deterministic — same (days, bucket, experience) always returns
-    the same split."""
+    Deterministic — same inputs always return the same split."""
     if inputs.preferred_split and inputs.preferred_split != "auto":
         if _SPLIT_MIN_DAYS.get(inputs.preferred_split, 99) <= inputs.days_per_week:
             return inputs.preferred_split
@@ -126,9 +124,14 @@ def pick_split(inputs) -> str:
     bucket = goal_bucket(inputs.goal)
     experience = (inputs.experience or "intermediate").lower()
 
-    # Goal-first routing for non-lifting modes. These returns match
-    # what `generate_weekly_recipe` expects — the recipe layer then
-    # owns the actual archetype sequence.
+    # Resolve region priority for split biasing
+    from .region_priority import normalize_region, split_region_bias
+    region = normalize_region(
+        getattr(inputs, "priority_region", None)
+        or focused_muscle
+        or getattr(inputs, "focused_muscle", None)
+    )
+
     if bucket == "endurance":
         return SPLIT_ENDURANCE
     if bucket == "athletic_performance" and days >= 3:
@@ -142,22 +145,58 @@ def pick_split(inputs) -> str:
             return SPLIT_FULL_BODY
         return SPLIT_UPPER_LOWER
 
-    if days == 3:
-        if bucket in ("muscle_gain", "strength", "body_recomp"):
-            return SPLIT_PPL
+    candidates = []
+    for split_id, min_d in _SPLIT_MIN_DAYS.items():
+        if split_id in (SPLIT_ENDURANCE, SPLIT_HYBRID):
+            continue
+        if days < min_d:
+            continue
+        score = _base_split_score(split_id, bucket, days, experience)
+        score += split_region_bias(region, split_id)
+        candidates.append((score, split_id))
+
+    if not candidates:
         return SPLIT_FULL_BODY
 
-    if days == 4:
-        return SPLIT_UPPER_LOWER
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    return candidates[0][1]
 
-    if days == 5:
-        if bucket in ("muscle_gain", "body_recomp"):
-            return SPLIT_PPL_UL
-        return SPLIT_UPPER_LOWER
 
-    if bucket == "muscle_gain" and experience == "advanced":
-        return SPLIT_BRO
-    return SPLIT_PPL
+def _base_split_score(split_id: str, bucket: str, days: int, experience: str) -> int:
+    """Base split fitness score WITHOUT focus bias. Encodes the same
+    preferences the old if/elif chain had, but as additive scores so
+    focus bias can tip the result."""
+    s = 0
+
+    # Days-in-range bonuses
+    if split_id == SPLIT_FULL_BODY:
+        if days <= 3: s += 15
+        elif days == 4: s += 5
+        else: s -= 10
+        if bucket in ("fat_loss", "general_health"): s += 10
+    elif split_id == SPLIT_UPPER_LOWER:
+        if days == 4: s += 20
+        elif days == 5: s += 12
+        elif days == 3: s += 8
+        else: s += 3
+        if bucket in ("body_recomp", "strength", "muscle_gain"): s += 8
+    elif split_id == SPLIT_PPL:
+        if days == 3 and bucket in ("muscle_gain", "strength", "body_recomp"): s += 18
+        elif days == 6: s += 20
+        elif days == 4: s += 10
+        elif days == 5: s += 8
+        else: s += 3
+        if bucket == "muscle_gain": s += 5
+    elif split_id == SPLIT_PPL_UL:
+        if days == 5 and bucket in ("muscle_gain", "body_recomp"): s += 22
+        elif days == 5: s += 10
+        else: s -= 5
+    elif split_id == SPLIT_BRO:
+        if days >= 5 and bucket == "muscle_gain" and experience == "advanced": s += 18
+        elif experience != "advanced": s -= 15
+        else: s += 3
+
+    return s
 
 
 # ─── Legacy split-driven naming (used by _day_meta when a split
@@ -326,36 +365,50 @@ def build_day_templates(split: str, days_per_week: int) -> list[tuple[str, list[
 # ─── Archetype dispatch (primary planner path) ──────────────────────
 
 
-def archetype_to_slots(archetype, day_index: int, days_per_week: int) -> list[Slot]:
+def archetype_to_slots(
+    archetype,
+    day_index: int,
+    days_per_week: int,
+    focused_muscle: str | None = None,
+) -> list[Slot]:
     """Turn a `DayArchetype` into a concrete slot list.
 
-    This is the SINGLE dispatch point between the weekly recipe layer
-    and the slot layer. Every `DayArchetype` enum value maps to
-    exactly one slot builder (or a small composition). Lifting
-    archetypes reuse the split slot builders; cardio archetypes use
-    the conditioning builders; mobility/recovery use the new mobility
-    builders; hybrid archetypes compose two categories.
-
-    `day_index` and `days_per_week` are forwarded to builders that
-    rotate emphasis across cycles (upper/lower/full-body rotate;
-    endurance/mobility don't).
+    When `focused_muscle` is set and the archetype trains that muscle's
+    region, a focus-aware slot variant is used instead of the generic
+    one. This is the structural layer of focus — actual slot composition
+    changes, not just scoring tweaks.
     """
-    # Lazy import to avoid any accidental import cycle — archetypes.py
-    # is pure data, but keeping this import local documents the
-    # dependency direction clearly.
     from .archetypes import DayArchetype as _DA
+    from .focus_profiles import get_focus_profile
+
+    fp = get_focus_profile(focused_muscle)
+    _variant = fp.slot_variant if fp else "default"
+    _is_lower_focus = fp and fp.region == "lower"
+    _is_upper_focus = fp and fp.region == "upper"
 
     if archetype == _DA.LIFT_FULL_BODY:
+        if _is_lower_focus and _variant == "glute":
+            return _full_body_glute_slots(day_index)
         return _full_body_slots(day_index)
     if archetype == _DA.LIFT_UPPER:
+        if _is_upper_focus and _variant == "chest":
+            return _upper_chest_focus_slots(day_index // 2)
+        if _is_upper_focus and _variant == "back":
+            return _upper_back_focus_slots(day_index // 2)
+        if _is_upper_focus and _variant == "shoulders":
+            return _upper_shoulders_focus_slots(day_index // 2)
         return _upper_slots(day_index // 2)
     if archetype == _DA.LIFT_LOWER:
+        if _variant == "glute":
+            return _lower_hypertrophy_glute_slots()
         return _lower_slots(day_index // 2)
     if archetype == _DA.LIFT_PUSH:
         return _push_slots()
     if archetype == _DA.LIFT_PULL:
         return _pull_slots()
     if archetype == _DA.LIFT_LEGS:
+        if _variant == "glute":
+            return _legs_glute_slots()
         return _legs_slots()
     if archetype == _DA.LIFT_BRO_CHEST:
         return _BRO_SLOT_SEQUENCE[0]
@@ -374,16 +427,36 @@ def archetype_to_slots(archetype, day_index: int, days_per_week: int) -> list[Sl
     if archetype == _DA.LIFT_UPPER_HEAVY:
         return _upper_heavy_slots()
     if archetype == _DA.LIFT_UPPER_HYPERTROPHY:
+        if _is_upper_focus and _variant == "chest":
+            return _upper_chest_focus_slots(0)
+        if _is_upper_focus and _variant == "back":
+            return _upper_back_focus_slots(0)
+        if _is_upper_focus and _variant == "shoulders":
+            return _upper_shoulders_focus_slots(0)
         return _upper_hypertrophy_slots()
     if archetype == _DA.LIFT_LOWER_HEAVY:
+        if _variant == "glute":
+            return _lower_heavy_glute_slots()
         return _lower_heavy_slots()
     if archetype == _DA.LIFT_LOWER_HYPERTROPHY:
+        if _variant == "glute":
+            return _lower_hypertrophy_glute_slots()
         return _lower_hypertrophy_slots()
+    if archetype == _DA.LIFT_PUSH_HEAVY:
+        return _push_heavy_slots()
+    if archetype == _DA.LIFT_PULL_HEAVY:
+        return _pull_heavy_slots()
+    if archetype == _DA.LIFT_LEGS_HEAVY:
+        if _variant == "glute":
+            return _legs_heavy_glute_slots()
+        return _legs_heavy_slots()
     if archetype == _DA.LIFT_PUSH_VOLUME:
         return _push_volume_slots()
     if archetype == _DA.LIFT_PULL_VOLUME:
         return _pull_volume_slots()
     if archetype == _DA.LIFT_LEGS_VOLUME:
+        if _variant == "glute":
+            return _legs_volume_glute_slots()
         return _legs_volume_slots()
     if archetype == _DA.LIFT_FULL_BODY_STRENGTH:
         return _full_body_strength_slots()

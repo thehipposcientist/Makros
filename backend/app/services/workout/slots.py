@@ -290,6 +290,54 @@ def _lower_hypertrophy_slots() -> list[Slot]:
     ]
 
 
+def _push_heavy_slots() -> list[Slot]:
+    """Push heavy day: fewer slots, heavier compounds."""
+    return [
+        Slot("Warmup Mobility",   "mobility",         "shoulders", "warmup"),
+        Slot("Primary Press",     "horizontal_press", "chest",     "primary"),
+        Slot("Vertical Press",    "vertical_press",   "shoulders", "primary"),
+        Slot("Secondary Press",   "horizontal_press", "chest",     "secondary"),
+        Slot("Triceps",           "isolation",        "triceps",   "isolation"),
+        Slot("Core",              "anti_extension",   "core",      "core"),
+    ]
+
+
+def _pull_heavy_slots() -> list[Slot]:
+    """Pull heavy day: fewer slots, heavier compounds."""
+    return [
+        Slot("Warmup Mobility",   "mobility",         "back",   "warmup"),
+        Slot("Vertical Pull",     "vertical_pull",    "back",   "primary"),
+        Slot("Horizontal Pull",   "horizontal_pull",  "back",   "primary"),
+        Slot("Secondary Pull",    "horizontal_pull",  "back",   "secondary"),
+        Slot("Biceps",            "isolation",        "biceps", "isolation"),
+        Slot("Core",              "anti_extension",   "core",   "core"),
+    ]
+
+
+def _legs_heavy_slots() -> list[Slot]:
+    """Legs heavy day: fewer slots, heavier compounds."""
+    return [
+        Slot("Warmup Mobility",   "mobility",   "hips",       "warmup"),
+        Slot("Squat Pattern",     "squat",      "quads",      "primary"),
+        Slot("Hinge Pattern",     "hinge",      "hamstrings", "primary"),
+        Slot("Single-leg",        "lunge",      "quads",      "secondary"),
+        Slot("Glute Isolation",   "isolation",   "glutes",    "isolation"),
+        Slot("Core",              "anti_extension", "core",   "core"),
+    ]
+
+
+def _legs_heavy_glute_slots() -> list[Slot]:
+    """Legs heavy with glute bias."""
+    return [
+        Slot("Warmup Mobility",   "mobility",   "hips",       "warmup"),
+        Slot("Hinge Pattern",     "hinge",      "glutes",     "primary"),
+        Slot("Squat Pattern",     "squat",      "quads",      "primary"),
+        Slot("Single-leg Glute",  "lunge",      "glutes",     "secondary"),
+        Slot("Glute Isolation",   "isolation",   "glutes",    "isolation"),
+        Slot("Core",              "anti_extension", "core",   "core"),
+    ]
+
+
 def _push_volume_slots() -> list[Slot]:
     """Push volume day: moderate weight, higher reps."""
     return [
@@ -340,6 +388,124 @@ def _full_body_strength_slots() -> list[Slot]:
         Slot("Vertical Pull",     "vertical_pull",    "back",       "primary"),
         Slot("Core",              "anti_extension",   "core",       "core"),
     ]
+
+
+# ─── Focus-aware lower-body slot variants ──────────────────────────
+#
+# These replace the generic lower/legs templates when the user has a
+# lower-body focus active. The structural difference is NOT just a
+# scoring tweak — the actual slot composition changes:
+#   - Glute focus: hinge-first, glute isolation on EVERY lower day,
+#     single-leg slots hint glutes instead of quads, less quad-only iso.
+#   - Hamstring focus: hinge-first, hamstring curl on every lower day.
+#   - Quad focus: squat-first, quad isolation emphasized.
+
+
+def _lower_heavy_glute_slots() -> list[Slot]:
+    """Lower heavy with glute bias: hinge leads, glute isolation mandatory."""
+    return [
+        Slot("Warmup Mobility",  "mobility",   "hips",       "warmup"),
+        Slot("Primary Hinge",    "hinge",      "glutes",     "primary"),
+        Slot("Secondary Squat",  "squat",      "quads",      "secondary"),
+        Slot("Single-leg Glute", "lunge",      "glutes",     "secondary"),
+        Slot("Glute Isolation",  "isolation",   "glutes",    "isolation"),
+        Slot("Core",             "anti_extension", "core",   "core"),
+    ]
+
+
+def _lower_hypertrophy_glute_slots() -> list[Slot]:
+    """Lower hypertrophy with glute bias: more glute volume, less quad iso."""
+    return [
+        Slot("Warmup Mobility",      "mobility",   "hips",       "warmup"),
+        Slot("Primary Hinge",        "hinge",      "glutes",     "primary"),
+        Slot("Secondary Squat",      "squat",      "quads",      "primary"),
+        Slot("Single-leg Glute",     "lunge",      "glutes",     "secondary"),
+        Slot("Glute Isolation",      "isolation",   "glutes",    "isolation"),
+        Slot("Hamstring Isolation",  "isolation",   "hamstrings","isolation"),
+        Slot("Core",                 "anti_extension", "core",   "core"),
+    ]
+
+
+def _legs_glute_slots() -> list[Slot]:
+    """PPL legs day with glute bias: hinge-first, glute iso, glute-hinted lunge."""
+    return [
+        Slot("Warmup Mobility",   "mobility",   "hips",       "warmup"),
+        Slot("Hinge Pattern",     "hinge",      "glutes",     "primary"),
+        Slot("Squat Pattern",     "squat",      "quads",      "primary"),
+        Slot("Single-leg Glute",  "lunge",      "glutes",     "secondary"),
+        Slot("Glute Isolation",   "isolation",   "glutes",    "isolation"),
+        Slot("Calves",            "isolation",   "calves",    "isolation"),
+        Slot("Core",              "anti_extension", "core",   "core"),
+    ]
+
+
+def _legs_volume_glute_slots() -> list[Slot]:
+    """Legs volume day with glute bias: more glute work, less quad stacking."""
+    return [
+        Slot("Warmup Mobility",    "mobility",   "hips",       "warmup"),
+        Slot("Primary Hinge",      "hinge",      "glutes",     "primary"),
+        Slot("Primary Squat",      "squat",      "quads",      "primary"),
+        Slot("Single-leg Glute",   "lunge",      "glutes",     "secondary"),
+        Slot("Glute Isolation A",  "isolation",   "glutes",    "isolation"),
+        Slot("Glute Isolation B",  "isolation",   "glutes",    "isolation"),
+        Slot("Hamstring Isolation","isolation",   "hamstrings","isolation"),
+        Slot("Calves",             "isolation",   "calves",    "isolation"),
+    ]
+
+
+def _full_body_glute_slots(day_index: int) -> list[Slot]:
+    """Full-body day with glute bias: always includes a hinge + glute iso."""
+    _warmup = Slot("Warmup Mobility", "mobility", "full_body", "warmup")
+    if day_index % 3 == 0:
+        return [
+            _warmup,
+            Slot("Hinge Pattern",     "hinge",            "glutes",      "primary"),
+            Slot("Horizontal Press",  "horizontal_press", "chest",       "primary"),
+            Slot("Horizontal Pull",   "horizontal_pull",  "back",        "primary"),
+            Slot("Single-leg Glute",  "lunge",            "glutes",      "secondary"),
+            Slot("Glute Isolation",   "isolation",         "glutes",     "isolation"),
+            Slot("Core",              "anti_extension",   "core",        "core"),
+        ]
+    if day_index % 3 == 1:
+        return [
+            _warmup,
+            Slot("Squat Pattern",     "squat",            "quads",       "primary"),
+            Slot("Vertical Press",    "vertical_press",   "shoulders",   "primary"),
+            Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
+            Slot("Hinge Accessory",   "hinge",            "glutes",      "secondary"),
+            Slot("Glute Isolation",   "isolation",         "glutes",     "isolation"),
+            Slot("Core",              "anti_extension",   "core",        "core"),
+        ]
+    return [
+        _warmup,
+        Slot("Hinge Pattern",     "hinge",            "glutes",      "primary"),
+        Slot("Horizontal Press",  "horizontal_press", "chest",       "secondary"),
+        Slot("Vertical Pull",     "vertical_pull",    "back",        "primary"),
+        Slot("Single-leg",        "lunge",            "glutes",      "secondary"),
+        Slot("Glute Isolation",   "isolation",         "glutes",     "isolation"),
+        Slot("Core",              "anti_extension",   "core",        "core"),
+    ]
+
+
+# ── Upper-body focus variants (lighter touch — add one extra
+#    isolation slot for the focused muscle) ─────────────────────────
+
+def _upper_chest_focus_slots(cycle_index: int) -> list[Slot]:
+    """Upper day with chest bias: extra chest isolation."""
+    base = _upper_slots(cycle_index)
+    return base + [Slot("Chest Isolation", "isolation", "chest", "isolation")]
+
+
+def _upper_back_focus_slots(cycle_index: int) -> list[Slot]:
+    """Upper day with back bias: extra back isolation."""
+    base = _upper_slots(cycle_index)
+    return base + [Slot("Back Isolation", "isolation", "back", "isolation")]
+
+
+def _upper_shoulders_focus_slots(cycle_index: int) -> list[Slot]:
+    """Upper day with shoulders bias: extra lateral raise slot."""
+    base = _upper_slots(cycle_index)
+    return base + [Slot("Lateral Raise", "isolation", "shoulders", "isolation")]
 
 
 # ─── Conditioning slot builders ─────────────────────────────────────

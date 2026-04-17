@@ -116,6 +116,42 @@ def build_history_familiarity(
     return counts
 
 
+def recent_exercise_slugs_by_muscle(
+    user_id: int,
+    db_session,
+    days: int = 14,
+) -> dict[str, set[str]]:
+    """Return {primary_muscle: {exercise_slugs}} from recent completed
+    sessions. Used by the planner to vary exercises across same-muscle
+    days — if the user did back squats (quads) last session, the next
+    quad-dominant day picks front squats instead.
+
+    This is split-agnostic: it tracks by MUSCLE, not by focus family.
+    A user who switches from PPL to Upper/Lower still gets proper
+    variation because "quads" is "quads" regardless of the split.
+    """
+    from sqlmodel import select
+    from app.models import WorkoutSession, WorkoutExercise, Exercise as ExModel
+
+    cutoff = date.today() - timedelta(days=days)
+    rows = db_session.exec(
+        select(ExModel.slug, ExModel.primary_muscle)
+        .join(WorkoutExercise, WorkoutExercise.exercise_id == ExModel.id)
+        .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+        .where(WorkoutSession.user_id == user_id)
+        .where(WorkoutSession.completed_at.is_not(None))
+        .where(WorkoutSession.workout_date >= cutoff)
+    ).all()
+
+    result: dict[str, set[str]] = {}
+    for slug, muscle in rows:
+        if slug and muscle:
+            if muscle not in result:
+                result[muscle] = set()
+            result[muscle].add(slug)
+    return result
+
+
 def most_recent_completed_focus(
     user_id: int,
     db_session,

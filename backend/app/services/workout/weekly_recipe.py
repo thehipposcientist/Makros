@@ -44,7 +44,7 @@ from .goal_profiles import GoalProfile
 # ── Lifting mode ────────────────────────────────────────────────────
 
 
-def _lifting_recipe(profile: GoalProfile, split: str, days: int) -> list[DayArchetype]:
+def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_region: str = "balanced") -> list[DayArchetype]:
     """Translate a traditional split id (from `pick_split`) into a
     list of `LIFT_*` archetypes. Mirrors the old `build_day_templates`
     dispatch but emits archetypes instead of slot lists.
@@ -78,35 +78,53 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int) -> list[DayArch
 
     if split == SPLIT_UPPER_LOWER:
         if _has_stimulus and days >= 3:
-            # Stimulus-alternated upper/lower with SAFE odd-day handling.
-            # Odd day counts (3, 5, 7) would repeat the cycle start and
-            # create an upper-upper adjacency after rotation. Instead,
-            # the odd day uses Full Body Strength — a neutral session
-            # that doesn't repeat either upper or lower family.
-            stimulus_cycle = [
-                DayArchetype.LIFT_UPPER_HEAVY,
-                DayArchetype.LIFT_LOWER_HEAVY,
-                DayArchetype.LIFT_UPPER_HYPERTROPHY,
-                DayArchetype.LIFT_LOWER_HYPERTROPHY,
-            ]
+            # Region-biased U/L: when priority_region is lower_body,
+            # start with Lower so odd-day counts give an extra lower day.
+            # When upper_body, start with Upper (same as current default).
+            if priority_region == "lower_body":
+                stimulus_cycle = [
+                    DayArchetype.LIFT_LOWER_HEAVY,
+                    DayArchetype.LIFT_UPPER_HEAVY,
+                    DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                    DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                ]
+            else:
+                stimulus_cycle = [
+                    DayArchetype.LIFT_UPPER_HEAVY,
+                    DayArchetype.LIFT_LOWER_HEAVY,
+                    DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                    DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                ]
             result = [stimulus_cycle[i % len(stimulus_cycle)] for i in range(days)]
             if days % 2 == 1 and _has_stimulus:
-                # Replace the odd tail (which repeats a family) with
-                # full-body strength so rotation can't create adjacency.
                 result[-1] = DayArchetype.LIFT_FULL_BODY_STRENGTH
             return result
-        cycle = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
+        if priority_region == "lower_body":
+            cycle = [DayArchetype.LIFT_LOWER, DayArchetype.LIFT_UPPER]
+        else:
+            cycle = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
         result = [cycle[i % 2] for i in range(days)]
         if days % 2 == 1:
             result[-1] = DayArchetype.LIFT_FULL_BODY
         return result
 
     if split == SPLIT_PPL:
+        if _has_stimulus and days >= 6:
+            # Full PPL × 2: first rotation heavy (3-5 reps), second volume (10-15).
+            # Gives the user both strength and hypertrophy stimulus in one week.
+            heavy = [
+                DayArchetype.LIFT_PUSH_HEAVY,
+                DayArchetype.LIFT_PULL_HEAVY,
+                DayArchetype.LIFT_LEGS_HEAVY,
+            ]
+            volume = [
+                DayArchetype.LIFT_PUSH_VOLUME,
+                DayArchetype.LIFT_PULL_VOLUME,
+                DayArchetype.LIFT_LEGS_VOLUME,
+            ]
+            return (heavy + volume)[:days]
         if _has_stimulus and days >= 4:
-            # Use volume variants for the extra days so PPL at 4-5 days
-            # doesn't duplicate the same focus. Instead of [Push, Pull,
-            # Legs, Push] (bad), produce [Push, Pull, Legs, Push Volume]
-            # (different stimulus, different exercises, no focus clash).
+            # PPL at 4-5 days: standard hypertrophy base + volume extras.
             base = [
                 DayArchetype.LIFT_PUSH,
                 DayArchetype.LIFT_PULL,
@@ -115,7 +133,6 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int) -> list[DayArch
             volume = [
                 DayArchetype.LIFT_PUSH_VOLUME,
                 DayArchetype.LIFT_PULL_VOLUME,
-                DayArchetype.LIFT_LEGS_VOLUME,
             ]
             return (base + volume)[:days]
         cycle = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
@@ -229,6 +246,7 @@ def _lifting_plus_cardio_recipe(
     lifting_split: str,
     *,
     user_chose_split: bool = False,
+    priority_region: str = "balanced",
 ) -> list[DayArchetype]:
     """Lifting-backbone plan with conditioning days interleaved.
 
@@ -256,11 +274,12 @@ def _lifting_plus_cardio_recipe(
     if conditioning_frac < 0.10:
         cond_days = 0
     elif conditioning_frac < 0.30:
-        # Body-recomp band: 1 cardio day at 4-5 days, 2 at 6+. Below
-        # 4 days the user needs every session for lifting stimulus.
+        # Body-recomp band: 1 cardio day at 4-6 days, 1 at 7 (keep 6
+        # lifting days so PPL gets full 2x rotation with 2 legs days).
+        # Below 4 days the user needs every session for lifting stimulus.
         if days <= 3:
             cond_days = 0
-        elif days <= 5:
+        elif days <= 7:
             cond_days = 1
         else:
             cond_days = 2
@@ -276,7 +295,7 @@ def _lifting_plus_cardio_recipe(
             cond_days = 3
 
     if cond_days == 0:
-        return _lifting_recipe(profile, lifting_split, days)
+        return _lifting_recipe(profile, lifting_split, days, priority_region=priority_region)
 
     lift_days = days - cond_days
     # Split-compatibility fix: a 3-move PPL cycle on 4 lift days emits
@@ -297,7 +316,7 @@ def _lifting_plus_cardio_recipe(
             "to avoid duplicate Push/Pull/Legs day"
         )
         effective_split = SPLIT_UPPER_LOWER
-    lifting = _lifting_recipe(profile, effective_split, lift_days)
+    lifting = _lifting_recipe(profile, effective_split, lift_days, priority_region=priority_region)
 
     # Cardio sequence: zone-2 first so any plan with ≥1 cardio day
     # gets an easy/steady aerobic session (the high-value, low-cost
@@ -326,18 +345,33 @@ def _lifting_plus_cardio_recipe(
     while len(cond) < cond_days:
         cond.append(DayArchetype.COND_ZONE2)
 
-    # Interleave: lift, cond, lift, cond, ... ending on lift if possible.
+    # Interleave cardio into the lifting sequence at positions that
+    # DON'T break the split's natural rotation. For PPL, cardio goes
+    # after each full Push→Pull→Legs cycle. For UL, after each U→L
+    # pair. For Full Body, evenly spaced. This preserves the training
+    # pattern the user chose instead of fragmenting it with cardio
+    # in the middle of a rotation.
+    from .day_templates import SPLIT_PPL, SPLIT_PPL_UL, SPLIT_UPPER_LOWER, SPLIT_FULL_BODY
+    if effective_split in (SPLIT_PPL, SPLIT_PPL_UL):
+        cycle_len = 3  # PPL cycle
+    elif effective_split == SPLIT_UPPER_LOWER:
+        cycle_len = 2  # UL pair
+    elif effective_split == SPLIT_FULL_BODY:
+        cycle_len = 2  # every other day
+    else:
+        cycle_len = 3  # default
+
     out: list[DayArchetype] = []
     li = ci = 0
-    place_cond = False
+    since_last_cond = 0
     while li < len(lifting) or ci < len(cond):
-        if not place_cond and li < len(lifting):
-            out.append(lifting[li]); li += 1
+        if li < len(lifting):
+            out.append(lifting[li]); li += 1; since_last_cond += 1
+            # Place cardio after a full rotation cycle
+            if ci < len(cond) and since_last_cond >= cycle_len:
+                out.append(cond[ci]); ci += 1; since_last_cond = 0
         elif ci < len(cond):
             out.append(cond[ci]); ci += 1
-        elif li < len(lifting):
-            out.append(lifting[li]); li += 1
-        place_cond = not place_cond
 
     return _repair_adjacent_duplicates(out)
 
@@ -716,6 +750,7 @@ def generate_weekly_recipe(
     user_chose_split: bool = False,
     recent_focus_buckets: tuple[str, ...] | list[str] = (),
     recent_focus_families: tuple[str, ...] | list[str] = (),
+    priority_region: str = "balanced",
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -743,9 +778,9 @@ def generate_weekly_recipe(
     mode = profile.planner_mode
 
     if mode == "lifting":
-        recipe = _lifting_recipe(profile, lifting_split or "full_body", days)
+        recipe = _lifting_recipe(profile, lifting_split or "full_body", days, priority_region=priority_region)
     elif mode in ("fat_loss_mix", "lifting_plus_cardio"):
-        recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower", user_chose_split=user_chose_split)
+        recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower", user_chose_split=user_chose_split, priority_region=priority_region)
     elif mode == "endurance":
         recipe = _endurance_recipe(profile, days)
     elif mode == "athletic":
@@ -787,6 +822,24 @@ def generate_weekly_recipe(
     print(
         f"[weekly_recipe] recipe_after_rotation={[a.value for a in recipe]}"
     )
+
+    # Active recovery: 7-day pure-lifting weeks need at least one easy
+    # day. If every day in the recipe is a lift day and the profile
+    # allows MOBILITY_FLOW, replace the last day with it. For modes
+    # that already have cardio days (lifting_plus_cardio), the Zone 2
+    # day already serves this role so no injection is needed.
+    # If the recipe is shorter than days_per_week (e.g., PPL heavy+volume
+    # = 6 archetypes but user wants 7 days), fill remaining slots with
+    # active recovery. Also: if ALL days are pure lifting and the user
+    # trains 7 days, replace the last lifting day with recovery.
+    all_lift = all(ARCHETYPE_META[a].category == "lift" for a in recipe)
+    has_mobility = DayArchetype.MOBILITY_FLOW in profile.allowed_archetypes
+    while len(recipe) < days and has_mobility:
+        recipe.append(DayArchetype.MOBILITY_FLOW)
+        print(f"[weekly_recipe] appended active recovery day at position {len(recipe) - 1}")
+    if days >= 7 and all_lift and has_mobility and len(recipe) == days:
+        recipe[-1] = DayArchetype.MOBILITY_FLOW
+        print(f"[weekly_recipe] replaced day {days} with active recovery")
 
     # Defensive: every archetype must be in the profile's allowed set.
     fallback = profile.anchor_archetypes[0] if profile.anchor_archetypes else DayArchetype.LIFT_FULL_BODY

@@ -55,6 +55,9 @@ class DayArchetype(str, Enum):
     LIFT_UPPER_HYPERTROPHY = "lift_upper_hypertrophy"
     LIFT_LOWER_HEAVY = "lift_lower_heavy"
     LIFT_LOWER_HYPERTROPHY = "lift_lower_hypertrophy"
+    LIFT_PUSH_HEAVY = "lift_push_heavy"
+    LIFT_PULL_HEAVY = "lift_pull_heavy"
+    LIFT_LEGS_HEAVY = "lift_legs_heavy"
     LIFT_PUSH_VOLUME = "lift_push_volume"
     LIFT_PULL_VOLUME = "lift_pull_volume"
     LIFT_LEGS_VOLUME = "lift_legs_volume"
@@ -181,37 +184,52 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
     # ── Stimulus-differentiated lifting ──────────────────────────────
     DayArchetype.LIFT_UPPER_HEAVY: ArchetypeMeta(
         category="lift", training_type="strength",
-        default_name="Upper — Heavy", intensity_cost=5,
+        default_name="Upper", intensity_cost=5,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_UPPER_HYPERTROPHY: ArchetypeMeta(
         category="lift", training_type="hypertrophy",
-        default_name="Upper — Hypertrophy", intensity_cost=4,
+        default_name="Upper", intensity_cost=4,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_LOWER_HEAVY: ArchetypeMeta(
         category="lift", training_type="strength",
-        default_name="Lower — Heavy", intensity_cost=5,
+        default_name="Lower", intensity_cost=5,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_LOWER_HYPERTROPHY: ArchetypeMeta(
         category="lift", training_type="hypertrophy",
-        default_name="Lower — Hypertrophy", intensity_cost=4,
+        default_name="Lower", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PUSH_HEAVY: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Push", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_PULL_HEAVY: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Pull", intensity_cost=4,
+        accepts_types=frozenset({"strength"}),
+    ),
+    DayArchetype.LIFT_LEGS_HEAVY: ArchetypeMeta(
+        category="lift", training_type="strength",
+        default_name="Legs", intensity_cost=4,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_PUSH_VOLUME: ArchetypeMeta(
         category="lift", training_type="volume",
-        default_name="Push — Volume", intensity_cost=3,
+        default_name="Push", intensity_cost=3,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_PULL_VOLUME: ArchetypeMeta(
         category="lift", training_type="volume",
-        default_name="Pull — Volume", intensity_cost=3,
+        default_name="Pull", intensity_cost=3,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_LEGS_VOLUME: ArchetypeMeta(
         category="lift", training_type="volume",
-        default_name="Legs — Volume", intensity_cost=3,
+        default_name="Legs", intensity_cost=3,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_FULL_BODY_STRENGTH: ArchetypeMeta(
@@ -351,6 +369,9 @@ ARCHETYPE_TO_FOCUS_BUCKET: dict[DayArchetype, str] = {
     DayArchetype.LIFT_UPPER_HYPERTROPHY: "upper_body",
     DayArchetype.LIFT_LOWER_HEAVY: "lower_body",
     DayArchetype.LIFT_LOWER_HYPERTROPHY: "lower_body",
+    DayArchetype.LIFT_PUSH_HEAVY: "upper_body",
+    DayArchetype.LIFT_PULL_HEAVY: "upper_body",
+    DayArchetype.LIFT_LEGS_HEAVY: "lower_body",
     DayArchetype.LIFT_PUSH_VOLUME: "upper_body",
     DayArchetype.LIFT_PULL_VOLUME: "upper_body",
     DayArchetype.LIFT_LEGS_VOLUME: "lower_body",
@@ -408,6 +429,9 @@ ARCHETYPE_TO_FOCUS_FAMILY: dict[DayArchetype, str] = {
     DayArchetype.LIFT_UPPER_HYPERTROPHY: "upper",
     DayArchetype.LIFT_LOWER_HEAVY: "lower",
     DayArchetype.LIFT_LOWER_HYPERTROPHY: "lower",
+    DayArchetype.LIFT_PUSH_HEAVY: "push",
+    DayArchetype.LIFT_PULL_HEAVY: "pull",
+    DayArchetype.LIFT_LEGS_HEAVY: "legs",
     DayArchetype.LIFT_PUSH_VOLUME: "push",
     DayArchetype.LIFT_PULL_VOLUME: "pull",
     DayArchetype.LIFT_LEGS_VOLUME: "legs",

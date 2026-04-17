@@ -5,6 +5,7 @@ import json
 import openai
 from openai import OpenAI
 from fastapi import HTTPException, Depends
+from pydantic import BaseModel as _PydanticBaseModel
 
 from app.auth import get_current_user
 from app.models import User
@@ -675,3 +676,61 @@ def body_scan(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Body scan failed: {str(e)}")
 
+
+# ─── Goal matcher ────────────────────────────────────────────────────────────
+
+
+class GoalMatchRequest(_PydanticBaseModel):
+    description: str
+
+
+@router.post("/match-goal")
+def match_goal(
+    body: GoalMatchRequest,
+):
+    """Match a natural language description to the best fitness goal.
+
+    No auth required — used during onboarding before the user has an account.
+    Cheap call: ~100 input / ~50 output tokens."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {"goal_id": "body_recomp", "reason": "Default recommendation"}
+
+    goals_list = (
+        "build_muscle: Build muscle mass and size\n"
+        "build_strength: Get stronger on compound lifts\n"
+        "body_recomp: Lose fat and gain muscle simultaneously\n"
+        "lose_fat: Lose weight and body fat\n"
+        "endurance: Improve cardiovascular endurance and stamina\n"
+        "athletic_performance: Build sport-ready fitness with power and conditioning\n"
+        "general_health: Balanced fitness for longevity and wellness\n"
+        "mental_wellness: Low-intensity movement for stress relief and mood\n"
+    )
+    try:
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model_chat(),
+            messages=[
+                {"role": "system", "content": "You match user fitness descriptions to goals. Return JSON only."},
+                {"role": "user", "content": (
+                    f"The user said: \"{body.description}\"\n\n"
+                    f"Available goals:\n{goals_list}\n"
+                    "Pick the single best goal_id. Also return a one-sentence reason.\n"
+                    '{"goal_id": "...", "reason": "..."}'
+                )},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=100,
+            timeout=10,
+        )
+        result = json.loads(resp.choices[0].message.content or "{}")
+        goal_id = result.get("goal_id", "body_recomp")
+        reason = result.get("reason", "")
+        valid_ids = {"build_muscle", "build_strength", "body_recomp", "lose_fat",
+                     "endurance", "athletic_performance", "general_health", "mental_wellness"}
+        if goal_id not in valid_ids:
+            goal_id = "body_recomp"
+        return {"goal_id": goal_id, "reason": reason}
+    except Exception as e:
+        print(f"[match-goal] failed: {e}")
+        return {"goal_id": "body_recomp", "reason": "Default recommendation"}

@@ -29,6 +29,7 @@ from app.services.workout.planner import (
 )
 from app.services.workout.history import (
     build_history_familiarity, db_history_lookup, propagate_session_targets,
+    recent_exercise_slugs_by_muscle,
 )
 from app.services.workout.performance import build_performance_profile
 from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngine
@@ -337,6 +338,13 @@ def _build_deterministic_workout(
     target propagation are skipped gracefully (the planner still emits a
     valid plan, just without continuity bias or target weights)."""
     owned_slugs = _resolve_owned_equipment_slugs(req.equipment)
+    # Priority region: new field takes precedence, fall back to legacy focused_muscle
+    from app.services.workout.region_priority import normalize_region
+    priority_region = normalize_region(
+        getattr(req, "priorityRegion", None)
+        or getattr(req.goalSelection, "targetFocus", None) if req.goalSelection else None
+        or req.focusedMuscleGroup
+    )
     focused: str | None = None
     if req.goalSelection is not None:
         focused = getattr(req.goalSelection, "targetFocus", None) or req.focusedMuscleGroup
@@ -372,6 +380,9 @@ def _build_deterministic_workout(
             recent_focus_buckets = ()
             recent_focus_families = ()
 
+    print(
+        f"[plan-gen workout] region={priority_region} focused={focused!r}"
+    )
     inputs = PlannerInputs(
         goal=req.goal,
         days_per_week=max(1, min(7, req.daysPerWeek)),
@@ -380,6 +391,7 @@ def _build_deterministic_workout(
         equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=req.preferredSplit,
         focused_muscle=focused,
+        priority_region=priority_region,
         preferred_exercises=tuple(req.preferredExercises or ()),
         disliked_exercises=tuple(req.dislikedExercises or ()),
         injuries=tuple(req.injuriesOrLimitations or ()),
@@ -389,6 +401,7 @@ def _build_deterministic_workout(
     )
 
     history_familiarity: dict[str, int] = {}
+    recent_muscle_exercises: dict[str, set[str]] = {}
     perf_profiles_for_planner = None
     if db is not None and user_id is not None:
         try:
@@ -396,6 +409,13 @@ def _build_deterministic_workout(
         except Exception as e:
             print(f"[plan-gen workout] history familiarity lookup failed (non-fatal): {e}")
             history_familiarity = {}
+        try:
+            recent_muscle_exercises = recent_exercise_slugs_by_muscle(user_id, db)
+            if recent_muscle_exercises:
+                print(f"[plan-gen workout] recent exercises by muscle: {', '.join(f'{k}={len(v)}' for k, v in recent_muscle_exercises.items())}")
+        except Exception as e:
+            print(f"[plan-gen workout] recent-muscle-exercises lookup failed (non-fatal): {e}")
+            recent_muscle_exercises = {}
         try:
             # Performance profiles also power the in-planner
             # starting-weight + set-scheme pass so the FIRST plan
@@ -413,6 +433,7 @@ def _build_deterministic_workout(
         SEED_EXERCISES,
         history_familiarity=history_familiarity,
         perf_profiles=perf_profiles_for_planner,
+        recent_muscle_exercises=recent_muscle_exercises,
     )
 
     # Stamp each exercise with target_weight_lbs, progression_action,
@@ -941,6 +962,7 @@ def _build_deterministic_workout(
     days = plan.get("workout_plan", {}).get("days") or []
     print(
         f"[plan-gen workout] deterministic — goal={req.goal} days={len(days)} "
+        f"focused_muscle={focused!r} "
         f"history_exercises={len(history_familiarity)} "
         f"owned_eq={sorted(owned_slugs)[:6]}{'...' if len(owned_slugs) > 6 else ''}"
     )
@@ -1013,17 +1035,25 @@ def _generate_trainer_note(
             else req.goal
         )
         injuries = ", ".join(req.injuriesOrLimitations or []) or "none"
+        focused = None
+        if req.goalSelection is not None:
+            focused = getattr(req.goalSelection, "targetFocus", None) or req.focusedMuscleGroup
+        else:
+            focused = req.focusedMuscleGroup
+        focus_line = f"Muscle focus: {focused} (boosted volume + exercise priority)\n" if focused else ""
         prompt = (
             "Write a 120-180 word explanation of this pre-built training plan to the user.\n\n"
             f"Goal: {goal}\n"
             f"Days/week: {req.daysPerWeek}\n"
             f"Session length: {req.workoutDurationMinutes or 60} min (INCLUDES warm-up — the deterministic planner reserves ~5 min of warm-up/ramp-up time inside every session's budget, so the user should NOT add extra time on top)\n"
             f"Experience: {req.experienceLevel or 'intermediate'}\n"
+            f"{focus_line}"
             f"Injuries/limits: {injuries}\n"
             f"Split: {wp.get('name', 'custom split')}\n"
             f"Days:\n{days_block}\n\n"
             f"Recent 3-day history (what they actually trained):\n{recent_block}\n\n"
             "Cover: (1) WHY this split fits their goal and weekly frequency, "
+            + (f"(1b) HOW the plan addresses their {focused} focus — cite specific exercises and extra volume, " if focused else "") +
             "(2) WHY the chosen exercises work for their equipment and any injuries — name 2 exercises, "
             "(3) HOW progression will work over the next 4 weeks, "
             "(4) what the user should FEEL by the end of a session so they can self-assess, "
@@ -1666,10 +1696,10 @@ def _normalize_template_to_target(
     the template's meal-level sums match the computed targets exactly.
 
     Runs whenever the assembled meals don't already hit the target. The
-    scale guard is wide ([0.3, 3.0]) because the deterministic variety=1
+    scale guard is wide ([0.2, 5.0]) because the deterministic variety=1
     path may produce a meal that's significantly under-target when only
-    one or two foods cover a category — and we'd rather scale aggressively
-    than ship a meal that misses the calorie goal by 30%+.
+    one or two foods cover a category, or routine meals eat most of the
+    daily budget leaving small generated meals that still need scaling.
 
     Returns a human-readable summary of what was normalized (for logs),
     or None if no normalization was needed / possible.
@@ -1682,7 +1712,7 @@ def _normalize_template_to_target(
     # Wide guard — only bail when the assembled meal is so wrong it
     # almost certainly indicates a structural failure (missing meals,
     # nonsense input).
-    if scale < 0.3 or scale > 3.0:
+    if scale < 0.2 or scale > 5.0:
         return None
     # If we're already within 1%, skip — no need to mutate for rounding.
     if abs(scale - 1.0) < 0.01:

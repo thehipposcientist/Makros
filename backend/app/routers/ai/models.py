@@ -39,6 +39,7 @@ class PlanRequest(BaseModel):
     # Legacy fields — ignored when goalSelection is present
     secondaryGoal: str | None = None
     focusedMuscleGroup: str | None = None
+    priorityRegion: str | None = None  # "balanced" | "lower_body" | "upper_body"
     goalDetails: GoalDetailsIn
     physicalStats: PhysicalStatsIn
     customMacros: CustomMacrosIn | None = None
