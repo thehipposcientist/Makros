@@ -2,8 +2,16 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
+  LayoutAnimation, UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import FadeInView from '../components/FadeInView';
+import PressableScale from '../components/PressableScale';
+import AnimatedNumber from '../components/AnimatedNumber';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
@@ -198,8 +206,8 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
   ];
 }
 
-const SHARE_LOGO_LIGHT = require('../../assets/images/main_logo_header-removebg-preview.png');
-const SHARE_LOGO_DARK  = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
+const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
 
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
     // Warm-up state
@@ -278,8 +286,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restExerciseNameRef = useRef<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
-  const [exercises, setExercises] = useState<SessionExercise[]>(() =>
-    workout.exercises.map(ex => ({
+  const [exercises, setExercisesRaw] = useState<SessionExercise[]>(() => {
+    // Try to restore in-progress session from AsyncStorage
+    // (synchronous initializer can't be async, so we override in useEffect below)
+    return workout.exercises.map(ex => ({
       name: ex.name,
       targetSets: ex.sets,
       targetReps: ex.reps,
@@ -287,8 +297,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       equipment: typeof ex.equipment === 'string' ? ex.equipment : String(ex.equipment),
       sets: [],
       aiRecommendation: undefined,
-    }))
-  );
+    }));
+  });
+  const setExercises = useCallback((updater: SessionExercise[] | ((prev: SessionExercise[]) => SessionExercise[])) => {
+    setExercisesRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      // Auto-save session state so it survives app backgrounding/kill
+      AsyncStorage.setItem('activeWorkoutSets', JSON.stringify(
+        next.map(ex => ({ name: ex.name, sets: ex.sets }))
+      )).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  // Restore logged sets from a previous interrupted session
+  useEffect(() => {
+    AsyncStorage.getItem('activeWorkoutSets').then(raw => {
+      if (!raw) return;
+      try {
+        const saved: Array<{ name: string; sets: any[] }> = JSON.parse(raw);
+        if (!saved?.length) return;
+        setExercisesRaw(prev => prev.map(ex => {
+          const match = saved.find(s => s.name === ex.name);
+          return match && match.sets.length > 0 ? { ...ex, sets: match.sets } : ex;
+        }));
+      } catch {}
+    }).catch(() => {});
+    return () => { AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); };
+  }, []);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
 
@@ -785,8 +821,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     // Auto-advance to next incomplete exercise when all effective sets are done
     if (cleanSets.length >= effectiveTotal) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       const nextIdx = updatedExercises.findIndex((e, i) => i > exIdx && e.sets.length < getTargetSetCount(e.targetSets));
       setActiveExIdx(nextIdx >= 0 ? nextIdx : -1);
+      import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     } else {
       setActiveExIdx(exIdx);
     }
@@ -1336,6 +1374,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   };
 
   const handleFinish = async () => {
+    import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -1662,7 +1702,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
           ))}
           <View style={styles.warmupActions}>
-            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => { setWarmupDone(true); setWarmupExpanded(false); }}>
+            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupDone(true); setWarmupExpanded(false); }}>
               <Text style={styles.warmupDoneBtnText}>Start Workout</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.warmupCoachBtn, { borderColor: workoutPalette.strong }]} onPress={() => { setCoachInput('Can you modify my warm-up based on today\'s workout focus?'); setCoachModalVisible(true); }}>
@@ -1675,14 +1715,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {warmupDone && (
         <TouchableOpacity
           activeOpacity={0.85}
-          onPress={() => setWarmupExpanded(v => !v)}
+          onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupExpanded(v => !v); }}
           style={[
             styles.warmupCollapsed,
             { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong },
           ]}>
           <View style={styles.warmupCollapsedHeader}>
             <Text style={[styles.warmupCollapsedTitle, { color: workoutPalette.text }]}>
-              Warm-Up {warmupExpanded ? '▾' : '▸'}
+              Warm-Up <Ionicons name={warmupExpanded ? 'chevron-down' : 'chevron-forward'} size={12} />
             </Text>
             <Text style={[styles.warmupCollapsedHint, { color: workoutPalette.text }]}>
               {warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps · tap to view`}
@@ -1758,7 +1798,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {/* ── Header row: tap to expand/collapse ── */}
               <TouchableOpacity
                 style={styles.exerciseHeader}
-                onPress={() => setActiveExIdx(isActive ? -1 : i)}
+                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setActiveExIdx(isActive ? -1 : i); }}
                 activeOpacity={0.7}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
@@ -1978,7 +2018,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     }
                                   }}>
                                   <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                    {isLogged ? '✓' : '○'}
+                                    {isLogged ? <Ionicons name="checkmark" size={14} color="#fff" /> : <Ionicons name="radio-button-off" size={14} />}
                                   </Text>
                                 </TouchableOpacity>
                               </View>
@@ -2079,7 +2119,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   if (!isLogged) { handleLogSetInline(i, slot, false); }
                                 }}>
                                 <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                  {isLogged ? '✓' : '○'}
+                                  {isLogged ? <Ionicons name="checkmark" size={14} color="#fff" /> : <Ionicons name="radio-button-off" size={14} />}
                                 </Text>
                               </TouchableOpacity>
                               {isLastSlot && (
@@ -2138,17 +2178,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <TouchableOpacity style={styles.addExerciseBtn} onPress={openAddExerciseModal}>
               <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
             </TouchableOpacity>
-            <TouchableOpacity
+            <PressableScale
               style={[styles.finishBtn, completedCount === 0 && styles.finishBtnDisabled]}
+              disabled={completedCount === 0}
               onPress={() => {
                 if (completedCount === 0) {
                   Alert.alert('No sets logged', 'Log at least one set before finishing.');
                   return;
                 }
+                import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
                 setFinishModalVisible(true);
               }}>
-              <Text style={styles.finishBtnText}>Finish Workout</Text>
-            </TouchableOpacity>
+              <Text style={styles.finishBtnText}><Ionicons name="checkmark-circle" size={16} color="#fff" />  Finish Workout</Text>
+            </PressableScale>
           </>
         )}
       </ScrollView>
@@ -2375,7 +2417,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         <Text style={styles.shareAchievementsTitle}>Best Sets</Text>
                         {summaryData!.achievements.slice(0, 4).map((a, i) => (
                           <View key={i} style={styles.shareAchievementRow}>
-                            <Text style={styles.shareAchievementBullet}>▸</Text>
+                            <Text style={styles.shareAchievementBullet}><Ionicons name="chevron-forward" size={12} /></Text>
                             <Text style={styles.shareAchievementText}>{a}</Text>
                           </View>
                         ))}
@@ -2394,7 +2436,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     ) : null}
 
                     {/* Watermark */}
-                    <Text style={styles.shareWatermark}>Tracked with MAKROS</Text>
+                    <Text style={styles.shareWatermark}>Tracked with THALLO</Text>
                   </View>
                 </ViewShot>
 
@@ -2452,7 +2494,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     style={[styles.summaryFeedbackBtn, { flex: 2 }]}
                     onPress={() => setSummaryStep('feedback')}
                     activeOpacity={0.85}>
-                    <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  →</Text>
+                    <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  <Ionicons name="arrow-forward" size={14} /></Text>
                   </TouchableOpacity>
                 </View>
                 <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
@@ -3275,7 +3317,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderBottomWidth: 1,
     borderBottomColor: tc.border,
   },
-  shareCardLogo: { width: 200, height: 60 },
+  shareCardLogo: { width: 220, height: 50 },
   shareCardDateBadge: {
     backgroundColor: tc.surfaceRaised,
     borderRadius: radius.full,

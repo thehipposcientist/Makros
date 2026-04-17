@@ -6,6 +6,11 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
+import FadeInView from '../components/FadeInView';
+import PulseView from '../components/PulseView';
+import PressableScale from '../components/PressableScale';
+import StreakCounter from '../components/StreakCounter';
+import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
@@ -440,8 +445,8 @@ const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
 ];
 
 // ── Logo assets ───────────────────────────────────────────────────────────────
-const LOGO_DARK   = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
-const LOGO_LIGHT_HEADER = require('../../assets/images/main_logo_header-removebg-preview.png');
+const LOGO_DARK   = require('../../assets/images/thallo-logo-white.png');
+const LOGO_LIGHT_HEADER = require('../../assets/images/thallo-logo-black.png');
 
 const _MICRO_CHECK_KEYS = ['saturated_fat', 'omega_3', 'potassium', 'calcium', 'iron', 'vitamin_d'];
 
@@ -1004,7 +1009,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
-  const [activeTab, setActiveTab]         = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  const [activeTab, setActiveTabRaw]      = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  const setActiveTab = useCallback((tab: typeof activeTab) => {
+    setActiveTabRaw(tab);
+    AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
+  }, []);
+  useEffect(() => {
+    AsyncStorage.getItem('lastActiveTab').then(saved => {
+      if (saved && ['goals', 'workout', 'meals', 'progress', 'profile'].includes(saved)) {
+        setActiveTabRaw(saved as typeof activeTab);
+      }
+    }).catch(() => {});
+  }, []);
   // Sub-tab inside each main tab.
   // Workouts: plan | exercises | muscles | equipment
   // Meals:    plan | foods     | supplements | macros
@@ -2561,6 +2577,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [nutritionPlansByDate]);
 
   const handleSkipToday = useCallback((focus: string) => {
+    import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
     setSelectedSkipReason('');
     setCustomSkipReason('');
     setSkipReasonFocus(focus);
@@ -2684,15 +2701,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             purple FAB from the previous design. */}
         <TouchableOpacity
           style={[styles.askAiBtn, { backgroundColor: aiPalette.strong }]}
-          onPress={() => setShowTrainerModal(true)}
+          onPress={() => {
+            import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+            setShowTrainerModal(true);
+          }}
           activeOpacity={0.85}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Image
-            source={require('../../assets/images/Brain and speech bubble icon white.png')}
-            style={styles.askAiIcon}
-            resizeMode="contain"
-          />
-          <Text style={styles.askAiText}>Ask AI</Text>
+          <Ionicons name="chatbubble-ellipses" size={16} color="#fff" style={{ marginRight: 5 }} />
+          <Text style={styles.askAiText}>Coach</Text>
         </TouchableOpacity>
       </LinearGradient>
 
@@ -2709,8 +2725,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           fully usable. */}
       {(isWorkoutUpdating && isNutritionUpdating) ? (
         <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
-          <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
+          <FadeInView delay={0}>
+            <Ionicons name="barbell-outline" size={40} color={themeColors.primary} style={{ alignSelf: 'center', marginBottom: 12 }} />
+          </FadeInView>
+          <FadeInView delay={200}>
+            <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Building your new plan</Text>
+          </FadeInView>
           <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
             {planStep || 'This usually takes 30–60 seconds.'}
           </Text>
@@ -2862,17 +2882,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             )}
 
-            {/* Trainer plan note — only shows on the Plan sub-tab. */}
-            {workoutSubTab === 'plan' && trainerNote ? (
-              <TouchableOpacity
-                style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
-                onPress={() => setShowTrainerNote(true)}
-                activeOpacity={0.7}>
-                <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
-                  Why this plan? ›
-                </Text>
-              </TouchableOpacity>
-            ) : null}
+            {/* Plan actions row — Why + Edit */}
+            {workoutSubTab === 'plan' && (
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                {trainerNote ? (
+                  <TouchableOpacity
+                    style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55', flex: 1 }]}
+                    onPress={() => setShowTrainerNote(true)}
+                    activeOpacity={0.7}>
+                    <Ionicons name="information-circle-outline" size={14} color={workoutPalette.strong} />
+                    <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
+                      Why this plan
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: trainerNote ? 0 : 1 }]}
+                  onPress={() => setWorkoutSubTab('equipment')}
+                  activeOpacity={0.7}>
+                  <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
+                  <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]}>
+                    Edit Plan
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {workoutSubTab === 'plan' && (availabilityItems.length > 0 || cardioProfile) && (
               <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
@@ -2893,8 +2927,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const isCompleted = isToday && todayDone;
               const isSkipped   = skippedDates.has(key);
               return (
+                <FadeInView key={i} delay={i * 80}>
                 <DayCard
-                  key={i}
                   item={item}
                   themeName={userProfile.themePreference}
                   isToday={isToday}
@@ -2903,11 +2937,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   skipReason={skipReasonsByDate[key]}
                   completedSummary={isCompleted ? todaySummary : null}
                   expanded={expandedDay === i}
-                  onPress={() => setExpandedDay(expandedDay === i ? -1 : i)}
+                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedDay(expandedDay === i ? -1 : i); }}
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                 />
+                </FadeInView>
               );
             })}
           </>
@@ -3009,21 +3044,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {/* Nutritionist plan note — only shows on the Plan sub-tab. */}
-            {mealsSubTab === 'plan' && nutritionistNote ? (
-              <TouchableOpacity
-                style={[styles.planNoteLink, { borderColor: mealPalette.strong + '55' }]}
-                onPress={() => setShowNutritionistNote(true)}
-                activeOpacity={0.7}>
-                <Text style={[styles.planNoteLinkText, { color: mealPalette.strong }]}>
-                  Why this plan? ›
-                </Text>
-              </TouchableOpacity>
-            ) : null}
+            {/* Plan actions row — Why + Edit */}
+            {mealsSubTab === 'plan' && (
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                {nutritionistNote ? (
+                  <TouchableOpacity
+                    style={[styles.planNoteLink, { borderColor: mealPalette.strong + '55', flex: 1 }]}
+                    onPress={() => setShowNutritionistNote(true)}
+                    activeOpacity={0.7}>
+                    <Ionicons name="information-circle-outline" size={14} color={mealPalette.strong} />
+                    <Text style={[styles.planNoteLinkText, { color: mealPalette.strong }]}>
+                      Why this plan
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: nutritionistNote ? 0 : 1 }]}
+                  onPress={() => setMealsSubTab('foods')}
+                  activeOpacity={0.7}>
+                  <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
+                  <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]}>
+                    Edit Plan
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
-              if (!plan) return null;
+              if (!plan) return (
+                <FadeInView key={d.key} delay={idx * 60}>
+                  <View style={{ height: 60, justifyContent: 'center', alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={themeColors.textMuted} />
+                  </View>
+                </FadeInView>
+              );
               const isExpanded = expandedMealDays.has(d.key);
               const isToday = idx === 0;
               const removedSet = new Set(plan.removedMealIds ?? []);
@@ -3042,7 +3097,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const cardBg = isToday ? themeColors.surfaceRaised : themeColors.surface;
               const cardBorder = isToday ? MEALS_ACCENT + '88' : themeColors.border;
               return (
-                <View key={d.key} style={[styles.mealAccordionCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+                <FadeInView key={d.key} delay={idx * 70}>
+                <View style={[styles.mealAccordionCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
                   {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: MEALS_ACCENT, marginBottom: 0 }]} />}
                   <TouchableOpacity
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
@@ -3073,7 +3129,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text>f</Text>
                       </Text>
                     </View>
-                    <Text style={[styles.mealAccordionChevron, { color: themeColors.textMuted }]}>{isExpanded ? '▲' : '▼'}</Text>
+                    <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
 
                   {isExpanded && (
@@ -3102,6 +3158,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     />
                   )}
                 </View>
+                </FadeInView>
               );
             })}
           </>
@@ -3710,12 +3767,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         >
           <View style={[styles.trainerSheet, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
             <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
+            <FadeInView delay={100}>
             <View style={styles.libraryHeader}>
-              <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>AI Coach</Text>
-              <TouchableOpacity onPress={() => setShowTrainerModal(false)}>
-                <Text style={[styles.libraryClose, { color: themeColors.primary }]}>Close</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="chatbubble-ellipses" size={20} color={themeColors.primary} />
+                <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>AI Coach</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowTrainerModal(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={22} color={themeColors.textMuted} />
               </TouchableOpacity>
             </View>
+            </FadeInView>
 
             {/* Mode picker */}
             <View style={[styles.coachModePicker, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
@@ -4870,13 +4932,15 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             </View>
           ) : (
             <>
+              <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000}>
               <View style={[styles.actionRow, { marginBottom: 14 }]}>
-                <TouchableOpacity
+                <PressableScale
                   style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}
-                  onPress={() => onStartWorkout(item.workout!)}>
-                  <Text style={styles.startWorkoutBtnText}>▶  Start Workout</Text>
-                </TouchableOpacity>
+                  onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}>
+                  <Text style={styles.startWorkoutBtnText}><Ionicons name="play" size={14} color="#fff" />  Start Workout</Text>
+                </PressableScale>
               </View>
+              </PulseView>
               <WorkoutCard workout={item.workout!} themeName={themeName} />
               {isToday && (
                 <TouchableOpacity style={styles.skipLink} onPress={() => onSkip(item.workout!.focus)}>
@@ -4921,9 +4985,9 @@ const styles = StyleSheet.create({
   checkinCardChevron: { fontSize: 22, marginLeft: 8, fontWeight: '300' },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 8, paddingRight: 16, paddingBottom: 0, borderBottomWidth: 1 },
-  headerLogoWrap: { width: 200, height: 60, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
-  headerLogo: { width: 200, height: 60 },
-  headerLogoDark: { width: 270, height: 90 },
+  headerLogoWrap: { width: 260, height: 60, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  headerLogo: { width: 260, height: 60 },
+  headerLogoDark: { width: 260, height: 60 },
   greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
@@ -5090,12 +5154,14 @@ const styles = StyleSheet.create({
 
   // ── Compact "Why this plan?" link (replaces full-card explanation) ──────
   planNoteLink: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: radius.full,
     borderWidth: 1,
-    marginBottom: 12,
+    justifyContent: 'center',
   },
   planNoteLinkText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
 

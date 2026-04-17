@@ -6,6 +6,10 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { LayoutAnimation, UIManager, Platform } from 'react-native';
+import FadeInView from '../components/FadeInView';
+import StreakCounter from '../components/StreakCounter';
+import AnimatedNumber from '../components/AnimatedNumber';
+import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -39,8 +43,8 @@ interface ProgressScreenProps {
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-const SHARE_LOGO_LIGHT = require('../../assets/images/main_logo_header-removebg-preview.png');
-const SHARE_LOGO_DARK  = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
+const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
 
 interface StrengthPoint {
   key: string;
@@ -166,12 +170,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
   };
 
+  const [sharingScore, setSharingScore] = useState(false);
   const handleShareFitnessScore = async () => {
     try {
       setShareLoading(true);
+      setSharingScore(true);
+      await new Promise(r => setTimeout(r, 100)); // let logo render
       const ref = fitnessScoreRef.current as any;
       if (!ref?.capture) return;
       const uri = await ref.capture();
+      setSharingScore(false);
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
         await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Fitness Score' });
@@ -429,12 +437,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {compositeFitness && (
             <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.fitnessScoreCard}>
-              {/* Logo for share/export */}
-              <Image
-                source={tc.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
-                style={styles.shareCardLogo}
-                resizeMode="contain"
-              />
+              {sharingScore && (
+                <Image
+                  source={tc.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
+                  style={styles.shareCardLogo}
+                  resizeMode="contain"
+                />
+              )}
               {/* Plain-language verdict — never show a score without
                   a one-line read the user can act on. */}
               <Text style={styles.fitnessVerdict}>
@@ -450,7 +459,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <Text style={styles.fitnessScoreSubtext}>4-pillar composite</Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
-                  <Text style={styles.fitnessScoreValue}>{Math.round(compositeFitness.total)}</Text>
+                  <AnimatedNumber value={Math.round(compositeFitness.total)} style={styles.fitnessScoreValue} />
                 </View>
               </View>
 
@@ -573,7 +582,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </Text>
                 </View>
                 <View style={styles.fitnessScoreCircle}>
-                  <Text style={styles.fitnessScoreValue}>{dietScore.total}</Text>
+                  <AnimatedNumber value={dietScore.total} style={styles.fitnessScoreValue} />
                 </View>
               </View>
               <Text style={styles.fitnessScoreRating}>
@@ -891,9 +900,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text key={d} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: '600', color: tc.textMuted }}>{d}</Text>
                   ))}
                 </View>
-                {/* Calendar grid */}
+                {/* Calendar grid — rows stagger in */}
                 {rows.map((row, ri) => (
-                  <View key={ri} style={{ flexDirection: 'row', marginBottom: 4 }}>
+                  <FadeInView key={ri} delay={ri * 40} style={{ flexDirection: 'row', marginBottom: 4 }}>
                     {row.map(cell => {
                       const isToday = cell.day === today.getDate() && cell.status !== 'empty';
                       return (
@@ -924,7 +933,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         </View>
                       );
                     })}
-                  </View>
+                  </FadeInView>
                 ))}
               </View>
             );
@@ -953,13 +962,33 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 });
                 const totalMin = Math.round(thisWeek.reduce((s, w) => s + (w.durationSeconds || 0), 0) / 60);
                 const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
-                return thisWeek.length > 0 ? (
+                // Compute streak from consecutive days with workouts
+                const allDoneDates = new Set(history.filter(s => s.date && !s.skipped).map(s => {
+                  const p = new Date(s.date);
+                  return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
+                }));
+                let streak = 0;
+                const checkDate = new Date();
+                const todayStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
+                if (!allDoneDates.has(todayStr)) checkDate.setDate(checkDate.getDate() - 1);
+                for (let j = 0; j < 90; j++) {
+                  const ck = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
+                  if (allDoneDates.has(ck)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
+                  else break;
+                }
+
+                return (
+                  <FadeInView delay={0}>
                   <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
-                    <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary }}>
-                      This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
-                    </Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary }}>
+                        This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
+                      </Text>
+                      {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
+                    </View>
                   </View>
-                ) : null;
+                  </FadeInView>
+                );
               })()}
 
               <Text style={styles.sectionLabel}>
@@ -971,6 +1000,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const isExpanded = expandedSessionId === session.id;
                 const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
                 return (
+                  <FadeInView key={session.id ?? i} delay={i * 60}>
                   <TouchableOpacity
                     key={session.id ?? i}
                     style={styles.sessionCard}
@@ -1041,6 +1071,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </View>
                     )}
                   </TouchableOpacity>
+                  </FadeInView>
                 );
               })}
             </>
@@ -1607,8 +1638,8 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     gap: 12,
   },
   shareCardLogo: {
-    width: 100,
-    height: 28,
+    width: 180,
+    height: 40,
     alignSelf: 'center',
     marginBottom: 4,
     opacity: 0.85,

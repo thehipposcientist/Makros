@@ -4,6 +4,7 @@ import {
   TextInput, Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, SupplementItem, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
@@ -69,7 +70,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-          <Text style={[styles.backBtn, { color: c.primary }]}>← Back</Text>
+          <Text style={[styles.backBtn, { color: c.primary }]}><Ionicons name="arrow-back" size={18} /> Back</Text>
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Supplements</Text>
         <TouchableOpacity onPress={handleSave} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
@@ -91,7 +92,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
           />
           {search.length > 0 && (
             <TouchableOpacity onPress={() => setSearch('')}>
-              <Text style={{ color: c.textMuted, fontSize: 14 }}>✕</Text>
+              <Ionicons name="close" size={16} color={c.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -110,7 +111,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                   <Text style={styles.myStackChipIcon}>{s.icon}</Text>
                   <Text style={[styles.myStackChipText, { color: meal.text }]}>{s.name}</Text>
                   <TouchableOpacity onPress={() => toggle(s.name)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={[styles.myStackChipRemove, { color: meal.strong }]}>✕</Text>
+                    <Text style={[styles.myStackChipRemove, { color: meal.strong }]}><Ionicons name="close" size={14} /></Text>
                   </TouchableOpacity>
                 </TouchableOpacity>
               ))}
@@ -228,7 +229,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
               <>
                 <View style={[styles.detailHeader, { borderBottomColor: c.border }]}>
                   <TouchableOpacity onPress={() => setDetailSupp(null)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-                    <Text style={[styles.detailClose, { color: c.primary }]}>← Back</Text>
+                    <Text style={[styles.detailClose, { color: c.primary }]}><Ionicons name="arrow-back" size={18} /> Back</Text>
                   </TouchableOpacity>
                   <Text style={[styles.detailTitle, { color: c.textPrimary }]} numberOfLines={1}>{detailSupp.name}</Text>
                   <TouchableOpacity

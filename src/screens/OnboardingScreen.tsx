@@ -13,8 +13,14 @@ import {
   ActivityIndicator,
   Modal,
   findNodeHandle,
+  LayoutAnimation,
   UIManager,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
 import {
@@ -29,7 +35,7 @@ import {
   goalCategory,
 } from '../constants/goalConfig';
 
-const logo = require('../../assets/images/Fitness brand logo with apple symbol darkmode.png');
+const logo = require('../../assets/images/thallo-logo-white.png');
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
@@ -457,20 +463,22 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     if (error) { Alert.alert('One more thing', error); return; }
 
     if (currentStep < totalSteps - 1) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
       setCurrentStep(s => s + 1);
-      // Scroll to top when advancing — otherwise the next step opens at the
-      // previous step's scroll offset, which is disorienting and often hides
-      // the section header.
-      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: false }));
+      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
     } else {
+      import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
       handleComplete();
     }
   };
 
   const handleBack = () => {
     if (currentStep > 0) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
       setCurrentStep(s => s - 1);
-      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: false }));
+      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
     }
   };
 
@@ -712,7 +720,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
                 onPress={() => selectGoal(g.id)}
                 activeOpacity={0.75}
               >
-                <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
+                <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? colors.primary : colors.textMuted} style={{ marginBottom: 6 }} />
                 <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
               </TouchableOpacity>
             );
@@ -1063,7 +1071,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         />
         {equipmentSearch.length > 0 && (
           <TouchableOpacity style={styles.clearBtn} onPress={() => setEquipmentSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={styles.clearBtnText}>✕</Text>
+            <Text style={styles.clearBtnText}><Ionicons name="close" size={16} /></Text>
           </TouchableOpacity>
         )}
       </View>
@@ -1111,7 +1119,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
                   style={styles.scannedRow}
                   onPress={() => setScannedEquipment(prev => prev.filter(e => e !== name))}>
                   <View style={[styles.scannedCheck, { backgroundColor: colors.primary }]}>
-                    <Text style={styles.scannedCheckMark}>✓</Text>
+                    <Text style={styles.scannedCheckMark}><Ionicons name="checkmark" size={14} color="#fff" /></Text>
                   </View>
                   <Text style={styles.scannedName}>{name}</Text>
                 </TouchableOpacity>
@@ -1206,7 +1214,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         />
         {foodSearch.length > 0 && (
           <TouchableOpacity style={styles.clearBtn} onPress={() => setFoodSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={styles.clearBtnText}>✕</Text>
+            <Text style={styles.clearBtnText}><Ionicons name="close" size={16} /></Text>
           </TouchableOpacity>
         )}
       </View>
@@ -1279,7 +1287,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
               key={f}
               style={[styles.foodChip, styles.foodChipActive]}
               onPress={() => setFoodsAvailable(prev => prev.filter(x => x !== f))}>
-              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>{f} ✕</Text>
+              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>{f} <Ionicons name="close" size={12} /></Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -1302,7 +1310,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
                     prev.map((item, i) => i === idx ? { ...item, selected: !item.selected } : item)
                   )}>
                   <View style={[styles.scannedCheck, { backgroundColor: f.selected ? colors.primary : colors.border }]}>
-                    {f.selected && <Text style={styles.scannedCheckMark}>✓</Text>}
+                    {f.selected && <Text style={styles.scannedCheckMark}><Ionicons name="checkmark" size={14} color="#fff" /></Text>}
                   </View>
                   <Text style={[styles.scannedName, !f.selected && { color: colors.textMuted }]}>{f.name}</Text>
                 </TouchableOpacity>
@@ -1480,7 +1488,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
               setAppleHealthEnabled(true);
               await persistHealthEnabled(true);
             } else {
-              Alert.alert('Permission Needed', 'Please enable Health access in Settings > Privacy > Health > Makros.');
+              Alert.alert('Permission Needed', 'Please enable Health access in Settings > Privacy > Health > Thallo.');
             }
           }}>
           <Text style={styles.chipIcon}>⌚</Text>
@@ -1488,7 +1496,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
             <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Yes, connect Apple Health</Text>
             <Text style={styles.chipWideDesc}>Reads heart rate, steps, sleep, and workouts</Text>
           </View>
-          {appleHealthEnabled && <Text style={{ fontSize: 18 }}>✓</Text>}
+          {appleHealthEnabled && <Ionicons name="checkmark-circle" size={20} />}
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -1586,7 +1594,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 24, paddingBottom: 200 },
   header: { marginTop: 20, marginBottom: 20 },
-  logo: { width: 260, height: 88 },
+  logo: { width: 340, height: 136 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 
   progressBar: { flexDirection: 'row', gap: 6, marginBottom: 32 },

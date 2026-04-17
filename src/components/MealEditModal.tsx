@@ -2,7 +2,13 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
+  LayoutAnimation, UIManager,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import * as ImagePicker from 'expo-image-picker';
 import {
   MealSuggestion, DailyNutritionPlan, SavedMealTemplate,
@@ -549,7 +555,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             {onToggleRoutine && (
               <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
                 <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
-                  {meal.isRoutine ? '📌 Routine' : '○ Pin as Routine'}
+                  {meal.isRoutine ? 'Pinned' : 'Pin as Routine'}
                 </Text>
               </TouchableOpacity>
             )}
@@ -580,9 +586,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           {instructionsLoading ? (
             <ActivityIndicator size="small" color={colors.accent} />
           ) : (
-            <Text style={{ color: colors.textPrimary, fontWeight: '700', fontSize: 14 }}>
-              🍳  {instructions ? 'View recipe' : 'How to make this'}
-            </Text>
+            <>
+              <Ionicons name="restaurant-outline" size={16} color={colors.textPrimary} />
+              <Text style={{ color: colors.textPrimary, fontWeight: '700', fontSize: 14 }}>
+                {instructions ? 'View Recipe' : 'Get Recipe'}
+              </Text>
+            </>
           )}
         </TouchableOpacity>
 
@@ -599,8 +608,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
               <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 }}>RECIPE</Text>
-              <TouchableOpacity onPress={() => setShowInstructions(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={{ fontSize: 13, color: colors.textMuted }}>Hide</Text>
+              <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setShowInstructions(false); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="chevron-up" size={16} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
             <Text style={{ fontSize: 13, color: colors.textPrimary, lineHeight: 19 }}>{instructions}</Text>
@@ -696,8 +705,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                     />
                     <TouchableOpacity
                       style={s.unitBtn}
-                      onPress={() => setUnitPickerIdx(unitPickerIdx === idx ? null : idx)}>
-                      <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} ▾</Text>
+                      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setUnitPickerIdx(unitPickerIdx === idx ? null : idx); }}>
+                      <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} <Ionicons name="chevron-down" size={11} /></Text>
                     </TouchableOpacity>
                   </View>
                   {unitPickerIdx === idx && (
@@ -724,15 +733,18 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                       ))}
                     </View>
                   )}
-                  <Text style={s.currentFoodMacros}>
-                    {Math.round(it.calories)} cal · {Math.round(it.protein)}g pro · {Math.round(it.carbs)}g carbs · {Math.round(it.fat)}g fat
-                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                    <Text style={{ fontSize: 11, color: colors.accent, fontWeight: '600' }}>{Math.round(it.calories)} cal</Text>
+                    <Text style={{ fontSize: 11, color: colors.primary, fontWeight: '600' }}>{Math.round(it.protein)}g P</Text>
+                    <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>{Math.round(it.carbs)}g C</Text>
+                    <Text style={{ fontSize: 11, color: '#A78BFA', fontWeight: '600' }}>{Math.round(it.fat)}g F</Text>
+                  </View>
                 </View>
                 <TouchableOpacity
                   onPress={() => removeItem(idx)}
                   style={s.removeBtn}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={s.removeText}>−</Text>
+                  <Ionicons name="remove-circle-outline" size={20} color={colors.error ?? '#EF4444'} />
                 </TouchableOpacity>
               </View>
             ))}
@@ -777,13 +789,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                   disabled={scanLoading}>
                   {scanLoading
                     ? <ActivityIndicator size="small" color={colors.primary} />
-                    : <Text style={s.scanBtnText}>Take Photo</Text>}
+                    : <><Ionicons name="camera-outline" size={16} color={colors.primary} /><Text style={s.scanBtnText}>Camera</Text></>}
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[s.scanBtn, scanLoading && { opacity: 0.5 }]}
                   onPress={() => pickAndScan('library')}
                   disabled={scanLoading}>
-                  <Text style={s.scanBtnText}>Choose Photo</Text>
+                  <Ionicons name="images-outline" size={16} color={colors.primary} /><Text style={s.scanBtnText}>Photos</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -800,7 +812,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               />
               {search.length > 0 && (
                 <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={s.clearBtnText}>✕</Text>
+                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
                 </TouchableOpacity>
               )}
               {authToken && search.length > 1 && (

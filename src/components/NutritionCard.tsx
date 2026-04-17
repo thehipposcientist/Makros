@@ -10,6 +10,8 @@ import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
 import NutritionInsightCard from './NutritionInsightCard';
+import SwipeableRow, { SwipeAction } from './SwipeableRow';
+import AnimatedNumber from './AnimatedNumber';
 
 interface NutritionCardProps {
   title?: string;
@@ -45,6 +47,7 @@ export default function NutritionCard({
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
+  const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const section = theme.sections.meals;
@@ -361,6 +364,15 @@ export default function NutritionCard({
             arranged with the up/down arrows. Routines are tagged with a
             📌 emoji but are otherwise rendered identically to other meals. */}
         <View style={styles.meals}>
+          {visibleMeals.length > 0 && !swipeHintDismissed && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 8, paddingBottom: 4, gap: 4 }}>
+              <Ionicons name="arrow-back" size={11} color={colors.textMuted} />
+              <Text style={{ fontSize: 10, color: colors.textMuted }}>Swipe meal for more options</Text>
+              <TouchableOpacity onPress={() => setSwipeHintDismissed(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close" size={12} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+          )}
           {visibleMeals.map(({ key, emoji, meal }, i) => (
             <MealRow
               key={key}
@@ -425,9 +437,7 @@ function MacroTracker({
     <View style={styles.macroTracker}>
       <Text style={styles.macroTrackerLabel}>{label}</Text>
       <View style={styles.macroTrackerValues}>
-        <Text style={[styles.macroActual, { color: over ? colors.error : color }]}>
-          {actual}{unit}
-        </Text>
+        <AnimatedNumber value={actual} suffix={unit} style={[styles.macroActual, { color: over ? colors.error : color }]} />
         <Text style={styles.macroSep}>/</Text>
         <Text style={styles.macroTarget}>{target}{unit}</Text>
       </View>
@@ -462,7 +472,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
-  const [itemsExpanded, setItemsExpanded] = useState(false);
+  const [itemsExpanded, setItemsExpanded] = useState(true);
   const withItems = ensureItems(meal);
   const itemRows = withItems.items && withItems.items.length > 0
     ? withItems.items.map((it, i) => ({
@@ -476,16 +486,22 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         amount: meal.amounts?.[i] ?? '',
       }));
 
+  const swipeActions: SwipeAction[] = [];
+  if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: '#fff', bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
+  if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp });
+  if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown });
+  if (onRemove) swipeActions.push({ icon: 'trash-outline', color: '#fff', bgColor: colors.error ?? '#EF4444', onPress: () => onRemove(mealType), label: 'Remove' });
+
   return (
+    <SwipeableRow actions={swipeActions}>
     <View style={[styles.mealItem, checked && styles.mealItemDone]}>
-      {/* Title row — checkbox + meal name + inline pin badge + actions.
-          Everything in one line, no wrapping action bar. */}
+      {/* Title row — checkbox + meal name + inline pin badge + actions. */}
       <View style={styles.mealHeader}>
         <TouchableOpacity
           style={[styles.checkbox, checked && styles.checkboxDone]}
           onPress={() => onToggle?.(mealType)}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          {checked && <Text style={styles.checkmark}>✓</Text>}
+          {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
         </TouchableOpacity>
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -518,36 +534,11 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
             )}
           </View>
         </View>
-        {/* Trailing icon strip — reorder + actions, all icon-only. */}
+        {/* Edit button — primary visible action */}
         <View style={styles.iconStrip}>
           {onEdit && (
-            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Ionicons name="create-outline" size={16} color={mealAccent.strong} />
-            </TouchableOpacity>
-          )}
-          {onShowRecipe && (
-            <TouchableOpacity onPress={() => onShowRecipe(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Ionicons name="restaurant-outline" size={15} color={colors.textMuted} />
-            </TouchableOpacity>
-          )}
-          {onMoveUp && (
-            <TouchableOpacity onPress={onMoveUp} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Ionicons name="chevron-up" size={16} color={colors.textMuted} />
-            </TouchableOpacity>
-          )}
-          {onMoveDown && (
-            <TouchableOpacity onPress={onMoveDown} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }} style={styles.iconBtn}>
-              <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-            </TouchableOpacity>
-          )}
-          {onRemove && (
-            <TouchableOpacity
-              onPress={() => onRemove(mealType)}
-              onLongPress={() => onHardDelete?.(mealType)}
-              delayLongPress={500}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
-              style={styles.iconBtn}>
-              <Ionicons name="close" size={16} color={colors.error} />
+            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn}>
+              <Ionicons name="create-outline" size={17} color={mealAccent.strong} />
             </TouchableOpacity>
           )}
         </View>
@@ -605,6 +596,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         );
       })()}
     </View>
+    </SwipeableRow>
   );
 }
 

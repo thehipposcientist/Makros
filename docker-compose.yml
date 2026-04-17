@@ -1,26 +1,26 @@
 services:
   db:
     image: postgres:16
-    container_name: makros-pg
+    container_name: thallo-pg
     restart: unless-stopped
     environment:
-      POSTGRES_USER: makros
-      POSTGRES_PASSWORD: makros
-      POSTGRES_DB: makros
+      POSTGRES_USER: thallo
+      POSTGRES_PASSWORD: thallo
+      POSTGRES_DB: thallo
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "5433:5432"
     volumes:
-      - makros-pgdata:/var/lib/postgresql/data
+      - thallo-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U makros"]
+      test: ["CMD-SHELL", "pg_isready -U thallo"]
       interval: 3s
       timeout: 3s
       retries: 10
 
   backend:
     build: ./backend
-    container_name: makros-backend
+    container_name: thallo-backend
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -28,10 +28,10 @@ services:
       - ./backend/.env
     environment:
       # Override DATABASE_URL to use the Docker network hostname
-      DATABASE_URL: postgresql://makros:makros@db:5432/makros
+      DATABASE_URL: postgresql://thallo:thallo@db:5432/thallo
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
-  makros-pgdata:
+  thallo-pgdata:

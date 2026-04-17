@@ -2,7 +2,13 @@ import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
+  LayoutAnimation, UIManager,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import * as ImagePicker from 'expo-image-picker';
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
@@ -1153,7 +1159,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   style={[styles.goalCard, active && styles.goalCardActive]}
                   onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setPace('moderate'); }}
                   activeOpacity={0.75}>
-                  <Text style={styles.goalIcon}>{catDef?.icon ?? '🎯'}</Text>
+                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={24} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 4 }} />
                   <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
                 </TouchableOpacity>
               );
@@ -1197,7 +1203,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     <Text style={{ fontSize: 15, fontWeight: active ? '700' : '500', color: active ? tc.primary : tc.textPrimary }}>{opt.label}</Text>
                     <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>{opt.desc}</Text>
                   </View>
-                  {active && <Text style={{ fontSize: 16, color: tc.primary, fontWeight: '700' }}>✓</Text>}
+                  {active && <Ionicons name="checkmark" size={16} color={tc.primary} />}
                 </TouchableOpacity>
               );
             })}
@@ -1481,7 +1487,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{displayName}</Text>
                     <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }} numberOfLines={2}>{displayHint}</Text>
                   </View>
-                  <Text style={{ fontSize: 16, color: tc.textMuted, marginLeft: 8 }}>›</Text>
+                  <Ionicons name="chevron-forward" size={16} color={tc.textMuted} style={{ marginLeft: 8 }} />
                 </TouchableOpacity>
               );
             })()}
@@ -1526,7 +1532,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                         key={name}
                         style={[styles.chip, styles.chipActive]}
                         onPress={() => setEquipment(prev => prev.filter(e => e !== name))}>
-                        <Text style={[styles.chipText, styles.chipTextActive]}>{name}  ✕</Text>
+                        <Text style={[styles.chipText, styles.chipTextActive]}>{name}  <Ionicons name="close" size={12} /></Text>
                       </TouchableOpacity>
                     ))}
                   </View>
@@ -1562,7 +1568,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   onPress={() => setSelectedExercise(null)}
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: tc.primary + '12', paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.lg, borderWidth: 1, borderColor: tc.primary + '30' }}
                   activeOpacity={0.7}>
-                  <Text style={{ fontSize: 18, color: tc.primary }}>←</Text>
+                  <Ionicons name="arrow-back" size={18} color={tc.primary} />
                   <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '700', flex: 1 }}>Back to exercises</Text>
                   <Text style={{ fontSize: 11, color: tc.textMuted }}>Tap to close</Text>
                 </TouchableOpacity>
@@ -1793,7 +1799,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                             )}
                           </View>
                         </View>
-                        <Text style={{ fontSize: 14, color: tc.textMuted }}>→</Text>
+                        <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
                       </TouchableOpacity>
                     ))}
                     {filteredExerciseLibrary.length > 50 && (
@@ -1828,7 +1834,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 /* Muscle detail view */
                 <View style={{ gap: 12 }}>
                   <TouchableOpacity onPress={() => setSelectedMuscle(null)} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '600' }}>← Back</Text>
+                    <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '600' }}><Ionicons name="arrow-back" size={14} /> Back</Text>
                   </TouchableOpacity>
                   <View style={{ gap: 4 }}>
                     <Text style={{ fontSize: 24 }}>{selectedMuscle.emoji}</Text>
@@ -1887,7 +1893,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                             <Text style={styles.muscleCardName}>{muscle.commonName}</Text>
                             <Text style={styles.muscleCardRegion}>{muscle.bodyRegion}</Text>
                           </View>
-                          <Text style={{ fontSize: 14, color: tc.textMuted }}>→</Text>
+                          <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
                         </View>
                         <Text style={styles.muscleCardDesc} numberOfLines={2}>{muscle.shortDescription}</Text>
                       </TouchableOpacity>
@@ -2041,10 +2047,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
             <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
               <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('camera')} disabled={scanFoodsLoading}>
-                <Text style={styles.sectionAddBtnText}>📷 Camera</Text>
+                <Text style={styles.sectionAddBtnText}><Ionicons name="camera-outline" size={14} /> Camera</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('library')} disabled={scanFoodsLoading}>
-                <Text style={styles.sectionAddBtnText}>🖼 Library</Text>
+                <Text style={styles.sectionAddBtnText}><Ionicons name="images-outline" size={14} /> Library</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => setAddFoodVisible(true)}>
                 <Text style={styles.sectionAddBtnText}>+ Manual</Text>
@@ -2182,7 +2188,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               )}
               {savedMeals.length > 0 && (
                 <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>📸  Saved Meals</Text>
+                  <Text style={styles.chipGroupLabel}>Saved Meals</Text>
                   <View style={styles.savedMealsList}>
                     {savedMeals.map((meal) => (
                       <View key={meal.id} style={styles.savedMealCard}>
@@ -2583,7 +2589,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <Text style={{ fontSize: 15, fontWeight: '700', color: preferredSplit === 'auto' ? tc.primary : tc.textPrimary }}>
                     Auto (recommended)
                   </Text>
-                  {preferredSplit === 'auto' && <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 16 }}>✓</Text>}
+                  {preferredSplit === 'auto' && <Ionicons name="checkmark" size={18} color={tc.primary} />}
                 </View>
                 <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>
                   Best split for your goal + training days.
@@ -2616,7 +2622,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                           </View>
                         )}
                       </View>
-                      {active && <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 16 }}>✓</Text>}
+                      {active && <Ionicons name="checkmark" size={18} color={tc.primary} />}
                     </View>
                     <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 4, lineHeight: 16 }}>
                       {opt.description}
@@ -2709,7 +2715,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <Image source={{ uri: routinePhotoUri }} style={{ width: '100%', height: 130 }} resizeMode="cover" />
                 ) : (
                   <View style={{ alignItems: 'center', gap: 4 }}>
-                    <Text style={{ fontSize: 28 }}>📷</Text>
+                    <Ionicons name="camera-outline" size={28} color={tc.primary} />
                     <Text style={{ fontSize: 13, color: tc.textSecondary, fontWeight: '600' }}>Add photo (optional)</Text>
                   </View>
                 )}

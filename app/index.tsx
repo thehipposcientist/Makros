@@ -8,7 +8,7 @@ import * as KeepAwake from 'expo-keep-awake';
  *  JS execution ~30s after the app backgrounds or the screen locks, which
  *  kills long-running `fetch` calls. A dedicated tag so multiple activations
  *  don't stomp each other. */
-const PLAN_GEN_AWAKE_TAG = 'makros-plan-gen';
+const PLAN_GEN_AWAKE_TAG = 'thallo-plan-gen';
 async function holdPlanGenAwake(): Promise<void> {
   try { await KeepAwake.activateKeepAwakeAsync(PLAN_GEN_AWAKE_TAG); } catch {}
 }
@@ -907,8 +907,8 @@ export default function Index() {
   if (isLoading) return (
     <View style={{ flex: 1, backgroundColor: '#0D0F14', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
       <Image
-        source={require('../assets/images/Fitness brand logo with apple symbol darkmode.png')}
-        style={{ width: 300, height: 300 * 0.58, marginBottom: 48 }}
+        source={require('../assets/images/thallo-logo-white.png')}
+        style={{ width: 360, height: 140, marginBottom: 48 }}
         resizeMode="contain"
       />
       <ActivityIndicator color="#15C7B8" size="large" />
@@ -1226,7 +1226,7 @@ function AccountInfoModal({
                     }
                     const granted = await requestHealthPermissions();
                     if (!granted) {
-                      Alert.alert('Permission Required', 'Please enable Health access in Settings > Privacy > Health > Makros.');
+                      Alert.alert('Permission Required', 'Please enable Health access in Settings > Privacy > Health > Thallo.');
                       return;
                     }
                   }

@@ -25,13 +25,13 @@ export interface GoalCategory {
 }
 
 export const GOAL_CATEGORIES: GoalCategory[] = [
-  { id: 'muscle_physique',       label: 'Muscle & Physique',       icon: '💪' },
-  { id: 'fat_loss',              label: 'Fat Loss',                icon: '🔥' },
-  { id: 'strength',              label: 'Strength',                icon: '🏋️' },
-  { id: 'cardio_endurance',      label: 'Cardio & Endurance',      icon: '🏃' },
-  { id: 'athletic_performance',  label: 'Athletic Performance',    icon: '⚡' },
-  { id: 'health_longevity',      label: 'Health & Longevity',      icon: '❤️' },
-  { id: 'lifestyle_consistency', label: 'Lifestyle & Consistency', icon: '🎯' },
+  { id: 'muscle_physique',       label: 'Muscle & Physique',       icon: 'barbell-outline' },
+  { id: 'fat_loss',              label: 'Fat Loss',                icon: 'flame-outline' },
+  { id: 'strength',              label: 'Strength',                icon: 'fitness-outline' },
+  { id: 'cardio_endurance',      label: 'Cardio & Endurance',      icon: 'heart-outline' },
+  { id: 'athletic_performance',  label: 'Athletic Performance',    icon: 'flash-outline' },
+  { id: 'health_longevity',      label: 'Health & Longevity',      icon: 'leaf-outline' },
+  { id: 'lifestyle_consistency', label: 'Lifestyle & Consistency', icon: 'checkmark-circle-outline' },
 ];
 
 // ─── Primary Goals ───────────────────────────────────────────────────────────

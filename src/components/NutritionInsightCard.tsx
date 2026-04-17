@@ -1,5 +1,9 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import { FIX_SUGGESTIONS, NutrientInsight, NutrientKey } from '../utils/nutritionLayers';
 import { MealSuggestion } from '../types';
 
@@ -98,7 +102,7 @@ export default function NutritionInsightCard({ insight, themeColors, meals }: Pr
   return (
     <TouchableOpacity
       activeOpacity={0.7}
-      onPress={() => setExpanded(!expanded)}
+      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpanded(!expanded); }}
       style={[styles.card, { backgroundColor: themeColors.surface, borderLeftColor: accent, borderColor: themeColors.border }]}>
       <View style={styles.header}>
         <Text style={[styles.label, { color: themeColors.textPrimary }]}>
