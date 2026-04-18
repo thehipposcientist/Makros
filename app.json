@@ -4,13 +4,25 @@
     "slug": "thallo",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "icon": "./assets/images/thallo-logo-black.png",
+    "splash": {
+      "image": "./assets/images/thallo-logo-white.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D0F14"
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
     "plugins": [
       "expo-notifications",
       "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Thallo uses the camera to scan food barcodes for nutrition tracking."
+        }
+      ],
       [
         "react-native-health",
         {
@@ -19,13 +31,23 @@
       ]
     ],
     "ios": {
+      "bundleIdentifier": "com.thallo.app",
+      "supportsTablet": false,
       "infoPlist": {
+        "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes and take food photos for nutrition tracking.",
         "NSHealthShareUsageDescription": "Thallo reads your resting heart rate, steps, workouts, sleep, and active energy from Apple Health to calculate your fitness score and recovery status.",
         "NSHealthUpdateUsageDescription": "Thallo saves your completed workouts to Apple Health so they appear in your health timeline."
       },
       "entitlements": {
         "com.apple.developer.healthkit": true,
         "com.apple.developer.healthkit.background-delivery": false
+      }
+    },
+    "android": {
+      "package": "com.thallo.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/thallo-logo-black.png",
+        "backgroundColor": "#0D0F14"
       }
     },
     "scheme": "thallo",

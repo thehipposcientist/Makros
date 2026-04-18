@@ -47,9 +47,9 @@ function getSteps(): StepKey[] {
   // Meal routine moved out of onboarding — users can pin meals as routines
   // from the Home screen after the first plan generates, which gives a
   // much better UX than typing prose at signup time.
-  const base: StepKey[] = ['goal', 'goalRefine', 'physicalStats', 'trainingDays', 'equipment', 'foods', 'supplements'];
+  // Compressed onboarding: 5 core steps + optional health/context
+  const base: StepKey[] = ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
   if (Platform.OS === 'ios') base.push('appleHealth');
-  base.push('context');
   return base;
 }
 
@@ -1067,6 +1067,35 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           Tap to customize your training days
         </Text>
       </View>
+
+      {/* Recent workout quick-ask */}
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>Did you work out recently?</Text>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          {[
+            { label: 'Today', value: 'today' },
+            { label: 'Yesterday', value: 'yesterday' },
+            { label: 'Not recently', value: '' },
+          ].map(opt => {
+            const active = lastWorkoutContext === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={{
+                  flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center',
+                  backgroundColor: active ? colors.primary : colors.surface,
+                  borderWidth: 1, borderColor: active ? colors.primary : colors.border,
+                }}
+                onPress={() => setLastWorkoutContext(opt.value)}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: active ? '#fff' : colors.textSecondary }}>{opt.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
+          This helps us plan your first week. You can always recalibrate your plan later from settings.
+        </Text>
+      </View>
     </View>
   );
 
@@ -1213,7 +1242,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Kitchen</Text>
       <Text style={styles.stepDescription}>
-        Pick a preset or select individual foods. You can always add more later.
+        Pick a preset or select individual foods. You can change everything later from settings.
         {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
       </Text>
 

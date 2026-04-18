@@ -949,6 +949,43 @@ def _rotate_recipe_to_avoid_recent(
     return recipe
 
 
+def _rotate_recipe_for_fatigue(
+    recipe: list[DayArchetype],
+    muscle_fatigue: dict[str, float],
+) -> list[DayArchetype]:
+    """Prefer rotations where day 0 targets the freshest muscles."""
+    if not muscle_fatigue or len(recipe) < 2:
+        return recipe
+
+    from .activity_impact import derive_focus_readiness, MuscleFatigue
+    mf = MuscleFatigue()
+    for m, v in muscle_fatigue.items():
+        if hasattr(mf, m):
+            mf.add(m, v)
+
+    best_rotation = recipe
+    best_score = -1.0
+
+    for shift in range(len(recipe)):
+        candidate = recipe[shift:] + recipe[:shift]
+        fam = archetype_to_focus_family(candidate[0])
+        if not fam:
+            continue
+        readiness = derive_focus_readiness(mf, fam)
+        # Slight preference for keeping original order (shift=0 gets +0.01 bonus)
+        bonus = 0.01 if shift == 0 else 0.0
+        if readiness + bonus > best_score:
+            best_score = readiness + bonus
+            best_rotation = candidate
+
+    if best_rotation != recipe:
+        old_fam = archetype_to_focus_family(recipe[0])
+        new_fam = archetype_to_focus_family(best_rotation[0])
+        print(f"[weekly_recipe] fatigue rotation: {old_fam} → {new_fam} (readiness {best_score:.0%})")
+
+    return best_rotation
+
+
 def generate_weekly_recipe(
     profile: GoalProfile,
     days_per_week: int,
@@ -958,6 +995,7 @@ def generate_weekly_recipe(
     recent_focus_buckets: tuple[str, ...] | list[str] = (),
     recent_focus_families: tuple[str, ...] | list[str] = (),
     priority_region: str = "balanced",
+    muscle_fatigue: dict[str, float] | None = None,
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -1024,9 +1062,11 @@ def generate_weekly_recipe(
     recipe = _rotate_recipe_to_avoid_recent(
         recipe, rotation_recent, mode=mode,
     )
-    # Rotation can reintroduce adjacent same-bucket duplicates that
-    # the recipe generator already cleaned up (e.g. rotating
-    # [P,Z2,Pu,S,L,P] by 1 → [Z2,Pu,S,L,P,P]). Sweep again.
+    # Fatigue-aware rotation: if user has real muscle fatigue data,
+    # prefer starting the week with the freshest focus.
+    if muscle_fatigue and mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
+        recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
+    # Rotation can reintroduce adjacent same-bucket duplicates.
     recipe = _repair_adjacent_duplicates(recipe)
     print(
         f"[weekly_recipe] recipe_after_rotation={[a.value for a in recipe]}"

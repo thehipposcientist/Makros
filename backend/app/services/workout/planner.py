@@ -96,6 +96,7 @@ class PlannerInputs:
     # compare against archetype focus families. Populated alongside
     # recent_focus_buckets by history.most_recent_completed_focus.
     recent_focus_families: tuple[str, ...] = ()
+    muscle_fatigue: dict | None = None  # MuscleFatigue.to_dict() for weekly rotation
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -1140,6 +1141,7 @@ def generate_workout_plan(
         recent_focus_buckets=inputs.recent_focus_buckets,
         recent_focus_families=inputs.recent_focus_families,
         priority_region=inputs.priority_region,
+        muscle_fatigue=inputs.muscle_fatigue,
     )
     print(
         f"[workout_planner] mode={profile.planner_mode} "
@@ -1417,8 +1419,79 @@ def generate_workout_plan(
         if lifting_split
         else profile.planner_mode.replace("_", " ").title()
     )
+    # ── Weekly core injection ────────────────────────────────────────
+    # Instead of hardcoding core into every template (which steals
+    # accessories), inject core into the best days based on weekly
+    # targets. Days that already have core from their template are
+    # counted toward the target.
+    from .core_planning import select_core_days, make_core_slot
+    try:
+        recipe_values = [a.value for a in recipe] if recipe else [d.get("_archetype", "") for d in days_out]
+        core_day_indices = select_core_days(recipe_values, inputs.goal, inputs.days_per_week)
+
+        for day_idx in core_day_indices:
+            if day_idx >= len(days_out):
+                continue
+            day = days_out[day_idx]
+            exercises = day.get("exercises", [])
+            # Skip if this day already has core from its template
+            already_has_core = any(
+                ex.get("_primary_muscle") == "core" or ex.get("_slot") == "Core"
+                or "core" in (ex.get("name", "") or "").lower()
+                for ex in exercises
+            )
+            if already_has_core:
+                continue
+
+            # Create and fill a core slot
+            core_slot_def = make_core_slot(day_idx)
+            from .slots import Slot
+            core_slot = Slot(
+                label=core_slot_def.label,
+                movement_pattern=core_slot_def.movement_pattern,
+                primary_muscle_hint="core",
+                role="core",
+            )
+            # Pick a core exercise
+            _owned_eq = set(inputs.equipment_slugs)
+            _disliked = {d.lower() for d in inputs.disliked_exercises}
+            core_ex = pick_for_slot(
+                all_exercises, core_slot,
+                owned_equipment=_owned_eq,
+                disliked_exercises=_disliked,
+                rng=rng,
+                history_familiarity=history_familiarity,
+                day_used_slugs=set(ex.get("_slug", "") for ex in exercises),
+                recent_muscle_exercises=recent_muscle_exercises,
+            )
+            if core_ex:
+                from .prescriptions import prescribe_for_slot
+                archetype = recipe[day_idx] if recipe and day_idx < len(recipe) else None
+                prescription = prescribe_for_slot(archetype, core_slot, core_ex, inputs) if archetype else None
+                equipment_label = _equipment_label(core_ex)
+                core_out = {
+                    "name": core_ex["name"],
+                    "sets": prescription.sets if prescription else 3,
+                    "reps": prescription.reps if prescription else "10-15",
+                    "restSeconds": prescription.rest_seconds if prescription else 45,
+                    "equipment": equipment_label,
+                    "_slug": core_ex.get("slug"),
+                    "_slot": core_slot.label,
+                    "_role": "core",
+                    "_primary_muscle": "core",
+                }
+                exercises.append(core_out)
+                day["exercises"] = exercises
+
+        core_count = sum(1 for d in days_out
+            for ex in d.get("exercises", [])
+            if ex.get("_primary_muscle") == "core" or ex.get("_role") == "core")
+        print(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
+    except Exception as e:
+        print(f"[planner] core injection failed (non-fatal): {e}")
+
     plan = {
-        "trainerNote": "",  # left empty so the caller can fill via AI if desired
+        "trainerNote": "",
         "workout_plan": {
             "name": f"{profile.label} — {plan_name_suffix}",
             "totalDays": inputs.days_per_week,
@@ -1428,9 +1501,6 @@ def generate_workout_plan(
             "goal_bucket": profile.bucket,
         },
     }
-    # Final validation pass — log violations and attempt lightweight
-    # repairs. This is the last line of defense before the plan leaves
-    # the planner.
     plan = validate_plan(plan, inputs, recipe)
     return plan
 

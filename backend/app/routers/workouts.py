@@ -275,6 +275,7 @@ def generate_single_day(
         rng_seed=current_user.id + body.day_index,
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
+        muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
     )
 
     # Generate full plan (fast — deterministic, no AI)
@@ -330,15 +331,26 @@ def generate_single_day(
             day = {**day, "focus": body.focus_override}
             print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
 
-    # Graduated fatigue response (not binary blocking)
+    # Graduated fatigue response — 5 tiers from force-recovery to proceed
     if fatigue_snapshot and not body.focus_override:
         from app.services.workout.focus_normalize import normalize_focus_to_family
-        from app.services.workout.activity_impact import derive_focus_readiness
         day_family = normalize_focus_to_family(day.get("focus", ""))
         day_readiness = fatigue_snapshot.focus_readiness.get(day_family, 1.0) if day_family else 1.0
+        systemic = fatigue_snapshot.muscle_fatigue.systemic
 
-        if day_readiness < 0.2:
-            # Very fatigued: swap to the most ready alternative day
+        # TIER 0: Force recovery when systemically overtrained
+        if fatigue_snapshot.readiness_score < 20 or systemic > 0.8:
+            day = {
+                "day": day.get("day", "Day 1"),
+                "focus": "Recovery",
+                "stimulus": "recovery",
+                "exercises": [],
+                "_forced_recovery": True,
+            }
+            print(f"[generate-day] FORCE RECOVERY: readiness={fatigue_snapshot.readiness_score}% systemic={systemic:.2f}")
+
+        elif day_readiness < 0.2:
+            # TIER 1: swap to most ready alternative
             best_alt, best_readiness = None, -1.0
             for alt_idx, alt_day in enumerate(days):
                 alt_fam = normalize_focus_to_family(alt_day.get("focus", ""))
@@ -351,7 +363,7 @@ def generate_single_day(
                 idx, day = best_alt
 
         elif day_readiness < 0.4:
-            # Moderately fatigued: downgrade stimulus
+            # TIER 2: downgrade stimulus aggressively
             if day.get("stimulus") in ("strength", "power"):
                 day = {**day, "stimulus": "hypertrophy"}
                 print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
@@ -360,10 +372,31 @@ def generate_single_day(
                 print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → volume")
 
         elif day_readiness < 0.6:
-            # Slightly fatigued: heavy → hypertrophy only
+            # TIER 3: heavy → hypertrophy only
             if day.get("stimulus") in ("strength", "power"):
                 day = {**day, "stimulus": "hypertrophy"}
                 print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
+
+        # TIER 4 (≥0.6): proceed as planned — no changes
+
+    # Mixed-day partial adaptation: reduce volume for fatigued muscles
+    # within a day while preserving fresh muscles
+    if fatigue_snapshot and day.get("exercises") and not day.get("_forced_recovery"):
+        mf_dict = fatigue_snapshot.muscle_fatigue.to_dict()
+        adapted = []
+        for ex in day["exercises"]:
+            primary = ex.get("_primary_muscle", "")
+            fl = mf_dict.get(primary, 0.0)
+            role = ex.get("_role", "")
+            if role in ("warmup", "core"):
+                adapted.append(ex)
+            elif fl > 0.8:
+                adapted.append({**ex, "sets": max(1, ex.get("sets", 3) - 2)})
+            elif fl > 0.6:
+                adapted.append({**ex, "sets": max(2, ex.get("sets", 3) - 1)})
+            else:
+                adapted.append(ex)
+        day = {**day, "exercises": adapted}
 
     return {
         "day": day,

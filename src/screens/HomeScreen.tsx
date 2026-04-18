@@ -1061,6 +1061,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'exercises' | 'muscles' | 'equipment'>('plan');
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
+  const [reminderEnabled, setReminderEnabled] = useState(false);
   useEffect(() => { import('../utils/feedback').then(f => f.loadSettings()).then(setFeedbackSettings).catch(() => {}); }, []);
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
@@ -1279,6 +1280,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   useEffect(() => {
     AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
+    import('../utils/workoutReminders').then(({ loadReminderSettings }) =>
+      loadReminderSettings().then(s => setReminderEnabled(s.enabled)).catch(() => {})
+    );
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
     // Check if a weekly review is due
@@ -3667,6 +3671,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             </View>
           ))}
+
+          {/* Workout Reminders */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
+          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Workout Reminders</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Daily notification on training days</Text>
+              </View>
+              <Switch
+                value={reminderEnabled}
+                onValueChange={async (v) => {
+                  setReminderEnabled(v);
+                  const { saveReminderSettings } = await import('../utils/workoutReminders');
+                  await saveReminderSettings({ enabled: v, hour: 8, minute: 0 });
+                }}
+                trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                thumbColor={reminderEnabled ? themeColors.primary : themeColors.textMuted}
+              />
+            </View>
+          </View>
 
           {/* Feedback Settings */}
           <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK</Text>
