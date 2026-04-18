@@ -45,31 +45,78 @@ interface Macros { calories: number; protein: number; carbs: number; fat: number
 const _WEIGHT_UNITS = new Set<FoodUnit>(['g', 'kg', 'oz', 'lb']);
 const _VOLUME_UNITS = new Set<FoodUnit>(['ml', 'l', 'fl_oz', 'cup', 'tbsp', 'tsp', 'pint', 'quart', 'gallon']);
 
-function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: number): number {
-  // Estimate a reasonable default quantity when switching between incompatible
-  // unit systems (e.g. serving→grams). The idea: 1 serving ≈ 100-150g for
-  // most foods. We pick sensible defaults so the user has a starting point.
+// Approximate grams per cup for common food types. Used when
+// converting between weight and volume without exact density data.
+const _GRAMS_PER_CUP: Record<string, number> = {
+  // Grains / dry
+  oat: 80, oatmeal: 80, oats: 80, granola: 120, rice: 185,
+  flour: 120, quinoa: 170, couscous: 175, cereal: 30, pasta: 100,
+  // Dairy / wet
+  milk: 244, yogurt: 245, 'greek yogurt': 245, 'cottage cheese': 226,
+  cream: 240, 'sour cream': 230,
+  // Produce
+  broccoli: 91, spinach: 30, kale: 67, lettuce: 36, carrot: 128,
+  berries: 150, berry: 150, blueberry: 148, strawberry: 152,
+  // Proteins (cooked, chopped)
+  chicken: 140, turkey: 140, beef: 135, pork: 135, fish: 140,
+  // Nuts / spreads
+  'peanut butter': 258, 'almond butter': 258, almonds: 143, nuts: 140,
+  // Legumes
+  beans: 180, lentils: 200, chickpeas: 164,
+  // Default for unknowns — somewhere between grains and produce
+  _default: 120,
+};
+
+function _estimateGramsPerCup(foodName: string): number {
+  const lower = (foodName || '').toLowerCase();
+  for (const [key, grams] of Object.entries(_GRAMS_PER_CUP)) {
+    if (key !== '_default' && lower.includes(key)) return grams;
+  }
+  return _GRAMS_PER_CUP._default;
+}
+
+function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: number, foodName?: string): { qty: number; ratio: number } {
   const toWeight = _WEIGHT_UNITS.has(toUnit);
   const toVolume = _VOLUME_UNITS.has(toUnit);
-  const fromCount = !_WEIGHT_UNITS.has(fromUnit) && !_VOLUME_UNITS.has(fromUnit);
+  const fromWeight = _WEIGHT_UNITS.has(fromUnit);
+  const fromVolume = _VOLUME_UNITS.has(fromUnit);
+  const fromCount = !fromWeight && !fromVolume;
   const toCount = !toWeight && !toVolume;
 
+  // Weight ↔ Volume: use food-specific density estimate
+  if (fromWeight && toVolume) {
+    const gpc = _estimateGramsPerCup(foodName ?? '');
+    const fromGrams = fromUnit === 'g' ? fromQty : fromUnit === 'oz' ? fromQty * 28.35 : fromUnit === 'kg' ? fromQty * 1000 : fromUnit === 'lb' ? fromQty * 453.6 : fromQty;
+    const cups = fromGrams / gpc;
+    // Convert cups to target volume unit
+    const cupToTarget: Record<string, number> = { cup: 1, ml: 240, fl_oz: 8, tbsp: 16, tsp: 48, l: 0.24, pint: 0.5, quart: 0.25, gallon: 0.0625 };
+    const targetQty = cups * (cupToTarget[toUnit] ?? 1);
+    return { qty: Math.round(targetQty * 100) / 100, ratio: targetQty / (fromQty || 1) };
+  }
+  if (fromVolume && toWeight) {
+    const gpc = _estimateGramsPerCup(foodName ?? '');
+    const volToMl: Record<string, number> = { ml: 1, l: 1000, fl_oz: 29.57, cup: 240, tbsp: 14.79, tsp: 4.93, pint: 473.18, quart: 946.35, gallon: 3785.41 };
+    const fromMl = fromQty * (volToMl[fromUnit] ?? 240);
+    const grams = fromMl * gpc / 240;
+    const targetQty = toUnit === 'g' ? grams : toUnit === 'oz' ? grams / 28.35 : toUnit === 'kg' ? grams / 1000 : toUnit === 'lb' ? grams / 453.6 : grams;
+    return { qty: Math.round(targetQty * 100) / 100, ratio: targetQty / (fromQty || 1) };
+  }
+
+  // Count ↔ Weight/Volume
   if (fromCount && toWeight) {
-    // serving/piece → weight: assume 1 serving ≈ 100g
     const perServing = toUnit === 'g' ? 100 : toUnit === 'oz' ? 3.5 : toUnit === 'kg' ? 0.1 : toUnit === 'lb' ? 0.22 : 100;
-    return Math.round(fromQty * perServing * 100) / 100;
+    const qty = Math.round(fromQty * perServing * 100) / 100;
+    return { qty, ratio: 1 };
   }
   if (fromCount && toVolume) {
-    // serving/piece → volume: assume 1 serving ≈ 1 cup
-    const perServing = toUnit === 'cup' ? 1 : toUnit === 'ml' ? 240 : toUnit === 'fl_oz' ? 8 : toUnit === 'tbsp' ? 16 : toUnit === 'tsp' ? 48 : toUnit === 'l' ? 0.24 : 1;
-    return Math.round(fromQty * perServing * 100) / 100;
+    const perServing = toUnit === 'cup' ? 1 : toUnit === 'ml' ? 240 : toUnit === 'fl_oz' ? 8 : toUnit === 'tbsp' ? 16 : toUnit === 'tsp' ? 48 : 1;
+    const qty = Math.round(fromQty * perServing * 100) / 100;
+    return { qty, ratio: 1 };
   }
   if (toCount) {
-    // weight/volume → serving/piece: assume 100g or 1 cup = 1 serving
-    return Math.max(1, Math.round(fromQty > 0 ? 1 : 1));
+    return { qty: 1, ratio: 1 };
   }
-  // weight ↔ volume: can't convert without density, keep quantity as-is
-  return fromQty;
+  return { qty: fromQty, ratio: 1 };
 }
 
 /** Sum macros directly from the structured item list. Each item carries its
@@ -430,20 +477,24 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             baseQuantity: baseConverted != null ? Math.round(baseConverted * 100) / 100 : current.baseQuantity,
           };
         } else {
-          // Cross-system switch (e.g. serving→g, piece→oz). We can't
-          // convert the quantity so we estimate a reasonable default in
-          // the new unit and reset the baseline. Macros stay frozen at
-          // their current values — the user adjusts quantity from here.
-          const defaultQty = _crossSystemDefault(current.unit, patch.unit, current.quantity);
+          // Cross-system switch (e.g. g→cup, piece→oz). Use food-specific
+          // density to estimate the equivalent quantity AND scale macros
+          // so the nutritional values stay proportional.
+          const { qty: defaultQty, ratio } = _crossSystemDefault(current.unit, patch.unit, current.quantity, current.name);
+          const macroScale = ratio !== 1 ? ratio : 1;
           next[idx] = {
             ...current,
             unit: patch.unit,
             quantity: defaultQty,
             baseQuantity: defaultQty,
-            baseCalories: current.calories,
-            baseProtein:  current.protein,
-            baseCarbs:    current.carbs,
-            baseFat:      current.fat,
+            calories: Math.round(current.calories * macroScale),
+            protein:  Math.round(current.protein * macroScale),
+            carbs:    Math.round(current.carbs * macroScale),
+            fat:      Math.round(current.fat * macroScale),
+            baseCalories: Math.round(current.calories * macroScale),
+            baseProtein:  Math.round(current.protein * macroScale),
+            baseCarbs:    Math.round(current.carbs * macroScale),
+            baseFat:      Math.round(current.fat * macroScale),
           };
         }
         return next;

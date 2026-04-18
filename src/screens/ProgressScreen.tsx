@@ -637,73 +637,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
-          <View style={styles.weightCard}>
-            <View style={styles.weightCardHeader}>
-              <Text style={styles.weightTitle}>Weight Progress</Text>
-              {onUpdateWeight && !editingWeight && (
-                <TouchableOpacity
-                  onPress={() => { setWeightInput(String(currentWeight)); setEditingWeight(true); }}
-                  style={styles.updateWeightBtn}>
-                  <Text style={styles.updateWeightBtnText}>Update</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-
-            {editingWeight ? (
-              <View style={styles.weightInputRow}>
-                <TextInput
-                  style={styles.weightInput}
-                  value={weightInput}
-                  onChangeText={setWeightInput}
-                  keyboardType="decimal-pad"
-                  placeholder="Enter weight (lbs)"
-                  placeholderTextColor={colors.textMuted}
-                  autoFocus
-                />
-                <TouchableOpacity
-                  style={styles.weightConfirmBtn}
-                  onPress={() => {
-                    const val = parseFloat(weightInput);
-                    if (isNaN(val) || val < 50 || val > 700) {
-                      Alert.alert('Invalid weight', 'Please enter a weight between 50 and 700 lbs.');
-                      return;
-                    }
-                    onUpdateWeight!(val);
-                    setEditingWeight(false);
-                  }}>
-                  <Text style={styles.weightConfirmText}>Save</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.weightCancelBtn}
-                  onPress={() => setEditingWeight(false)}>
-                  <Text style={styles.weightCancelText}>Cancel</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.weightRow}>
-                <View style={styles.weightMetric}>
-                  <Text style={styles.weightMetricLabel}>Initial</Text>
-                  <Text style={styles.weightMetricValue}>{startWeight} lbs</Text>
-                </View>
-                <View style={styles.weightMetric}>
-                  <Text style={styles.weightMetricLabel}>Current</Text>
-                  <Text style={styles.weightMetricValue}>{currentWeight} lbs</Text>
-                </View>
-                <View style={styles.weightMetric}>
-                  <Text style={styles.weightMetricLabel}>Change</Text>
-                  <Text style={styles.weightMetricValue}>{lostOrGained.toFixed(1)} lbs {direction}</Text>
-                </View>
-              </View>
-            )}
-
-            {targetWeight != null && !editingWeight && (
-              <Text style={styles.weightEta}>
-                Target: {targetWeight} lbs
-                {remainingLbs != null ? `  ·  ${remainingLbs.toFixed(1)} lbs remaining` : ''}
-                {estimate ? `  ·  ${estimate.label}` : ''}
-              </Text>
-            )}
-          </View>
+          {/* Weight tracking moved to Body Check tab */}
 
           {/* Estimated 1RM showcase — deterministic Epley estimates
               from recent logged sessions for the main compound lifts.
@@ -1379,7 +1313,40 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     );
                   })()}
                 </View>
-                {/* Mini weight log */}
+                {/* Goal progress */}
+                {(() => {
+                  const target = userProfile.goalDetails?.targetWeightLbs;
+                  const start = userProfile.goalDetails?.startWeightLbs ?? weightEntries[0]?.weightLbs;
+                  const curr = weightEntries[weightEntries.length - 1]?.weightLbs ?? currentWeight;
+                  const remaining = target ? Math.abs(target - curr) : null;
+                  return (
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, paddingVertical: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                      {start != null && (
+                        <View style={{ alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, color: tc.textMuted }}>Start</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{start}</Text>
+                        </View>
+                      )}
+                      <View style={{ alignItems: 'center' }}>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Current</Text>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{curr}</Text>
+                      </View>
+                      {target != null && (
+                        <View style={{ alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, color: tc.textMuted }}>Target</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{target}</Text>
+                        </View>
+                      )}
+                      {remaining != null && (
+                        <View style={{ alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, color: tc.textMuted }}>Remaining</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{remaining.toFixed(1)}</Text>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })()}
+                {/* Weight log */}
                 {weightEntries.slice(-10).reverse().map((e, i) => (
                   <View key={e.date} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
                     <Text style={{ fontSize: 13, color: tc.textSecondary }}>
@@ -1547,6 +1514,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   const updated = await saveWeightEntry(val, 'manual');
                   setWeightEntries(updated);
                   setWeightInputVisible(false);
+                  // Sync to profile so macros/goal progress update too
+                  if (onUpdateWeight) onUpdateWeight(val);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
                 }}>
                 <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>Save</Text>

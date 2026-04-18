@@ -148,11 +148,25 @@ def _startup_enrich_food_micros():
     print("[startup] food enrichment kicked off in background thread")
 
 
+def _startup_enrich_exercise_images():
+    """Background: clean generic images then re-enrich from wger.de."""
+    import threading
+    def _worker():
+        try:
+            from app.seed_exercise_images import seed_exercise_images, clear_bad_images
+            clear_bad_images(engine)
+            seed_exercise_images(engine)
+        except Exception as e:
+            print(f"[startup] exercise image enrichment failed (non-fatal): {e}")
+    threading.Thread(target=_worker, daemon=True, name="enrich-exercise-images").start()
+
+
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
     _cleanup_orphaned_plan_jobs()
     _startup_enrich_food_micros()
+    _startup_enrich_exercise_images()
 
 
 app.include_router(auth.router)

@@ -39,6 +39,7 @@ PlannerBucket = Literal[
     "strength",
     "endurance",
     "athletic_performance",
+    "hyrox",
     "general_health",
 ]
 
@@ -121,6 +122,18 @@ _GOAL_REGISTRY: list[GoalDefinition] = [
         icon="⚡",
         description="Speed, power, agility, and sport-specific fitness",
         notes="Hybrid — alternates strength and conditioning days.",
+    ),
+    GoalDefinition(
+        user_id="hyrox",
+        bucket="hyrox",
+        label="HYROX / Hybrid Race",
+        icon="medal-outline",
+        description="Train for HYROX, Deka, or hybrid fitness races",
+        notes=(
+            "Hybrid race prep: running, intervals, functional stations "
+            "(sled push/pull, wall balls, lunges, row, ski erg, burpees). "
+            "Conditioning-heavy with strength support, not bodybuilding."
+        ),
     ),
     GoalDefinition(
         user_id="toning",
@@ -224,6 +237,12 @@ _LEGACY_ALIASES: dict[str, str] = {
     # Body recomp synonyms
     "body_recomposition":    "body_recomp",
     "recomp":                "body_recomp",
+    # HYROX / hybrid race synonyms
+    "hybrid_race":           "hyrox",
+    "race_hybrid":           "hyrox",
+    "deka":                  "hyrox",
+    "deka_fit":              "hyrox",
+    "functional_fitness":    "hyrox",
 }
 
 
@@ -254,6 +273,8 @@ def resolve_goal(goal: Optional[str]) -> GoalDefinition:
     # table. Matches the keyword-scan the old `_goal_bucket` used to do.
     if "cardio" in g or "endurance" in g or "run" in g or "marathon" in g:
         return _BY_ID["endurance"]
+    if "hyrox" in g or "hybrid race" in g or "deka" in g:
+        return _BY_ID["hyrox"]
     if "athletic" in g or "sport" in g:
         return _BY_ID["athletic_performance"]
     if "muscle" in g or "hypertrophy" in g or "bulk" in g:

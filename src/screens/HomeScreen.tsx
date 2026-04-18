@@ -1048,6 +1048,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       from clobbering each other if an effect re-fires rapidly. */
   const loadPlansInFlightRef = useRef(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
+  const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
+  const [showAllThemes, setShowAllThemes] = useState(false);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
   const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
@@ -1184,6 +1186,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
   const [readinessScore, setReadinessScore] = useState<{ score: number; label: string } | null>(null);
+  const [username, setUsername] = useState('');
 
   // Skip reason modal
   const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
@@ -1242,6 +1245,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken, checkedMealsByDate, nutritionPlansByDate, skippedDates]);
 
   useEffect(() => {
+    AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
     // Check if a weekly review is due
@@ -1292,6 +1296,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     authToken,
     planRefreshKey,
   ]);
+
+  // Clear fresh-day flag only when workout-specific settings change
+  useEffect(() => {
+    AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userProfile?.goal, userProfile?.daysPerWeek, userProfile?.workoutDurationMinutes, userProfile?.preferredSplit]);
 
   useEffect(() => {
     let mounted = true;
@@ -1415,36 +1425,73 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     try {
     // Check for an AI-generated plan saved after user saves plan settings
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
-    const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
-    setWorkoutPlan(baseWorkout);
+    let baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
 
-    // Generate today's workout fresh using the planner with history.
-    // This replaces the rotation approach (same 7 workouts cycling)
-    // with per-day generation that varies exercises based on recent sessions.
-    if (authToken && baseWorkout?.days?.length) {
+    // Enrich all exercises with image URLs from the backend library.
+    // This covers cached plans that were generated before image enrichment.
+    if (baseWorkout?.days?.length) {
       try {
-        const { generateWorkoutDay } = await import('../services/api');
-        const todayIdx = completedDates.size % baseWorkout.days.length;
-        const freshDay = await generateWorkoutDay(authToken, {
-          goal: profile.goal,
-          day_index: todayIdx,
-          days_per_week: profile.daysPerWeek,
-          session_minutes: profile.workoutDurationMinutes ?? 60,
-          experience: profile.experienceLevel ?? 'intermediate',
-          equipment: profile.equipment ?? [],
-          preferred_split: profile.preferredSplit,
-          priority_region: profile.priorityRegion ?? 'balanced',
-          injuries: profile.injuriesOrLimitations ?? [],
-        });
-        if (freshDay?.day) {
-          const updatedDays = [...baseWorkout.days];
-          updatedDays[todayIdx % updatedDays.length] = freshDay.day;
-          const updatedPlan = { ...baseWorkout, days: updatedDays };
-          setWorkoutPlan(updatedPlan);
-          console.log(`[loadPlans] fresh day generated: ${freshDay.day.focus} (idx ${todayIdx})`);
+        const { getExercises } = await import('../services/api');
+        const { refreshExerciseImageMap } = await import('../utils/exerciseImages');
+        const library = await getExercises({ forceRefresh: true });
+        const imgMap = await refreshExerciseImageMap(library);
+        console.log(`[loadPlans] exercise image map: ${imgMap.size} images`);
+        if (imgMap.size > 0) {
+          baseWorkout = {
+            ...baseWorkout,
+            days: baseWorkout.days.map((d: any) => ({
+              ...d,
+              exercises: (d.exercises ?? []).map((ex: any) => ({
+                ...ex,
+                image_url: ex.image_url || imgMap.get((ex.name || '').toLowerCase()) || undefined,
+              })),
+            })),
+          };
         }
       } catch (e) {
-        console.log('[loadPlans] fresh day generation failed (using cached):', e);
+        console.log(`[loadPlans] exercise image enrichment failed:`, e);
+      }
+    }
+    setWorkoutPlan(baseWorkout);
+    // Persist enriched plan so images survive next load without re-fetching
+    if (aiWorkoutRaw) {
+      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(baseWorkout)).catch(() => {});
+    }
+
+    // Generate a fresh workout for today — but only once per day.
+    // Without this guard, every app open regenerates today's workout
+    // with different exercise variation, which is confusing.
+    if (authToken && baseWorkout?.days?.length) {
+      const freshDayKey = `freshDayGenerated_${todayKey()}`;
+      const alreadyGenerated = await AsyncStorage.getItem(freshDayKey).catch(() => null);
+      if (!alreadyGenerated) {
+        try {
+          const { generateWorkoutDay } = await import('../services/api');
+          const todayIdx = completedDates.size % baseWorkout.days.length;
+          const freshDay = await generateWorkoutDay(authToken, {
+            goal: profile.goal,
+            day_index: todayIdx,
+            days_per_week: profile.daysPerWeek,
+            session_minutes: profile.workoutDurationMinutes ?? 60,
+            experience: profile.experienceLevel ?? 'intermediate',
+            equipment: profile.equipment ?? [],
+            preferred_split: profile.preferredSplit,
+            priority_region: profile.priorityRegion ?? 'balanced',
+            injuries: profile.injuriesOrLimitations ?? [],
+          });
+          if (freshDay?.day) {
+            const updatedDays = [...baseWorkout.days];
+            updatedDays[todayIdx % updatedDays.length] = freshDay.day;
+            const updatedPlan = { ...baseWorkout, days: updatedDays };
+            setWorkoutPlan(updatedPlan);
+            await AsyncStorage.setItem(freshDayKey, '1').catch(() => {});
+            console.log(`[loadPlans] fresh day generated: ${freshDay.day.focus} (idx ${todayIdx})`);
+          }
+        } catch (e) {
+          console.log('[loadPlans] fresh day generation failed (using cached):', e);
+        }
+      } else {
+        console.log('[loadPlans] fresh day already generated today, using cached plan');
       }
     }
 
@@ -1504,6 +1551,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // pinned as a routine gets overlaid on every day's plan so it appears
     // verbatim across the rotation.
     const routines = await loadMealRoutines();
+    let _routineWarningShown = false;
 
     const localEntries = await Promise.all(
       mealDays.map(async (d, i) => {
@@ -1583,6 +1631,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         //      applyRoutines a SECOND time so the dedup logic there can
         //      reconcile anything the overlay brought in.
         if (routines.length > 0) {
+          const mpd = profile?.mealsPerDay ?? 3;
+          // Warn user once if routines exceed or fill all meal slots
+          if (routines.length > mpd && !_routineWarningShown) {
+            _routineWarningShown = true;
+            setTimeout(() => {
+              Alert.alert(
+                'Too many routine meals',
+                `You have ${routines.length} pinned routine meals but only ${mpd} meals per day. ` +
+                `No new meals can be generated.\n\nYou can either:\n` +
+                `• Increase meals per day in settings\n` +
+                `• Unpin some routine meals`,
+              );
+            }, 500);
+          }
+          // Trim generated meals BEFORE applying routines so the total
+          // stays at mealsPerDay.
+          const genSlots = Math.max(0, mpd - routines.length);
+          const currentMeals = picked.meals ?? [];
+          if (currentMeals.length > genSlots) {
+            picked = { ...picked, meals: currentMeals.slice(0, genSlots) };
+          }
           picked = applyRoutines(picked, routines);
         }
         const countAfterRoutines = (picked.meals ?? []).length;
@@ -2030,8 +2099,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         mode: coachMode,
         topic: chatTopic,
         profile: slimProfile,
-        // Pass full workout plan so AI returns the correct structure (with 'days' key, not 'workoutDays')
-        workoutPlan: coachMode === 'trainer' ? (workoutPlan ?? undefined) : undefined,
+        workoutPlan: workoutPlan ?? undefined,
         nutritionPlan: todayPlan ?? undefined,
         currentPlanContext,
         progress: {
@@ -3010,7 +3078,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
               </View>
             )}
-            {workoutSubTab === 'plan' && schedule.map((item, i) => {
+            {workoutSubTab === 'plan' && (() => {
+              const split = userProfile.preferredSplit ?? 'ppl';
+              const splitFocusOptions: Record<string, string[]> = {
+                ppl: ['Push', 'Pull', 'Legs'],
+                upper_lower: ['Upper', 'Lower'],
+                full_body: ['Full Body'],
+                ppl_upper_lower: ['Push', 'Pull', 'Legs', 'Upper', 'Lower'],
+                bro: ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs'],
+              };
+              const focusOptions = splitFocusOptions[split] ?? splitFocusOptions.ppl;
+              const extraOptions = ['Cardio', 'Mobility', 'Recovery'];
+              const allOptions = [...focusOptions, ...extraOptions];
+
+              return schedule.map((item, i) => {
               const key = dateKey(item.date);
               const isToday     = i === 0;
               const isCompleted = isToday && todayDone;
@@ -3030,10 +3111,108 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
+                  splitOptions={allOptions}
+                  showSwitchOptions={switchDayIdx === i}
+                  onToggleSwitch={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
+                  onChangeFocus={async (newFocus) => {
+                    setSwitchDayIdx(-1);
+                    if (!workoutPlan || !item.workout) return;
+                    const dayIdx = workoutPlan.days.indexOf(item.workout);
+                    if (dayIdx < 0) return;
+                    const days = workoutPlan.days;
+
+                    // Warn if adjacent day has the same focus
+                    const prevFocus = dayIdx > 0 ? days[dayIdx - 1]?.focus : null;
+                    const nextFocus = dayIdx < days.length - 1 ? days[dayIdx + 1]?.focus : null;
+                    if (prevFocus === newFocus || nextFocus === newFocus) {
+                      const adjDay = prevFocus === newFocus ? 'yesterday' : 'the next day';
+                      const proceed = await new Promise<boolean>(resolve => {
+                        Alert.alert(
+                          'Same focus back-to-back',
+                          `${adjDay === 'yesterday' ? 'The previous day' : 'The next day'} is already ${newFocus}. ` +
+                          `Training the same muscles two days in a row limits recovery. Continue anyway?`,
+                          [
+                            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                            { text: 'Do it anyway', onPress: () => resolve(true) },
+                          ],
+                        );
+                      });
+                      if (!proceed) return;
+                    }
+
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+
+                    if (authToken) {
+                      try {
+                        const { generateWorkoutDay } = await import('../services/api');
+
+                        // Regenerate the changed day
+                        const freshDay = await generateWorkoutDay(authToken, {
+                          goal: userProfile.goal,
+                          day_index: dayIdx,
+                          days_per_week: userProfile.daysPerWeek,
+                          session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                          experience: userProfile.experienceLevel ?? 'intermediate',
+                          equipment: userProfile.equipment ?? [],
+                          preferred_split: userProfile.preferredSplit,
+                          priority_region: userProfile.priorityRegion ?? 'balanced',
+                          injuries: (userProfile as any).injuriesOrLimitations ?? [],
+                          focus_override: newFocus,
+                        });
+                        if (freshDay?.day) {
+                          const newDay = { ...freshDay.day, focus: newFocus };
+                          const updatedDays = [...workoutPlan.days];
+                          updatedDays[dayIdx] = newDay;
+
+                          // Rebalance: if the swap created a duplicate adjacent
+                          // focus, swap the conflicting neighbor with the old focus
+                          const oldFocus = item.workout.focus;
+                          if (nextFocus === newFocus && dayIdx + 1 < updatedDays.length) {
+                            updatedDays[dayIdx + 1] = { ...updatedDays[dayIdx + 1], focus: oldFocus };
+                            // Regenerate that day too
+                            try {
+                              const rebalanced = await generateWorkoutDay(authToken, {
+                                goal: userProfile.goal,
+                                day_index: dayIdx + 1,
+                                days_per_week: userProfile.daysPerWeek,
+                                session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                                experience: userProfile.experienceLevel ?? 'intermediate',
+                                equipment: userProfile.equipment ?? [],
+                                preferred_split: userProfile.preferredSplit,
+                                priority_region: userProfile.priorityRegion ?? 'balanced',
+                                injuries: (userProfile as any).injuriesOrLimitations ?? [],
+                                focus_override: oldFocus,
+                              });
+                              if (rebalanced?.day) {
+                                updatedDays[dayIdx + 1] = { ...rebalanced.day, focus: oldFocus };
+                              }
+                            } catch {}
+                          }
+
+                          const updatedPlan = { ...workoutPlan, days: updatedDays };
+                          setWorkoutPlan(updatedPlan);
+                          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+                          // Clear fresh-day flags so future loads don't overwrite
+                          await AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`);
+                          return;
+                        }
+                      } catch (e) {
+                        console.log('[onChangeFocus] regeneration failed, using focus-only swap:', e);
+                      }
+                    }
+                    // Fallback: just change the focus label
+                    const updatedDays = [...workoutPlan.days];
+                    updatedDays[dayIdx] = { ...updatedDays[dayIdx], focus: newFocus };
+                    const updatedPlan = { ...workoutPlan, days: updatedDays };
+                    setWorkoutPlan(updatedPlan);
+                    AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                  }}
                 />
                 </FadeInView>
               );
-            })}
+            });
+            })()}
           </>
           )
         ) : (
@@ -3283,7 +3462,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             themeName={userProfile.themePreference}
             noHeader
             onBack={() => setActiveTab('workout')}
-            onUpdateWeight={(weightLbs) => onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true)}
+            onUpdateWeight={(weightLbs) => {
+              onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
+              import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
+            }}
           />
         </View>
       )}
@@ -3292,16 +3474,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {activeTab === 'profile' && (() => {
         const ps = userProfile.physicalStats;
         const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
-        const themeOptions: Array<{ key: import('../types').AppThemeName; label: string; swatch: string }> = [
-          { key: 'midnight', label: 'Midnight', swatch: '#15C7B8' },
-          { key: 'ocean',    label: 'Ocean',    swatch: '#00CCE8' },
-          { key: 'amethyst', label: 'Amethyst', swatch: '#A060FF' },
-          { key: 'ember',    label: 'Ember',    swatch: '#FF6018' },
-          { key: 'forest',   label: 'Forest',   swatch: '#3AA860' },
-          { key: 'wine',     label: 'Wine',     swatch: '#C82848' },
-          { key: 'arctic',   label: 'Arctic',   swatch: '#5BA3D9' },
-          { key: 'sunrise',  label: 'Sunrise',  swatch: '#F08020' },
+        type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
+        const allThemes: ThemeEntry[] = [
+          // Dark themes
+          { key: 'midnight', label: 'Midnight', swatch: '#15C7B8', mode: 'dark' },
+          { key: 'ocean',    label: 'Ocean',    swatch: '#00CCE8', mode: 'dark' },
+          { key: 'amethyst', label: 'Amethyst', swatch: '#A060FF', mode: 'dark' },
+          { key: 'ember',    label: 'Ember',    swatch: '#FF6018', mode: 'dark' },
+          { key: 'forest',   label: 'Forest',   swatch: '#3AA860', mode: 'dark' },
+          { key: 'wine',     label: 'Wine',     swatch: '#C82848', mode: 'dark' },
+          { key: 'arctic',   label: 'Arctic',   swatch: '#5BA3D9', mode: 'dark' },
+          { key: 'sunrise',  label: 'Sunrise',  swatch: '#F08020', mode: 'dark' },
+          { key: 'obsidian', label: 'Obsidian', swatch: '#888888', mode: 'dark' },
+          { key: 'neon',     label: 'Neon',     swatch: '#00FF88', mode: 'dark' },
+          { key: 'flamingo', label: 'Flamingo', swatch: '#FF69B4', mode: 'dark' },
+          { key: 'citrus',   label: 'Citrus',   swatch: '#FFD700', mode: 'dark' },
+          { key: 'scarlet',  label: 'Scarlet',  swatch: '#DC143C', mode: 'dark' },
+          { key: 'cocoa',    label: 'Cocoa',    swatch: '#8B4513', mode: 'dark' },
+          { key: 'void',     label: 'Void',     swatch: '#6A0DAD', mode: 'dark' },
+          { key: 'dusk',     label: 'Dusk',     swatch: '#FF6F61', mode: 'dark' },
+          { key: 'lavender', label: 'Lavender', swatch: '#B57EDC', mode: 'dark' },
+          { key: 'aurora',   label: 'Aurora',   swatch: '#00CED1', mode: 'dark' },
+          { key: 'copper',   label: 'Copper',   swatch: '#B87333', mode: 'dark' },
+          { key: 'storm',    label: 'Storm',    swatch: '#4F5D75', mode: 'dark' },
+          // Light themes
+          { key: 'parchment', label: 'Parchment', swatch: '#D4A76A', mode: 'light' },
+          { key: 'blossom',  label: 'Blossom',  swatch: '#FFB7C5', mode: 'light' },
+          { key: 'meadow',   label: 'Meadow',   swatch: '#4CAF50', mode: 'light' },
+          { key: 'rose',     label: 'Rose',     swatch: '#FF8FAB', mode: 'light' },
+          { key: 'steel',    label: 'Steel',    swatch: '#4682B4', mode: 'light' },
+          { key: 'sand',     label: 'Sand',     swatch: '#C2B280', mode: 'light' },
+          { key: 'slate',    label: 'Slate',    swatch: '#708090', mode: 'light' },
         ];
+        const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
+        const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
+        const lightThemes = visibleThemes.filter(t => t.mode === 'light');
         const currentTheme = userProfile.themePreference ?? 'midnight';
         return (
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
@@ -3309,12 +3516,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
               <Text style={[styles.profileAvatarText, { color: themeColors.primary }]}>
-                {(userProfile.goal?.[0] ?? 'U').toUpperCase()}
+                {(username?.[0] ?? userProfile.goal?.[0] ?? 'U').toUpperCase()}
               </Text>
             </View>
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
-                {(userProfile.goal ?? 'Your profile').replace(/_/g, ' ')}
+                {username || 'Your Profile'}
               </Text>
               <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
                 {ps?.weightLbs ? `${ps.weightLbs} lb` : '—'}  ·  {heightStr}  ·  age {ps?.age ?? '—'}
@@ -3356,29 +3563,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               the "More themes" link below. */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginBottom: 0 }]}>THEME</Text>
-            <TouchableOpacity onPress={onEditThemes} activeOpacity={0.7}>
-              <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>See all ›</Text>
+            <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setShowAllThemes(!showAllThemes); }} activeOpacity={0.7}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>{showAllThemes ? 'Show less' : 'Show more'}</Text>
             </TouchableOpacity>
           </View>
-          <View style={styles.profileThemeGrid}>
-            {themeOptions.map(t => {
-              const isActive = currentTheme === t.key;
-              return (
-                <TouchableOpacity
-                  key={t.key}
-                  style={[
-                    styles.profileThemeTile,
-                    { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
-                  ]}
-                  onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
-                  activeOpacity={0.8}>
-                  <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
-                  <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
-                  {isActive && <Text style={[styles.profileThemeCheck, { color: t.swatch }]}>✓</Text>}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          {([
+            { label: 'Dark', items: darkThemes, icon: 'moon-outline' as const },
+            ...(lightThemes.length > 0 ? [{ label: 'Light', items: lightThemes, icon: 'sunny-outline' as const }] : []),
+          ] as const).map(group => (
+            <View key={group.label}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6, marginTop: group.label === 'Light' ? 10 : 0 }}>
+                <Ionicons name={group.icon} size={12} color={themeColors.textMuted} />
+                <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5 }}>{group.label.toUpperCase()}</Text>
+              </View>
+              <View style={styles.profileThemeGrid}>
+                {group.items.map(t => {
+                  const isActive = currentTheme === t.key;
+                  return (
+                    <TouchableOpacity
+                      key={t.key}
+                      style={[
+                        styles.profileThemeTile,
+                        { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
+                      ]}
+                      onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
+                      activeOpacity={0.8}>
+                      <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
+                      <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
+                      {isActive && <Ionicons name="checkmark-circle" size={14} color={t.swatch} style={{ position: 'absolute', top: 4, right: 4 }} />}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          ))}
 
           {/* Feedback Settings */}
           <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK</Text>
@@ -3552,8 +3770,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <ScrollView contentContainerStyle={styles.detailContent}>
                 {(() => {
                   const guide = buildExerciseGuide(selectedExercise);
+                  const { getExerciseImage: _getImg } = require('../utils/exerciseImages');
+                  const _imgUrl = (selectedExercise as any).image_url || _getImg(selectedExercise.name);
                   return (
                     <>
+                      {_imgUrl ? (
+                        <View style={{ width: '100%', height: 200, borderRadius: 14, marginBottom: 14, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                          <Image
+                            source={{ uri: _imgUrl }}
+                            style={{ width: '100%', height: '100%' }}
+                            resizeMode="contain"
+                          />
+                        </View>
+                      ) : null}
                       <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
                         <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
                         {selectedExercise.secondary_muscles?.length ? (
@@ -3818,17 +4047,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
                   {filteredExerciseLibrary.length === 0 ? (
                     <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
-                  ) : filteredExerciseLibrary.map((ex) => (
-                    <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
-                      <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
-                      <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
-                        {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
-                        {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
-                      </Text>
-                      {ex.description ? <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.description}</Text> : null}
-                      <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap for form guide →</Text>
+                  ) : filteredExerciseLibrary.map((ex) => {
+                    const _exImg = ex.image_url || (require('../utils/exerciseImages').getExerciseImage(ex.name));
+                    return (
+                    <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
+                      {_exImg ? (
+                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                          <Image source={{ uri: _exImg }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+                        </View>
+                      ) : (
+                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
+                          <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
+                        </View>
+                      )}
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
+                        <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
+                          {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
+                          {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
                     </TouchableOpacity>
-                  ))}
+                    );
+                  })}
                 </ScrollView>
               )
 
@@ -3907,7 +4149,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </Text>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center' }}>
                   {([
-                    { key: 'change_plan', label: 'Modify Workout', icon: 'barbell-outline' as const, mode: 'trainer' as const },
+                    { key: 'change_plan', label: 'Swap Exercise', icon: 'swap-horizontal-outline' as const, mode: 'trainer' as const },
+                    { key: 'change_goal', label: 'Change Goal', icon: 'flag-outline' as const, mode: 'trainer' as const },
                     { key: 'change_meals', label: 'Modify Meals', icon: 'nutrition-outline' as const, mode: 'nutritionist' as const },
                     { key: 'log_activity', label: 'Log Activity', icon: 'create-outline' as const, mode: 'trainer' as const },
                     { key: 'log_food', label: 'Log Food', icon: 'cafe-outline' as const, mode: 'nutritionist' as const },
@@ -4845,7 +5088,7 @@ const btStyles = StyleSheet.create({
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, showSwitchOptions, onToggleSwitch }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -4858,6 +5101,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   onStartWorkout: (workout: WorkoutDay) => void;
   onSkip: (focus: string) => void;
   onUnskip: () => void;
+  onChangeFocus?: (newFocus: string) => void;
+  splitOptions?: string[];
+  showSwitchOptions?: boolean;
+  onToggleSwitch?: () => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -5043,6 +5290,46 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             </View>
           ) : (
             <>
+              {/* Switch Day */}
+              {onChangeFocus && splitOptions && splitOptions.length > 1 && !isCompleted && (
+                <View style={{ marginBottom: 12 }}>
+                  {!showSwitchOptions ? (
+                    <TouchableOpacity
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+                        paddingVertical: 10, borderRadius: 10, borderWidth: 1.5,
+                        borderColor: workoutPalette.strong + '55', backgroundColor: tc.surface,
+                      }}
+                      onPress={onToggleSwitch}>
+                      <Ionicons name="swap-horizontal-outline" size={16} color={workoutPalette.strong} />
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: workoutPalette.strong }}>Switch Day</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: tc.border }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Switch to:</Text>
+                        <TouchableOpacity onPress={onToggleSwitch} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                          <Ionicons name="close-circle" size={20} color={tc.textMuted} />
+                        </TouchableOpacity>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {splitOptions.filter(f => f !== item.workout?.focus).map(focus => (
+                          <TouchableOpacity
+                            key={focus}
+                            style={{
+                              paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10,
+                              borderWidth: 1.5, borderColor: workoutPalette.strong + '55',
+                              backgroundColor: tc.surface,
+                            }}
+                            onPress={() => { if (onToggleSwitch) onToggleSwitch(); onChangeFocus(focus); }}>
+                            <Text style={{ fontSize: 14, fontWeight: '700', color: workoutPalette.strong }}>{focus}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+                </View>
+              )}
               <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000}>
                 <PressableScale
                   style={{ marginBottom: 14 }}

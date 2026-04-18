@@ -80,12 +80,11 @@ def ask_trainer_question(
         for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
             profile_slim.pop(drop_key, None)
     context_blob: dict = {"profile": profile_slim, "progress": body.progress}
-    # Always include both plans so the unified coach can reference either
+    # Always include BOTH plans so the unified coach can modify either.
+    # The old if/else only sent one — which meant asking to change the
+    # workout while a nutrition plan was present dropped the workout context.
     if body.nutritionPlan:
         context_blob["nutritionPlan"] = body.nutritionPlan
-        # Inject shared nutrition context so the chat knows bodyweight,
-        # experience, weight trend, recent adherence, and recent
-        # workouts — data the plan generator now also sees.
         try:
             from app.services.nutrition.context import build_nutrition_context, format_for_prompt
             bw = profile_slim.get("physicalStats", {}).get("weightLbs") if isinstance(profile_slim.get("physicalStats"), dict) else None
@@ -103,21 +102,19 @@ def ask_trainer_question(
                 context_blob["foodsAvailable"] = foods_available[:50]
         except Exception as e:
             print(f"[trainer-question] nutrition context enrichment failed: {e}")
-    else:
-        # Send full workout plan so the AI can return a complete updated plan
-        # with all fields (equipment, restSeconds, etc.)
-        wp = body.workoutPlan
-        if isinstance(wp, dict) and "days" in wp:
-            # Keep full exercise details but cap to avoid token overflow
-            full_days = []
-            for d in wp.get("days", []):
-                exs = [{"name": e.get("name"), "sets": e.get("sets"), "reps": e.get("reps"),
-                         "restSeconds": e.get("restSeconds", 60), "equipment": e.get("equipment", "")}
-                        for e in (d.get("exercises") or [])]
-                full_days.append({"day": d.get("day"), "focus": d.get("focus"), "exercises": exs})
-            context_blob["workoutPlan"] = {"name": wp.get("name"), "totalDays": wp.get("totalDays"), "days": full_days}
-        else:
-            context_blob["workoutPlan"] = wp
+
+    # Always include workout plan when provided
+    wp = body.workoutPlan
+    if isinstance(wp, dict) and "days" in wp:
+        full_days = []
+        for d in wp.get("days", []):
+            exs = [{"name": e.get("name"), "sets": e.get("sets"), "reps": e.get("reps"),
+                     "restSeconds": e.get("restSeconds", 60), "equipment": e.get("equipment", "")}
+                    for e in (d.get("exercises") or [])]
+            full_days.append({"day": d.get("day"), "focus": d.get("focus"), "stimulus": d.get("stimulus", ""), "exercises": exs})
+        context_blob["workoutPlan"] = {"name": wp.get("name"), "totalDays": wp.get("totalDays"), "days": full_days}
+    elif wp:
+        context_blob["workoutPlan"] = wp
     # Include schedule mapping so AI knows which plan day = which calendar date
     if body.currentPlanContext and isinstance(body.currentPlanContext, dict):
         mapping = body.currentPlanContext.get("scheduleMapping")
@@ -166,6 +163,11 @@ def ask_trainer_question(
                             exercise_names.append(ex.get("name", ""))
                     context_blob["workoutPlan"] = {"exerciseNames": exercise_names}
                 context_blob.pop("progress", None)
+                context_blob.pop("recentActivityLog", None)
+            elif topic == "change_goal":
+                # Keep profile + progress, drop plans
+                context_blob.pop("workoutPlan", None)
+                context_blob.pop("scheduleMapping", None)
                 context_blob.pop("recentActivityLog", None)
             elif topic == "general":
                 # Slim profile only
@@ -229,6 +231,15 @@ def ask_trainer_question(
         "You handle BOTH workout programming AND nutrition advice in the same conversation. "
         "Reference specific exercises, foods, macros, and plan details from the user's actual data. "
         "\n\n"
+        "ABSOLUTE RULE — DO WHAT THE USER ASKS:\n"
+        "When the user explicitly asks for a specific change, YOU MUST DO IT.\n"
+        "- If they ask to change a DAY'S FOCUS (e.g. 'make tomorrow legs', 'swap day 3 to push'), "
+        "tell them: 'You can do this directly! Expand the day on your workout tab and tap "
+        "\"Switch this day to\" to pick a new focus. This generates proper exercises instantly.' "
+        "Do NOT attempt to rebuild the entire plan for a single day swap — the app handles this better.\n"
+        "- If they ask to SWAP A SPECIFIC EXERCISE (e.g. 'replace bench press with dumbbell press'), "
+        "DO IT by returning the updated plan with the exercise swapped.\n"
+        "- Do NOT override their request with recovery opinions.\n\n"
         "CRITICAL — RESPECT THE USER'S SETTINGS:\n"
         "The user's profile contains `preferredSplit` and `priorityRegion`. When modifying the workout plan:\n"
         "- If they chose a split (e.g. PPL, Upper/Lower), keep that split structure. Do NOT switch to a different split.\n"
@@ -243,6 +254,11 @@ def ask_trainer_question(
         "- Day focus must match the split pattern. PPL days use: Push, Pull, Legs. U/L days use: Upper, Lower.\n"
         "\n"
         "\n"
+        "SCHEDULE MAPPING:\n"
+        "The `scheduleMapping` array maps plan days to calendar dates. Use it to understand "
+        "what 'tomorrow', 'Wednesday', etc. mean in terms of which plan day to modify. "
+        "Example: if scheduleMapping says {dayLabel: 'tomorrow', planDay: 'Day 3', focus: 'Legs'}, "
+        "and the user says 'make tomorrow push', change Day 3's focus from Legs to Push.\n\n"
         "WORKOUT HISTORY — RESPECT COMPLETED SESSIONS:\n"
         "The `progress.workoutHistory` and `progress.recentDays` fields show what the user ACTUALLY did recently.\n"
         "- Entries with `completed: true` are real workouts the user finished — even if `exercises` is empty (manually logged).\n"

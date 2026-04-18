@@ -59,18 +59,24 @@ def _extract_nutrients(food: dict) -> dict[str, float]:
     return out
 
 
-def _extract_serving(food: dict) -> str:
-    """Best-effort serving description from USDA data."""
-    # servingSize + servingSizeUnit (e.g., 244.0 + "g")
-    ss = food.get("servingSize")
-    ssu = food.get("servingSizeUnit", "g")
-    if ss:
-        return f"{round(ss)} {ssu}"
-    # householdServingFullText (e.g., "1 cup")
-    hs = food.get("householdServingFullText")
+def _extract_serving(food: dict) -> tuple[str, float]:
+    """Best-effort serving description + gram weight from USDA data.
+
+    Returns (serving_label, grams_per_serving). Prefers household
+    servings ("1 cup") over raw gram weights ("100 g") since users
+    cook with cups/tbsp, not grams.
+    """
+    ss = food.get("servingSize")  # grams per serving
+    hs = food.get("householdServingFullText")  # "1 cup", "2 tbsp"
+
+    if hs and ss and ss > 0:
+        return hs, ss
     if hs:
-        return hs
-    return "100 g"
+        return hs, ss or 100.0
+    if ss and ss > 0:
+        ssu = food.get("servingSizeUnit", "g")
+        return f"{round(ss)} {ssu}", ss
+    return "100 g", 100.0
 
 
 def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
@@ -90,7 +96,7 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             json={
                 "query": query,
                 "pageSize": max_results * 4,
-                "dataType": ["Foundation", "SR Legacy", "Survey (FNDDS)"],
+                "dataType": ["Foundation", "SR Legacy", "Survey (FNDDS)", "Branded"],
             },
             timeout=_TIMEOUT,
         )
@@ -111,16 +117,20 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             continue
         seen_names.add(norm)
 
-        nutrients = _extract_nutrients(food)
-        cal = nutrients.get("calories", 0)
-        if cal <= 0:
+        nutrients_per100g = _extract_nutrients(food)
+        cal_per100g = nutrients_per100g.get("calories", 0)
+        if cal_per100g <= 0:
             continue
 
-        serving = _extract_serving(food)
+        serving_label, serving_grams = _extract_serving(food)
+
+        # Scale nutrients from per-100g to per-serving
+        scale = serving_grams / 100.0 if serving_grams > 0 else 1.0
+        nutrients = {k: round(v * scale, 1) for k, v in nutrients_per100g.items()}
 
         entry: dict[str, Any] = {
             "name": _clean_name(name),
-            "serving": serving,
+            "serving": serving_label,
             "calories": round(nutrients.get("calories", 0)),
             "protein": round(nutrients.get("protein", 0)),
             "carbs": round(nutrients.get("carbs", 0)),
@@ -140,19 +150,22 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
 
         results.append((food, entry))
 
-    # Rerank: prefer foods where query words appear at start of name
+    # Rerank: prefer whole foods over branded, and foods where query
+    # words appear at start of the name.
     q_words = set(query.lower().split())
     def _relevance(item: tuple) -> tuple:
         food_obj, ent = item
         raw = food_obj.get("description", "").lower()
         clean = ent["name"].lower()
-        # Score: starts with query word → 0, contains → 1, else → 2
         starts = any(raw.startswith(w) or clean.startswith(w) for w in q_words)
         word_hits = sum(1 for w in q_words if w in raw)
-        # Prefer Foundation > SR Legacy > Survey
+        # Prefer Foundation > SR Legacy > Survey > Branded
         dt = food_obj.get("dataType", "")
-        dt_rank = 0 if dt == "Foundation" else (1 if "Legacy" in dt else 2)
-        return (0 if starts else 1, -word_hits, dt_rank)
+        dt_rank = 0 if dt == "Foundation" else (1 if "Legacy" in dt else (2 if "Survey" in dt else 3))
+        # Penalize items with absurd calorie values (likely bad data)
+        cal = ent.get("calories", 0)
+        cal_penalty = 1 if cal > 800 else 0
+        return (cal_penalty, 0 if starts else 1, -word_hits, dt_rank)
 
     results.sort(key=_relevance)
     return [entry for _, entry in results[:max_results]]

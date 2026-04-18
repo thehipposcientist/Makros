@@ -346,14 +346,41 @@ export default function Index() {
     if (nn) setNutritionistNote(nn);
     if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
 
-    // Restore active workout if user was mid-session when the app was killed
+    // Restore active workout if user was mid-session when the app was killed.
+    // Show a resume/discard prompt so the user isn't silently thrown back
+    // into a workout they may have intended to abandon.
     try {
       const savedWorkout = await AsyncStorage.getItem('activeWorkoutSession');
       if (savedWorkout) {
         const parsed = JSON.parse(savedWorkout);
         if (parsed && parsed.exercises) {
-          setActiveWorkoutRaw(parsed);
-          console.log('[initApp] restored active workout session');
+          const savedSets = await AsyncStorage.getItem('activeWorkoutSets');
+          const loggedCount = savedSets
+            ? (JSON.parse(savedSets) as any[]).filter(e => e.sets?.length > 0).length
+            : 0;
+          Alert.alert(
+            'Resume Workout?',
+            `You have an unfinished ${parsed.focus || 'workout'}${loggedCount > 0 ? ` with ${loggedCount} exercise${loggedCount === 1 ? '' : 's'} logged` : ''}. Pick up where you left off?`,
+            [
+              {
+                text: 'Discard',
+                style: 'destructive',
+                onPress: () => {
+                  AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
+                  AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+                  console.log('[initApp] discarded saved workout session');
+                },
+              },
+              {
+                text: 'Resume',
+                style: 'default',
+                onPress: () => {
+                  setActiveWorkoutRaw(parsed);
+                  console.log('[initApp] resumed active workout session');
+                },
+              },
+            ],
+          );
         }
       }
     } catch {}
@@ -377,7 +404,10 @@ export default function Index() {
     const persistedToken = await loadAuthToken();
     if (persistedToken) {
       try {
-        await getMe(persistedToken);
+        const meData = await getMe(persistedToken);
+        if ((meData as any)?.username) {
+          await AsyncStorage.setItem('user_username', (meData as any).username);
+        }
         await loadProfile(persistedToken);
         setAuthToken(persistedToken);
       } catch (err: any) {
@@ -583,6 +613,9 @@ export default function Index() {
     try {
       const me = await getMe(token);
       incomingUserId = (me as any)?.id ?? (me as any)?.user_id ?? null;
+      if ((me as any)?.username) {
+        await AsyncStorage.setItem('user_username', (me as any).username);
+      }
     } catch {
       incomingUserId = null;
     }
@@ -901,6 +934,11 @@ export default function Index() {
     await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
     setUserProfile(updated);
     if (authToken) syncOnboarding(authToken, updated).catch(() => null);
+    // Sync to weight history so Body Check trend stays current
+    try {
+      const { saveWeightEntry } = await import('../src/utils/weightHistory');
+      await saveWeightEntry(weightLbs, 'manual');
+    } catch {}
     await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${weightLbs} lbs` });
   };
 

@@ -98,6 +98,17 @@ function normalizeUnit(raw: string | undefined | null): FoodUnit | null {
 export function parseAmountString(str: string): { quantity: number; unit: FoodUnit } | null {
   if (!str) return null;
   const s = str.trim().replace(/^about\s+/i, '');
+  // Handle fractions: "1/2 cup", "1/4 cup", "3/4 lb"
+  const fracMatch = s.match(/^(\d+)\/(\d+)\s*([a-zA-Z.]+(?:\s+[a-zA-Z.]+)?)?/);
+  if (fracMatch) {
+    const num = parseInt(fracMatch[1], 10);
+    const den = parseInt(fracMatch[2], 10);
+    if (den > 0) {
+      const quantity = num / den;
+      const unit = normalizeUnit(fracMatch[3]) ?? 'serving';
+      return { quantity, unit };
+    }
+  }
   // Match "<num><optional space><optional unit>" — everything after is ignored.
   const m = s.match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z.]+(?:\s+[a-zA-Z.]+)?)?/);
   if (!m) return null;

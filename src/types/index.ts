@@ -244,6 +244,7 @@ export interface Exercise {
   reps: string;
   restSeconds: number;
   equipment: Equipment;
+  image_url?: string;
   // ── New progression layer (all optional — backward compatible) ──
   /** Anchor target weight for the FIRST working set. Heavy-top and
    *  backoff loads inside setScheme are derived from this. Null when
@@ -577,7 +578,8 @@ export interface SessionExercise {
   targetRestSeconds: number;
   equipment: string;
   sets: CompletedSet[];
-  aiRecommendation?: string; // e.g. "Try 165 lbs for 8 reps"
+  aiRecommendation?: string;
+  image_url?: string;
 }
 
 export interface WorkoutSession {

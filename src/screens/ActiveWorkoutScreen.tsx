@@ -24,6 +24,7 @@ import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
+import { getExerciseImage } from '../utils/exerciseImages';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
@@ -121,6 +122,108 @@ function isLongCardioExercise(name: string, targetReps?: string | number): boole
     if (Number.isFinite(n) && n >= 3) return true;
   }
   return false;
+}
+
+function getTimedExerciseTip(name: string, targetReps?: string | number, loggedSets?: any[]): string | null {
+  const n = (name || '').toLowerCase();
+  const setNum = (loggedSets?.length ?? 0) + 1;
+
+  // Treadmill / Running — recommend pace
+  if (/treadmill|running|jogging|run\b/.test(n)) {
+    if (setNum === 1) return 'Start easy at 5.0-6.0 mph for 2 min to warm up, then build to your target pace.';
+    return 'Steady effort — aim for a pace you can hold a conversation at for zone 2, or push to 7.0+ mph for intervals.';
+  }
+  // Rowing machine
+  if (/row|rowing|erg/.test(n)) {
+    if (setNum === 1) return 'Warm up at a 2:15-2:30 /500m split. Focus on the drive from your legs, not your arms.';
+    return 'Target a 1:55-2:10 /500m split for steady state. Keep stroke rate at 22-26 spm.';
+  }
+  // Cycling / Bike
+  if (/bike|cycling|ride|peloton/.test(n)) {
+    if (setNum === 1) return 'Start with low resistance for 2-3 min to warm up your legs. Cadence 80-90 rpm.';
+    return 'For steady state: resistance where you can hold 80-90 rpm. For intervals: push resistance up and hold 60-70 rpm.';
+  }
+  // Stair climber / Elliptical
+  if (/stair|elliptical/.test(n)) {
+    return 'Find a level where you can maintain a steady pace. Avoid leaning on the handrails.';
+  }
+  // Swimming
+  if (/swim/.test(n)) {
+    return 'Focus on long strokes and steady breathing. Count strokes per length to gauge efficiency.';
+  }
+  // Plank / Holds
+  if (/plank|dead.?hang|wall.?sit|hollow.?hold|l.?sit/.test(n)) {
+    const lastDur = loggedSets?.length ? loggedSets[loggedSets.length - 1]?.durationSeconds : null;
+    if (lastDur && lastDur > 0) return `Last hold was ${lastDur}s — try to match or beat it by 5 seconds.`;
+    return 'Hold with good form. Stop when form breaks down, not when it gets uncomfortable.';
+  }
+  // Farmer's walk / Carry
+  if (/farmer|carry|suitcase/.test(n)) {
+    return 'Shoulders back, core braced. Walk with short controlled steps. Grip is usually the limiter.';
+  }
+  // Battle ropes / Jump rope
+  if (/battle.?rope|jump.?rope/.test(n)) {
+    return 'Keep a consistent rhythm. Rest when form breaks down, then resume.';
+  }
+  // HIIT / Intervals / Sprints
+  if (/hiit|interval|sprint/.test(n)) {
+    return 'Max effort during work intervals. Fully recover during rest — heart rate should drop before the next round.';
+  }
+  // Boxing, kickboxing, yoga, stretching, mobility — no useful metric to recommend
+  return null;
+}
+
+type MetricField = { key: string; label: string; placeholder: string; keyboard: 'decimal-pad' | 'number-pad' | 'default' };
+
+function getTimedMetricsFields(name: string): MetricField[] | null {
+  const n = (name || '').toLowerCase();
+  if (/treadmill|running|jogging|run\b/.test(n)) {
+    return [
+      { key: 'pace', label: 'Avg Pace', placeholder: 'e.g. 8:30 /mi', keyboard: 'default' },
+      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 3.1', keyboard: 'decimal-pad' },
+      { key: 'incline', label: 'Incline %', placeholder: 'e.g. 2', keyboard: 'decimal-pad' },
+    ];
+  }
+  if (/row|rowing|erg/.test(n)) {
+    return [
+      { key: 'split', label: 'Avg Split', placeholder: 'e.g. 2:05 /500m', keyboard: 'default' },
+      { key: 'distance', label: 'Distance (m)', placeholder: 'e.g. 5000', keyboard: 'number-pad' },
+      { key: 'spm', label: 'Strokes/min', placeholder: 'e.g. 24', keyboard: 'number-pad' },
+    ];
+  }
+  if (/bike|cycling|ride|peloton/.test(n)) {
+    return [
+      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 12.5', keyboard: 'decimal-pad' },
+      { key: 'cadence', label: 'Avg Cadence', placeholder: 'e.g. 85 rpm', keyboard: 'number-pad' },
+      { key: 'output', label: 'Output (kJ)', placeholder: 'e.g. 350', keyboard: 'number-pad' },
+    ];
+  }
+  if (/swim/.test(n)) {
+    return [
+      { key: 'distance', label: 'Distance (m)', placeholder: 'e.g. 1500', keyboard: 'number-pad' },
+      { key: 'laps', label: 'Laps', placeholder: 'e.g. 30', keyboard: 'number-pad' },
+    ];
+  }
+  if (/stair|elliptical/.test(n)) {
+    return [
+      { key: 'floors', label: 'Floors / Level', placeholder: 'e.g. 45', keyboard: 'number-pad' },
+      { key: 'calories', label: 'Calories', placeholder: 'e.g. 280', keyboard: 'number-pad' },
+    ];
+  }
+  if (/hik/.test(n)) {
+    return [
+      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 4.2', keyboard: 'decimal-pad' },
+      { key: 'elevation', label: 'Elevation (ft)', placeholder: 'e.g. 800', keyboard: 'number-pad' },
+    ];
+  }
+  if (/farmer|carry|suitcase/.test(n)) {
+    return [
+      { key: 'weight', label: 'Weight (lbs)', placeholder: 'e.g. 70 each', keyboard: 'default' },
+      { key: 'distance', label: 'Distance (ft)', placeholder: 'e.g. 120', keyboard: 'number-pad' },
+    ];
+  }
+  // Boxing, kickboxing, yoga, stretching, etc — no metrics to capture
+  return null;
 }
 
 /** Parse a user-entered duration string into seconds. Accepts:
@@ -297,6 +400,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       equipment: typeof ex.equipment === 'string' ? ex.equipment : String(ex.equipment),
       sets: [],
       aiRecommendation: undefined,
+      image_url: (ex as any).image_url,
     }));
   });
   const setExercises = useCallback((updater: SessionExercise[] | ((prev: SessionExercise[]) => SessionExercise[])) => {
@@ -310,7 +414,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     });
   }, []);
 
-  // Restore logged sets from a previous interrupted session
+  // Restore logged sets from a previous interrupted session.
+  // Do NOT clear on unmount — the data must survive app kills so
+  // the user can resume. It's cleared explicitly on Finish or Cancel.
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutSets').then(raw => {
       if (!raw) return;
@@ -321,9 +427,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const match = saved.find(s => s.name === ex.name);
           return match && match.sets.length > 0 ? { ...ex, sets: match.sets } : ex;
         }));
+        console.log(`[ActiveWorkout] restored ${saved.filter(s => s.sets.length > 0).length} exercises with logged sets`);
       } catch {}
     }).catch(() => {});
-    return () => { AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); };
   }, []);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
@@ -550,6 +656,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
 
   // Workout summary after finish
+  const [timedMetrics, setTimedMetrics] = useState<Record<string, string>>({});
   const [summaryVisible, setSummaryVisible] = useState(false);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
@@ -757,8 +864,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setEditSetVisible(false);
   }, [editSetExIdx, editSetIdx, editSetWeight, editSetReps]);
 
-  // Log a specific set slot inline (no modal)
-  const handleLogSetInline = useCallback(async (exIdx: number, setSlot: number, silent = false) => {
+  // Log a specific set slot inline (no modal).
+  // `overrideDuration` bypasses the state read for timed exercises —
+  // needed because the timer "Done" button sets duration in state then
+  // calls this immediately, but React hasn't flushed the state yet.
+  const handleLogSetInline = useCallback(async (exIdx: number, setSlot: number, silent = false, overrideDuration?: string) => {
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
     const ex = exercises[exIdx];
@@ -767,7 +877,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let newSet: CompletedSet;
 
     if (timed) {
-      const durText = input?.duration?.trim() ?? '';
+      const durText = overrideDuration?.trim() || input?.duration?.trim() || '';
       if (!durText) {
         if (!silent) Alert.alert('Enter duration', 'Fill in the duration before logging this set.');
         return;
@@ -1224,7 +1334,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const ex = exercises[exIdx];
     const targetSetCount = ex ? getTargetSetCount(ex.targetSets) : 3;
     if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
-    if (isTimedExercise(ex.name, ex.targetReps)) return; // No AI weight tip for cardio/timed exercises
+    if (isTimedExercise(ex.name, ex.targetReps)) {
+      const tip = getTimedExerciseTip(ex.name, ex.targetReps, setsForExercise);
+      if (tip) {
+        setExercises(prev => prev.map((item, idx) => idx === exIdx ? { ...item, aiRecommendation: tip } : item));
+      }
+      return;
+    }
 
     setAiLoadingIdx(exIdx);
     try {
@@ -1691,7 +1807,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
           'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); onCancel(); } }]
+          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); onCancel(); } }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
         </TouchableOpacity>
@@ -1813,6 +1929,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 style={styles.exerciseHeader}
                 onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setActiveExIdx(isActive ? -1 : i); }}
                 activeOpacity={0.7}>
+                {(() => {
+                  const imgUrl = ex.image_url || getExerciseImage(ex.name);
+                  return imgUrl ? (
+                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                      <Image source={{ uri: imgUrl }} style={{ width: 40, height: 40 }} resizeMode="cover" />
+                    </View>
+                  ) : null;
+                })()}
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
                   <Text style={styles.exerciseMeta}>{targetSetCount} × {ex.targetReps}  ·  {restLabel}</Text>
@@ -1891,23 +2015,170 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {/* ── Inline set rows ── */}
                   {(() => {
                     const timed = isTimedExercise(ex.name, ex.targetReps);
+                    const isMultiInterval = timed && totalSetCount >= 2;
                     return (
                       <>
+                        {/* ── Prominent timer for timed exercises ── */}
+                        {timed && isActive && (() => {
+                          const currentSlot = ex.sets.length;
+                          const allDone = currentSlot >= totalSetCount;
+                          const timerKey = `${i}-${currentSlot < totalSetCount ? currentSlot : totalSetCount - 1}`;
+                          const timerRunning = activeTimers[timerKey]?.running ?? false;
+                          const timerElapsed = getTimerElapsed(timerKey);
+                          const timerMM = Math.floor(timerElapsed / 60).toString().padStart(2, '0');
+                          const timerSS = (timerElapsed % 60).toString().padStart(2, '0');
+                          return (
+                            <View style={{ alignItems: 'center', paddingVertical: 16, gap: 8 }}>
+                              {isMultiInterval && (
+                                <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textMuted }}>
+                                  {allDone ? 'All rounds complete' : `Round ${currentSlot + 1} of ${totalSetCount}`}
+                                </Text>
+                              )}
+                              <TouchableOpacity onPress={() => { if (!allDone) setTimerModalKey(timerKey); }} activeOpacity={0.7}>
+                                <Text style={{
+                                  fontSize: 56, fontWeight: '900', fontVariant: ['tabular-nums'] as any,
+                                  letterSpacing: -1,
+                                  color: allDone ? themeColors.textMuted : timerRunning ? themeColors.primary : themeColors.textPrimary,
+                                }}>
+                                  {timerMM}:{timerSS}
+                                </Text>
+                              </TouchableOpacity>
+                              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                                {allDone ? 'Done' : timerRunning ? 'Running — tap to expand' : timerElapsed > 0 ? 'Paused — tap to resume' : 'Tap to start timer'}
+                              </Text>
+                              {!allDone && (
+                                <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                                  {!timerRunning && timerElapsed === 0 ? (
+                                    <TouchableOpacity
+                                      style={{ backgroundColor: themeColors.primary, paddingHorizontal: 28, paddingVertical: 12, borderRadius: 12 }}
+                                      onPress={() => { startExerciseTimer(timerKey); setTimerModalKey(timerKey); }}>
+                                      <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>Start</Text>
+                                    </TouchableOpacity>
+                                  ) : timerRunning ? (
+                                    <>
+                                      <TouchableOpacity
+                                        style={{ backgroundColor: '#E53935', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
+                                        onPress={() => stopExerciseTimer(timerKey)}>
+                                        <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>Pause</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={{ backgroundColor: themeColors.primary, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
+                                        onPress={() => {
+                                          stopExerciseTimer(timerKey);
+                                          const secs = getTimerElapsed(timerKey);
+                                          const durStr = secs > 0 ? formatDurationForInput(secs) : '';
+                                          const inputKey = `${i}-${currentSlot}`;
+                                          if (durStr) {
+                                            setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
+                                          }
+                                          handleLogSetInline(i, currentSlot, true, durStr || undefined);
+                                          resetExerciseTimer(timerKey);
+                                        }}>
+                                        <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>
+                                          {isMultiInterval ? 'Log Round' : 'Done'}
+                                        </Text>
+                                      </TouchableOpacity>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <TouchableOpacity
+                                        style={{ backgroundColor: themeColors.primary, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
+                                        onPress={() => startExerciseTimer(timerKey)}>
+                                        <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>Resume</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={{ borderWidth: 1, borderColor: themeColors.border, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
+                                        onPress={() => resetExerciseTimer(timerKey)}>
+                                        <Text style={{ color: themeColors.textSecondary, fontSize: 15, fontWeight: '600' }}>Reset</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={{ backgroundColor: themeColors.primary + '22', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
+                                        onPress={() => {
+                                          const secs = getTimerElapsed(timerKey);
+                                          const durStr = secs > 0 ? formatDurationForInput(secs) : '';
+                                          const inputKey = `${i}-${currentSlot}`;
+                                          if (durStr) {
+                                            setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
+                                          }
+                                          handleLogSetInline(i, currentSlot, true, durStr || undefined);
+                                          resetExerciseTimer(timerKey);
+                                        }}>
+                                        <Text style={{ color: themeColors.primary, fontSize: 15, fontWeight: '700' }}>
+                                          {isMultiInterval ? 'Log Round' : 'Done'}
+                                        </Text>
+                                      </TouchableOpacity>
+                                    </>
+                                  )}
+                                </View>
+                              )}
+                              {/* Logged rounds summary for intervals */}
+                              {isMultiInterval && ex.sets.length > 0 && (
+                                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                                  {ex.sets.map((s, si) => (
+                                    <View key={si} style={{ backgroundColor: themeColors.primary + '22', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>
+                                        R{si + 1}: {s.durationSeconds != null ? `${Math.floor(s.durationSeconds / 60)}:${(s.durationSeconds % 60).toString().padStart(2, '0')}` : `${s.reps} reps`}
+                                      </Text>
+                                    </View>
+                                  ))}
+                                </View>
+                              )}
+                              {/* Manual duration entry for equipment-based timing */}
+                              {!timerRunning && !allDone && (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Or enter manually:</Text>
+                                  <TextInput
+                                    style={[styles.inlineInput, { width: 100, textAlign: 'center' }]}
+                                    value={(setInputs[`${i}-${currentSlot}`] ?? { duration: '' }).duration}
+                                    onChangeText={(v) => {
+                                      const inputKey = `${i}-${currentSlot}`;
+                                      setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
+                                    }}
+                                    placeholder={isLongCardioExercise(ex.name, ex.targetReps) ? '25 min' : '45s'}
+                                    placeholderTextColor={themeColors.textMuted}
+                                    keyboardType="default"
+                                  />
+                                </View>
+                              )}
+                              {/* Optional metrics input — shown when done, exercise-type-specific */}
+                              {allDone && (() => {
+                                const metrics = getTimedMetricsFields(ex.name);
+                                if (!metrics) return null;
+                                return (
+                                  <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 8, borderWidth: 1, borderColor: themeColors.border }}>
+                                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted }}>Session Details (optional)</Text>
+                                    {metrics.map(m => (
+                                      <View key={m.key} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                                        <Text style={{ fontSize: 13, color: themeColors.textSecondary, fontWeight: '600' }}>{m.label}</Text>
+                                        <TextInput
+                                          style={[styles.inlineInput, { width: 110, textAlign: 'center' }]}
+                                          placeholder={m.placeholder}
+                                          placeholderTextColor={themeColors.textMuted}
+                                          keyboardType={m.keyboard}
+                                          value={timedMetrics[`${i}-${m.key}`] ?? ''}
+                                          onChangeText={v => setTimedMetrics(prev => ({ ...prev, [`${i}-${m.key}`]: v }))}
+                                        />
+                                      </View>
+                                    ))}
+                                  </View>
+                                );
+                              })()}
+                            </View>
+                          );
+                        })()}
+
+                        {/* ── Standard set header + rows for non-timed exercises ── */}
+                        {!timed && (
                         <View style={styles.inlineSetsHeader}>
                           <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
-                          {timed ? (
-                            <Text style={[styles.inlineSetsLabel, { flex: 2 }]}>Duration (min)</Text>
-                          ) : (
-                            <>
                               <Text style={styles.inlineSetsLabel}>Weight</Text>
                               <Text style={styles.inlineSetsLabel}>Reps</Text>
-                            </>
-                          )}
                           <Text style={styles.inlineSetsLabel}>Last time</Text>
                           <View style={{ width: 40 }} />
                         </View>
+                        )}
 
-                        {Array.from({ length: totalSetCount }, (_, slot) => {
+                        {!timed && Array.from({ length: totalSetCount }, (_, slot) => {
                           const logged = ex.sets[slot];
                           const inputKey = `${i}-${slot}`;
                           const input = setInputs[inputKey] ?? { weight: '', reps: '', duration: '' };
@@ -1919,125 +2190,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 ? `${(lastSet.durationSeconds / 60).toFixed(1)}min`
                                 : `${lastSet.weightLbs}×${lastSet.reps}`)
                             : '—';
-
-                          if (timed) {
-                            const timerKey = `${i}-${slot}`;
-                            const timer = activeTimers[timerKey];
-                            const timerRunning = timer?.running ?? false;
-                            // Wall-clock derived: survives screen lock and
-                            // app backgrounding. Ticked once per second by
-                            // the shared render ticker.
-                            const timerElapsed = getTimerElapsed(timerKey);
-                            const timerMM = Math.floor(timerElapsed / 60).toString().padStart(2, '0');
-                            const timerSS = (timerElapsed % 60).toString().padStart(2, '0');
-                            const loggedLabel = logged?.durationSeconds != null
-                              ? `${Math.floor(logged.durationSeconds / 60)}:${(logged.durationSeconds % 60).toString().padStart(2, '0')}`
-                              : '';
-                            return (
-                              <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone, { minHeight: 44, paddingVertical: 6 }]}>
-                                <Text style={styles.inlineSetNum}>{slot + 1}</Text>
-                                {isLogged ? (
-                                  <View style={{ flex: 2, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                    <Text style={[styles.timerDisplay, { color: themeColors.textPrimary }]}>{loggedLabel}</Text>
-                                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>logged</Text>
-                                  </View>
-                                ) : (
-                                  <View style={{ flex: 2, gap: 4 }}>
-                                    {/* Always-available manual entry. Long cardio
-                                        users (treadmill/bike/rower) type here
-                                        directly using the equipment's own clock. */}
-                                    <TextInput
-                                      style={[styles.inlineInput, { width: '100%' }]}
-                                      value={input.duration}
-                                      onChangeText={(v) => {
-                                        if (timerRunning) stopExerciseTimer(timerKey);
-                                        setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
-                                      }}
-                                      placeholder={isLongCardioExercise(ex.name, ex.targetReps) ? '25:00 or 25 min' : '45s or 1:00'}
-                                      placeholderTextColor={themeColors.textMuted}
-                                      keyboardType="default"
-                                    />
-                                    {/* Compact timer row — useful for short
-                                        holds (plank, dead hang, carries). */}
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                      <Text style={[styles.timerDisplay, timerRunning && { color: themeColors.primary }, { fontSize: 12 }]}>
-                                        {timerMM}:{timerSS}
-                                      </Text>
-                                      {!timerRunning && timerElapsed === 0 ? (
-                                        <TouchableOpacity
-                                          style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
-                                          onPress={() => {
-                                            // Open the full-screen timer modal and start
-                                            // the timer so the user sees big digits from
-                                            // the first tick. The modal reads from the
-                                            // same activeTimers state, so stopping inside
-                                            // the modal also updates the inline display.
-                                            startExerciseTimer(timerKey);
-                                            setTimerModalKey(timerKey);
-                                          }}>
-                                          <Text style={styles.timerBtnText}>Start</Text>
-                                        </TouchableOpacity>
-                                      ) : timerRunning ? (
-                                        <TouchableOpacity
-                                          style={[styles.timerBtn, { backgroundColor: '#E53935' }]}
-                                          onPress={() => {
-                                            stopExerciseTimer(timerKey);
-                                            const secs = getTimerElapsed(timerKey);
-                                            if (secs > 0) {
-                                              const durStr = formatDurationForInput(secs);
-                                              setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
-                                            }
-                                          }}>
-                                          <Text style={styles.timerBtnText}>Stop</Text>
-                                        </TouchableOpacity>
-                                      ) : (
-                                        <>
-                                          <TouchableOpacity
-                                            style={[styles.timerBtn, { backgroundColor: themeColors.primary }]}
-                                            onPress={() => startExerciseTimer(timerKey)}>
-                                            <Text style={styles.timerBtnText}>Resume</Text>
-                                          </TouchableOpacity>
-                                          <TouchableOpacity
-                                            style={[styles.timerBtn, { backgroundColor: themeColors.textMuted }]}
-                                            onPress={() => resetExerciseTimer(timerKey)}>
-                                            <Text style={styles.timerBtnText}>Reset</Text>
-                                          </TouchableOpacity>
-                                        </>
-                                      )}
-                                    </View>
-                                  </View>
-                                )}
-                                <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
-                                <TouchableOpacity
-                                  style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
-                                  onPress={() => {
-                                    if (!isLogged) {
-                                      // If the user typed a duration, log that.
-                                      // Otherwise pull the elapsed off the timer.
-                                      const typed = (input.duration || '').trim();
-                                      if (typed) {
-                                        handleLogSetInline(i, slot, false);
-                                        return;
-                                      }
-                                      if (timerRunning) stopExerciseTimer(timerKey);
-                                      const secs = getTimerElapsed(timerKey);
-                                      if (secs > 0) {
-                                        const durStr = formatDurationForInput(secs);
-                                        setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: durStr } }));
-                                        setTimeout(() => handleLogSetInline(i, slot, false), 50);
-                                      } else {
-                                        handleLogSetInline(i, slot, false);
-                                      }
-                                    }
-                                  }}>
-                                  <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                    {isLogged ? <Ionicons name="checkmark" size={14} color="#fff" /> : <Ionicons name="radio-button-off" size={14} />}
-                                  </Text>
-                                </TouchableOpacity>
-                              </View>
-                            );
-                          }
-
                           // Only the LAST slot is deletable (logged or
                           // unlogged) so we don't rearrange slot indices
                           // mid-list. Users can tap delete repeatedly to
@@ -2248,12 +2400,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           return (
             <View style={[styles.timerModalRoot, { backgroundColor: themeColors.background }]}>
               <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+                {(() => {
+                  const imgUrl = mEx?.image_url || (mEx ? getExerciseImage(mEx.name) : undefined);
+                  return imgUrl ? (
+                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                      <Image source={{ uri: imgUrl }} style={{ width: 64, height: 64 }} resizeMode="cover" />
+                    </View>
+                  ) : null;
+                })()}
                 <Text style={[styles.timerModalExerciseName, { color: themeColors.textSecondary }]} numberOfLines={2}>
                   {mEx?.name || 'Timed Set'}
                 </Text>
-                <Text style={[styles.timerModalTargetReps, { color: themeColors.textMuted }]}>
-                  Target: {mEx?.targetReps ?? '—'}
-                </Text>
+                {getTargetSetCount(mEx?.targetSets) >= 2 ? (
+                  <Text style={[styles.timerModalTargetReps, { color: themeColors.textMuted }]}>
+                    Round {mSlot + 1} of {getTargetSetCount(mEx?.targetSets)} · Target: {mEx?.targetReps ?? '—'}
+                  </Text>
+                ) : (
+                  <Text style={[styles.timerModalTargetReps, { color: themeColors.textMuted }]}>
+                    Target: {mEx?.targetReps ?? '—'}
+                  </Text>
+                )}
                 <Text style={[styles.timerModalDigits, { color: mRunning ? themeColors.primary : themeColors.textPrimary }]}>
                   {mMM}:{mSS}
                 </Text>
@@ -2843,10 +3009,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Suggestions</Text>
                     {aiExerciseResults.map((ex, i) => (
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
-                        <Text style={styles.addExerciseName}>{ex.name}</Text>
-                        <Text style={styles.addExerciseMeta}>
-                          {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}×{ex.reps}
-                        </Text>
+                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                          {ex.image_url ? (
+                            <View style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                              <Image source={{ uri: ex.image_url }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+                            </View>
+                          ) : null}
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.addExerciseName}>{ex.name}</Text>
+                            <Text style={styles.addExerciseMeta}>
+                              {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}×{ex.reps}
+                            </Text>
+                          </View>
+                          {ex.source === 'wger' && (
+                            <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                              <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textMuted }}>DB</Text>
+                            </View>
+                          )}
+                        </View>
                         <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
                         {ex.form_cues?.length > 0 && (
                           <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>

@@ -261,6 +261,7 @@ class Exercise(SQLModel, table=True):
     exercise_type: str = Field(default="strength")           # ExerciseType enum value
     is_machine: bool = Field(default=False)
     is_unilateral: bool = Field(default=False)
+    image_url: str | None = Field(default=None)
 
 
 # ─── Food library ─────────────────────────────────────────────────────────────

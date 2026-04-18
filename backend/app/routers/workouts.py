@@ -200,6 +200,7 @@ class GenerateDayRequest(BaseModel):
     priority_region: str = "balanced"
     focused_muscle: str | None = None
     injuries: list[str] = []
+    focus_override: str | None = None      # force a specific focus (e.g. "Legs")
 
 
 @router.post("/generate-day")
@@ -288,12 +289,49 @@ def generate_single_day(
     if not days:
         raise HTTPException(status_code=500, detail="Planner produced no days")
 
+    # Enrich exercises with image URLs from the DB
+    try:
+        from app.models import Exercise as ExModel
+        ex_names = set()
+        for d in days:
+            for ex in d.get("exercises", []):
+                ex_names.add(ex.get("name", ""))
+        if ex_names:
+            img_rows = db.exec(
+                select(ExModel.name, ExModel.image_url)
+                .where(ExModel.name.in_(ex_names))
+                .where(ExModel.image_url != None)
+            ).all()
+            img_map = {r[0]: r[1] for r in img_rows}
+            for d in days:
+                for ex in d.get("exercises", []):
+                    url = img_map.get(ex.get("name"))
+                    if url:
+                        ex["image_url"] = url
+    except Exception:
+        pass
+
     # Pick the requested day from the generated plan.
-    # If fatigue data blocks the planned focus, try to find a better day.
     idx = body.day_index % len(days)
     day = days[idx]
 
-    if blocked_focuses and day.get("focus"):
+    # Focus override: user explicitly chose a focus (e.g. tapped "Legs").
+    # Find the recipe day that matches, so exercises are correct for that focus.
+    if body.focus_override:
+        override_lower = body.focus_override.lower().strip()
+        for alt_idx, alt_day in enumerate(days):
+            if alt_day.get("focus", "").lower().strip() == override_lower:
+                day = alt_day
+                idx = alt_idx
+                print(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
+                break
+        else:
+            # No exact match — override the focus label on the current day.
+            # Exercises won't perfectly match but it's better than ignoring the request.
+            day = {**day, "focus": body.focus_override}
+            print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
+
+    if blocked_focuses and day.get("focus") and not body.focus_override:
         from app.services.workout.focus_normalize import normalize_focus_to_family
         day_family = normalize_focus_to_family(day["focus"])
         if day_family and day_family in blocked_focuses:
@@ -491,6 +529,12 @@ def get_fatigue_score(
         "readiness_label": snapshot.readiness_label,
         "total_fatigue": snapshot.total_fatigue,
         "total_cardio": snapshot.total_cardio,
+        "regional": {
+            "upper_body": snapshot.regional.upper_body,
+            "lower_body": snapshot.regional.lower_body,
+            "cardio": snapshot.regional.cardio,
+            "systemic": snapshot.regional.systemic,
+        },
         "fatigued_regions": snapshot.fatigued_regions,
         "blocked_focuses": snapshot.blocked_focuses,
         "days_analyzed": snapshot.days_analyzed,

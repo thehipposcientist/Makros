@@ -297,6 +297,47 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         notes="Blends strength, power, conditioning. Distinct from hypertrophy.",
     ),
 
+    "hyrox": GoalProfile(
+        bucket="hyrox",
+        label="HYROX / Hybrid Race",
+        mix=TrainingMix(
+            strength=0.15, hypertrophy=0.10, power=0.10,
+            conditioning=0.45, mobility=0.10, recovery=0.10,
+        ),
+        allowed_archetypes=frozenset({
+            # Conditioning — the backbone
+            DayArchetype.COND_ZONE2,
+            DayArchetype.COND_INTERVALS_SHORT,
+            DayArchetype.COND_INTERVALS_LONG,
+            DayArchetype.COND_TEMPO,
+            DayArchetype.COND_CIRCUIT,
+            # Hybrid — station-style work
+            DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
+            DayArchetype.HYBRID_STRENGTH_INTERVALS,
+            DayArchetype.HYBRID_LOWER_POWER,
+            # Strength support — not bodybuilding, functional
+            DayArchetype.LIFT_FULL_BODY,
+            DayArchetype.LIFT_FULL_BODY_STRENGTH,
+            DayArchetype.LIFT_LOWER,
+            DayArchetype.LIFT_UPPER,
+            DayArchetype.LIFT_STRENGTH_MAINTENANCE,
+            # Recovery
+            DayArchetype.MOBILITY_FLOW,
+            DayArchetype.RECOVERY_EASY,
+        }),
+        anchor_archetypes=(
+            DayArchetype.COND_INTERVALS_SHORT,
+            DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
+            DayArchetype.COND_ZONE2,
+        ),
+        planner_mode="hyrox",
+        stable_lifts=False,
+        notes=(
+            "HYROX race prep: running, intervals, functional stations. "
+            "Conditioning-heavy with strength support for sled/carry/lunges."
+        ),
+    ),
+
     "general_health": GoalProfile(
         bucket="general_health",
         label="General Health",

@@ -1,8 +1,9 @@
-import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Pressable, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { WorkoutDay, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { getExerciseImage } from '../utils/exerciseImages';
 
 /** Turn a planner-emitted equipment string into a display label.
  *  The planner outputs comma-separated slugs like
@@ -163,10 +164,19 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
 }) {
   return (
     <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
-      {/* Number */}
-      <View style={[styles.exNum, { backgroundColor: section.strong }]}>
-        <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
-      </View>
+      {/* Thumbnail / Number */}
+      {(() => {
+        const imgUrl = exercise.image_url || getExerciseImage(exercise.name);
+        return imgUrl ? (
+          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: c.border }}>
+            <Image source={{ uri: imgUrl }} style={{ width: 44, height: 44 }} resizeMode="cover" />
+          </View>
+        ) : (
+          <View style={[styles.exNum, { backgroundColor: section.strong }]}>
+            <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
+          </View>
+        );
+      })()}
 
       {/* Info */}
       <View style={styles.exInfo}>

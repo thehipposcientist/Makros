@@ -271,28 +271,33 @@ def _lifting_plus_cardio_recipe(
     conditioning_frac = getattr(profile.mix, "conditioning", 0.0) or 0.0
 
     # Decide how many days to reserve for cardio based on the mix.
+    # Availability != recovery capacity. A user training 7 days/week
+    # does NOT want 6 hard lifting days + 1 token cardio day. At high
+    # frequencies, reserve more low-stress days for sustainability.
     if conditioning_frac < 0.10:
         cond_days = 0
     elif conditioning_frac < 0.30:
-        # Body-recomp band: 1 cardio day at 4-6 days, 1 at 7 (keep 6
-        # lifting days so PPL gets full 2x rotation with 2 legs days).
-        # Below 4 days the user needs every session for lifting stimulus.
+        # Body-recomp band: conservative recovery at high frequency
         if days <= 3:
             cond_days = 0
-        elif days <= 7:
+        elif days <= 5:
             cond_days = 1
+        elif days == 6:
+            cond_days = 1  # 5 lift + 1 cardio
         else:
-            cond_days = 2
+            cond_days = 2  # 7 days → 5 lift + 2 low-stress
     else:
-        # Fat-loss band: meaningful conditioning starting at 3 days.
+        # Fat-loss band: meaningful conditioning starting at 3 days
         if days <= 2:
             cond_days = 0
         elif days <= 4:
             cond_days = 1
         elif days == 5:
             cond_days = 2
+        elif days == 6:
+            cond_days = 2
         else:
-            cond_days = 3
+            cond_days = 3  # 7 days → 4 lift + 3 cardio/recovery
 
     if cond_days == 0:
         return _lifting_recipe(profile, lifting_split, days, priority_region=priority_region)
@@ -325,10 +330,13 @@ def _lifting_plus_cardio_recipe(
     # ordering means recomp at 6 days (2 cardio) lands Z2 + intervals
     # — at least one easy/steady day guaranteed — instead of two hard
     # sessions back to back.
+    # For recomp goals, the second low-stress day should be
+    # mobility/recovery, not another hard cardio session.
+    is_recomp_band = conditioning_frac < 0.30
     cond_sequence = [
         DayArchetype.COND_ZONE2,
-        DayArchetype.COND_INTERVALS_SHORT,
-        DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
+        DayArchetype.MOBILITY_FLOW if is_recomp_band else DayArchetype.COND_INTERVALS_SHORT,
+        DayArchetype.COND_INTERVALS_SHORT if is_recomp_band else DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
     ]
     # Only append cardio archetypes the profile actually allows. A
     # profile that opts out of circuits (e.g. strength) won't see
@@ -496,6 +504,53 @@ def _mobility_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
     # 6+: add recovery day
     base = _mobility_recipe(profile, 5)
     return base + [DayArchetype.RECOVERY_EASY] * (days - 5)
+
+
+# ── HYROX / hybrid race mode ────────────────────────────────────────
+
+
+def _hyrox_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
+    """HYROX-style hybrid race prep. Conditioning-heavy with functional
+    strength support. Key principles:
+      - Running / intervals are the backbone (aerobic engine)
+      - Hybrid circuit days simulate race stations
+      - Strength is functional (sled push/pull, carries, lunges, wall balls)
+      - Lower-body fatigue management is critical
+      - Recovery days prevent overtraining the running base
+    """
+    A = DayArchetype
+    if days == 1:
+        return [A.HYBRID_FULL_BODY_CIRCUIT]
+    if days == 2:
+        return [A.COND_INTERVALS_SHORT, A.HYBRID_FULL_BODY_CIRCUIT]
+    if days == 3:
+        # 1 strength, 1 intervals, 1 hybrid circuit
+        return [A.LIFT_FULL_BODY, A.COND_INTERVALS_SHORT, A.HYBRID_FULL_BODY_CIRCUIT]
+    if days == 4:
+        # 1 lower strength, 1 intervals, 1 zone 2, 1 hybrid circuit
+        return [A.LIFT_LOWER, A.COND_INTERVALS_SHORT, A.COND_ZONE2, A.HYBRID_FULL_BODY_CIRCUIT]
+        # Zone 2 between intervals and circuit as recovery spacer
+    if days == 5:
+        # 2 conditioning, 1 hybrid, 1 strength, 1 zone 2
+        return [
+            A.COND_INTERVALS_SHORT,
+            A.LIFT_FULL_BODY,
+            A.COND_ZONE2,
+            A.HYBRID_FULL_BODY_CIRCUIT,
+            A.COND_TEMPO,
+        ]
+    # 6-7 days: full HYROX build
+    base = [
+        A.COND_INTERVALS_SHORT,     # speed / threshold
+        A.LIFT_LOWER,               # sled/carry/lunge strength
+        A.COND_ZONE2,               # aerobic base (easy)
+        A.HYBRID_FULL_BODY_CIRCUIT, # station simulation
+        A.LIFT_UPPER,               # upper support + core
+        A.COND_TEMPO,               # sustained effort
+    ]
+    if days >= 7:
+        base.append(A.MOBILITY_FLOW)  # recovery day
+    return base[:days]
 
 
 # ── Recovery / stress relief mode ───────────────────────────────────
@@ -934,6 +989,8 @@ def generate_weekly_recipe(
         recipe = _endurance_recipe(profile, days)
     elif mode == "athletic":
         recipe = _athletic_recipe(profile, days)
+    elif mode == "hyrox":
+        recipe = _hyrox_recipe(profile, days)
     elif mode == "maintain":
         recipe = _maintain_recipe(profile, days)
     elif mode == "mobility":

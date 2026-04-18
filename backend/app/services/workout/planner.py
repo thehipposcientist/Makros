@@ -1255,6 +1255,7 @@ def generate_workout_plan(
                 "reps": prescription.reps,
                 "restSeconds": prescription.rest_seconds,
                 "equipment": equipment_label,
+                **({"image_url": ex["image_url"]} if ex.get("image_url") else {}),
                 # Internal metadata the canonicalizer + progression engine
                 # can read. Frontend ignores unknown keys.
                 "_slug": ex.get("slug"),

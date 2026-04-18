@@ -113,6 +113,7 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
   { id: 'offseason_training',   label: 'Off-Season Training',       category: 'athletic_performance', description: 'Build strength, size, and fix weaknesses when you are not competing. Higher volume, more muscle building.',  launch: false },
   { id: 'inseason_maintenance', label: 'In-Season Maintenance',     category: 'athletic_performance', description: 'Lower volume to stay strong and healthy during your competitive season without adding fatigue.',  launch: false },
   { id: 'return_to_sport',      label: 'Return to Sport Conditioning', category: 'athletic_performance', description: 'Gradual ramp-up after a break or injury. Rebuilds fitness base before full sport-specific training.',  launch: false },
+  { id: 'hyrox',               label: 'HYROX / Hybrid Race',          category: 'athletic_performance', description: 'Train for HYROX, Deka, or hybrid fitness races. Running, intervals, sled push/pull, wall balls, lunges, rowing, and burpees. Conditioning-heavy with functional strength.',  launch: true },
 
   // ── Health & Longevity ─────────────────────────────────────────────────────
   { id: 'general_health',      label: 'General Health',             category: 'health_longevity', description: 'Balanced mix of strength, cardio, and mobility. No extreme goals — just consistent, well-rounded fitness for feeling good.',  launch: false },

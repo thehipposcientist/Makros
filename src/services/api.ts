@@ -880,8 +880,9 @@ export async function generateWorkoutDay(
     priority_region?: string;
     focused_muscle?: string;
     injuries?: string[];
+    focus_override?: string;
   },
-): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string }> {
+): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string; readiness_score?: number }> {
   return request('/workouts/generate-day', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -1079,6 +1080,8 @@ export type AIExerciseResult = {
   rest_seconds: number;
   why: string;
   form_cues: string[];
+  image_url?: string;
+  source?: string;
 };
 
 export async function searchExerciseAI(

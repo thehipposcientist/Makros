@@ -189,10 +189,42 @@ def _infer_from_focus_label(focus: str, intensity: str) -> tuple[float, float, l
 # ─── Rolling fatigue / recovery score ────────────────────────────────────────
 
 @dataclass
+class RegionalFatigue:
+    """Per-region fatigue buckets. Each is 0.0 (fresh) to 1.0+ (overtrained)."""
+    upper_body: float = 0.0
+    lower_body: float = 0.0
+    cardio: float = 0.0
+    systemic: float = 0.0    # full-body / CNS drain
+
+    def high_regions(self, threshold: float = 0.5) -> list[str]:
+        """Return region names above the threshold."""
+        out = []
+        if self.upper_body >= threshold: out.append("upper_body")
+        if self.lower_body >= threshold: out.append("lower_body")
+        if self.cardio >= threshold: out.append("cardio")
+        if self.systemic >= threshold: out.append("systemic")
+        return out
+
+    def blocked_focuses(self, threshold: float = 0.6) -> list[str]:
+        """Focus families that should be suppressed due to accumulated fatigue."""
+        blocked = []
+        if self.upper_body >= threshold:
+            blocked.extend(["push", "pull", "upper"])
+        if self.lower_body >= threshold:
+            blocked.extend(["legs", "lower"])
+        if self.cardio >= threshold:
+            blocked.extend(["cardio"])
+        if self.lower_body >= threshold and self.cardio >= 0.4:
+            blocked.append("full_body")
+        return sorted(set(blocked))
+
+
+@dataclass
 class FatigueSnapshot:
     """Rolling fatigue state across recent days."""
     total_fatigue: float      # 0.0 = fully recovered, 1.0+ = overtrained
     total_cardio: float       # accumulated cardio load
+    regional: RegionalFatigue # per-region breakdown
     readiness_score: int      # 0-100, higher = more ready
     readiness_label: str      # "Fresh", "Ready", "Moderate", "Fatigued", "Overtrained"
     fatigued_regions: list[str]
@@ -221,7 +253,7 @@ def compute_rolling_fatigue(
 
     total_fatigue = 0.0
     total_cardio = 0.0
-    all_regions: list[str] = []
+    reg = RegionalFatigue()
     all_blocks: list[str] = []
     activities: list[dict] = []
 
@@ -252,7 +284,17 @@ def compute_rolling_fatigue(
 
         total_fatigue += impact.fatigue_load * decay
         total_cardio += impact.cardio_load * decay
-        all_regions.extend(impact.muscle_regions)
+
+        # Accumulate per-region fatigue
+        decayed_fatigue = impact.fatigue_load * decay
+        decayed_cardio = impact.cardio_load * decay
+        if "upper_body" in impact.muscle_regions:
+            reg.upper_body += decayed_fatigue
+        if "lower_body" in impact.muscle_regions:
+            reg.lower_body += decayed_fatigue
+        reg.cardio += decayed_cardio
+        reg.systemic += decayed_fatigue * 0.5  # everything contributes to systemic
+
         if days_ago <= 1:
             all_blocks.extend(impact.blocks_next_day)
 
@@ -265,6 +307,9 @@ def compute_rolling_fatigue(
             "fatigue": round(impact.fatigue_load * decay, 2),
             "cardio": round(impact.cardio_load * decay, 2),
         })
+
+    # Merge region-based blocks with activity-based blocks
+    all_blocks.extend(reg.blocked_focuses())
 
     # Readiness: inverse of fatigue, 0-100 scale
     raw_readiness = max(0.0, 1.0 - total_fatigue)
@@ -284,9 +329,15 @@ def compute_rolling_fatigue(
     return FatigueSnapshot(
         total_fatigue=round(total_fatigue, 3),
         total_cardio=round(total_cardio, 3),
+        regional=RegionalFatigue(
+            upper_body=round(reg.upper_body, 3),
+            lower_body=round(reg.lower_body, 3),
+            cardio=round(reg.cardio, 3),
+            systemic=round(reg.systemic, 3),
+        ),
         readiness_score=readiness_score,
         readiness_label=label,
-        fatigued_regions=sorted(set(all_regions)),
+        fatigued_regions=reg.high_regions(),
         blocked_focuses=sorted(set(all_blocks)),
         days_analyzed=len(activities),
         activities=activities,

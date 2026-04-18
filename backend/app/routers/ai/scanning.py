@@ -217,19 +217,40 @@ def exercise_ai_search(
     body: ExerciseSearchRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Search for exercises via natural-language using AI. Mirrors the food
-    search flow — user types "lower chest dumbbell" or "knee-friendly quad
-    builder" and gets back structured exercise suggestions the app can add
-    to a workout.
-
-    The AI respects the user's available equipment and injuries so results
-    are directly usable without filtering on the client.
-    """
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    """Search for exercises. Tries wger.de database first (free, has images),
+    falls back to AI for natural-language queries that wger can't match."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query is required")
+
+    # 1. Try wger.de first (free, structured, has images)
+    try:
+        from app.services.workout.wger_exercises import search_exercises as wger_search
+        wger_results = wger_search(body.query.strip(), max_results=6)
+        if wger_results:
+            mapped = []
+            for w in wger_results:
+                mapped.append({
+                    "name": w["name"],
+                    "primary_muscle": (w.get("muscles") or [""])[0].lower().replace(" ", "_") if w.get("muscles") else "full_body",
+                    "equipment": (w.get("equipment") or ["bodyweight"])[0].lower() if w.get("equipment") else "bodyweight",
+                    "sets": 3,
+                    "reps": "8-12",
+                    "rest_seconds": 90,
+                    "why": f"From wger.de exercise database",
+                    "form_cues": [],
+                    "image_url": w.get("image_url"),
+                    "source": "wger",
+                })
+            print(f"[exercise-search] wger hit: {len(mapped)} results for '{body.query}'")
+            return {"results": mapped}
+    except Exception as e:
+        print(f"[exercise-search] wger search failed: {e}")
+
+    # 2. Fallback to AI
+    print(f"[exercise-search] wger miss for '{body.query}', falling back to AI")
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="No wger results and OpenAI API key not configured")
 
     equipment_line = (
         f"User's available equipment: {', '.join(body.equipment)}"

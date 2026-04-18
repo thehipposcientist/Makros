@@ -28,11 +28,19 @@ CardioIntensity = Literal["intervals", "steady", "easy", "not_cardio"]
 # doesn't agree.
 _INTERVAL_KEYWORDS = (
     "interval", "hiit", "sprint", "hill", "tabata",
+    "battle rope", "burpee", "mountain climber", "assault",
+    "jump rope",  # high-intensity, not suitable for zone 2
 )
 
-# Keywords that signal explicitly easy / conversational cardio.
 _EASY_KEYWORDS = (
     "walk", "jog", "easy", "zone 2", "zone2", "recovery",
+)
+
+# Exercises suitable for steady-state / zone 2 work. If the exercise
+# name matches none of these, it shouldn't be picked for a Zone 2 day.
+_STEADY_KEYWORDS = (
+    "treadmill", "bike", "stationary", "elliptical", "stair climber",
+    "rowing", "run", "cycling", "swim", "jog", "walk", "incline",
 )
 
 
@@ -67,7 +75,13 @@ def classify_cardio(exercise: dict) -> CardioIntensity:
         if kw in name:
             return "easy"
 
-    # Fallback to the seed's is_compound flag.
+    # Check if the exercise is suitable for steady-state work
+    for kw in _STEADY_KEYWORDS:
+        if kw in name:
+            return "steady"
+
+    # Fallback to the seed's is_compound flag — but only for exercises
+    # that aren't clearly steady-state.
     if exercise.get("is_compound"):
         return "intervals"
     return "steady"

@@ -53,6 +53,39 @@ def get_exercise(exercise_id: int, db: Session = Depends(get_session)):
     return exercise
 
 
+@router.post("/exercises/enrich-images")
+def enrich_exercise_images(db: Session = Depends(get_session)):
+    """One-time enrichment: match exercises to wger.de and store image URLs."""
+    from app.services.workout.wger_exercises import _INDEX, _fetch_exercise_info
+
+    exercises = db.exec(select(Exercise).where(Exercise.image_url == None)).all()
+    if not exercises:
+        return {"enriched": 0, "message": "All exercises already have images or none need enrichment"}
+
+    enriched = 0
+    for ex in exercises:
+        entry = _INDEX.by_name.get(ex.name.lower().strip())
+        if not entry:
+            for wname, wentry in _INDEX.by_name.items():
+                if ex.name.lower() in wname or wname in ex.name.lower():
+                    entry = wentry
+                    break
+        if not entry:
+            continue
+        info = _fetch_exercise_info(entry["wger_id"])
+        if not info:
+            continue
+        images = [i.get("image", "") for i in info.get("images", []) if i.get("image")]
+        if images:
+            ex.image_url = images[0]
+            db.add(ex)
+            enriched += 1
+            print(f"[enrich] {ex.name} → {images[0][:60]}...")
+
+    db.commit()
+    return {"enriched": enriched, "total": len(exercises)}
+
+
 @router.get("/foods")
 def list_foods(category: str | None = None, db: Session = Depends(get_session)):
     """

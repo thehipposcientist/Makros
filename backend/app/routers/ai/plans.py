@@ -465,6 +465,29 @@ def _build_deterministic_workout(
         except Exception as e:
             print(f"[plan-gen workout] propagate_session_targets failed (non-fatal): {e}")
 
+    # Enrich exercises with image URLs from the DB
+    if db is not None:
+        try:
+            from app.models import Exercise as ExModel
+            ex_names = set()
+            for d in plan.get("workout_plan", {}).get("days", []):
+                for ex in d.get("exercises", []):
+                    ex_names.add(ex.get("name", ""))
+            if ex_names:
+                img_rows = db.exec(
+                    select(ExModel.name, ExModel.image_url)
+                    .where(ExModel.name.in_(ex_names))
+                    .where(ExModel.image_url != None)
+                ).all()
+                img_map = {r[0]: r[1] for r in img_rows}
+                for d in plan.get("workout_plan", {}).get("days", []):
+                    for ex in d.get("exercises", []):
+                        url = img_map.get(ex.get("name"))
+                        if url:
+                            ex["image_url"] = url
+        except Exception:
+            pass
+
     # ── Recent-history query (unconditional) ───────────────────────
     # MUST run regardless of whether the AI plan review is enabled,
     # because the trainer-note LLM call reads it too. Previously this
