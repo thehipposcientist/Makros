@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
@@ -257,15 +258,23 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [currentWeightInput, setCurrentWeightInput]               = useState('');
 
   // Workout prefs
+  const _defaultDays = (n: number): number[] => {
+    const defaults: Record<number, number[]> = {
+      1: [1], 2: [1, 4], 3: [1, 3, 5], 4: [1, 2, 4, 5],
+      5: [1, 2, 3, 4, 5], 6: [1, 2, 3, 4, 5, 6], 7: [0, 1, 2, 3, 4, 5, 6],
+    };
+    return defaults[Math.min(7, Math.max(1, n))] ?? [1, 3, 5];
+  };
   const [daysPerWeek, setDaysPerWeekRaw] = useState(profile.daysPerWeek);
-  const [trainingDays, setTrainingDays] = useState<number[]>(profile.trainingDays ?? []);
+  const [trainingDays, setTrainingDays] = useState<number[]>(
+    profile.trainingDays?.length === profile.daysPerWeek
+      ? profile.trainingDays
+      : _defaultDays(profile.daysPerWeek)
+  );
   const setDaysPerWeek = (updater: number | ((d: number) => number)) => {
     setDaysPerWeekRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
-      // Auto-adjust trainingDays when count changes
-      if (trainingDays.length !== next) {
-        setTrainingDays([]); // clear custom selection so it re-syncs
-      }
+      setTrainingDays(_defaultDays(next));
       return next;
     });
   };
@@ -303,6 +312,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [suppSearchLoading, setSuppSearchLoading] = useState(false);
   const [suppSearchResult, setSuppSearchResult] = useState<any>(null);
   const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
+  const [barcodeScanVisible, setBarcodeScanVisible] = useState(false);
   const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
 
   // Custom macro overrides
@@ -920,6 +930,28 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     setAiFoodResults(prev => prev.filter(r => r.name !== item.name));
   };
 
+  const handleBarcodeScan = async (barcode: string) => {
+    if (!authToken || !barcode.trim()) return;
+    setBarcodeScanVisible(false);
+    try {
+      const { lookupBarcode } = await import('../services/api');
+      const result = await lookupBarcode(authToken, barcode.trim());
+      if (result?.name) {
+        addAiFoodResult({
+          name: result.name,
+          serving: result.serving,
+          calories: result.calories,
+          protein: result.protein,
+          carbs: result.carbs,
+          fat: result.fat,
+        });
+        Alert.alert('Added', `${result.name} added to your food list.`);
+      }
+    } catch {
+      Alert.alert('Not found', `No nutrition data for barcode ${barcode}. Try searching by name.`);
+    }
+  };
+
   const confirmPhotoMeal = () => {
     if (!photoMealDraft) return;
     // Apply serving fraction — e.g. if batch makes 4 servings and user eats 3, multiply by 3/4
@@ -982,6 +1014,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
 
   const handleSave = () => {
+    // Validate training days match days per week
+    if (trainingDays.length > 0 && trainingDays.length !== daysPerWeek) {
+      Alert.alert(
+        'Training days mismatch',
+        `You selected ${trainingDays.length} training day${trainingDays.length !== 1 ? 's' : ''} but set ${daysPerWeek} days per week. Please select exactly ${daysPerWeek} day${daysPerWeek !== 1 ? 's' : ''}.`,
+      );
+      return;
+    }
     // Theme-only / cosmetic saves go straight through — the user isn't
     // asking for a plan regen so the confirmation dialog is noise.
     if (!hasPlanRelevantChanges()) {
@@ -1041,7 +1081,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         targetEvent: targetEventVal,
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
-      trainingDays: trainingDays.length === daysPerWeek ? trainingDays : undefined,
+      trainingDays: trainingDays.length > 0 ? trainingDays : undefined,
       workoutDurationMinutes: duration,
       preferredSplit: preferredSplit === 'auto' ? undefined : preferredSplit,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
@@ -2135,13 +2175,30 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
-              <SearchInput
-                style={styles.searchInput}
-                value={foodSearch}
-                onChangeText={setFoodSearch}
-                placeholder="Search foods or serving types"
-                placeholderTextColor={tc.textMuted}
-              />
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <SearchInput
+                  containerStyle={{ flex: 1 }}
+                  style={styles.searchInput}
+                  value={foodSearch}
+                  onChangeText={setFoodSearch}
+                  placeholder="Search foods..."
+                  placeholderTextColor={tc.textMuted}
+                />
+                {authToken && (
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.primary, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 }}
+                    onPress={() => {
+                      Alert.alert('Add Food', 'How would you like to add food?', [
+                        { text: 'Scan Barcode', onPress: () => setBarcodeScanVisible(true) },
+                        { text: 'Search by Name', onPress: () => handleAiFoodSearch() },
+                        { text: 'Cancel', style: 'cancel' },
+                      ]);
+                    }}>
+                    <Ionicons name="add" size={18} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Add</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
                 <TouchableOpacity
                   style={[styles.filterChip, foodCategoryFilter === 'all' && styles.filterChipActive]}
@@ -2948,6 +3005,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </TouchableOpacity>
         </KeyboardAvoidingView>
       </Modal>
+      <BarcodeScannerModal
+        visible={barcodeScanVisible}
+        onClose={() => setBarcodeScanVisible(false)}
+        onScan={handleBarcodeScan}
+      />
     </View>
   );
 }

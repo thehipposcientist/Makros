@@ -1555,7 +1555,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             rir: null,
           })),
         }));
-        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload);
+        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
+          category: 'strength',
+          subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
+          intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
+        });
       }
     } catch {}
 
@@ -1940,6 +1944,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
                   <Text style={styles.exerciseMeta}>{targetSetCount} × {ex.targetReps}  ·  {restLabel}</Text>
+                  {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
+                    <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '600', marginTop: 1 }}>
+                      Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
+                      {(workout as any).exercises?.[i]?.targetWeightLbs
+                        ? ` → Try ${(workout as any).exercises[i].targetWeightLbs} lbs`
+                        : ''}
+                    </Text>
+                  )}
                 </View>
                 <View style={[styles.setsBadge, isDone && styles.setsBadgeDone]}>
                   <Text style={[styles.setsBadgeText, isDone && styles.setsBadgeTextDone]}>

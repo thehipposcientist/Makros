@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import BarcodeScannerModal from './BarcodeScannerModal';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
@@ -230,6 +231,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [items, setItems] = useState<MealItem[]>(() => seedItemBaselines(ensureItems(meal).items ?? []));
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
+  const [barcodeScanning, setBarcodeScanning] = useState(false);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
   // Track which item is currently showing the unit picker popover.
@@ -531,6 +533,30 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     });
   };
 
+  const handleBarcodeScan = async (barcode: string) => {
+    if (!authToken || !barcode.trim()) return;
+    setBarcodeScanning(false);
+    setScanLoading(true);
+    try {
+      const { lookupBarcode } = await import('../services/api');
+      const result = await lookupBarcode(authToken, barcode.trim());
+      if (result && result.name) {
+        addAiFood({
+          name: result.name,
+          serving: result.serving,
+          calories: result.calories,
+          protein: result.protein,
+          carbs: result.carbs,
+          fat: result.fat,
+        });
+      }
+    } catch (e: any) {
+      Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Try searching by name instead.`);
+    } finally {
+      setScanLoading(false);
+    }
+  };
+
   const handleAiSearch = async () => {
     if (!authToken || !search.trim()) return;
     setAiSearchLoading(true);
@@ -619,6 +645,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   };
 
   return (
+    <>
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={s.container}>
 
@@ -878,22 +905,21 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
 
             {authToken && (
-              <View style={s.scanRow}>
-                <TouchableOpacity
-                  style={[s.scanBtn, scanLoading && { opacity: 0.5 }]}
-                  onPress={() => pickAndScan('camera')}
-                  disabled={scanLoading}>
-                  {scanLoading
-                    ? <ActivityIndicator size="small" color={colors.primary} />
-                    : <><Ionicons name="camera-outline" size={16} color={colors.primary} /><Text style={s.scanBtnText}>Camera</Text></>}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[s.scanBtn, scanLoading && { opacity: 0.5 }]}
-                  onPress={() => pickAndScan('library')}
-                  disabled={scanLoading}>
-                  <Ionicons name="images-outline" size={16} color={colors.primary} /><Text style={s.scanBtnText}>Photos</Text>
-                </TouchableOpacity>
-              </View>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, borderWidth: 1.5, borderColor: colors.primary + '55', backgroundColor: colors.surface, marginBottom: 8 }}
+                disabled={scanLoading}
+                onPress={() => {
+                  Alert.alert('Add Food', 'How would you like to add food?', [
+                    { text: 'Scan Barcode', onPress: () => setBarcodeScanning(true) },
+                    { text: 'Photo Scan', onPress: () => pickAndScan('camera') },
+                    { text: 'Photo Library', onPress: () => pickAndScan('library') },
+                    { text: 'Cancel', style: 'cancel' },
+                  ]);
+                }}>
+                {scanLoading
+                  ? <ActivityIndicator size="small" color={colors.primary} />
+                  : <><Ionicons name="add-circle-outline" size={18} color={colors.primary} /><Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>Add Food</Text></>}
+              </TouchableOpacity>
             )}
 
             <View style={s.searchRow}>
@@ -965,6 +991,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         </KeyboardAvoidingView>
       </View>
     </Modal>
+    <BarcodeScannerModal
+        visible={barcodeScanning}
+        onClose={() => setBarcodeScanning(false)}
+        onScan={handleBarcodeScan}
+      />
+    </>
   );
 }
 

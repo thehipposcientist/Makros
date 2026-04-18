@@ -367,7 +367,20 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
   const [gender, setGender] = useState<Gender | ''>('');
 
   // Step 4 — Training days
-  const [daysPerWeek, setDaysPerWeek] = useState('3');
+  const [daysPerWeek, setDaysPerWeekRaw] = useState('3');
+  const _defaultDaysOnboarding = (n: number): number[] => {
+    const defaults: Record<number, number[]> = {
+      1: [1], 2: [1, 4], 3: [1, 3, 5], 4: [1, 2, 4, 5],
+      5: [1, 2, 3, 4, 5], 6: [1, 2, 3, 4, 5, 6], 7: [0, 1, 2, 3, 4, 5, 6],
+    };
+    return defaults[Math.min(7, Math.max(1, n))] ?? [1, 3, 5];
+  };
+  const [selectedTrainingDays, setSelectedTrainingDays] = useState<number[]>(_defaultDaysOnboarding(3));
+  const setDaysPerWeek = (val: string) => {
+    setDaysPerWeekRaw(val);
+    const n = parseInt(val);
+    if (!isNaN(n) && n >= 1 && n <= 7) setSelectedTrainingDays(_defaultDaysOnboarding(n));
+  };
   const [workoutDuration, setWorkoutDuration] = useState(60);
 
   // Step 5 — Equipment
@@ -518,6 +531,7 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
       goalDetails,
       physicalStats,
       daysPerWeek:            parseInt(daysPerWeek),
+      trainingDays:           selectedTrainingDays.length === parseInt(daysPerWeek) ? selectedTrainingDays : undefined,
       workoutDurationMinutes: workoutDuration,
       equipment:              selectedEquipment,
       foodsAvailable,
@@ -1016,6 +1030,42 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
             </TouchableOpacity>
           ))}
         </View>
+      </View>
+
+      {/* Day-of-week selector */}
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>Which days?</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
+          {(['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const).map((label, dow) => {
+            const dpw = parseInt(daysPerWeek) || 3;
+            const selected = selectedTrainingDays.includes(dow);
+            const atLimit = selectedTrainingDays.length >= dpw && !selected;
+            return (
+              <TouchableOpacity
+                key={dow}
+                style={{
+                  width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: selected ? colors.primary : colors.surface,
+                  borderWidth: 1.5, borderColor: selected ? colors.primary : colors.border,
+                  opacity: atLimit ? 0.35 : 1,
+                }}
+                disabled={atLimit}
+                onPress={() => {
+                  import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                  if (selected) {
+                    setSelectedTrainingDays(prev => prev.filter(d => d !== dow));
+                  } else if (selectedTrainingDays.length < dpw) {
+                    setSelectedTrainingDays(prev => [...prev, dow].sort());
+                  }
+                }}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: selected ? '#fff' : colors.textSecondary }}>{label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
+          Tap to customize your training days
+        </Text>
       </View>
     </View>
   );

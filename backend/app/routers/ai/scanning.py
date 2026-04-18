@@ -145,6 +145,25 @@ def scan_foods_photo(
         raise HTTPException(status_code=502, detail=f"Food scan failed: {str(e)}")
 
 
+class BarcodeLookupRequest(_PydanticBaseModel):
+    barcode: str
+
+
+@router.post("/barcode-lookup")
+def barcode_lookup(
+    body: BarcodeLookupRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Look up a packaged food product by barcode using OpenFoodFacts."""
+    if not body.barcode.strip():
+        raise HTTPException(status_code=400, detail="Barcode is required")
+    from app.services.openfoodfacts import lookup_barcode
+    result = lookup_barcode(body.barcode.strip())
+    if not result:
+        raise HTTPException(status_code=404, detail="Product not found for this barcode")
+    return result
+
+
 @router.post("/food-search")
 def food_nutrition_search(
     body: FoodNutritionSearchRequest,

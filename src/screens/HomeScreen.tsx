@@ -3363,6 +3363,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <Text style={{ fontSize: 10, color: themeColors.textMuted }}>fat · {fatPct}%</Text>
                     </View>
                   </View>
+                  {/* Workout-aware nutrition tip */}
+                  {(() => {
+                    const todaySchedule = schedule[0];
+                    if (!todaySchedule || todaySchedule.isRest) {
+                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Rest day — prioritize protein and recovery nutrition</Text>;
+                    }
+                    const stim = todaySchedule.workout?.stimulus;
+                    if (stim === 'strength' || stim === 'power') {
+                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Heavy training day — extra carbs around your workout for fuel</Text>;
+                    }
+                    if (stim === 'conditioning') {
+                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Cardio day — stay hydrated and replenish electrolytes</Text>;
+                    }
+                    return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Training day — keep protein high for muscle recovery</Text>;
+                  })()}
                 </View>
               );
             })()}
@@ -3678,6 +3693,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             ))}
+          </View>
+
+          {/* Data export */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>DATA</Text>
+          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={async () => {
+              try {
+                const { exportWorkoutHistory } = await import('../utils/dataExport');
+                await exportWorkoutHistory();
+              } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
+            }}>
+              <Ionicons name="download-outline" size={18} color={themeColors.textPrimary} />
+              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary, marginLeft: 8 }]}>Export Workout History</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={async () => {
+              try {
+                const { exportWeightHistory } = await import('../utils/dataExport');
+                await exportWeightHistory();
+              } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
+            }}>
+              <Ionicons name="download-outline" size={18} color={themeColors.textPrimary} />
+              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary, marginLeft: 8 }]}>Export Weight History</Text>
+            </TouchableOpacity>
           </View>
 
           {/* Account + Sign out */}

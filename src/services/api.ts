@@ -1242,6 +1242,18 @@ export async function matchGoal(
   }, 12000);
 }
 
+/** Look up a packaged food by barcode via OpenFoodFacts. */
+export async function lookupBarcode(
+  token: string,
+  barcode: string,
+): Promise<{ name: string; barcode: string; serving: string; calories: number; protein: number; carbs: number; fat: number; source: string }> {
+  return request<any>('/ai/barcode-lookup', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ barcode }),
+  }, 10000);
+}
+
 /** Search food nutrition info by name using AI. */
 export async function searchFoodNutrition(
   token: string,
