@@ -1965,7 +1965,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     const note = getExerciseWarmupNote(ex.name, i === 0);
                     return note ? (
                       <View style={styles.warmupNoteCard}>
-                        <Text style={styles.warmupNoteText}>💡 {note}</Text>
+                        <Text style={styles.warmupNoteText}>{note}</Text>
                       </View>
                     ) : null;
                   })()}
@@ -2567,7 +2567,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {/* Stats grid */}
                     <View style={styles.shareStatsGrid}>
                       <View style={styles.shareStatTile}>
-                        <Text style={styles.shareStatIcon}>⏱</Text>
+                        <Ionicons name="time-outline" size={16} color={themeColors.textMuted} />
                         <Text style={styles.shareStatValue}>{formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
                         <Text style={styles.shareStatLabel}>Duration</Text>
                       </View>
@@ -2689,7 +2689,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <View style={styles.feedbackSubmittingBlock}>
                     {feedbackResult ? (
                       <>
-                        <Text style={styles.feedbackResultIcon}>✅</Text>
+                        <Ionicons name="checkmark-circle" size={24} color={themeColors.success ?? '#22C55E'} />
                         <Text style={styles.feedbackResultTitle}>Plan Updated</Text>
                         <Text style={styles.feedbackResultText}>{feedbackResult}</Text>
                       </>
@@ -2714,8 +2714,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         {([
                           { value: 'rough', label: '😓 Rough' },
                           { value: 'okay',  label: '😐 Okay' },
-                          { value: 'good',  label: '💪 Good' },
-                          { value: 'great', label: '🔥 Great' },
+                          { value: 'good',  label: 'Good' },
+                          { value: 'great', label: 'Great' },
                         ] as const).map(opt => (
                           <TouchableOpacity
                             key={opt.value}

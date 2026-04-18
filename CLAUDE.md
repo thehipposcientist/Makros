@@ -1,80 +1,91 @@
-# WorkoutPal — CLAUDE.md
+# Thallo — CLAUDE.md
 
 ## Project Overview
-React Native fitness app built with Expo SDK 54 and expo-router. Users complete an onboarding flow (goal, days/week, equipment, foods), then see a generated workout + nutrition plan on the home screen. All data is stored locally with AsyncStorage — no backend.
+Thallo is a premium fitness and nutrition app built with React Native (Expo) and a FastAPI backend. Users complete onboarding (goal, schedule, equipment, foods), then get a deterministic workout plan + AI-generated nutrition plan. The app tracks workouts, meals, weight, fatigue, and recovery — adapting recommendations based on real training data.
 
 ## Tech Stack
-- **Expo SDK 54** with expo-router v4 (file-based routing via `app/` directory)
-- **React Native 0.76.6** / React 18.3.1
-- **TypeScript** throughout
-- **AsyncStorage** for local persistence (no server/API)
-- **No external UI library** — plain React Native StyleSheet
+- **Frontend**: React Native 0.81.5 / Expo SDK ~54 / expo-router v6 / TypeScript
+- **Backend**: FastAPI + SQLModel + PostgreSQL 16 (Docker)
+- **AI**: OpenAI gpt-4o-mini for nutrition plans, coach chat, food scanning
+- **Workout planner**: Fully deterministic — no AI in the exercise selection pipeline
+- **External data**: USDA FoodData Central (food nutrition), wger.de (exercise images/search)
+
+## Architecture
+
+### Workout System (Deterministic)
+```
+User Profile -> GoalProfile -> WeeklyRecipe -> DayArchetype -> Slots -> ExerciseSelection -> Prescription
+```
+- `goal_profiles.py` — maps goals to training mix, allowed archetypes, planner mode
+- `weekly_recipe.py` — generates the weekly archetype sequence with intensity spacing
+- `day_templates.py` — picks splits, maps archetypes to exercise slots
+- `planner.py` — core orchestrator: slot filling, scoring, exercise selection
+- `prescriptions.py` — sets/reps/rest per archetype and slot role
+- `activity_impact.py` — 12-muscle-group fatigue model with decay and derived readiness
+
+### Nutrition System (AI + Deterministic)
+- AI generates meal templates via structured JSON prompts
+- Deterministic macro solver calculates targets from TDEE
+- USDA FoodData Central for food search (AI fallback)
+- Meal routines, preserved meals, per-day editing
+
+### AI Coach (Unified)
+- Single chat interface for workout + nutrition questions
+- Exercise swaps, meal modifications, injury handling, goal changes
+- Day-level focus changes are deterministic (not AI) via Switch Day button
 
 ## File Structure
 ```
-app/                    # expo-router pages (entry points)
-  _layout.tsx           # Root Stack navigator, headerShown: false
-  index.tsx             # Main logic: loads profile, routes to Onboarding or Home
+app/
+  _layout.tsx          # Root Stack navigator
+  index.tsx            # Auth -> Onboarding -> HomeScreen routing
 src/
-  screens/
-    OnboardingScreen.tsx  # 4-step form: goal → days → equipment → foods
-    HomeScreen.tsx        # Displays workout + nutrition plan, day selector
-  components/
-    WorkoutCard.tsx       # Blue card showing exercises (sets × reps, rest)
-    NutritionCard.tsx     # Pink card showing meals and macros
-  navigation/
-    RootNavigator.tsx     # Legacy file — navigation now handled by expo-router
-  utils/
-    planGenerator.ts      # All plan logic — pure mock data, no API calls
-  types/
-    index.ts              # TypeScript interfaces (UserProfile, Exercise, etc.)
+  screens/             # 7 screens (Auth, Onboarding, Home, ActiveWorkout, EditProfile, Progress, Supplements)
+  components/          # 19 components (WorkoutCard, NutritionCard, LogActivityModal, MealEditModal, etc.)
+  utils/               # weightHistory, exerciseImages, mealTracker, workoutHistory
+  constants/           # goalConfig, muscleLibrary, muscleImages, theme (27 themes)
+  services/api.ts      # All backend API calls
+  hooks/useMetaData.ts # Cached metadata (foods, equipment, goals, paces)
+backend/
+  app/
+    main.py            # FastAPI with startup hooks (exercise images, food enrichment, fatigue backfill)
+    models.py          # SQLModel tables
+    routers/           # auth, workouts, meals, meta, profile, ai/ (plans, chat, scanning, progression)
+    services/workout/  # 25 files: planner, fatigue, recipes, prescriptions, goals
+    services/nutrition/ # meal assembly, calorie calc, plan review
+    services/usda_fdc.py # USDA FoodData Central client
 ```
-
-## Architecture Notes
-- **Entry point**: `"main": "expo-router/entry"` in package.json — expo-router handles bootstrapping. `App.tsx` at root is not used.
-- **Routing**: `app/index.tsx` checks AsyncStorage for a saved `userProfile`. If none → renders OnboardingScreen. If found → renders HomeScreen.
-- **No navigation library**: expo-router's Stack handles the single-screen app. `src/navigation/RootNavigator.tsx` is a legacy file, not currently wired up.
-- **Plan generation**: All workout/nutrition data is hardcoded mock logic in `planGenerator.ts`. No external API calls.
 
 ## Dev Commands
 ```bash
-# Install dependencies (after any package.json change)
-npm install
-
-# Start Expo dev server
-npx expo start
-
-# If Expo Go on iPhone can't connect (firewall/network issue), use tunnel:
-npx expo start --tunnel
-
-# Clear Metro cache (use when seeing stale bundle errors)
-npx expo start --clear
-
-# Fix dependency version mismatches
-npx expo install --fix
+docker compose up -d                          # Start backend + DB
+docker compose build backend && docker compose up -d backend  # Rebuild
+npx expo start --clear                        # Start frontend
+docker compose logs -f backend                # Backend logs
+docker exec thallo-pg psql -U thallo -d thallo  # DB shell
 ```
 
-## Expo Go on iPhone — Troubleshooting
-1. **Same WiFi** — Phone and PC must be on the same network.
-2. **Windows Firewall** — Node.js / port 8081 may be blocked. Either allow it in Firewall settings, or use `--tunnel` mode (requires `@expo/ngrok`).
-3. **Tunnel mode**: `npx expo start --tunnel` routes traffic through Expo's servers — works even on different networks.
-4. **Scan QR code** from the Expo Go app (not the camera app).
-5. **SDK mismatch**: Expo Go only supports the current SDK. If you upgrade Expo SDK, also update Expo Go from the App Store.
+## Environment Variables (backend/.env)
+```
+SECRET_KEY=<change for production>
+OPENAI_API_KEY=<your key>
+USDA_FDC_API_KEY=<get free key from https://fdc.nal.usda.gov/api-key-signup>
+MODEL_CHAT=gpt-4o-mini
+MODEL_PLAN_GENERATION=gpt-4o-mini
+MODEL_MEAL_PARSING=gpt-4o-mini
+PLAN_REVIEW_ENABLED=1
+NUTRITION_REVIEW_ENABLED=1
+```
 
-## Known Issues / Watchouts
-- **No icon/splash assets**: The `assets/` folder is empty. Expo will use defaults. Do not add references to `app.json` until actual PNG files exist in `assets/`.
-- **`src/navigation/RootNavigator.tsx`** is not used — routing is handled by expo-router via `app/`. Don't wire it back in.
-- **planGenerator.ts is all mock data** — no real AI or API integration yet.
+## Key Design Decisions
+- Workout planner is deterministic — no AI in exercise selection, split logic, or weekly recipe
+- AI is gated — used only for nutrition plans, coach chat, food scanning
+- Fatigue is muscle-group based — 12 dimensions, not pattern-based
+- Day focus changes are UI buttons, not AI
+- Food data: USDA first, AI fallback. Exercise search: wger first, AI fallback
 
-## Dependency Versions (Expo SDK 54 compatible)
-| Package | Version |
-|---|---|
-| expo | ~54.0.8 |
-| react-native | 0.76.6 |
-| react | 18.3.1 |
-| expo-router | ~4.0.8 |
-| expo-constants | ~17.0.5 |
-| expo-status-bar | ~2.0.1 |
-| react-native-screens | ~4.4.0 |
-| react-native-safe-area-context | 4.12.0 |
-| @react-native-async-storage/async-storage | 2.1.0 |
+## Supported Goals
+fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, hyrox, toning, maintain, general_health
+
+## Supported Splits
+PPL, Upper/Lower, Full Body, PPL+UL hybrid, Bro split (auto-selected based on goal + days)

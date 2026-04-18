@@ -556,6 +556,10 @@ const SKIP_REASONS = [
   { icon: 'sunny-outline' as const, label: 'Did something else' },
 ];
 
+// Training day patterns. For 1-4 days we space them across the week.
+// For 5+ days, training starts from today and rest days are placed
+// at the end — so a user signing up on Saturday doesn't see 2 rest
+// days before their first workout.
 const TRAINING_DAY_SETS: Record<number, number[]> = {
   1: [1],
   2: [1, 4],
@@ -572,9 +576,15 @@ function get7DaySchedule(
   skippedDates?: Set<string>,
   droppedSkipDates?: Set<string>,
   completedDates?: Set<string>,
+  userTrainingDays?: number[],
 ): ScheduleItem[] {
   if (!workoutPlan?.days?.length) return [];
-  const trainingSet = new Set(TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]);
+  // Use user-selected training days if available, else fall back to defaults
+  const trainingSet = new Set(
+    userTrainingDays && userTrainingDays.length === daysPerWeek
+      ? userTrainingDays
+      : TRAINING_DAY_SETS[Math.min(Math.max(daysPerWeek, 1), 7)] ?? [1, 3, 5]
+  );
   const today = new Date();
   const totalDays = workoutPlan.days.length;
   const todayDow = today.getDay();
@@ -605,13 +615,36 @@ function get7DaySchedule(
     }
   }
 
+  // Build a 7-day schedule. For 5+ training days, ensure today is
+  // always a training day so new users don't see rest first.
+  // For fewer days, use the fixed day-of-week pattern.
   const schedule: ScheduleItem[] = [];
   let workoutIdx = weekOffset;
+
+  // When user picked specific training days, use day-of-week matching.
+  // Otherwise for 5+ days/week, use today-relative placement so
+  // new users don't start with rest days.
+  const hasCustomDays = !!(userTrainingDays && userTrainingDays.length === daysPerWeek);
+  const dynamicRest = new Set<number>();
+  if (!hasCustomDays && daysPerWeek >= 5) {
+    const restCount = 7 - daysPerWeek;
+    for (let r = 0; r < restCount; r++) {
+      dynamicRest.add(7 - 1 - r);
+    }
+  }
+
   for (let i = 0; i < 7; i++) {
     const date = new Date(today);
     date.setDate(today.getDate() + i);
     const dow = date.getDay();
-    if (trainingSet.has(dow)) {
+
+    const isTrainingDay = hasCustomDays
+      ? trainingSet.has(dow)
+      : daysPerWeek >= 5
+        ? !dynamicRest.has(i)
+        : trainingSet.has(dow);
+
+    if (isTrainingDay) {
       schedule.push({ date, workout: workoutPlan.days[workoutIdx % totalDays], isRest: false });
       const key = dateKey(date);
       if (!skippedDates?.has(key) || droppedSkipDates?.has(key)) {
@@ -1185,7 +1218,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
-  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string } | null>(null);
+  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }> } | null>(null);
   const [username, setUsername] = useState('');
 
   // Skip reason modal
@@ -1408,8 +1441,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { getFatigueScore } = await import('../services/api');
         const fs = await getFatigueScore(authToken);
-        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label });
-      } catch {}
+        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label, topFatigued: fs.top_fatigued ?? [] });
+        console.log(`[fatigue] readiness=${fs.readiness_score}% top=${(fs.top_fatigued ?? []).map((t: any) => t.muscle).join(',')}`);
+      } catch (e) {
+        console.log('[fatigue] fetch failed:', e);
+        // Show fresh state so the badge always appears
+        setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
+      }
+    } else {
+      setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
     }
   };
 
@@ -2773,7 +2813,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
     ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
     ?? userProfile.goal;
-  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates) : [];
+  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays) : [];
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -3021,11 +3061,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
-                    Recovery: {readinessScore.label}
+                    Recovery: {readinessScore.label} ({readinessScore.score}%)
                   </Text>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-                    {readinessScore.score}% readiness based on recent activity
-                  </Text>
+                  {readinessScore.topFatigued && readinessScore.topFatigued.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                      {readinessScore.topFatigued.map(({ muscle, value }) => {
+                        const pct = Math.round(value * 100);
+                        const color = pct >= 70 ? '#EF4444' : pct >= 40 ? '#F59E0B' : themeColors.textMuted;
+                        return (
+                          <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                            <View style={{ width: 30, height: 4, borderRadius: 2, backgroundColor: themeColors.border }}>
+                              <View style={{ width: `${Math.min(100, pct)}%` as any, height: 4, borderRadius: 2, backgroundColor: color }} />
+                            </View>
+                            <Text style={{ fontSize: 10, fontWeight: '600', color }}>{muscle.replace('_', ' ')}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>All muscle groups fresh</Text>
+                  )}
                 </View>
               </View>
             )}
@@ -3850,8 +3905,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             /* ── MUSCLE DETAIL ──────────────────────────────────────────────── */
             ) : selectedMuscle ? (
               <ScrollView contentContainerStyle={styles.detailContent}>
-                <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55' }]}>
-                  <Text style={{ fontSize: 40, textAlign: 'center', marginBottom: 6 }}>{selectedMuscle.emoji}</Text>
+                <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55', alignItems: 'center' }]}>
+                  <View style={{ width: 64, height: 64, borderRadius: 16, backgroundColor: selectedMuscle.tagColor + '22', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
+                    <Ionicons name={(selectedMuscle.icon || 'body-outline') as any} size={32} color={selectedMuscle.tagColor} />
+                  </View>
                   <Text style={[styles.detailMeta, { color: selectedMuscle.tagColor, fontWeight: '700', fontSize: 13 }]}>{selectedMuscle.commonName.toUpperCase()} · {selectedMuscle.bodyRegion}</Text>
                   <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6 }]}>{selectedMuscle.shortDescription}</Text>
                 </View>
@@ -4103,8 +4160,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       activeOpacity={0.8}
                       onPress={() => setSelectedMuscle(muscle)}>
                       <View style={styles.muscleItemRow}>
-                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '22' }]}>
-                          <Text style={{ fontSize: 22 }}>{muscle.emoji}</Text>
+                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 12 }]}>
+                          <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
                         </View>
                         <View style={styles.muscleItemBody}>
                           <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{muscle.name}</Text>
@@ -4776,7 +4833,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <Text style={{ fontSize: 13, color: themeColors.textSecondary, lineHeight: 19 }}>{suppAiResult.whatItDoes}</Text>
                     <View style={{ flexDirection: 'row', gap: 12 }}>
                       <Text style={{ fontSize: 12, color: themeColors.textMuted }}>📏 <Text style={{ color: themeColors.textPrimary, fontWeight: '600' }}>{suppAiResult.dose}</Text></Text>
-                      <Text style={{ fontSize: 12, color: themeColors.textMuted }}>⏱ <Text style={{ color: themeColors.textPrimary, fontWeight: '600' }}>{suppAiResult.timing}</Text></Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Ionicons name="time-outline" size={12} color={themeColors.textMuted} />
+                        <Text style={{ fontSize: 12, color: themeColors.textPrimary, fontWeight: '600' }}>{suppAiResult.timing}</Text>
+                      </View>
                     </View>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
                       <TouchableOpacity

@@ -247,18 +247,17 @@ def generate_single_day(
     except Exception:
         pass
 
-    # Get fatigue data to influence day selection
-    blocked_focuses: list[str] = []
+    # Get muscle-group fatigue to influence day selection
+    fatigue_snapshot = None
     fatigue_readiness = 100
     try:
         from app.services.workout.history import get_recent_completions_for_fatigue
         from app.services.workout.activity_impact import compute_rolling_fatigue
         completions = get_recent_completions_for_fatigue(current_user.id, db)
         if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            blocked_focuses = snapshot.blocked_focuses
-            fatigue_readiness = snapshot.readiness_score
-            print(f"[generate-day] fatigue: readiness={fatigue_readiness} blocked={blocked_focuses}")
+            fatigue_snapshot = compute_rolling_fatigue(completions)
+            fatigue_readiness = fatigue_snapshot.readiness_score
+            print(f"[generate-day] fatigue: readiness={fatigue_readiness} focus_readiness={fatigue_snapshot.focus_readiness}")
     except Exception as e:
         print(f"[generate-day] fatigue check failed: {e}")
 
@@ -331,25 +330,40 @@ def generate_single_day(
             day = {**day, "focus": body.focus_override}
             print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
 
-    if blocked_focuses and day.get("focus") and not body.focus_override:
+    # Graduated fatigue response (not binary blocking)
+    if fatigue_snapshot and not body.focus_override:
         from app.services.workout.focus_normalize import normalize_focus_to_family
-        day_family = normalize_focus_to_family(day["focus"])
-        if day_family and day_family in blocked_focuses:
+        from app.services.workout.activity_impact import derive_focus_readiness
+        day_family = normalize_focus_to_family(day.get("focus", ""))
+        day_readiness = fatigue_snapshot.focus_readiness.get(day_family, 1.0) if day_family else 1.0
+
+        if day_readiness < 0.2:
+            # Very fatigued: swap to the most ready alternative day
+            best_alt, best_readiness = None, -1.0
             for alt_idx, alt_day in enumerate(days):
                 alt_fam = normalize_focus_to_family(alt_day.get("focus", ""))
-                if alt_fam and alt_fam not in blocked_focuses:
-                    print(
-                        f"[generate-day] fatigue override: swapping day {idx} "
-                        f"({day_family}) → day {alt_idx} ({alt_fam})"
-                    )
-                    day = alt_day
-                    idx = alt_idx
-                    break
+                alt_r = fatigue_snapshot.focus_readiness.get(alt_fam, 1.0) if alt_fam else 1.0
+                if alt_r > best_readiness:
+                    best_readiness = alt_r
+                    best_alt = (alt_idx, alt_day)
+            if best_alt and best_readiness > day_readiness + 0.2:
+                print(f"[generate-day] fatigue swap: {day_family}({day_readiness:.0%}) → {normalize_focus_to_family(best_alt[1].get('focus',''))}({best_readiness:.0%})")
+                idx, day = best_alt
 
-    # If heavily fatigued (readiness < 30), downgrade stimulus label
-    if fatigue_readiness < 30 and day.get("stimulus") in ("strength", "power"):
-        day = {**day, "stimulus": "volume"}
-        print(f"[generate-day] readiness {fatigue_readiness}% — downgraded stimulus to volume")
+        elif day_readiness < 0.4:
+            # Moderately fatigued: downgrade stimulus
+            if day.get("stimulus") in ("strength", "power"):
+                day = {**day, "stimulus": "hypertrophy"}
+                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
+            elif day.get("stimulus") == "hypertrophy":
+                day = {**day, "stimulus": "volume"}
+                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → volume")
+
+        elif day_readiness < 0.6:
+            # Slightly fatigued: heavy → hypertrophy only
+            if day.get("stimulus") in ("strength", "power"):
+                day = {**day, "stimulus": "hypertrophy"}
+                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
 
     return {
         "day": day,
@@ -357,6 +371,7 @@ def generate_single_day(
         "day_index": idx,
         "plan_name": plan.get("workout_plan", {}).get("name", ""),
         "readiness_score": fatigue_readiness,
+        "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
     }
 
 
@@ -494,6 +509,45 @@ def mark_workout_complete(
         except Exception as e:
             print(f"[workouts/complete] structured persistence failed (non-fatal): {e}")
 
+    # Resolve per-muscle fatigue and store on the completion row.
+    # Uses per-exercise data when available, falls back to focus-label estimate.
+    try:
+        from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
+        completion_row = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.workout_date == body.workout_date)
+        ).first()
+        if completion_row:
+            if body.exercises:
+                from app.seed_exercises_data import SEED_EXERCISES
+                seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
+                ex_list = []
+                for ep in body.exercises:
+                    seed = seed_map.get(ep.name.lower(), {})
+                    ex_list.append({
+                        "name": ep.name,
+                        "primary_muscle": seed.get("primary_muscle", ""),
+                        "secondary_muscles": seed.get("secondary_muscles", []),
+                        "is_compound": seed.get("is_compound", False),
+                        "sets_logged": len(ep.sets),
+                    })
+                resolved = resolve_exercise_fatigue(
+                    ex_list,
+                    intensity=body.activity_intensity or "moderate",
+                    duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
+                )
+            else:
+                resolved = resolve_focus_fatigue(
+                    body.focus_label,
+                    intensity=body.activity_intensity or "moderate",
+                    duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
+                )
+            completion_row.resolved_muscle_fatigue = resolved
+            db.add(completion_row)
+    except Exception as e:
+        print(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
+
     db.commit()
     return {"ok": True, "structured_persisted": bool(session_rows_created)}
 
@@ -527,15 +581,9 @@ def get_fatigue_score(
     return {
         "readiness_score": snapshot.readiness_score,
         "readiness_label": snapshot.readiness_label,
-        "total_fatigue": snapshot.total_fatigue,
-        "total_cardio": snapshot.total_cardio,
-        "regional": {
-            "upper_body": snapshot.regional.upper_body,
-            "lower_body": snapshot.regional.lower_body,
-            "cardio": snapshot.regional.cardio,
-            "systemic": snapshot.regional.systemic,
-        },
-        "fatigued_regions": snapshot.fatigued_regions,
+        "muscle_fatigue": snapshot.muscle_fatigue.to_dict(),
+        "focus_readiness": snapshot.focus_readiness,
+        "top_fatigued": [{"muscle": m, "value": round(v, 2)} for m, v in snapshot.top_fatigued],
         "blocked_focuses": snapshot.blocked_focuses,
         "days_analyzed": snapshot.days_analyzed,
         "activities": snapshot.activities,

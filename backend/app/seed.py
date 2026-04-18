@@ -436,44 +436,44 @@ GOAL_OPTIONS_DATA = _ui_goal_rows()
 
 PACE_OPTIONS_DATA = [
     # Fat loss
-    ("fat_loss", "conservative", "Slow & Steady",   "🐢", "~0.5 lbs/week",  "Sustainable pace — preserves muscle, easiest to stick to"),
-    ("fat_loss", "moderate",     "Balanced",         "🚶", "~1 lb/week",     "Recommended for most — good results without feeling deprived"),
-    ("fat_loss", "aggressive",   "Aggressive",       "🚀", "~1.5 lbs/week",  "Fastest fat loss — requires high adherence and discipline"),
+    ("fat_loss", "conservative", "Slow & Steady",   "leaf-outline", "~0.5 lbs/week",  "Sustainable pace — preserves muscle, easiest to stick to"),
+    ("fat_loss", "moderate",     "Balanced",         "walk-outline", "~1 lb/week",     "Recommended for most — good results without feeling deprived"),
+    ("fat_loss", "aggressive",   "Aggressive",       "rocket-outline", "~1.5 lbs/week",  "Fastest fat loss — requires high adherence and discipline"),
 
     # Muscle gain
-    ("muscle_gain", "conservative", "Lean Bulk",       "🌱", "~0.25 lbs/week", "Minimal fat gain — slow, clean muscle accumulation"),
-    ("muscle_gain", "moderate",     "Standard Bulk",   "💪", "~0.5 lbs/week",  "Best balance of muscle gain vs fat — most popular approach"),
-    ("muscle_gain", "aggressive",   "Aggressive Bulk", "🦣", "~1 lb/week",     "Maximum muscle gain — expect some added body fat"),
+    ("muscle_gain", "conservative", "Lean Bulk",       "leaf-outline", "~0.25 lbs/week", "Minimal fat gain — slow, clean muscle accumulation"),
+    ("muscle_gain", "moderate",     "Standard Bulk",   "barbell-outline", "~0.5 lbs/week",  "Best balance of muscle gain vs fat — most popular approach"),
+    ("muscle_gain", "aggressive",   "Aggressive Bulk", "trending-up-outline", "~1 lb/week",     "Maximum muscle gain — expect some added body fat"),
 
     # Body recomposition
-    ("body_recomp", "conservative", "Gradual Recomp",   "🐢", "Slow shift",    "High protein + slight deficit — very sustainable, slower visual change"),
-    ("body_recomp", "moderate",     "Steady Recomp",    "⚖️", "Steady effort", "Balanced nutrition and consistent training for noticeable changes over months"),
-    ("body_recomp", "aggressive",   "Intensive Recomp", "🔥", "High effort",   "Strict calorie cycling and high training volume — best results fastest"),
+    ("body_recomp", "conservative", "Gradual Recomp",   "leaf-outline", "Slow shift",    "High protein + slight deficit — very sustainable, slower visual change"),
+    ("body_recomp", "moderate",     "Steady Recomp",    "swap-horizontal-outline", "Steady effort", "Balanced nutrition and consistent training for noticeable changes over months"),
+    ("body_recomp", "aggressive",   "Intensive Recomp", "flame-outline", "High effort",   "Strict calorie cycling and high training volume — best results fastest"),
 
     # Toning
-    ("toning", "conservative", "Gentle Tone",   "🐢", "~0.5 lbs/week",  "Slow lean-out — very sustainable, no crash dieting"),
-    ("toning", "moderate",     "Steady Tone",   "🚶", "~0.75 lbs/week", "Good balance of speed and comfort for visible definition"),
-    ("toning", "aggressive",   "Fast Tone",     "🚀", "~1 lb/week",     "Quicker definition — stricter diet and more training required"),
+    ("toning", "conservative", "Gentle Tone",   "leaf-outline", "~0.5 lbs/week",  "Slow lean-out — very sustainable, no crash dieting"),
+    ("toning", "moderate",     "Steady Tone",   "walk-outline", "~0.75 lbs/week", "Good balance of speed and comfort for visible definition"),
+    ("toning", "aggressive",   "Fast Tone",     "rocket-outline", "~1 lb/week",     "Quicker definition — stricter diet and more training required"),
 
     # Strength
-    ("strength", "conservative", "Skill Focus",        "📚", "Technique first",   "Master movement patterns, light and gradual load increases"),
-    ("strength", "moderate",     "Progressive Overload","💪", "Weekly PR gains",   "Steady linear or wave-load progression — most reliable approach"),
-    ("strength", "aggressive",   "Peaking",            "🏋️", "Max effort blocks",  "High-intensity training cycles, frequent heavy days, competition prep"),
+    ("strength", "conservative", "Skill Focus",        "book-outline", "Technique first",   "Master movement patterns, light and gradual load increases"),
+    ("strength", "moderate",     "Progressive Overload","barbell-outline", "Weekly PR gains",   "Steady linear or wave-load progression — most reliable approach"),
+    ("strength", "aggressive",   "Peaking",            "trophy-outline", "Max effort blocks",  "High-intensity training cycles, frequent heavy days, competition prep"),
 
     # Endurance
-    ("endurance", "conservative", "Easy Base",    "🐢", "+10% vol/week",  "Build your aerobic base at easy, conversational pace"),
-    ("endurance", "moderate",     "Steady Build", "🚶", "+15% vol/week",  "Mix of easy, tempo, and moderate sessions for well-rounded fitness"),
-    ("endurance", "aggressive",   "Race Prep",    "🏃", "+20% vol/week",  "High weekly volume with quality speed work — training for events"),
+    ("endurance", "conservative", "Easy Base",    "leaf-outline", "+10% vol/week",  "Build your aerobic base at easy, conversational pace"),
+    ("endurance", "moderate",     "Steady Build", "walk-outline", "+15% vol/week",  "Mix of easy, tempo, and moderate sessions for well-rounded fitness"),
+    ("endurance", "aggressive",   "Race Prep",    "bicycle-outline", "+20% vol/week",  "High weekly volume with quality speed work — training for events"),
 
     # Athletic performance
-    ("athletic_performance", "conservative", "Foundation",       "🌱", "Base building",    "Develop strength, movement quality, and aerobic base"),
-    ("athletic_performance", "moderate",     "Sport-Ready",      "⚡", "Balanced output",  "Well-rounded mix of strength, speed, power, and conditioning"),
-    ("athletic_performance", "aggressive",   "Peak Performance", "🏆", "Competition prep", "Maximum effort across all physical attributes — for serious athletes"),
+    ("athletic_performance", "conservative", "Foundation",       "leaf-outline", "Base building",    "Develop strength, movement quality, and aerobic base"),
+    ("athletic_performance", "moderate",     "Sport-Ready",      "flash-outline", "Balanced output",  "Well-rounded mix of strength, speed, power, and conditioning"),
+    ("athletic_performance", "aggressive",   "Peak Performance", "trophy-outline", "Competition prep", "Maximum effort across all physical attributes — for serious athletes"),
 
     # Maintain
-    ("maintain", "conservative", "Light Active",   "🌿", "2–3x/week", "Casual, low-effort sessions to stay mobile and healthy"),
-    ("maintain", "moderate",     "Steady Active",  "🎯", "3–4x/week", "Consistent training to hold your current fitness and physique"),
-    ("maintain", "aggressive",   "Active Lifestyle","🔥", "5x/week",   "Stay highly active, keep challenging yourself without major goals"),
+    ("maintain", "conservative", "Light Active",   "leaf-outline", "2-3x/week", "Casual, low-effort sessions to stay mobile and healthy"),
+    ("maintain", "moderate",     "Steady Active",  "checkmark-circle-outline", "3-4x/week", "Consistent training to hold your current fitness and physique"),
+    ("maintain", "aggressive",   "Active Lifestyle","flame-outline", "5x/week",   "Stay highly active, keep challenging yourself without major goals"),
 
     # flexibility and stress_relief pace rows were removed alongside
     # their goal entries in the goal-honesty pass. They stay resolvable

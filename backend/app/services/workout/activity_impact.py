@@ -1,260 +1,243 @@
-"""Fatigue and recovery scoring for logged activities.
+"""Muscle-group fatigue system v1.5.
 
-Converts structured activity data (category, subtype, intensity, duration)
-into a fatigue impact used by the planner to avoid overtraining and by
-the user-facing recovery score to show readiness.
+Source of truth: per-muscle-group fatigue buckets (12 dimensions).
+Derived readiness: computed per focus-type from the muscle buckets.
 
-Fatigue model:
-  - Each activity produces a fatigue_load (0.0-1.0) and cardio_load (0.0-1.0)
-  - Fatigue decays over time: ~50% after 24h, ~25% after 48h, ~10% after 72h
-  - Rolling sum across recent days yields a readiness score
-  - The planner reads blocks_next_day to suppress conflicting workouts
+Architecture:
+  1. Exercises contribute fatigue to specific muscles via primary/secondary
+  2. Fatigue decays over time (50% at 24h, 25% at 48h, 10% at 72h)
+  3. The planner derives readiness for any focus type from the muscle state
+  4. Decisions are graduated (proceed / downgrade / swap / recover), not binary
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta, timezone
+from datetime import date, timedelta
+from typing import Any
 
 _DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10}
 
+# The 12 fatigue dimensions. Matches MuscleGroup enum minus the
+# ultra-granular ones (traps→back, forearms→biceps, adductors→quads).
+FATIGUE_MUSCLES = (
+    "chest", "back", "shoulders", "biceps", "triceps",
+    "quads", "hamstrings", "glutes", "calves", "core",
+    "cardio", "systemic",
+)
+
+# ─── Muscle fatigue model ───────────��────────────────────────────────────────
 
 @dataclass
-class ActivityImpact:
-    fatigue_load: float = 0.0
-    cardio_load: float = 0.0
-    muscle_regions: list[str] = field(default_factory=list)
-    blocks_next_day: list[str] = field(default_factory=list)
-
-
-# ─── Base fatigue tables ─────────────────────────────────────────────────────
-
-_STRENGTH_BASE: dict[str, dict[str, tuple[float, float, list[str], list[str]]]] = {
-    # subtype → intensity → (fatigue, cardio, regions, blocks)
-    "push":       {"easy": (0.30, 0.05, ["upper_body"], []),
-                   "moderate": (0.60, 0.10, ["upper_body"], ["push"]),
-                   "hard": (0.80, 0.15, ["upper_body"], ["push", "upper"])},
-    "pull":       {"easy": (0.30, 0.05, ["upper_body"], []),
-                   "moderate": (0.60, 0.10, ["upper_body"], ["pull"]),
-                   "hard": (0.80, 0.15, ["upper_body"], ["pull", "upper"])},
-    "legs":       {"easy": (0.35, 0.10, ["lower_body"], []),
-                   "moderate": (0.65, 0.15, ["lower_body"], ["legs"]),
-                   "hard": (0.90, 0.20, ["lower_body"], ["legs", "lower", "cardio"])},
-    "upper_body": {"easy": (0.30, 0.05, ["upper_body"], []),
-                   "moderate": (0.60, 0.10, ["upper_body"], ["push", "pull", "upper"]),
-                   "hard": (0.80, 0.15, ["upper_body"], ["push", "pull", "upper"])},
-    "lower_body": {"easy": (0.35, 0.10, ["lower_body"], []),
-                   "moderate": (0.65, 0.15, ["lower_body"], ["legs", "lower"]),
-                   "hard": (0.90, 0.20, ["lower_body"], ["legs", "lower", "cardio"])},
-    "full_body":  {"easy": (0.35, 0.10, ["upper_body", "lower_body"], []),
-                   "moderate": (0.65, 0.15, ["upper_body", "lower_body"], ["full_body"]),
-                   "hard": (0.85, 0.20, ["upper_body", "lower_body"], ["full_body", "legs", "upper"])},
-}
-
-_CARDIO_BASE: dict[str, dict[str, tuple[float, float, list[str], list[str]]]] = {
-    "walk":       {"easy": (0.05, 0.10, [], []),
-                   "moderate": (0.15, 0.25, [], []),
-                   "hard": (0.25, 0.40, ["lower_body"], [])},
-    "run":        {"easy": (0.20, 0.30, ["lower_body"], []),
-                   "moderate": (0.40, 0.55, ["lower_body"], ["legs"]),
-                   "hard": (0.60, 0.80, ["lower_body"], ["legs", "lower", "cardio"])},
-    "ride":       {"easy": (0.15, 0.25, ["lower_body"], []),
-                   "moderate": (0.35, 0.50, ["lower_body"], []),
-                   "hard": (0.60, 0.75, ["lower_body"], ["legs", "lower"])},
-    "hike":       {"easy": (0.15, 0.20, ["lower_body"], []),
-                   "moderate": (0.35, 0.40, ["lower_body"], ["legs"]),
-                   "hard": (0.50, 0.60, ["lower_body"], ["legs", "lower"])},
-    "swim":       {"easy": (0.20, 0.30, ["upper_body"], []),
-                   "moderate": (0.40, 0.50, ["upper_body", "lower_body"], []),
-                   "hard": (0.60, 0.70, ["upper_body", "lower_body"], ["upper", "cardio"])},
-    "row":        {"easy": (0.20, 0.30, ["upper_body", "lower_body"], []),
-                   "moderate": (0.40, 0.55, ["upper_body", "lower_body"], ["pull"]),
-                   "hard": (0.60, 0.75, ["upper_body", "lower_body"], ["pull", "upper", "cardio"])},
-    "stair":      {"easy": (0.15, 0.25, ["lower_body"], []),
-                   "moderate": (0.35, 0.50, ["lower_body"], ["legs"]),
-                   "hard": (0.55, 0.70, ["lower_body"], ["legs", "lower"])},
-    "elliptical": {"easy": (0.10, 0.20, [], []),
-                   "moderate": (0.30, 0.45, ["lower_body"], []),
-                   "hard": (0.50, 0.65, ["lower_body"], ["cardio"])},
-    "bootcamp":   {"easy": (0.35, 0.30, ["upper_body", "lower_body"], []),
-                   "moderate": (0.55, 0.50, ["upper_body", "lower_body"], ["full_body"]),
-                   "hard": (0.70, 0.60, ["upper_body", "lower_body"], ["full_body", "legs", "upper"])},
-    "other":      {"easy": (0.10, 0.20, [], []),
-                   "moderate": (0.30, 0.45, [], []),
-                   "hard": (0.50, 0.65, [], ["cardio"])},
-}
-
-_MOBILITY_BASE: dict[str, dict[str, tuple[float, float, list[str], list[str]]]] = {
-    "yoga":       {"easy": (0.10, 0.00, [], []),
-                   "moderate": (0.20, 0.05, [], []),
-                   "hard": (0.35, 0.10, ["upper_body", "lower_body"], [])},
-    "stretching": {"easy": (0.05, 0.00, [], []),
-                   "moderate": (0.05, 0.00, [], []),
-                   "hard": (0.10, 0.00, [], [])},
-    "foam_roll":  {"easy": (0.05, 0.00, [], []),
-                   "moderate": (0.05, 0.00, [], []),
-                   "hard": (0.05, 0.00, [], [])},
-    "pilates":    {"easy": (0.15, 0.05, ["upper_body", "lower_body"], []),
-                   "moderate": (0.30, 0.10, ["upper_body", "lower_body"], []),
-                   "hard": (0.45, 0.15, ["upper_body", "lower_body"], [])},
-}
-
-_SPORT_OVERRIDES: dict[str, dict[str, tuple[float, float, list[str], list[str]]]] = {
-    "boxing":     {"easy": (0.30, 0.35, ["upper_body"], []),
-                   "moderate": (0.55, 0.55, ["upper_body"], ["push", "pull"]),
-                   "hard": (0.75, 0.75, ["upper_body"], ["push", "pull", "upper", "cardio"])},
-    "kickboxing": {"easy": (0.35, 0.40, ["upper_body", "lower_body"], []),
-                   "moderate": (0.60, 0.60, ["upper_body", "lower_body"], ["full_body"]),
-                   "hard": (0.80, 0.80, ["upper_body", "lower_body"], ["full_body", "legs", "cardio"])},
-}
-
-_SPORT_DEFAULT: dict[str, tuple[float, float, list[str], list[str]]] = {
-    "easy": (0.20, 0.30, ["lower_body"], []),
-    "moderate": (0.45, 0.50, ["upper_body", "lower_body"], []),
-    "hard": (0.65, 0.70, ["upper_body", "lower_body"], ["full_body", "cardio"]),
-}
-
-
-def compute_activity_impact(
-    category: str | None,
-    subtype: str | None,
-    intensity: str | None,
-    duration_minutes: int = 60,
-    cardio_style: str | None = None,
-) -> ActivityImpact:
-    """Compute fatigue impact from a single activity."""
-    cat = (category or "").lower()
-    sub = (subtype or "other").lower()
-    inten = (intensity or "moderate").lower()
-    if inten not in ("easy", "moderate", "hard"):
-        inten = "moderate"
-
-    if cat == "recovery":
-        return ActivityImpact()
-
-    if cat == "strength":
-        row = _STRENGTH_BASE.get(sub, _STRENGTH_BASE["full_body"]).get(inten, (0.5, 0.1, [], []))
-    elif cat == "cardio":
-        row = _CARDIO_BASE.get(sub, _CARDIO_BASE["other"]).get(inten, (0.3, 0.4, [], []))
-    elif cat == "mobility":
-        row = _MOBILITY_BASE.get(sub, _MOBILITY_BASE["yoga"]).get(inten, (0.1, 0.0, [], []))
-    elif cat == "sport":
-        override = _SPORT_OVERRIDES.get(sub)
-        row = override.get(inten, (0.45, 0.50, [], [])) if override else _SPORT_DEFAULT.get(inten, (0.45, 0.50, [], []))
-    else:
-        row = _infer_from_focus_label(subtype or "", inten)
-
-    fatigue, cardio, regions, blocks = row
-
-    # Class-style cardio (Peloton etc) gets a fatigue bump
-    if cardio_style == "class" and cat == "cardio":
-        fatigue = min(1.0, fatigue + 0.10)
-    elif cardio_style == "intervals" and cat == "cardio":
-        fatigue = min(1.0, fatigue + 0.05)
-
-    # Duration scaling: baseline is 60 min, scale 0.5x-1.5x
-    dur_mult = max(0.5, min(1.5, duration_minutes / 60.0))
-    fatigue = min(1.0, fatigue * dur_mult)
-    cardio = min(1.0, cardio * dur_mult)
-
-    return ActivityImpact(
-        fatigue_load=round(fatigue, 3),
-        cardio_load=round(cardio, 3),
-        muscle_regions=list(regions),
-        blocks_next_day=list(blocks),
-    )
-
-
-def _infer_from_focus_label(focus: str, intensity: str) -> tuple[float, float, list[str], list[str]]:
-    """Backward compat: infer impact from old-style focus labels."""
-    f = focus.lower()
-    if any(k in f for k in ("push", "chest", "shoulder")):
-        return _STRENGTH_BASE["push"].get(intensity, (0.5, 0.1, ["upper_body"], []))
-    if any(k in f for k in ("pull", "back")):
-        return _STRENGTH_BASE["pull"].get(intensity, (0.5, 0.1, ["upper_body"], []))
-    if any(k in f for k in ("leg", "lower", "squat", "glute")):
-        return _STRENGTH_BASE["legs"].get(intensity, (0.6, 0.15, ["lower_body"], []))
-    if any(k in f for k in ("upper",)):
-        return _STRENGTH_BASE["upper_body"].get(intensity, (0.5, 0.1, ["upper_body"], []))
-    if any(k in f for k in ("full", "total")):
-        return _STRENGTH_BASE["full_body"].get(intensity, (0.5, 0.15, [], []))
-    if any(k in f for k in ("cardio", "run", "cycling", "walk", "hik", "swim")):
-        return _CARDIO_BASE["other"].get(intensity, (0.3, 0.4, [], []))
-    if any(k in f for k in ("yoga", "stretch", "mobil", "foam")):
-        return _MOBILITY_BASE["yoga"].get(intensity, (0.1, 0.0, [], []))
-    if any(k in f for k in ("recovery", "rest", "sauna")):
-        return (0.0, 0.0, [], [])
-    return (0.50, 0.10, [], [])
-
-
-# ─── Rolling fatigue / recovery score ────────────────────────────────────────
-
-@dataclass
-class RegionalFatigue:
-    """Per-region fatigue buckets. Each is 0.0 (fresh) to 1.0+ (overtrained)."""
-    upper_body: float = 0.0
-    lower_body: float = 0.0
+class MuscleFatigue:
+    """Per-muscle-group fatigue state. Each is 0.0 (fresh) to 1.0+ (overtrained)."""
+    chest: float = 0.0
+    back: float = 0.0
+    shoulders: float = 0.0
+    biceps: float = 0.0
+    triceps: float = 0.0
+    quads: float = 0.0
+    hamstrings: float = 0.0
+    glutes: float = 0.0
+    calves: float = 0.0
+    core: float = 0.0
     cardio: float = 0.0
-    systemic: float = 0.0    # full-body / CNS drain
+    systemic: float = 0.0
 
-    def high_regions(self, threshold: float = 0.5) -> list[str]:
-        """Return region names above the threshold."""
-        out = []
-        if self.upper_body >= threshold: out.append("upper_body")
-        if self.lower_body >= threshold: out.append("lower_body")
-        if self.cardio >= threshold: out.append("cardio")
-        if self.systemic >= threshold: out.append("systemic")
-        return out
+    def get(self, muscle: str) -> float:
+        return getattr(self, muscle, 0.0)
 
-    def blocked_focuses(self, threshold: float = 0.6) -> list[str]:
-        """Focus families that should be suppressed due to accumulated fatigue."""
-        blocked = []
-        if self.upper_body >= threshold:
-            blocked.extend(["push", "pull", "upper"])
-        if self.lower_body >= threshold:
-            blocked.extend(["legs", "lower"])
-        if self.cardio >= threshold:
-            blocked.extend(["cardio"])
-        if self.lower_body >= threshold and self.cardio >= 0.4:
-            blocked.append("full_body")
-        return sorted(set(blocked))
+    def add(self, muscle: str, value: float):
+        current = getattr(self, muscle, None)
+        if current is not None:
+            setattr(self, muscle, current + value)
 
+    def to_dict(self) -> dict[str, float]:
+        return {m: round(getattr(self, m, 0.0), 3) for m in FATIGUE_MUSCLES}
+
+    def top_fatigued(self, n: int = 4, threshold: float = 0.3) -> list[tuple[str, float]]:
+        pairs = [(m, getattr(self, m, 0.0)) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")]
+        return sorted([(m, v) for m, v in pairs if v >= threshold], key=lambda x: -x[1])[:n]
+
+
+# ─── Focus-type readiness derivation ─────────────────────────────────────────
+
+# Maps focus types to the muscles that determine readiness.
+# Weights: how much each muscle matters for that focus type.
+_FOCUS_MUSCLES: dict[str, dict[str, float]] = {
+    "push":       {"chest": 1.0, "shoulders": 0.8, "triceps": 0.6},
+    "pull":       {"back": 1.0, "biceps": 0.7, "shoulders": 0.3},
+    "legs":       {"quads": 1.0, "glutes": 0.8, "hamstrings": 0.8, "calves": 0.3},
+    "upper":      {"chest": 0.8, "back": 0.8, "shoulders": 0.7, "biceps": 0.5, "triceps": 0.5},
+    "lower":      {"quads": 1.0, "glutes": 0.9, "hamstrings": 0.9, "calves": 0.4},
+    "full_body":  {"chest": 0.5, "back": 0.5, "shoulders": 0.4, "quads": 0.5, "glutes": 0.4, "hamstrings": 0.4, "systemic": 0.8},
+    "chest_back": {"chest": 1.0, "back": 1.0},
+    "arms":       {"biceps": 1.0, "triceps": 1.0},
+    "shoulders":  {"shoulders": 1.0},
+    "glute_focus": {"glutes": 1.0, "hamstrings": 0.4, "quads": 0.3},
+    "cardio":     {"cardio": 1.0, "systemic": 0.3},
+    "mobility":   {},
+    "recovery":   {},
+}
+
+
+def derive_focus_readiness(fatigue: MuscleFatigue, focus: str) -> float:
+    """Compute 0.0 (blocked) to 1.0 (fully fresh) readiness for a focus type."""
+    muscles = _FOCUS_MUSCLES.get(focus.lower().replace(" ", "_"), {})
+    if not muscles:
+        return 1.0  # mobility/recovery always ready
+
+    weighted_fatigue = 0.0
+    total_weight = 0.0
+    for muscle, importance in muscles.items():
+        weighted_fatigue += fatigue.get(muscle) * importance
+        total_weight += importance
+
+    avg = weighted_fatigue / total_weight if total_weight > 0 else 0.0
+    return max(0.0, min(1.0, 1.0 - avg))
+
+
+def derive_all_readiness(fatigue: MuscleFatigue) -> dict[str, float]:
+    """Compute readiness for all focus types at once."""
+    return {focus: round(derive_focus_readiness(fatigue, focus), 2) for focus in _FOCUS_MUSCLES}
+
+
+# ─── Exercise → muscle fatigue resolution ─────────────────────────────────────
+
+# Granular muscles that roll up into our 12 buckets
+_MUSCLE_ROLLUP: dict[str, str] = {
+    "traps": "back",
+    "forearms": "biceps",
+    "adductors": "quads",
+    "hip_flexors": "quads",
+    "full_body": "systemic",
+    "cardio": "cardio",
+    # Direct mappings
+    "chest": "chest", "back": "back", "shoulders": "shoulders",
+    "biceps": "biceps", "triceps": "triceps",
+    "quads": "quads", "hamstrings": "hamstrings", "glutes": "glutes",
+    "calves": "calves", "core": "core",
+    "lats": "back", "rear_delt": "shoulders",
+}
+
+
+def resolve_exercise_fatigue(
+    exercises: list[dict],
+    intensity: str = "moderate",
+    duration_minutes: int = 60,
+) -> dict[str, float]:
+    """Resolve a list of completed exercises into per-muscle fatigue scores.
+
+    Each exercise dict should have:
+      - name (str)
+      - primary_muscle (str)
+      - secondary_muscles (list[str])
+      - is_compound (bool)
+      - sets logged or target_sets (int)
+    """
+    intensity_mult = {"easy": 0.5, "moderate": 1.0, "hard": 1.4}.get(intensity, 1.0)
+    fatigue: dict[str, float] = {}
+
+    for ex in exercises:
+        primary = _MUSCLE_ROLLUP.get(ex.get("primary_muscle", ""), "")
+        secondaries = [_MUSCLE_ROLLUP.get(m, "") for m in (ex.get("secondary_muscles") or [])]
+        secondaries = [s for s in secondaries if s and s != primary]
+        is_compound = ex.get("is_compound", False)
+        sets = ex.get("sets_logged") or ex.get("target_sets") or ex.get("sets") or 3
+
+        # Per-exercise fatigue: ~0.08 per set for primary, scaled by intensity
+        base_per_set = 0.08 * intensity_mult
+        if primary:
+            fatigue[primary] = fatigue.get(primary, 0.0) + base_per_set * sets
+        for sec in secondaries:
+            fatigue[sec] = fatigue.get(sec, 0.0) + base_per_set * 0.3 * sets
+
+        # Systemic contribution
+        sys_mult = 0.4 if is_compound else 0.15
+        fatigue["systemic"] = fatigue.get("systemic", 0.0) + base_per_set * sys_mult * sets
+
+    # Cap individual muscles at 1.0
+    return {k: round(min(1.0, v), 3) for k, v in fatigue.items()}
+
+
+def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duration_minutes: int = 60) -> dict[str, float]:
+    """Estimate muscle fatigue from a focus label when no per-exercise data exists."""
+    intensity_mult = {"easy": 0.5, "moderate": 1.0, "hard": 1.4}.get(intensity, 1.0)
+    dur_mult = max(0.5, min(1.5, duration_minutes / 60.0))
+    scale = intensity_mult * dur_mult
+
+    _FOCUS_FATIGUE: dict[str, dict[str, float]] = {
+        "push":       {"chest": 0.6, "shoulders": 0.4, "triceps": 0.35, "systemic": 0.25},
+        "pull":       {"back": 0.6, "biceps": 0.35, "shoulders": 0.15, "systemic": 0.25},
+        "legs":       {"quads": 0.6, "glutes": 0.5, "hamstrings": 0.45, "calves": 0.2, "systemic": 0.35},
+        "upper":      {"chest": 0.45, "back": 0.45, "shoulders": 0.35, "biceps": 0.25, "triceps": 0.25, "systemic": 0.25},
+        "lower":      {"quads": 0.55, "glutes": 0.5, "hamstrings": 0.45, "calves": 0.2, "systemic": 0.3},
+        "full_body":  {"chest": 0.3, "back": 0.3, "shoulders": 0.25, "quads": 0.3, "glutes": 0.25, "hamstrings": 0.25, "systemic": 0.35},
+        "chest":      {"chest": 0.65, "triceps": 0.3, "shoulders": 0.2, "systemic": 0.2},
+        "back":       {"back": 0.65, "biceps": 0.3, "systemic": 0.2},
+        "shoulders":  {"shoulders": 0.6, "triceps": 0.2, "systemic": 0.15},
+        "arms":       {"biceps": 0.5, "triceps": 0.5, "systemic": 0.1},
+        "cardio":     {"cardio": 0.5, "quads": 0.15, "hamstrings": 0.1, "calves": 0.1, "systemic": 0.2},
+        "recovery":   {},
+        "mobility":   {},
+        "yoga":       {"core": 0.1, "systemic": 0.05},
+        "walking":    {"cardio": 0.1, "systemic": 0.05},
+        "running":    {"cardio": 0.5, "quads": 0.2, "hamstrings": 0.15, "calves": 0.15, "systemic": 0.25},
+        "cycling":    {"cardio": 0.45, "quads": 0.25, "glutes": 0.15, "systemic": 0.2},
+        "hiking":     {"cardio": 0.35, "quads": 0.2, "glutes": 0.15, "calves": 0.15, "systemic": 0.2},
+        "swimming":   {"cardio": 0.4, "back": 0.2, "shoulders": 0.15, "systemic": 0.2},
+    }
+
+    focus = focus_label.lower().replace(" ", "_").replace("body", "").strip("_")
+    # Try exact match, then keyword search
+    base = _FOCUS_FATIGUE.get(focus)
+    if not base:
+        fl = focus_label.lower()
+        if any(k in fl for k in ("push", "chest")):     base = _FOCUS_FATIGUE["push"]
+        elif any(k in fl for k in ("pull", "back")):     base = _FOCUS_FATIGUE["pull"]
+        elif any(k in fl for k in ("leg", "lower")):     base = _FOCUS_FATIGUE["legs"]
+        elif any(k in fl for k in ("upper",)):           base = _FOCUS_FATIGUE["upper"]
+        elif any(k in fl for k in ("full",)):            base = _FOCUS_FATIGUE["full_body"]
+        elif any(k in fl for k in ("run",)):             base = _FOCUS_FATIGUE["running"]
+        elif any(k in fl for k in ("cardio", "cycling", "bike")): base = _FOCUS_FATIGUE["cardio"]
+        elif any(k in fl for k in ("yoga", "stretch", "mobil")): base = _FOCUS_FATIGUE["yoga"]
+        elif any(k in fl for k in ("recovery", "rest")): base = _FOCUS_FATIGUE["recovery"]
+        else:                                            base = {"systemic": 0.3}
+
+    return {k: round(min(1.0, v * scale), 3) for k, v in base.items()}
+
+
+# ─── Rolling fatigue / recovery score ─────────��──────────────────────────────
 
 @dataclass
 class FatigueSnapshot:
     """Rolling fatigue state across recent days."""
-    total_fatigue: float      # 0.0 = fully recovered, 1.0+ = overtrained
-    total_cardio: float       # accumulated cardio load
-    regional: RegionalFatigue # per-region breakdown
-    readiness_score: int      # 0-100, higher = more ready
-    readiness_label: str      # "Fresh", "Ready", "Moderate", "Fatigued", "Overtrained"
-    fatigued_regions: list[str]
-    blocked_focuses: list[str]
+    muscle_fatigue: MuscleFatigue
+    readiness_score: int          # 0-100 overall
+    readiness_label: str          # Fresh/Ready/Moderate/Fatigued/Overtrained
+    focus_readiness: dict[str, float]  # per-focus 0.0-1.0
+    top_fatigued: list[tuple[str, float]]  # [(muscle, value), ...]
+    blocked_focuses: list[str]    # backward compat: focuses below threshold
     days_analyzed: int
-    activities: list[dict]    # summary per day
+    activities: list[dict]
 
 
 def compute_rolling_fatigue(
     completions: list[dict],
     today: date | None = None,
 ) -> FatigueSnapshot:
-    """Compute rolling fatigue from recent workout completions.
+    """Compute muscle-group fatigue from recent workout completions.
 
     Each completion dict should have:
       - workout_date (date or str)
       - focus_label (str)
       - duration_seconds (int)
-      - activity_category (str|None)
-      - activity_subtype (str|None)
-      - activity_intensity (str|None)
-      - cardio_style (str|None)
+      - resolved_muscle_fatigue (dict | None) — pre-computed per-muscle
+      - activity_intensity (str | None)
     """
     if today is None:
         today = date.today()
 
-    total_fatigue = 0.0
-    total_cardio = 0.0
-    reg = RegionalFatigue()
-    all_blocks: list[str] = []
+    mf = MuscleFatigue()
     activities: list[dict] = []
 
     for c in completions:
@@ -272,73 +255,50 @@ def compute_rolling_fatigue(
             continue
 
         decay = _DECAY.get(days_ago, 0.0)
-        dur = (c.get("duration_seconds") or 0) / 60
 
-        impact = compute_activity_impact(
-            category=c.get("activity_category"),
-            subtype=c.get("activity_subtype") or c.get("focus_label"),
-            intensity=c.get("activity_intensity"),
-            duration_minutes=int(dur) if dur > 0 else 60,
-            cardio_style=c.get("cardio_style"),
-        )
+        # Prefer pre-resolved muscle fatigue; fall back to focus-label estimate
+        resolved = c.get("resolved_muscle_fatigue")
+        if not resolved or not isinstance(resolved, dict):
+            dur = max(1, (c.get("duration_seconds") or 0) // 60)
+            resolved = resolve_focus_fatigue(
+                c.get("focus_label", ""),
+                intensity=c.get("activity_intensity") or "moderate",
+                duration_minutes=dur,
+            )
 
-        total_fatigue += impact.fatigue_load * decay
-        total_cardio += impact.cardio_load * decay
-
-        # Accumulate per-region fatigue
-        decayed_fatigue = impact.fatigue_load * decay
-        decayed_cardio = impact.cardio_load * decay
-        if "upper_body" in impact.muscle_regions:
-            reg.upper_body += decayed_fatigue
-        if "lower_body" in impact.muscle_regions:
-            reg.lower_body += decayed_fatigue
-        reg.cardio += decayed_cardio
-        reg.systemic += decayed_fatigue * 0.5  # everything contributes to systemic
-
-        if days_ago <= 1:
-            all_blocks.extend(impact.blocks_next_day)
+        for muscle, value in resolved.items():
+            if muscle in FATIGUE_MUSCLES:
+                mf.add(muscle, value * decay)
 
         activities.append({
             "date": wd.isoformat(),
             "days_ago": days_ago,
             "focus": c.get("focus_label", ""),
-            "category": c.get("activity_category", ""),
             "intensity": c.get("activity_intensity", ""),
-            "fatigue": round(impact.fatigue_load * decay, 2),
-            "cardio": round(impact.cardio_load * decay, 2),
+            "muscles": {k: round(v * decay, 2) for k, v in resolved.items() if v > 0},
         })
 
-    # Merge region-based blocks with activity-based blocks
-    all_blocks.extend(reg.blocked_focuses())
+    # Overall readiness from systemic + average muscle fatigue
+    muscle_avg = sum(getattr(mf, m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
+    overall = max(0.0, 1.0 - (muscle_avg * 0.6 + mf.systemic * 0.4))
+    readiness_score = int(round(overall * 100))
 
-    # Readiness: inverse of fatigue, 0-100 scale
-    raw_readiness = max(0.0, 1.0 - total_fatigue)
-    readiness_score = int(round(raw_readiness * 100))
+    if readiness_score >= 85:   label = "Fresh"
+    elif readiness_score >= 65: label = "Ready"
+    elif readiness_score >= 40: label = "Moderate"
+    elif readiness_score >= 20: label = "Fatigued"
+    else:                       label = "Overtrained"
 
-    if readiness_score >= 85:
-        label = "Fresh"
-    elif readiness_score >= 65:
-        label = "Ready"
-    elif readiness_score >= 40:
-        label = "Moderate"
-    elif readiness_score >= 20:
-        label = "Fatigued"
-    else:
-        label = "Overtrained"
+    focus_readiness = derive_all_readiness(mf)
+    blocked = [f for f, r in focus_readiness.items() if r < 0.3 and f not in ("mobility", "recovery")]
 
     return FatigueSnapshot(
-        total_fatigue=round(total_fatigue, 3),
-        total_cardio=round(total_cardio, 3),
-        regional=RegionalFatigue(
-            upper_body=round(reg.upper_body, 3),
-            lower_body=round(reg.lower_body, 3),
-            cardio=round(reg.cardio, 3),
-            systemic=round(reg.systemic, 3),
-        ),
+        muscle_fatigue=mf,
         readiness_score=readiness_score,
         readiness_label=label,
-        fatigued_regions=reg.high_regions(),
-        blocked_focuses=sorted(set(all_blocks)),
+        focus_readiness=focus_readiness,
+        top_fatigued=mf.top_fatigued(4),
+        blocked_focuses=blocked,
         days_analyzed=len(activities),
         activities=activities,
     )

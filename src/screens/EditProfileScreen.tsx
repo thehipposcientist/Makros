@@ -257,13 +257,24 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [currentWeightInput, setCurrentWeightInput]               = useState('');
 
   // Workout prefs
-  const [daysPerWeek, setDaysPerWeek] = useState(profile.daysPerWeek);
+  const [daysPerWeek, setDaysPerWeekRaw] = useState(profile.daysPerWeek);
+  const [trainingDays, setTrainingDays] = useState<number[]>(profile.trainingDays ?? []);
+  const setDaysPerWeek = (updater: number | ((d: number) => number)) => {
+    setDaysPerWeekRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      // Auto-adjust trainingDays when count changes
+      if (trainingDays.length !== next) {
+        setTrainingDays([]); // clear custom selection so it re-syncs
+      }
+      return next;
+    });
+  };
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
   const [preferredSplit, setPreferredSplit] = useState(profile.preferredSplit ?? 'auto');
   const [splitOptions, setSplitOptions] = useState<import('../services/api').SplitOption[]>([]);
   const [splitLoading, setSplitLoading] = useState(false);
   const [splitModalVisible, setSplitModalVisible] = useState(false);
-  const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 3);
+  const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 5);
   const [mealsPerDay, setMealsPerDay] = useState<number>(profile.mealsPerDay ?? 3);
   // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
   // macros tab is opened so the macros section isn't waiting on an extra
@@ -957,7 +968,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     if (!sameArr(profile.equipment, equipment)) return true;
     // Nutrition shape
     if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
-    if ((profile.mealVariety ?? 3) !== mealVariety) return true;
+    if ((profile.mealVariety ?? 5) !== mealVariety) return true;
     if (!sameArr(profile.foodsAvailable, foods.filter(f => !f.startsWith('__supp__')))) return true;
     if ((profile.mealRoutine ?? '') !== (mealRoutine ?? '').trim()) return true;
     // Bodyweight (affects macro targets)
@@ -1030,6 +1041,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         targetEvent: targetEventVal,
       },
       daysPerWeek: Math.min(7, Math.max(1, daysPerWeek)),
+      trainingDays: trainingDays.length === daysPerWeek ? trainingDays : undefined,
       workoutDurationMinutes: duration,
       preferredSplit: preferredSplit === 'auto' ? undefined : preferredSplit,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
@@ -1229,7 +1241,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     style={[styles.paceCard, selected && styles.paceCardActive]}
                     onPress={() => setPace(opt.value as GoalPace)}>
                     <View style={styles.paceTop}>
-                      <Text style={styles.paceIcon}>{opt.icon}</Text>
+                      {opt.icon.includes('-') ? <Ionicons name={opt.icon as any} size={20} color={colors.textPrimary} /> : <Text style={styles.paceIcon}>{opt.icon}</Text>}
                       <View style={{ flex: 1 }}>
                         <Text style={[styles.paceLabel, selected && styles.paceLabelActive]}>{opt.label}</Text>
                         <Text style={styles.paceRate}>{opt.rate}</Text>
@@ -1456,8 +1468,42 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
 
+          {/* Day-of-week selector */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16, marginTop: 4 }}>
+            {(['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const).map((label, dow) => {
+              const selected = trainingDays.includes(dow);
+              const atLimit = trainingDays.length >= daysPerWeek && !selected;
+              return (
+                <TouchableOpacity
+                  key={dow}
+                  style={{
+                    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+                    backgroundColor: selected ? colors.primary : colors.surfaceRaised,
+                    borderWidth: 1.5, borderColor: selected ? colors.primary : colors.border,
+                    opacity: atLimit ? 0.4 : 1,
+                  }}
+                  disabled={atLimit}
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    if (selected) {
+                      setTrainingDays(prev => prev.filter(d => d !== dow));
+                    } else if (trainingDays.length < daysPerWeek) {
+                      setTrainingDays(prev => [...prev, dow].sort());
+                    }
+                  }}>
+                  <Text style={{ fontSize: 13, fontWeight: '800', color: selected ? '#fff' : colors.textSecondary }}>{label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {trainingDays.length > 0 && trainingDays.length !== daysPerWeek && (
+            <Text style={{ fontSize: 11, color: colors.warning ?? '#F59E0B', marginBottom: 8, marginTop: -8 }}>
+              Select {daysPerWeek - trainingDays.length} more day{daysPerWeek - trainingDays.length !== 1 ? 's' : ''}
+            </Text>
+          )}
+
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>⏱  Session Length</Text>
+            <Text style={styles.chipGroupLabel}>Session Length</Text>
             <View style={[styles.durationRow, { marginTop: 8 }]}>
               {DURATION_OPTIONS.map(opt => (
                 <TouchableOpacity
@@ -2179,7 +2225,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               ))}
               {filteredCustomFoods.length > 0 && (
                 <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>✨  Custom</Text>
+                  <Text style={styles.chipGroupLabel}>Custom</Text>
                   <View style={styles.chips}>
                     {filteredCustomFoods.map(f => {
                       const selected = foods.includes(f.name);

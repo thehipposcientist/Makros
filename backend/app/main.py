@@ -161,12 +161,91 @@ def _startup_enrich_exercise_images():
     threading.Thread(target=_worker, daemon=True, name="enrich-exercise-images").start()
 
 
+def _startup_backfill_muscle_fatigue():
+    """Background: resolve muscle fatigue for existing completions that don't have it."""
+    import threading
+    def _worker():
+        try:
+            from sqlmodel import Session, select
+            from app.models import WorkoutCompletion, WorkoutExercise, ExerciseSet
+            from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
+            from app.seed_exercises_data import SEED_EXERCISES
+
+            seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
+            with Session(engine) as db:
+                rows = db.exec(
+                    select(WorkoutCompletion).where(WorkoutCompletion.resolved_muscle_fatigue == None)
+                ).all()
+                if not rows:
+                    return
+
+                backfilled = 0
+                for row in rows:
+                    # Try to find structured exercise data
+                    from app.models import WorkoutSession as WS
+                    session = db.exec(
+                        select(WS)
+                        .where(WS.user_id == row.user_id)
+                        .where(WS.workout_date == row.workout_date)
+                    ).first()
+
+                    if session:
+                        exercises = db.exec(
+                            select(WorkoutExercise)
+                            .where(WorkoutExercise.session_id == session.id)
+                        ).all()
+                        if exercises:
+                            ex_list = []
+                            for ex in exercises:
+                                seed = seed_map.get(ex.name.lower(), {})
+                                sets_count = db.exec(
+                                    select(ExerciseSet)
+                                    .where(ExerciseSet.workout_exercise_id == ex.id)
+                                    .where(ExerciseSet.completed == True)
+                                ).all()
+                                ex_list.append({
+                                    "name": ex.name,
+                                    "primary_muscle": seed.get("primary_muscle", ""),
+                                    "secondary_muscles": seed.get("secondary_muscles", []),
+                                    "is_compound": seed.get("is_compound", False),
+                                    "sets_logged": len(sets_count),
+                                })
+                            if ex_list:
+                                resolved = resolve_exercise_fatigue(
+                                    ex_list,
+                                    intensity=row.activity_intensity or row.stimulus or "moderate",
+                                    duration_minutes=max(1, row.duration_seconds // 60) if row.duration_seconds else 60,
+                                )
+                                row.resolved_muscle_fatigue = resolved
+                                db.add(row)
+                                backfilled += 1
+                                continue
+
+                    # Fallback: use focus label
+                    resolved = resolve_focus_fatigue(
+                        row.focus_label,
+                        intensity=row.activity_intensity or "moderate",
+                        duration_minutes=max(1, row.duration_seconds // 60) if row.duration_seconds else 60,
+                    )
+                    row.resolved_muscle_fatigue = resolved
+                    db.add(row)
+                    backfilled += 1
+
+                if backfilled:
+                    db.commit()
+                print(f"[startup] backfilled muscle fatigue for {backfilled}/{len(rows)} completions")
+        except Exception as e:
+            print(f"[startup] muscle fatigue backfill failed (non-fatal): {e}")
+    threading.Thread(target=_worker, daemon=True, name="backfill-muscle-fatigue").start()
+
+
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
     _cleanup_orphaned_plan_jobs()
     _startup_enrich_food_micros()
     _startup_enrich_exercise_images()
+    _startup_backfill_muscle_fatigue()
 
 
 app.include_router(auth.router)

@@ -96,16 +96,19 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
                     DayArchetype.LIFT_LOWER_HYPERTROPHY,
                 ]
             result = [stimulus_cycle[i % len(stimulus_cycle)] for i in range(days)]
-            if days % 2 == 1 and _has_stimulus:
-                result[-1] = DayArchetype.LIFT_FULL_BODY_STRENGTH
+            # Odd day: repeat an extra upper or lower hypertrophy day
+            # instead of breaking the split with full body
+            if days % 2 == 1:
+                result[-1] = DayArchetype.LIFT_UPPER_HYPERTROPHY if priority_region != "upper_body" else DayArchetype.LIFT_LOWER_HYPERTROPHY
             return result
         if priority_region == "lower_body":
             cycle = [DayArchetype.LIFT_LOWER, DayArchetype.LIFT_UPPER]
         else:
             cycle = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
         result = [cycle[i % 2] for i in range(days)]
+        # Odd day: extra session of the priority region, not full body
         if days % 2 == 1:
-            result[-1] = DayArchetype.LIFT_FULL_BODY
+            result[-1] = cycle[0]
         return result
 
     if split == SPLIT_PPL:

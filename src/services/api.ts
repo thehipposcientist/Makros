@@ -465,7 +465,7 @@ export async function getAIPlans(
     routineMacros:          routinePayload?.routineMacros,
     routineSlots:           routinePayload?.routineSlots ?? [],
     mealsPerDay:            Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
-    mealVariety:            Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
+    mealVariety:            Math.max(1, Math.min(7, profile.mealVariety ?? 5)),
     customMacros:           profile.customMacros ?? undefined,
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -587,7 +587,7 @@ export async function getAINutritionPlan(
     routineMacros:        routinePayload?.routineMacros,
     routineSlots:         routinePayload?.routineSlots ?? [],
     mealsPerDay:          Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
-    mealVariety:          Math.max(1, Math.min(7, profile.mealVariety ?? 3)),
+    mealVariety:          Math.max(1, Math.min(7, profile.mealVariety ?? 5)),
     customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
@@ -939,19 +939,16 @@ export async function logWorkoutDone(
 export interface FatigueScore {
   readiness_score: number;
   readiness_label: string;
-  total_fatigue: number;
-  total_cardio: number;
-  fatigued_regions: string[];
+  muscle_fatigue: Record<string, number>;
+  focus_readiness: Record<string, number>;
+  top_fatigued: Array<{ muscle: string; value: number }>;
   blocked_focuses: string[];
   days_analyzed: number;
   activities: Array<{
     date: string;
     days_ago: number;
     focus: string;
-    category: string;
     intensity: string;
-    fatigue: number;
-    cardio: number;
   }>;
 }
 

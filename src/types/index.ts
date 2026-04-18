@@ -180,6 +180,9 @@ export interface UserProfile {
   themePreference?: AppThemeName;
   physicalStats: PhysicalStats;
   daysPerWeek: number;
+  /** Specific days the user can train. 0=Sun, 1=Mon, ..., 6=Sat.
+   *  When set, overrides daysPerWeek for scheduling. Length must match daysPerWeek. */
+  trainingDays?: number[];
   workoutDurationMinutes: number;
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   foodsAvailable: string[];

@@ -2010,7 +2010,7 @@ async def run_full_plan_generation(
         int(targets_for_check["fat"]),
     )
 
-    variety_n = max(1, min(7, int(getattr(req, "mealVariety", 3) or 3)))
+    variety_n = max(1, min(7, int(getattr(req, "mealVariety", 5) or 5)))
 
     # Hybrid nutrition pipeline: AI picks meal skeletons, algorithm solves
     # portions and hits macro targets. Runs in parallel with the trainer
@@ -2447,7 +2447,7 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
         int(targets_for_check["carbs"]),
         int(targets_for_check["fat"]),
     )
-    variety_n = max(1, min(7, int(getattr(plan_req, "mealVariety", 3) or 3)))
+    variety_n = max(1, min(7, int(getattr(plan_req, "mealVariety", 5) or 5)))
     nutrition_data = await asyncio.to_thread(
         assemble_nutrition_response,
         client, plan_req, nutrition_target_macros, variety_n, plan_req.foodsAvailable, enriched,
@@ -2588,7 +2588,7 @@ async def generate_nutrition_plan(
         dietaryPreference=req.dietaryPreference,
         allergies=req.allergies,
         mealsPerDay=req.mealsPerDay,
-        mealVariety=getattr(req, "mealVariety", 3) or 3,
+        mealVariety=getattr(req, "mealVariety", 5) or 5,
         mealRoutine=req.mealRoutine,
         routineMacros=getattr(req, "routineMacros", None),
         routineSlots=list(getattr(req, "routineSlots", None) or []),

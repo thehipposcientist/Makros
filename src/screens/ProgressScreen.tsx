@@ -118,6 +118,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
+  const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -136,6 +137,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       import('../utils/weightHistory').then(({ loadWeightHistory }) =>
         loadWeightHistory().then(setWeightEntries).catch(() => null)
       );
+      if (authToken) {
+        import('../services/api').then(({ getFatigueScore }) =>
+          getFatigueScore(authToken).then(fs => setMuscleFatigue({
+            score: fs.readiness_score, label: fs.readiness_label,
+            topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
+          })).catch(() => null)
+        );
+      }
       if (authToken) {
         import('../services/api').then(({ getOneRepMaxShowcase }) =>
           getOneRepMaxShowcase(authToken)
@@ -1263,6 +1272,58 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Muscle Recovery */}
+          {muscleFatigue && (
+            <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <Ionicons
+                  name={muscleFatigue.score >= 65 ? 'battery-full' : muscleFatigue.score >= 40 ? 'battery-half' : 'battery-dead'}
+                  size={22}
+                  color={muscleFatigue.score >= 65 ? '#22C55E' : muscleFatigue.score >= 40 ? '#F59E0B' : '#EF4444'}
+                />
+                <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
+                  Recovery: {muscleFatigue.label} ({muscleFatigue.score}%)
+                </Text>
+              </View>
+              {/* Per-muscle fatigue bars */}
+              {(() => {
+                const muscles = Object.entries(muscleFatigue.muscleFatigue || {})
+                  .filter(([k]) => k !== 'cardio' && k !== 'systemic')
+                  .sort((a, b) => b[1] - a[1]);
+                if (muscles.length === 0 || muscles.every(([, v]) => v < 0.05)) {
+                  return <Text style={{ fontSize: 13, color: tc.textMuted }}>All muscle groups are fresh and recovered.</Text>;
+                }
+                return (
+                  <View style={{ gap: 6 }}>
+                    {muscles.filter(([, v]) => v >= 0.05).map(([muscle, value]) => {
+                      const pct = Math.min(100, Math.round(value * 100));
+                      const color = pct >= 70 ? '#EF4444' : pct >= 40 ? '#F59E0B' : '#22C55E';
+                      return (
+                        <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{muscle.replace('_', ' ')}</Text>
+                          <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                            <View style={{ width: `${pct}%` as any, height: 6, borderRadius: 3, backgroundColor: color }} />
+                          </View>
+                          <Text style={{ fontSize: 10, fontWeight: '700', color, width: 30, textAlign: 'right' }}>{pct}%</Text>
+                        </View>
+                      );
+                    })}
+                    {/* Cardio + systemic */}
+                    {(muscleFatigue.muscleFatigue?.cardio ?? 0) >= 0.05 && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 70 }}>cardio</Text>
+                        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                          <View style={{ width: `${Math.min(100, Math.round((muscleFatigue.muscleFatigue?.cardio ?? 0) * 100))}%` as any, height: 6, borderRadius: 3, backgroundColor: '#3B82F6' }} />
+                        </View>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: '#3B82F6', width: 30, textAlign: 'right' }}>{Math.round((muscleFatigue.muscleFatigue?.cardio ?? 0) * 100)}%</Text>
+                      </View>
+                    )}
+                  </View>
+                );
+              })()}
+            </View>
+          )}
+
           {/* Weight Trend */}
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>

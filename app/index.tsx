@@ -664,12 +664,17 @@ export default function Index() {
   const handleProfileComplete = async (profile: UserProfile) => {
     const stamped = stampGoalStart(profile, null);
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
-    setUserProfile(stamped);   // transition to HomeScreen — loading overlays will show
 
-    if (!authToken) return;
+    if (!authToken) {
+      setUserProfile(stamped);
+      return;
+    }
     syncOnboarding(authToken, stamped).catch(() => null);
 
-    // Generate initial plan with both loading states active
+    // Show loading screen while generating the initial plan.
+    // DON'T set userProfile yet — that would mount HomeScreen which
+    // triggers its own loadPlans, causing a white flash.
+    setIsLoading(true);
     setIsWorkoutUpdating(true);
     setIsNutritionUpdating(true);
     holdPlanGenAwake();
@@ -735,6 +740,8 @@ export default function Index() {
       })
       .then(() => clearPlanGenMarker().catch(() => null))
       .finally(() => {
+        setUserProfile(stamped);  // NOW mount HomeScreen — plan data is ready
+        setIsLoading(false);
         setIsWorkoutUpdating(false);
         setIsNutritionUpdating(false);
         releasePlanGenAwake();

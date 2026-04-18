@@ -445,6 +445,7 @@ class WorkoutCompletion(SQLModel, table=True):
     activity_intensity: str | None = Field(default=None)
     activity_source: str | None = Field(default=None)
     cardio_style: str | None = Field(default=None)
+    resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
