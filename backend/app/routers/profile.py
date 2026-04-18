@@ -393,6 +393,77 @@ def get_coach_memory(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+@router.get("/nutrition-score")
+def get_nutrition_score(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Compute today's nutrition score from DailyRollup + food quality data."""
+    from app.models import DailyRollup
+    from app.services.nutrition.nutrition_score import (
+        NutritionIndicators, compute_nutrition_score,
+        compute_overall_health_score, compute_weekly_trend,
+    )
+
+    today = date.today()
+    goal = "body_recomp"  # default
+    try:
+        active_goal = session.exec(
+            select(UserGoal).where(UserGoal.user_id == current_user.id, UserGoal.is_active == True)
+        ).first()
+        if active_goal:
+            goal = active_goal.goal_type.value
+    except Exception:
+        pass
+
+    # Get today's rollup
+    rollup = session.exec(
+        select(DailyRollup)
+        .where(DailyRollup.user_id == current_user.id, DailyRollup.day == today)
+    ).first()
+
+    if not rollup:
+        # No data today — return neutral score
+        empty = compute_nutrition_score(NutritionIndicators(), goal=goal)
+        return {
+            "date": today.isoformat(),
+            "score": empty.total,
+            "adherence": empty.adherence_score,
+            "quality": empty.quality_score,
+            "micro": empty.micro_score,
+            "confidence": "low",
+            "tags": [],
+            "wins": [],
+            "improvements": ["Start logging meals to track your nutrition"],
+            "likely_gaps": [],
+            "indicators": empty.indicators,
+        }
+
+    # Build indicators from rollup
+    indicators = NutritionIndicators(
+        calories_logged=rollup.kcal or 0,
+        calories_target=rollup.kcal_target or 0,
+        protein_logged=rollup.protein_g or 0,
+        protein_target=rollup.protein_target_g or 0,
+        meals_logged=rollup.meals_logged or 0,
+    )
+
+    score = compute_nutrition_score(indicators, goal=goal)
+    return {
+        "date": today.isoformat(),
+        "score": score.total,
+        "adherence": score.adherence_score,
+        "quality": score.quality_score,
+        "micro": score.micro_score,
+        "confidence": score.confidence,
+        "tags": score.tags,
+        "wins": score.wins,
+        "improvements": score.improvements,
+        "likely_gaps": score.likely_gaps,
+        "indicators": score.indicators,
+    }
+
+
 # Client-state JSON blob — cross-device sync.
 #
 # Client pushes the union of its AsyncStorage keys as a single JSON dict;

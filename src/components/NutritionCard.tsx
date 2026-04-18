@@ -9,6 +9,7 @@ import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } 
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
+import { classifyFood, computeNutritionScore } from '../utils/nutritionScore';
 import NutritionInsightCard from './NutritionInsightCard';
 import SwipeableRow, { SwipeAction } from './SwipeableRow';
 import AnimatedNumber from './AnimatedNumber';
@@ -28,6 +29,7 @@ interface NutritionCardProps {
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
   /** Reorder the day's meals[]. `direction` is -1 (move up) or +1 (move down). */
   onMoveMeal?: (mealType: string, direction: -1 | 1) => void;
+  goal?: string;
 }
 
 export default function NutritionCard({
@@ -44,8 +46,10 @@ export default function NutritionCard({
   onToggleRoutine,
   onShowRecipe,
   onMoveMeal,
+  goal,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
+  const dayScore = computeNutritionScore(nutritionPlan, goal ?? 'body_recomp');
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
   const theme = getTheme(themeName);
@@ -129,6 +133,34 @@ export default function NutritionCard({
           <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
+        {/* Day score + food quality legend */}
+        {dayScore.score > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, marginTop: 2 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: (dayScore.score >= 70 ? '#22C55E' : dayScore.score >= 45 ? '#F59E0B' : '#EF4444') + '18', alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 12, fontWeight: '900', color: dayScore.score >= 70 ? '#22C55E' : dayScore.score >= 45 ? '#F59E0B' : '#EF4444' }}>{dayScore.score}</Text>
+              </View>
+              <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>Score</Text>
+              {dayScore.confidence !== 'high' && (
+                <Text style={{ fontSize: 9, color: colors.textMuted }}>({dayScore.confidence})</Text>
+              )}
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#22C55E' }} />
+                <Text style={{ fontSize: 9, color: colors.textMuted }}>Whole</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#EF4444' }} />
+                <Text style={{ fontSize: 9, color: colors.textMuted }}>Processed</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: colors.border }} />
+                <Text style={{ fontSize: 9, color: colors.textMuted }}>Other</Text>
+              </View>
+            </View>
+          </View>
+        )}
         {/* Nutrition details button + modal — always visible */}
         <TouchableOpacity
           style={styles.microBtn}
@@ -479,11 +511,13 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         key: `${it.name}-${i}`,
         name: it.name,
         amount: formatItemAmount(it),
+        quality: classifyFood(it.name, it.food_quality),
       }))
     : meal.foods.map((f, i) => ({
         key: `${f}-${i}`,
         name: f,
         amount: meal.amounts?.[i] ?? '',
+        quality: classifyFood(f),
       }));
 
   const swipeActions: SwipeAction[] = [];
@@ -556,9 +590,13 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           <View style={styles.mealFoodsDetail}>
             {itemRows.map(r => (
               <View key={r.key} style={styles.mealFoodRow}>
+                <View style={{ width: 6, height: 6, borderRadius: 3, marginRight: 6, marginTop: 5, backgroundColor: r.quality === 'whole' ? '#22C55E' : r.quality === 'processed' ? '#EF4444' : colors.border }} />
                 <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1 }]}>
                   {r.name}
                 </Text>
+                {r.quality === 'processed' && (
+                  <Text style={{ fontSize: 9, color: '#EF4444', fontWeight: '600', marginRight: 6 }}>Processed</Text>
+                )}
                 {r.amount ? (
                   <Text style={styles.mealFoodAmount}>{r.amount}</Text>
                 ) : null}

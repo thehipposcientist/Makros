@@ -19,8 +19,8 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <GestureWrapper style={{ flex: 1 }}>
-      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.background } }}>
+    <GestureWrapper style={{ flex: 1, backgroundColor: '#0D0F14' }}>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#0D0F14' } }}>
         <Stack.Screen name="index" />
       </Stack>
       <StatusBar style="light" />

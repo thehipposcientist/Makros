@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
@@ -949,22 +949,7 @@ export default function Index() {
     await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${weightLbs} lbs` });
   };
 
-  if (isLoading) return (
-    <View style={{ flex: 1, backgroundColor: '#0D0F14', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
-      <Image
-        source={require('../assets/images/thallo-logo-white.png')}
-        style={{ width: 360, height: 140, marginBottom: 48 }}
-        resizeMode="contain"
-      />
-      <ActivityIndicator color="#15C7B8" size="large" />
-      <Text style={{ color: '#15C7B8', fontSize: 13, fontWeight: '600', marginTop: 16, letterSpacing: 0.5 }}>
-        Loading your plan…
-      </Text>
-      <Text style={{ color: '#4A5060', fontSize: 12, marginTop: 6, textAlign: 'center' }}>
-        Train smart. Fuel better. Get stronger.
-      </Text>
-    </View>
-  );
+  if (isLoading) return <SplashLoadingScreen />;
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (!userProfile) return <OnboardingScreen authToken={authToken ?? ''} onComplete={handleProfileComplete} />;
 
@@ -1190,6 +1175,110 @@ export default function Index() {
     </>
   );
 }
+
+// ── Splash Loading Screen ─────────────────────────────────────────────────────
+
+function SplashLoadingScreen() {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const spinAnim = useRef(new Animated.Value(0)).current;
+  const [tipIndex, setTipIndex] = useState(0);
+  const tipFade = useRef(new Animated.Value(1)).current;
+
+  const TIPS = [
+    'Building your personalized plan...',
+    'Calibrating workout intensity...',
+    'Preparing your nutrition targets...',
+  ];
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+
+    // Continuous spinner rotation
+    const spin = Animated.loop(
+      Animated.timing(spinAnim, { toValue: 1, duration: 1200, useNativeDriver: true })
+    );
+    spin.start();
+
+    const tipTimer = setInterval(() => {
+      Animated.timing(tipFade, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => {
+        setTipIndex(prev => (prev + 1) % TIPS.length);
+        Animated.timing(tipFade, { toValue: 1, duration: 250, useNativeDriver: true }).start();
+      });
+    }, 2500);
+
+    return () => { spin.stop(); clearInterval(tipTimer); };
+  }, []);
+
+  const spinInterpolate = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  return (
+    <View style={{
+      flex: 1, backgroundColor: '#0D0F14',
+      alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32,
+    }}>
+      {/* Logo — same size/position as auth screen */}
+      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12 }}>
+        <Image
+          source={require('../assets/images/thallo-logo-white.png')}
+          style={{ width: 260, height: 100 }}
+          resizeMode="contain"
+        />
+      </Animated.View>
+
+      {/* Tagline — matches auth screen */}
+      <Animated.Text style={{
+        color: '#8A90A0', fontSize: 15, fontWeight: '500', textAlign: 'center',
+        letterSpacing: 0.2, marginBottom: 48, opacity: fadeAnim,
+      }}>
+        Your AI personal trainer and nutritionist.
+      </Animated.Text>
+
+      {/* Spinner — clean rotating arc */}
+      <Animated.View style={{
+        width: 40, height: 40, borderRadius: 20,
+        borderWidth: 3, borderColor: '#1E2430',
+        borderTopColor: '#15C7B8',
+        transform: [{ rotate: spinInterpolate }],
+        marginBottom: 20,
+      }} />
+
+      {/* Rotating status text */}
+      <Animated.Text style={{
+        color: '#4A5568', fontSize: 13, fontWeight: '500',
+        textAlign: 'center', opacity: tipFade,
+      }}>
+        {TIPS[tipIndex]}
+      </Animated.Text>
+
+      {/* Feature chips — same style as auth screen */}
+      <Animated.View style={{
+        flexDirection: 'row', flexWrap: 'wrap', gap: 8,
+        justifyContent: 'center', marginTop: 48, opacity: fadeAnim,
+      }}>
+        {['Custom workout plans', 'Personalised nutrition', 'AI coaching that adapts'].map(f => (
+          <View key={f} style={{
+            backgroundColor: '#161A22', borderRadius: 20,
+            paddingHorizontal: 12, paddingVertical: 6,
+            borderWidth: 1, borderColor: '#2A3242',
+          }}>
+            <Text style={{ fontSize: 12, color: '#6A7888', fontWeight: '600' }}>{f}</Text>
+          </View>
+        ))}
+      </Animated.View>
+
+      <Animated.Text style={{
+        color: '#3A4050', fontSize: 13, fontWeight: '500',
+        marginTop: 12, opacity: fadeAnim,
+      }}>
+        Set up in under 3 minutes
+      </Animated.Text>
+    </View>
+  );
+}
+
 
 // ── Account Info Modal ────────────────────────────────────────────────────────
 

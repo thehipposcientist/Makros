@@ -168,7 +168,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
       {(() => {
         const imgUrl = exercise.image_url || getExerciseImage(exercise.name);
         return imgUrl ? (
-          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: c.border }}>
+          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 1, borderColor: c.border }}>
             <Image source={{ uri: imgUrl }} style={{ width: 44, height: 44 }} resizeMode="cover" />
           </View>
         ) : (

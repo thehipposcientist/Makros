@@ -46,7 +46,7 @@ def model_plan_update() -> str:
     return os.getenv("MODEL_PLAN_UPDATE", "gpt-4o-mini")
 
 def model_meal_parsing() -> str:
-    return os.getenv("MODEL_MEAL_PARSING", "gpt-4o-mini")
+    return os.getenv("MODEL_MEAL_PARSING", "gpt-5-mini")
 
 def model_chat() -> str:
     return os.getenv("MODEL_CHAT", "gpt-4o-mini")

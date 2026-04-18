@@ -130,7 +130,9 @@
       "Bash(pip3 install *)",
       "Bash(export PATH=\"/opt/homebrew/Cellar/node/25.9.0_1/bin:/opt/homebrew/bin:$PATH\")",
       "Bash(awk '/^_STRENGTH_EXERCISES = \\\\[/,/^\\\\]/' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/seed_exercises_data.py)",
-      "Bash(head -20 /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/*.py)"
+      "Bash(head -20 /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/*.py)",
+      "Bash(find *)",
+      "Bash(node_modules/.bin/tsc --noEmit --pretty)"
     ]
   }
 }

@@ -409,6 +409,7 @@ export interface MealItem {
   baseCarbs?: number;
   baseFat?: number;
   micronutrients?: Record<string, number>;
+  food_quality?: 'whole' | 'processed' | 'unknown';
 }
 
 export interface MealSuggestion {

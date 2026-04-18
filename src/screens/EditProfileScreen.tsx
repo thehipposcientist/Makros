@@ -2186,16 +2186,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 />
                 {authToken && (
                   <TouchableOpacity
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.primary, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 }}
-                    onPress={() => {
-                      Alert.alert('Add Food', 'How would you like to add food?', [
-                        { text: 'Scan Barcode', onPress: () => setBarcodeScanVisible(true) },
-                        { text: 'Search by Name', onPress: () => handleAiFoodSearch() },
-                        { text: 'Cancel', style: 'cancel' },
-                      ]);
-                    }}>
-                    <Ionicons name="add" size={18} color="#fff" />
-                    <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Add</Text>
+                    style={{ alignItems: 'center', justifyContent: 'center', width: 42, height: 42, borderRadius: 10, backgroundColor: colors.primary }}
+                    onPress={() => setBarcodeScanVisible(true)}>
+                    <Ionicons name="barcode-outline" size={22} color="#fff" />
                   </TouchableOpacity>
                 )}
               </View>

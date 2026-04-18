@@ -1,6 +1,6 @@
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useRef, useEffect } from 'react';
 
 interface Props {
   visible: boolean;
@@ -9,13 +9,16 @@ interface Props {
 }
 
 export default function BarcodeScannerModal({ visible, onClose, onScan }: Props) {
-  const [scanned, setScanned] = useState(false);
+  const scannedRef = useRef(false);
+
+  useEffect(() => {
+    if (visible) scannedRef.current = false;
+  }, [visible]);
 
   const handleScan = (data: string) => {
-    if (scanned) return;
-    setScanned(true);
+    if (scannedRef.current) return;
+    scannedRef.current = true;
     onScan(data);
-    setTimeout(() => setScanned(false), 2000);
   };
 
   return (
@@ -40,9 +43,9 @@ export default function BarcodeScannerModal({ visible, onClose, onScan }: Props)
           } catch {
             return (
               <View style={[StyleSheet.absoluteFillObject, { alignItems: 'center', justifyContent: 'center' }]}>
-                <Ionicons name="camera-outline" size={48} color="#555" />
-                <Text style={{ color: '#888', marginTop: 12, fontSize: 14 }}>Camera not available in Expo Go</Text>
-                <Text style={{ color: '#666', marginTop: 4, fontSize: 12 }}>Use a development build to scan barcodes</Text>
+                <Ionicons name="camera-outline" size={48} color="#999" />
+                <Text style={{ color: '#ccc', marginTop: 12, fontSize: 14 }}>Camera not available in Expo Go</Text>
+                <Text style={{ color: '#aaa', marginTop: 4, fontSize: 12 }}>Use a development build to scan barcodes</Text>
               </View>
             );
           }
@@ -68,7 +71,7 @@ export default function BarcodeScannerModal({ visible, onClose, onScan }: Props)
 
           {/* Bottom */}
           <View style={styles.bottomBar}>
-            {scanned && (
+            {scannedRef.current && (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 16 }}>
                 <ActivityIndicator color="#fff" size="small" />
                 <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>Looking up product...</Text>

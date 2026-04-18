@@ -39,6 +39,7 @@ interface ProgressScreenProps {
   // this screen is rendered inline as bottom-tab content — the bottom
   // nav already provides navigation, so the inner header is redundant.
   noHeader?: boolean;
+  nutritionPlan?: import('../types').DailyNutritionPlan | null;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -79,7 +80,7 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
     });
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -119,6 +120,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
+  const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -138,12 +140,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         loadWeightHistory().then(setWeightEntries).catch(() => null)
       );
       if (authToken) {
-        import('../services/api').then(({ getFatigueScore }) =>
+        import('../services/api').then(({ getFatigueScore }) => {
           getFatigueScore(authToken).then(fs => setMuscleFatigue({
             score: fs.readiness_score, label: fs.readiness_label,
             topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
-          })).catch(() => null)
-        );
+          })).catch(() => null);
+        });
       }
       if (authToken) {
         import('../services/api').then(({ getOneRepMaxShowcase }) =>
@@ -167,6 +169,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     loadHealthScore().then(setHealthScore);
     computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
   }, [userProfile.mealsPerDay]);
+
+  // Compute nutrition score from plan data
+  useEffect(() => {
+    if (!nutritionPlan) { setNutritionScore(null); return; }
+    import('../utils/nutritionScore').then(({ computeNutritionScore }) => {
+      const goal = userProfile?.goal ?? 'body_recomp';
+      setNutritionScore(computeNutritionScore(nutritionPlan, goal));
+    });
+  }, [nutritionPlan, userProfile?.goal_type]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -965,7 +976,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <View style={styles.sessionHeader}>
                       <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          <Text style={styles.sessionFocus}>{session.focus}</Text>
+                          <Text style={styles.sessionFocus}>
+                            {session.manualActivity
+                              ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ' (' + session.manualActivity.intensity + ')' : ''}`
+                              : session.focus}
+                          </Text>
                           {summary?.totalSets != null && summary.totalSets > 0 && (
                             <View style={{ backgroundColor: tc.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
                               <Text style={{ fontSize: 9, fontWeight: '700', color: tc.primary }}>
@@ -1272,6 +1287,65 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Combined Health Score */}
+          {(() => {
+            const fitnessScore = healthScore?.fitnessScore ?? null;
+            const nutScore = nutritionScore?.score ?? null;
+            // Combine available scores with weighted average
+            const scores: Array<{ label: string; value: number; weight: number; color: string }> = [];
+            if (fitnessScore != null) scores.push({ label: 'Fitness', value: fitnessScore, weight: 0.5, color: tc.primary });
+            if (nutScore != null) scores.push({ label: 'Nutrition', value: nutScore, weight: 0.5, color: '#22C55E' });
+            const totalWeight = scores.reduce((s, x) => s + x.weight, 0);
+            const combined = totalWeight > 0 ? Math.round(scores.reduce((s, x) => s + x.value * (x.weight / totalWeight), 0)) : null;
+
+            return combined != null ? (
+              <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  <Ionicons name="heart-circle-outline" size={22} color={tc.primary} />
+                  <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Health Score</Text>
+                  <Text style={{ fontSize: 28, fontWeight: '900', color: combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444' }}>{combined}</Text>
+                </View>
+                {/* Sub-scores */}
+                {scores.map(s => (
+                  <View key={s.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{s.label}</Text>
+                    <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                      <View style={{ width: `${Math.min(100, s.value)}%` as any, height: 6, borderRadius: 3, backgroundColor: s.color }} />
+                    </View>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: s.color, width: 28, textAlign: 'right' }}>{s.value}</Text>
+                  </View>
+                ))}
+                {/* Nutrition tags */}
+                {nutritionScore && nutritionScore.tags.length > 0 && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+                    {nutritionScore.tags.slice(0, 5).map(tag => (
+                      <View key={tag} style={{ backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: tc.border }}>
+                        <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textSecondary }}>{tag}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {/* Wins + Improvements */}
+                {nutritionScore && (nutritionScore.wins.length > 0 || nutritionScore.improvements.length > 0) && (
+                  <View style={{ marginTop: 10, gap: 4 }}>
+                    {nutritionScore.wins.map(w => (
+                      <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
+                        <Text style={{ fontSize: 11, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
+                      </View>
+                    ))}
+                    {nutritionScore.improvements.map(imp => (
+                      <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Ionicons name="arrow-up-circle" size={14} color="#F59E0B" />
+                        <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            ) : null;
+          })()}
+
           {/* Muscle Recovery */}
           {muscleFatigue && (
             <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>

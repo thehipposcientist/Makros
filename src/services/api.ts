@@ -958,6 +958,25 @@ export async function getFatigueScore(token: string): Promise<FatigueScore> {
   });
 }
 
+export interface NutritionScoreResult {
+  score: number;
+  adherence: number;
+  quality: number;
+  micro: number;
+  confidence: string;
+  tags: string[];
+  wins: string[];
+  improvements: string[];
+  likely_gaps: string[];
+  indicators: Record<string, any>;
+}
+
+export async function getNutritionScore(token: string): Promise<NutritionScoreResult> {
+  return request<NutritionScoreResult>('/profile/nutrition-score', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getWorkoutStatus(
   token: string,
   workout_date: string,

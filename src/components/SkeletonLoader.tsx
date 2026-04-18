@@ -10,6 +10,7 @@ interface Props {
   height?: number;
   borderRadius?: number;
   style?: ViewStyle;
+  color?: string;
 }
 
 export default function SkeletonLoader({
@@ -17,6 +18,7 @@ export default function SkeletonLoader({
   height = 16,
   borderRadius = 8,
   style,
+  color,
 }: Props) {
   const opacity = useRef(new Animated.Value(0.3)).current;
 
@@ -38,7 +40,7 @@ export default function SkeletonLoader({
           width: width as any,
           height,
           borderRadius,
-          backgroundColor: '#374151',
+          backgroundColor: color ?? '#374151',
           opacity,
         },
         style,

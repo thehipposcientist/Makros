@@ -2262,6 +2262,22 @@ async def run_full_plan_generation(
     except Exception as exc:
         print(f"[plan-gen] post-assembly micro enrichment failed (non-fatal): {exc}")
 
+    # ── Classify food quality on each item ─────────────────────────────
+    try:
+        from app.services.nutrition.nutrition_score import classify_food_quality
+        for np_ in plans_list:
+            if not isinstance(np_, dict):
+                continue
+            for meal in np_.get("meals") or []:
+                if not isinstance(meal, dict):
+                    continue
+                for it in meal.get("items") or []:
+                    if not isinstance(it, dict) or it.get("food_quality"):
+                        continue
+                    it["food_quality"] = classify_food_quality(it)
+    except Exception:
+        pass
+
     print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
 

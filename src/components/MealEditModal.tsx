@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
@@ -30,6 +30,7 @@ interface Props {
   foodCategories: FoodCategoryGroup[];
   savedMeals?: SavedMealTemplate[];
   authToken?: string;
+  dateKey?: string;           // e.g. '2026-04-18' — enables immediate AsyncStorage persist
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
   onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
@@ -175,7 +176,7 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   }, zero);
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, dateKey, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName }: Props) {
   const colors = useMemo(() => getTheme(themeName).colors, [themeName]);
   const s = useMemo(() => createStyles(colors), [colors]);
   // Structured items are the source of truth. Legacy foods[] / amounts[]
@@ -254,9 +255,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   // controlled by `mealName` either way — but kept here for documentation.
   void (mealType === 'new_meal' || mealType === 'new_extra');
 
+  const userEdited = useRef(false);
   useEffect(() => {
     if (visible) {
       setItems(seedItemBaselines(ensureItems(meal).items ?? []));
+      userEdited.current = false;
       setSearch('');
       setAiResults([]);
       setUnitPickerIdx(null);
@@ -265,6 +268,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setMealName(meal.meal ?? '');
     }
   }, [visible, meal]);
+
 
   const fetchInstructions = async () => {
     if (!authToken) return;
@@ -371,7 +375,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
           };
         });
-        setItems(prev => [...prev, ...newItems]);
+        setItems(prev => {
+          const next = [...prev, ...newItems];
+          persistNow(next);
+          return next;
+        });
         // Persist the scanned food into the user's custom library so
         // future meals (and the backend's nutrition lookup) can find it
         // without another AI call. Mirrors the flow used by the AI
@@ -411,6 +419,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const dayTotal    = addMacros(mealMacros, otherMacros);
 
   const removeItem = (idx: number) => {
+    userEdited.current = true;
     setItems(prev => {
       const next = prev.slice();
       next.splice(idx, 1);
@@ -452,9 +461,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       baseCarbs:    lib?.carbs    ?? 0,
       baseFat:      lib?.fat      ?? 0,
     };
+    userEdited.current = true;
     setItems(prev => [...prev, newItem]);
   };
   const updateItem = (idx: number, patch: Partial<MealItem>) => {
+    userEdited.current = true;
     setItems(prev => {
       const next = prev.slice();
       const current = next[idx];
@@ -533,8 +544,10 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     });
   };
 
+  const barcodeLock = useRef(false);
   const handleBarcodeScan = async (barcode: string) => {
-    if (!authToken || !barcode.trim()) return;
+    if (!authToken || !barcode.trim() || barcodeLock.current) return;
+    barcodeLock.current = true;
     setBarcodeScanning(false);
     setScanLoading(true);
     try {
@@ -549,11 +562,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           carbs: result.carbs,
           fat: result.fat,
         });
+      } else {
+        Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Try searching by name instead.`);
       }
     } catch (e: any) {
       Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Try searching by name instead.`);
     } finally {
       setScanLoading(false);
+      barcodeLock.current = false;
     }
   };
 
@@ -589,7 +605,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         baseQuantity: qty > 0 ? qty : 1,
         baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
       };
-      setItems(prev => [...prev, newItem]);
+      setItems(prev => {
+        const next = [...prev, newItem];
+        persistNow(next);
+        return next;
+      });
     }
     // Persist to user's custom food library
     onAddCustomFood?.({
@@ -644,14 +664,63 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     onClose();
   };
 
+  // Persist current items to AsyncStorage immediately (survives app kill).
+  // Called after scan/barcode adds items, without waiting for Save tap.
+  const persistNow = (updatedItems: MealItem[]) => {
+    if (!dateKey) return;
+    const resummed: Record<string, number> = {};
+    for (const it of updatedItems) {
+      if (!it.micronutrients) continue;
+      for (const [k, v] of Object.entries(it.micronutrients)) {
+        if (typeof v === 'number') resummed[k] = (resummed[k] ?? 0) + v;
+      }
+    }
+    const updatedMeal: MealSuggestion = {
+      ...meal,
+      meal: mealName.trim() || meal.meal || 'Meal',
+      items: updatedItems,
+      ...(Object.keys(resummed).length > 0
+        ? { micronutrients: { ...(meal.micronutrients ?? {}), ...resummed } }
+        : {}),
+    };
+    const synced = syncLegacyFieldsFromItems(updatedMeal);
+    // Update the plan in AsyncStorage directly
+    const plan = { ...nutritionPlan };
+    const meals = [...(plan.meals ?? [])];
+    if (mealType.startsWith('meal_')) {
+      const idx = parseInt(mealType.slice(5), 10);
+      if (idx >= 0 && idx < meals.length) meals[idx] = synced;
+      else meals.push(synced);
+    } else {
+      meals.push(synced);
+    }
+    plan.meals = meals;
+    console.log(`[MealEditModal] persistNow: dateKey=${dateKey} meals=${meals.length} stamp=${(plan as any)._templatesVersion ?? 'NONE'}`);
+    import('../utils/mealTracker').then(({ saveNutritionPlan }) => {
+      saveNutritionPlan(dateKey, plan).then(() => {
+        console.log(`[MealEditModal] persistNow: saved to AsyncStorage OK`);
+      }).catch((e) => {
+        console.warn(`[MealEditModal] persistNow: FAILED`, e);
+      });
+    });
+  };
+
+  // Auto-persist whenever items change from a user action (debounced).
+  // This ensures food additions survive app kill without requiring Save tap.
+  useEffect(() => {
+    if (!userEdited.current || !dateKey || !visible) return;
+    const timer = setTimeout(() => persistNow(items), 600);
+    return () => clearTimeout(timer);
+  }, [items]);
+
   return (
     <>
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} animationType="slide" onRequestClose={() => { handleSave(); }}>
       <View style={s.container}>
 
         {/* Header */}
         <View style={s.header}>
-          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
           <View style={s.headerCenter}>
@@ -905,21 +974,30 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
 
             {authToken && (
-              <TouchableOpacity
-                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, borderWidth: 1.5, borderColor: colors.primary + '55', backgroundColor: colors.surface, marginBottom: 8 }}
-                disabled={scanLoading}
-                onPress={() => {
-                  Alert.alert('Add Food', 'How would you like to add food?', [
-                    { text: 'Scan Barcode', onPress: () => setBarcodeScanning(true) },
-                    { text: 'Photo Scan', onPress: () => pickAndScan('camera') },
-                    { text: 'Photo Library', onPress: () => pickAndScan('library') },
-                    { text: 'Cancel', style: 'cancel' },
-                  ]);
-                }}>
-                {scanLoading
-                  ? <ActivityIndicator size="small" color={colors.primary} />
-                  : <><Ionicons name="add-circle-outline" size={18} color={colors.primary} /><Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>Add Food</Text></>}
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                <TouchableOpacity
+                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                  disabled={scanLoading}
+                  onPress={() => setBarcodeScanning(true)}>
+                  <Ionicons name="barcode-outline" size={18} color={colors.primary} />
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Barcode</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                  disabled={scanLoading}
+                  onPress={() => pickAndScan('camera')}>
+                  {scanLoading
+                    ? <ActivityIndicator size="small" color={colors.primary} />
+                    : <><Ionicons name="camera-outline" size={18} color={colors.primary} /><Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Photo</Text></>}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                  disabled={scanLoading}
+                  onPress={() => pickAndScan('library')}>
+                  <Ionicons name="images-outline" size={18} color={colors.primary} />
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Library</Text>
+                </TouchableOpacity>
+              </View>
             )}
 
             <View style={s.searchRow}>
@@ -990,12 +1068,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           </ScrollView>
         </KeyboardAvoidingView>
       </View>
+      <BarcodeScannerModal
+          visible={barcodeScanning}
+          onClose={() => setBarcodeScanning(false)}
+          onScan={handleBarcodeScan}
+        />
     </Modal>
-    <BarcodeScannerModal
-        visible={barcodeScanning}
-        onClose={() => setBarcodeScanning(false)}
-        onScan={handleBarcodeScan}
-      />
     </>
   );
 }

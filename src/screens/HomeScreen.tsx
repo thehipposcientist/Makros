@@ -46,6 +46,7 @@ import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 // so the bottom nav stays pinned and feels like a single-page app.
 import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
+import { computeNutritionScore } from '../utils/nutritionScore';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1220,6 +1221,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
   const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }> } | null>(null);
+  const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [username, setUsername] = useState('');
 
   // Skip reason modal
@@ -1249,6 +1251,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const trainerNote = trainerNoteProp;
   const nutritionistNote = nutritionistNoteProp;
   const [showNutritionistNote, setShowNutritionistNote] = useState(false);
+  const [nutritionScoreExpanded, setNutritionScoreExpanded] = useState(false);
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
@@ -1261,6 +1264,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [checkinEnergy, setCheckinEnergy] = useState(3);       // 1-5
   const [checkinNotes, setCheckinNotes] = useState('');
   const [checkinInjuryStatuses, setCheckinInjuryStatuses] = useState<Record<string, InjuryEntry['status']>>({});
+
+  // Recompute nutrition score client-side whenever the plan changes
+  useEffect(() => {
+    const plan = nutritionPlansByDate[todayKey()] ?? null;
+    if (!plan) { setNutritionScoreData(null); return; }
+    setNutritionScoreData(computeNutritionScore(plan, userProfile?.goal ?? 'body_recomp'));
+  }, [nutritionPlansByDate, userProfile?.goal]);
 
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
@@ -1452,6 +1462,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // Show fresh state so the badge always appears
         setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
       }
+      // Nutrition score is computed client-side from plan data (see updateNutritionScore)
     } else {
       setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
     }
@@ -1628,14 +1639,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const pickedPathRef: { name: string } = { name: 'none' };
 
         const saved = await getSavedNutritionPlan(d.key);
-        const savedIsUsable = saved && hasMealMacros(saved) && stampOk(saved) && (hasLayer2Micros(saved) || !templateHasMicros);
+        // User edits always win — only require macros + version stamp.
+        // The old micros check was rejecting user edits that added foods
+        // without micronutrient data (e.g. local library foods).
+        const savedIsUsable = saved && hasMealMacros(saved) && stampOk(saved);
+        console.log(`[loadPlans] ${d.key}: saved=${!!saved} meals=${saved?.meals?.length ?? 0} usable=${savedIsUsable} savedStamp=${(saved as any)?._templatesVersion ?? 'NONE'} currentStamp=${currentVersion ?? 'NONE'}`);
         if (savedIsUsable) {
           picked = normalize(saved);
           pickedPathRef.name = 'saved';
         }
         if (!picked && authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
-          const remoteOk = remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan) && (hasLayer2Micros(remote.nutrition_plan) || !templateHasMicros);
+          const remoteOk = remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan);
           if (remoteOk) {
             picked = normalize(remote.nutrition_plan);
             pickedPathRef.name = 'remote';
@@ -1676,7 +1691,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         //      reconcile anything the overlay brought in.
         if (routines.length > 0) {
           const mpd = profile?.mealsPerDay ?? 3;
-          // Warn user once if routines exceed or fill all meal slots
           if (routines.length > mpd && !_routineWarningShown) {
             _routineWarningShown = true;
             setTimeout(() => {
@@ -1689,14 +1703,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             }, 500);
           }
-          // Trim generated meals BEFORE applying routines so the total
-          // stays at mealsPerDay.
-          const genSlots = Math.max(0, mpd - routines.length);
-          const currentMeals = picked.meals ?? [];
-          if (currentMeals.length > genSlots) {
-            picked = { ...picked, meals: currentMeals.slice(0, genSlots) };
+          // Only trim + re-apply routines for template-sourced plans.
+          // Saved/remote plans already have the user's edits (including
+          // custom meals and routine meals) baked in — trimming them
+          // would delete user-added meals.
+          const isSavedOrRemote = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
+          if (!isSavedOrRemote) {
+            const genSlots = Math.max(0, mpd - routines.length);
+            const currentMeals = picked.meals ?? [];
+            if (currentMeals.length > genSlots) {
+              picked = { ...picked, meals: currentMeals.slice(0, genSlots) };
+            }
+            picked = applyRoutines(picked, routines);
           }
-          picked = applyRoutines(picked, routines);
         }
         const countAfterRoutines = (picked.meals ?? []).length;
 
@@ -2516,10 +2535,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [checkedMealsByDate, persistDayState, nutritionPlansByDate]);
 
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
+    console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0}`);
     let nextPlan: DailyNutritionPlan | null = null;
     setNutritionPlansByDate(prev => {
       const current = prev[date];
-      if (!current) return prev;
+      if (!current) { console.log(`[handleMealSave] no current plan for ${date}`); return prev; }
       const meals = [...(current.meals ?? [])];
       if (mealType === 'new_meal' || mealType === 'new_extra') {
         meals.push(updated);
@@ -2529,9 +2549,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         else meals.push(updated);
       }
       nextPlan = { ...current, meals };
+      console.log(`[handleMealSave] built nextPlan with ${meals.length} meals, stamp=${(nextPlan as any)?._templatesVersion ?? 'NONE'}`);
       return { ...prev, [date]: nextPlan as DailyNutritionPlan };
     });
-    if (nextPlan) await saveNutritionPlan(date, nextPlan);
+    if (nextPlan) {
+      await saveNutritionPlan(date, nextPlan);
+      console.log(`[handleMealSave] saved to AsyncStorage`);
+    } else {
+      console.log(`[handleMealSave] nextPlan was null — NOT saved`);
+    }
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
 
     // Routine-backed meal edits must propagate to `mealRoutines` storage.
@@ -3386,6 +3412,94 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
+            {/* Nutrition score badge — tap to expand breakdown */}
+            {mealsSubTab === 'plan' && nutritionScoreData && (() => {
+              const sc = nutritionScoreData;
+              const scoreColor = sc.score >= 70 ? '#22C55E' : sc.score >= 45 ? '#F59E0B' : '#EF4444';
+              return (
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => setNutritionScoreExpanded(p => !p)}
+                  style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.border }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: scoreColor + '22', alignItems: 'center', justifyContent: 'center' }}>
+                      <Text style={{ fontSize: 16, fontWeight: '900', color: scoreColor }}>{sc.score}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>Today's Nutrition Score</Text>
+                      {sc.wins.length > 0 ? (
+                        <Text style={{ fontSize: 11, color: '#22C55E' }} numberOfLines={1}>{sc.wins.join(' · ')}</Text>
+                      ) : sc.improvements.length > 0 ? (
+                        <Text style={{ fontSize: 11, color: '#F59E0B' }} numberOfLines={1}>{sc.improvements.join(' · ')}</Text>
+                      ) : null}
+                    </View>
+                    <Ionicons name={nutritionScoreExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
+                  </View>
+                  {nutritionScoreExpanded && (
+                    <View style={{ marginTop: 10, gap: 6 }}>
+                      {[
+                        { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? '#22C55E' : sc.adherence >= 45 ? '#F59E0B' : '#EF4444' },
+                        { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? '#22C55E' : sc.quality >= 45 ? '#F59E0B' : '#EF4444' },
+                        { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? '#22C55E' : sc.micro >= 45 ? '#F59E0B' : '#EF4444' },
+                      ].map(sub => (
+                        <View key={sub.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 85 }}>{sub.label}</Text>
+                          <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
+                            <View style={{ width: `${Math.min(100, sub.value)}%` as any, height: 5, borderRadius: 3, backgroundColor: sub.color }} />
+                          </View>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: sub.color, width: 26, textAlign: 'right' }}>{sub.value}</Text>
+                        </View>
+                      ))}
+                      {sc.indicators && (
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                          {sc.indicators.total_calories > 0 && (
+                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
+                              {Math.round(sc.indicators.total_calories)} / {Math.round(sc.indicators.target_calories)} cal
+                            </Text>
+                          )}
+                          {sc.indicators.total_protein > 0 && (
+                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
+                              {Math.round(sc.indicators.total_protein)} / {Math.round(sc.indicators.target_protein)}g protein
+                            </Text>
+                          )}
+                          {sc.indicators.whole_food_pct > 0 && (
+                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
+                              {sc.indicators.whole_food_pct}% whole foods
+                            </Text>
+                          )}
+                        </View>
+                      )}
+                      {sc.tags.length > 0 && (
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                          {sc.tags.slice(0, 5).map(tag => (
+                            <View key={tag} style={{ backgroundColor: themeColors.surface, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: themeColors.border }}>
+                              <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textSecondary }}>{tag}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                      {(sc.wins.length > 0 || sc.improvements.length > 0) && (
+                        <View style={{ marginTop: 4, gap: 3 }}>
+                          {sc.wins.map(w => (
+                            <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                              <Ionicons name="checkmark-circle" size={12} color="#22C55E" />
+                              <Text style={{ fontSize: 10, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
+                            </View>
+                          ))}
+                          {sc.improvements.map(imp => (
+                            <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                              <Ionicons name="arrow-up-circle" size={12} color="#F59E0B" />
+                              <Text style={{ fontSize: 10, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })()}
+
             {/* Plan actions row — Why + Edit */}
             {mealsSubTab === 'plan' && (
               <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
@@ -3471,6 +3585,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text>f</Text>
                       </Text>
                     </View>
+                    {/* Per-day nutrition score badge */}
+                    {(() => {
+                      const ds = computeNutritionScore(plan, userProfile.goal ?? 'body_recomp');
+                      if (!ds || ds.score <= 0) return null;
+                      const c = ds.score >= 70 ? '#22C55E' : ds.score >= 45 ? '#F59E0B' : '#EF4444';
+                      return (
+                        <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: c + '18', alignItems: 'center', justifyContent: 'center', marginRight: 4 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '900', color: c }}>{ds.score}</Text>
+                        </View>
+                      );
+                    })()}
                     <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
 
@@ -3497,6 +3622,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                       onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
                       onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
+                      goal={userProfile.goal}
                     />
                   )}
                 </View>
@@ -3535,6 +3661,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             userProfile={userProfile}
             themeName={userProfile.themePreference}
             noHeader
+            nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
             onBack={() => setActiveTab('workout')}
             onUpdateWeight={(weightLbs) => {
               onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
@@ -3806,6 +3933,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           visible={!!editingMeal}
           mealType={editingMeal.type}
           meal={editingMeal.meal}
+          dateKey={editingMeal.dateKey}
           themeName={userProfile.themePreference}
           nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
           allFoods={allFoodsWithCustom}
@@ -3893,7 +4021,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   return (
                     <>
                       {_imgUrl ? (
-                        <View style={{ width: '100%', height: 200, borderRadius: 14, marginBottom: 14, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                        <View style={{ width: '100%', height: 200, borderRadius: 14, marginBottom: 14, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
                           <Image
                             source={{ uri: _imgUrl }}
                             style={{ width: '100%', height: '100%' }}
@@ -4172,7 +4300,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return (
                     <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
                       {_exImg ? (
-                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
                           <Image source={{ uri: _exImg }} style={{ width: 48, height: 48 }} resizeMode="cover" />
                         </View>
                       ) : (

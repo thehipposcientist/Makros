@@ -1936,7 +1936,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const imgUrl = ex.image_url || getExerciseImage(ex.name);
                   return imgUrl ? (
-                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
                       <Image source={{ uri: imgUrl }} style={{ width: 40, height: 40 }} resizeMode="cover" />
                     </View>
                   ) : null;
@@ -2415,7 +2415,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const imgUrl = mEx?.image_url || (mEx ? getExerciseImage(mEx.name) : undefined);
                   return imgUrl ? (
-                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
                       <Image source={{ uri: imgUrl }} style={{ width: 64, height: 64 }} resizeMode="cover" />
                     </View>
                   ) : null;
@@ -3023,7 +3023,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
                         <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
                           {ex.image_url ? (
-                            <View style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: '#F5F5F5', overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
+                            <View style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
                               <Image source={{ uri: ex.image_url }} style={{ width: 48, height: 48 }} resizeMode="cover" />
                             </View>
                           ) : null}

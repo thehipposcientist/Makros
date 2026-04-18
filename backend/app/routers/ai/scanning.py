@@ -1,11 +1,43 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 
 import openai
 from openai import OpenAI
 from fastapi import HTTPException, Depends
 from pydantic import BaseModel as _PydanticBaseModel
+
+
+def _fix_image_mime(b64: str, declared_mime: str) -> tuple[str, str]:
+    """Detect actual image format from magic bytes and re-encode to JPEG if needed.
+
+    Returns (fixed_base64, fixed_mime). Converts HEIC/HEIF and other
+    unsupported formats to JPEG via Pillow so OpenAI accepts them.
+    """
+    SUPPORTED = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    raw = base64.b64decode(b64[:32])
+    if raw[:3] == b'\xff\xd8\xff':
+        return b64, "image/jpeg"
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        return b64, "image/png"
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return b64, "image/webp"
+    if raw[:6] in (b'GIF87a', b'GIF89a'):
+        return b64, "image/gif"
+    # Unsupported format (likely HEIC) — try re-encoding to JPEG
+    if declared_mime in SUPPORTED:
+        return b64, declared_mime
+    try:
+        from PIL import Image as PILImage
+        img_bytes = base64.b64decode(b64)
+        img = PILImage.open(io.BytesIO(img_bytes))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+    except Exception:
+        return b64, "image/jpeg"
 
 from app.auth import get_current_user
 from app.models import User
@@ -38,7 +70,8 @@ def analyze_food_photo(
     if not body.image_base64:
         raise HTTPException(status_code=400, detail="image_base64 is required")
 
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
     client = OpenAI(api_key=api_key)
 
     # Build a concrete JSON example with two real micronutrient fields so
@@ -118,7 +151,8 @@ def scan_foods_photo(
         }
     ]
     for img in body.images:
-        image_data_url = f"data:{img.mime_type};base64,{img.image_base64}"
+        _ib64, _imime = _fix_image_mime(img.image_base64, img.mime_type or "image/jpeg")
+        image_data_url = f"data:{_imime};base64,{_ib64}"
         user_content.append({"type": "image_url", "image_url": {"url": image_data_url}})
 
     _sf_messages = [
@@ -498,7 +532,8 @@ def get_supplement_from_photo(
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
 
     _sp_messages = [
         {
@@ -548,7 +583,8 @@ def scan_equipment_photo(
     if not body.image_base64:
         raise HTTPException(status_code=400, detail="image_base64 is required")
 
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
     client = OpenAI(api_key=api_key)
 
     known_equipment = [
@@ -613,7 +649,8 @@ def analyze_form_photo(
     if not body.image_base64:
         raise HTTPException(status_code=400, detail="image_base64 is required")
 
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
     client = OpenAI(api_key=api_key)
 
     _form_messages = [
@@ -664,7 +701,8 @@ def body_scan(
     if not body.image_base64:
         raise HTTPException(status_code=400, detail="image_base64 is required")
 
-    image_data_url = f"data:{body.mime_type};base64,{body.image_base64}"
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
     client = OpenAI(api_key=api_key)
 
     context_lines = []
