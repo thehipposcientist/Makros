@@ -246,6 +246,40 @@ def most_recent_completed_focus(
     return buckets, families
 
 
+def get_recent_completions_for_fatigue(
+    user_id: int,
+    db_session,
+    *,
+    days: int = 4,
+) -> list[dict]:
+    """Fetch recent workout completions as dicts for fatigue scoring.
+
+    Returns the last `days` worth of completions with all structured
+    activity fields. Used by `compute_rolling_fatigue` in activity_impact.py.
+    """
+    cutoff = date.today() - timedelta(days=days)
+    rows = db_session.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == user_id)
+        .where(WorkoutCompletion.workout_date >= cutoff)
+        .order_by(WorkoutCompletion.workout_date.desc())
+        .limit(20)
+    ).all()
+    return [
+        {
+            "workout_date": row.workout_date,
+            "focus_label": row.focus_label,
+            "duration_seconds": row.duration_seconds,
+            "stimulus": row.stimulus,
+            "activity_category": getattr(row, "activity_category", None),
+            "activity_subtype": getattr(row, "activity_subtype", None),
+            "activity_intensity": getattr(row, "activity_intensity", None),
+            "cardio_style": getattr(row, "cardio_style", None),
+        }
+        for row in rows
+    ]
+
+
 # ─── Layer 2 — Last session lookup ───────────────────────────────────────────
 
 

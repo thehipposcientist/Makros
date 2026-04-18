@@ -214,7 +214,7 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
     ),
     DayArchetype.LIFT_LEGS_HEAVY: ArchetypeMeta(
         category="lift", training_type="strength",
-        default_name="Legs", intensity_cost=4,
+        default_name="Legs", intensity_cost=5,
         accepts_types=frozenset({"strength"}),
     ),
     DayArchetype.LIFT_PUSH_VOLUME: ArchetypeMeta(

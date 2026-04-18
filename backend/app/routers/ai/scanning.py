@@ -150,12 +150,23 @@ def food_nutrition_search(
     body: FoodNutritionSearchRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Search for food nutrition info by name/description using AI."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    """Search for food nutrition info. Uses USDA FoodData Central first,
+    falls back to AI only when USDA returns no results."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query is required")
+
+    # 1. Try USDA FoodData Central (free, accurate, fast)
+    from app.services.usda_fdc import search_foods as usda_search
+    usda_results = usda_search(body.query.strip(), max_results=5)
+    if usda_results:
+        print(f"[food-search] USDA hit: {len(usda_results)} results for '{body.query}'")
+        return {"results": usda_results}
+
+    # 2. Fallback to AI when USDA has no match
+    print(f"[food-search] USDA miss for '{body.query}', falling back to AI")
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="No USDA results and OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
     micros_example = ", ".join(f'"{k}": 0' for k in MICRONUTRIENT_AI_FIELDS)
@@ -189,14 +200,13 @@ def food_nutrition_search(
             model=model_meal_parsing(),
             messages=messages,
             response_format={"type": "json_object"},
-            # Bumped from 500 → 1500 to fit the full micronutrient panel
-            # for up to 5 results. Old cap truncated mid-response and
-            # produced "invalid JSON" errors for users.
             max_tokens=1500,
             timeout=30,
         )
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
+        for r in results:
+            r["source"] = "ai"
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food search failed: {str(e)}")

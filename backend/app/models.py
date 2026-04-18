@@ -439,6 +439,11 @@ class WorkoutCompletion(SQLModel, table=True):
     # completion so the planner can space heavy days from heavy days
     # and avoid back-to-back high-intensity stimulus.
     stimulus: str | None = Field(default=None)
+    activity_category: str | None = Field(default=None)
+    activity_subtype: str | None = Field(default=None)
+    activity_intensity: str | None = Field(default=None)
+    activity_source: str | None = Field(default=None)
+    cardio_style: str | None = Field(default=None)
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

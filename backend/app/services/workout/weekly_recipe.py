@@ -519,71 +519,220 @@ def _recovery_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
 # ── Intensity-cost spacing ─────────────────────────────────────────
 
 
-def _space_high_intensity_days(recipe: list[DayArchetype]) -> list[DayArchetype]:
-    """Post-recipe repair pass that prevents back-to-back high-intensity days.
+_HEAVY_TO_VOLUME: dict[DayArchetype, DayArchetype] = {
+    DayArchetype.LIFT_PUSH_HEAVY: DayArchetype.LIFT_PUSH_VOLUME,
+    DayArchetype.LIFT_PULL_HEAVY: DayArchetype.LIFT_PULL_VOLUME,
+    DayArchetype.LIFT_LEGS_HEAVY: DayArchetype.LIFT_LEGS_VOLUME,
+    DayArchetype.LIFT_UPPER_HEAVY: DayArchetype.LIFT_UPPER_HYPERTROPHY,
+    DayArchetype.LIFT_LOWER_HEAVY: DayArchetype.LIFT_LOWER_HYPERTROPHY,
+    DayArchetype.LIFT_FULL_BODY_STRENGTH: DayArchetype.LIFT_FULL_BODY,
+}
 
-    Rules:
-      - intensity_cost 5 should NEVER be adjacent to another cost-5 day
-      - intensity_cost 4 should not be adjacent to cost 5 when avoidable
-      - Cost 1-3 days can be adjacent to anything
-      - Conditioning days (cost 2-3) are good spacers between lifting days
+# Fatigue weights: legs are extra fatiguing because they tax the whole
+# central nervous system, not just the target muscles.
+_LEGS_ARCHETYPES = frozenset({
+    DayArchetype.LIFT_LEGS, DayArchetype.LIFT_LEGS_HEAVY,
+    DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_LOWER,
+    DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+    DayArchetype.LIFT_BRO_LEGS, DayArchetype.HYBRID_LOWER_POWER,
+})
 
-    When two adjacent days both have intensity_cost >= 4, one of them is
-    swapped with the nearest lower-intensity day (cost <= 3). If no swap
-    target exists (all days are high intensity), the recipe is left as-is.
+
+def _fatigue_cost(a: DayArchetype) -> float:
+    """Systemic fatigue score (0.0-1.0) for rolling-window calculation.
+
+    Separate from intensity_cost (which is an integer for swap logic).
+    This models cumulative nervous-system drain: heavy compounds are
+    expensive, legs are extra expensive, cardio/mobility are cheap.
+    """
+    meta = ARCHETYPE_META[a]
+    base = {
+        1: 0.05,   # mobility/recovery
+        2: 0.15,   # zone 2 cardio
+        3: 0.35,   # volume lifting, tempo cardio
+        4: 0.55,   # heavy push/pull, hypertrophy compounds, intervals
+        5: 0.75,   # heavy legs, full-body strength, hybrid power
+    }[meta.intensity_cost]
+    if a in _LEGS_ARCHETYPES:
+        base = min(1.0, base + 0.10)
+    return base
+
+
+def _is_heavy(a: DayArchetype) -> bool:
+    """True for archetypes classified as heavy / strength stimulus."""
+    meta = ARCHETYPE_META[a]
+    return meta.training_type in ("strength", "power", "mixed") and meta.intensity_cost >= 4
+
+
+def _is_resistance(a: DayArchetype) -> bool:
+    """True for any lifting or hybrid archetype (not pure cardio/mobility/recovery)."""
+    return ARCHETYPE_META[a].category in ("lift", "hybrid")
+
+
+def _space_high_intensity_days(
+    recipe: list[DayArchetype],
+    *,
+    goal_allows_heavy_streaks: bool = False,
+) -> list[DayArchetype]:
+    """Post-recipe repair pass that prevents unrealistic intensity stacking.
+
+    Rules enforced (in priority order):
+
+    1. HEAVY DAY STACKING GUARD
+       - Never allow 3+ consecutive heavy (strength/power, cost >= 4) days.
+       - Prefer max 2 consecutive heavy days. For non-strength goals,
+         prefer max 1 consecutive heavy day.
+       - When a streak is found, try to swap with a nearby low-cost day.
+         If no swap target exists, downgrade the middle day from heavy
+         to its volume/hypertrophy counterpart.
+
+    2. ROLLING FATIGUE THRESHOLD
+       - Sum the fatigue_cost of each 3-day window. If the rolling sum
+         exceeds the threshold (default 1.6, ~53% of max), downgrade
+         the highest-cost day in that window.
+
+    3. HEAVY LEGS PLACEMENT
+       - Heavy legs should not appear after 2+ accumulated hard days
+         unless the user is strength-focused. If it does, swap or
+         downgrade the preceding day.
+
+    4. RECOVERY WINDOW AFTER RESISTANCE STREAKS
+       - After 3 consecutive resistance-training days, prefer the 4th
+         day to be cardio, mobility, or recovery (cost <= 2). If not,
+         try to swap with a nearby low-cost day.
     """
     if len(recipe) < 2:
         return recipe
 
     out = list(recipe)
+    max_heavy_streak = 3 if goal_allows_heavy_streaks else 2
+    fatigue_threshold = 1.8 if goal_allows_heavy_streaks else 1.5
 
     def _cost(a: DayArchetype) -> int:
         return ARCHETYPE_META[a].intensity_cost
 
-    def _needs_spacing(cost_a: int, cost_b: int) -> bool:
-        """True when two adjacent costs represent a problematic pair."""
-        # Two cost-5 days: always bad
-        if cost_a == 5 and cost_b == 5:
-            return True
-        # Cost 4 next to cost 5: bad when avoidable
-        if (cost_a == 5 and cost_b >= 4) or (cost_a >= 4 and cost_b == 5):
+    def _find_swap(exclude: set[int], max_cost: int = 3) -> int | None:
+        """Find nearest day index with cost <= max_cost, not in exclude."""
+        best_idx, best_dist = None, len(out) + 1
+        center = sum(exclude) / max(1, len(exclude))
+        for j in range(len(out)):
+            if j in exclude:
+                continue
+            if _cost(out[j]) > max_cost:
+                continue
+            dist = abs(j - center)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = j
+        return best_idx
+
+    def _downgrade(idx: int) -> bool:
+        """Try to downgrade a heavy archetype to its volume counterpart."""
+        vol = _HEAVY_TO_VOLUME.get(out[idx])
+        if vol:
+            print(f"[intensity] downgrading day {idx} from {out[idx].value} to {vol.value}")
+            out[idx] = vol
             return True
         return False
 
+    # ── Pass 1: Break consecutive heavy streaks ──────────────────────
+    changed = True
+    iterations = 0
+    while changed and iterations < 5:
+        changed = False
+        iterations += 1
+        streak_start = -1
+        streak_len = 0
+        for i in range(len(out)):
+            if _is_heavy(out[i]):
+                if streak_start < 0:
+                    streak_start = i
+                streak_len = i - streak_start + 1
+            else:
+                streak_start = -1
+                streak_len = 0
+
+            if streak_len > max_heavy_streak:
+                mid = streak_start + streak_len // 2
+                swap_idx = _find_swap(set(range(streak_start, i + 1)))
+                if swap_idx is not None:
+                    print(
+                        f"[intensity] heavy streak days {streak_start}-{i}: "
+                        f"swapping day {mid} ({out[mid].value}) with "
+                        f"day {swap_idx} ({out[swap_idx].value})"
+                    )
+                    out[mid], out[swap_idx] = out[swap_idx], out[mid]
+                    changed = True
+                    break
+                elif _downgrade(mid):
+                    changed = True
+                    break
+
+    # ── Pass 2: Rolling 3-day fatigue window ─────────────────────────
+    for i in range(len(out) - 2):
+        window = [out[i], out[i + 1], out[i + 2]]
+        total = sum(_fatigue_cost(a) for a in window)
+        if total <= fatigue_threshold:
+            continue
+        costs = [(j, _fatigue_cost(out[i + j])) for j in range(3)]
+        costs.sort(key=lambda x: -x[1])
+        worst_offset = costs[0][0]
+        worst_idx = i + worst_offset
+        if _downgrade(worst_idx):
+            print(
+                f"[intensity] 3-day fatigue {total:.2f} > {fatigue_threshold} "
+                f"at days {i}-{i+2}, downgraded day {worst_idx}"
+            )
+        else:
+            swap_idx = _find_swap({i, i + 1, i + 2})
+            if swap_idx is not None:
+                print(
+                    f"[intensity] 3-day fatigue {total:.2f}: swapping "
+                    f"day {worst_idx} ({out[worst_idx].value}) with "
+                    f"day {swap_idx} ({out[swap_idx].value})"
+                )
+                out[worst_idx], out[swap_idx] = out[swap_idx], out[worst_idx]
+
+    # ── Pass 3: Heavy legs after accumulated fatigue ─────────────────
+    for i in range(2, len(out)):
+        if out[i] not in _LEGS_ARCHETYPES:
+            continue
+        if not _is_heavy(out[i]):
+            continue
+        prev_fatigue = sum(_fatigue_cost(out[j]) for j in range(max(0, i - 2), i))
+        if prev_fatigue < 0.9:
+            continue
+        if _downgrade(i):
+            print(f"[intensity] heavy legs at day {i} after fatigue {prev_fatigue:.2f}, downgraded")
+
+    # ── Pass 4: Resistance streaks need recovery windows ─────────────
+    for i in range(3, len(out)):
+        if not all(_is_resistance(out[j]) for j in range(i - 3, i)):
+            continue
+        if _cost(out[i]) <= 2:
+            continue
+        swap_idx = _find_swap({i - 3, i - 2, i - 1, i}, max_cost=2)
+        if swap_idx is not None:
+            print(
+                f"[intensity] 3 resistance days before day {i}: "
+                f"swapping day {i} ({out[i].value}) with "
+                f"day {swap_idx} ({out[swap_idx].value})"
+            )
+            out[i], out[swap_idx] = out[swap_idx], out[i]
+
+    # ── Pass 5: Original pairwise spacing (cost-5 adjacent to cost-4/5) ──
     for i in range(1, len(out)):
         ca, cb = _cost(out[i - 1]), _cost(out[i])
-        if not _needs_spacing(ca, cb):
+        if not (ca >= 5 and cb >= 4) and not (ca >= 4 and cb >= 5):
             continue
-
-        # Find the nearest day with cost <= 3 to swap with out[i].
-        # Search forward first, then backward (skip the conflicting neighbor).
-        swap_idx = None
-        best_dist = len(out) + 1
-
-        for j in range(len(out)):
-            if j == i or j == i - 1:
-                continue
-            if _cost(out[j]) > 3:
-                continue
-            dist = abs(j - i)
-            if dist < best_dist:
-                best_dist = dist
-                swap_idx = j
-
-        if swap_idx is None:
-            # All days are high intensity — user asked for that many hard days
-            continue
-
-        old_i_val = out[i].value
-        old_swap_val = out[swap_idx].value
-        old_i_cost = _cost(out[i])
-        old_swap_cost = _cost(out[swap_idx])
-        out[i], out[swap_idx] = out[swap_idx], out[i]
-        print(
-            f"[weekly_recipe] intensity spacing: swapped day {i} "
-            f"({old_i_val}, cost={old_i_cost}) with day {swap_idx} "
-            f"({old_swap_val}, cost={old_swap_cost})"
-        )
+        swap_idx = _find_swap({i - 1, i})
+        if swap_idx is not None:
+            print(
+                f"[intensity] pairwise spacing: swapped day {i} "
+                f"({out[i].value}, cost={cb}) with day {swap_idx} "
+                f"({out[swap_idx].value}, cost={_cost(out[swap_idx])})"
+            )
+            out[i], out[swap_idx] = out[swap_idx], out[i]
 
     return out
 
@@ -846,7 +995,11 @@ def generate_weekly_recipe(
     final = [a if a in profile.allowed_archetypes else fallback for a in recipe]
 
     # Intensity-cost spacing: prevent back-to-back high-intensity days.
-    final = _space_high_intensity_days(final)
+    # Strength-dominant goals (mix.strength >= 0.5) get slightly more
+    # allowance for consecutive heavy days; all others bias toward
+    # alternating heavy/volume for better recovery.
+    goal_allows_heavy = profile.mix.strength >= 0.5 or profile.planner_mode == "lifting"
+    final = _space_high_intensity_days(final, goal_allows_heavy_streaks=goal_allows_heavy)
     # Intensity spacing can reintroduce focus-family adjacency (e.g.
     # swapping Legs with PushVolume to space intensity puts Push next
     # to PushVolume). One more adjacency sweep to catch this.

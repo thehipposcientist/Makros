@@ -27,7 +27,7 @@ import {
   savePreservedCompletedWorkout,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
-import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal } from '../utils/mealTracker';
+import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -546,14 +546,14 @@ function bgIsDark(hex: string): boolean {
 }
 
 const SKIP_REASONS = [
-  { emoji: '😴', label: 'Too tired' },
-  { emoji: '🤕', label: 'Injury / Pain' },
-  { emoji: '🤒', label: 'Feeling sick' },
-  { emoji: '⏰', label: 'No time today' },
-  { emoji: '✈️', label: 'Travelling' },
-  { emoji: '🧘', label: 'Need more rest' },
-  { emoji: '💼', label: 'Work conflict' },
-  { emoji: '🌤️', label: 'Did something else' },
+  { icon: 'moon-outline' as const, label: 'Too tired' },
+  { icon: 'bandage-outline' as const, label: 'Injury / Pain' },
+  { icon: 'thermometer-outline' as const, label: 'Feeling sick' },
+  { icon: 'time-outline' as const, label: 'No time today' },
+  { icon: 'airplane-outline' as const, label: 'Travelling' },
+  { icon: 'bed-outline' as const, label: 'Need more rest' },
+  { icon: 'briefcase-outline' as const, label: 'Work conflict' },
+  { icon: 'sunny-outline' as const, label: 'Did something else' },
 ];
 
 const TRAINING_DAY_SETS: Record<number, number[]> = {
@@ -985,7 +985,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const customCat = {
       key: 'custom',
       label: 'My Custom Foods',
-      icon: '⭐',
+      icon: 'star-outline',
       foods: customs.map(cf => ({
         name: cf.name,
         category: 'custom',
@@ -1101,6 +1101,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [chatTopic, setChatTopic] = useState<string | null>(null);
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
+  const trainerAbortRef = useRef<AbortController | null>(null);
   const [isChatPlanUpdating, setIsChatPlanUpdating] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<PendingPlanUpdate | null>(null);
   const chatProgressAnim = useRef(new Animated.Value(0)).current;
@@ -1182,6 +1183,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
+  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string } | null>(null);
 
   // Skip reason modal
   const [skipReasonFocus, setSkipReasonFocus]         = useState<string | null>(null);
@@ -1390,9 +1392,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const todaySummaryEntry = summaries.find(s => s.date.startsWith(today)) ?? null;
     setTodaySummary(todaySummaryEntry);
 
-    // Load preserved completed workouts so plan regeneration can't replace
-    // a day the user already finished.
     setPreservedWorkouts(await loadPreservedCompletedWorkouts());
+
+    if (authToken) {
+      try {
+        const { getFatigueScore } = await import('../services/api');
+        const fs = await getFatigueScore(authToken);
+        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label });
+      } catch {}
+    }
   };
 
   const loadPlans = async (profile: UserProfile) => {
@@ -1409,6 +1417,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
     const baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
     setWorkoutPlan(baseWorkout);
+
+    // Generate today's workout fresh using the planner with history.
+    // This replaces the rotation approach (same 7 workouts cycling)
+    // with per-day generation that varies exercises based on recent sessions.
+    if (authToken && baseWorkout?.days?.length) {
+      try {
+        const { generateWorkoutDay } = await import('../services/api');
+        const todayIdx = completedDates.size % baseWorkout.days.length;
+        const freshDay = await generateWorkoutDay(authToken, {
+          goal: profile.goal,
+          day_index: todayIdx,
+          days_per_week: profile.daysPerWeek,
+          session_minutes: profile.workoutDurationMinutes ?? 60,
+          experience: profile.experienceLevel ?? 'intermediate',
+          equipment: profile.equipment ?? [],
+          preferred_split: profile.preferredSplit,
+          priority_region: profile.priorityRegion ?? 'balanced',
+          injuries: profile.injuriesOrLimitations ?? [],
+        });
+        if (freshDay?.day) {
+          const updatedDays = [...baseWorkout.days];
+          updatedDays[todayIdx % updatedDays.length] = freshDay.day;
+          const updatedPlan = { ...baseWorkout, days: updatedDays };
+          setWorkoutPlan(updatedPlan);
+          console.log(`[loadPlans] fresh day generated: ${freshDay.day.focus} (idx ${todayIdx})`);
+        }
+      } catch (e) {
+        console.log('[loadPlans] fresh day generation failed (using cached):', e);
+      }
+    }
 
     // Load nutrition templates. The canonical storage is now a JSON
     // array under `aiNutritionPlans` (dynamic length, matches the user's
@@ -1550,7 +1588,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const countAfterRoutines = (picked.meals ?? []).length;
 
         const preserved = await getPreservedMeals(d.key);
-        if (preserved.length > 0) {
+        const skipPreservedOverlay = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
+        if (preserved.length > 0 && !skipPreservedOverlay) {
           // Merge preserved checked meals into the unified meals[] list,
           // deduping by _localId, _routineId, or content signature.
           const currentMeals = picked.meals ?? [];
@@ -1580,15 +1619,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const countAfterPreserved = (picked.meals ?? []).length;
 
         // ── Hard guard: enforce meals-per-day budget ──
-        // The invariant is: displayed_meals == mealsPerDay + any user-added
-        // extras. The backend should already reduce generate_count by the
-        // routine count so routine overlay lands cleanly. If we land above
-        // mealsPerDay + routines (i.e., the backend didn't reduce), trim
-        // the tail so the UI stays sane. Also log loudly so the backend
-        // bug can still be diagnosed.
-        const expectedCount = (profile?.mealsPerDay ?? 3) + (preserved?.length ?? 0);
+        // Only trim template/fallback plans — saved/remote plans already
+        // reflect the user's explicit edits (added meals, routines, etc.)
+        // and should never be capped.
+        const preservedAdded = skipPreservedOverlay ? 0 : (preserved?.length ?? 0);
+        const expectedCount = (profile?.mealsPerDay ?? 3) + preservedAdded;
         const currentCount = (picked.meals ?? []).length;
-        if (currentCount > expectedCount) {
+        const userSavedPlan = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
+        if (currentCount > expectedCount && !userSavedPlan) {
           console.warn(
             `[loadPlans] ${d.key}: meal count overage — template=${countBeforeOverlay}, ` +
             `afterRoutines=${countAfterRoutines}, afterPreserved=${countAfterPreserved}, ` +
@@ -1858,6 +1896,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const imageToSend = attachedImage;
     setAttachedImage(null);
     setTrainerLoading(true);
+    const abortCtrl = new AbortController();
+    trainerAbortRef.current = abortCtrl;
 
     try {
       const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
@@ -1872,12 +1912,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       const workoutHistory = await loadWorkoutHistory();
       // Only send last 5 sessions (not 40) — keeps payload small enough for model context
-      const recentHistory = workoutHistory.slice(0, 5).map((s) => ({
+      const recentHistory = workoutHistory.slice(0, 6).map((s) => ({
         date: s.date,
         focus: s.focus,
-        durationSeconds: s.durationSeconds,
+        durationMinutes: Math.round((s.durationSeconds || 0) / 60),
         completed: s.completed,
         skipped: s.skipped ?? false,
+        manuallyLogged: (s.exercises ?? []).length === 0 && s.completed,
         exercises: (s.exercises ?? []).slice(0, 6).map((ex) => ({
           name: ex.name,
           setsLogged: ex.sets?.length ?? 0,
@@ -1975,6 +2016,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         physicalStats: userProfile.physicalStats,
         daysPerWeek: userProfile.daysPerWeek,
         workoutDurationMinutes: userProfile.workoutDurationMinutes,
+        preferredSplit: userProfile.preferredSplit,
+        priorityRegion: userProfile.priorityRegion ?? 'balanced',
         equipment: userProfile.equipment,
         mealRoutine: userProfile.mealRoutine,
         injuries: userProfile.injuries,
@@ -2192,8 +2235,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setIsChatPlanUpdating(true);
     setPendingUpdate(null);
     try {
-      const canUpdateWorkout   = mode === 'trainer';
-      const canUpdateNutrition = mode === 'nutritionist';
+      const canUpdateWorkout   = true;
+      const canUpdateNutrition = true;
       const prevWorkout = workoutPlan;
       const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
       let appliedNutrition: DailyNutritionPlan | null = null;
@@ -2204,7 +2247,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           updatedPlan = { ...updatedPlan, days: (updatedPlan as any).workoutDays };
         }
         const isValid = Array.isArray(updatedPlan.days) && updatedPlan.days.length > 0
-          && updatedPlan.days.some((d: any) => Array.isArray(d.exercises));
+          && updatedPlan.days.every((d: any) => Array.isArray(d.exercises) && d.exercises.length > 0);
         if (isValid) {
           if (prevWorkout?.name && !updatedPlan.name) updatedPlan.name = prevWorkout.name;
           if (!updatedPlan.totalDays) updatedPlan.totalDays = updatedPlan.days.length;
@@ -2306,7 +2349,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
       const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
       setUpdateSummary(changeSummary);
-      setActiveChat(prev => [...prev, { role: 'assistant', content: `✅ Changes applied! Close this chat to see them on your home screen.` }]);
+      setActiveChat(prev => [...prev, { role: 'assistant', content: `Changes applied! Close this chat to see them on your home screen.` }]);
       await savePlanChange({
         id: Date.now().toString(),
         changedAt: new Date().toISOString(),
@@ -2461,6 +2504,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     if (preservedLocalIdToClear) {
       await clearPreservedMeal(date, mealType, preservedLocalIdToClear);
+    } else if (target) {
+      await clearPreservedMealBySignature(date, target.meal, target.calories ?? 0);
     }
   }, [persistDayState, nutritionPlansByDate]);
 
@@ -2517,6 +2562,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const routines = await loadMealRoutines();
     const alreadyActive = !!existingRoutineId && routines.some(r => r.id === existingRoutineId);
     const turningOn = !alreadyActive;
+
+    if (turningOn) {
+      const mealsPerDay = userProfile?.mealsPerDay ?? 3;
+      if (routines.length >= mealsPerDay) {
+        Alert.alert(
+          'Routine limit reached',
+          `You have ${routines.length} routine${routines.length === 1 ? '' : 's'} but only ${mealsPerDay} meal${mealsPerDay === 1 ? '' : 's'} per day. ` +
+          'Adding another routine will push out a generated meal. Consider increasing your meals per day in settings.',
+        );
+      }
+    }
 
     let nextRoutines: MealRoutineEntry[];
     if (turningOn) {
@@ -2881,6 +2937,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   })}
                 </View>
               </TouchableOpacity>
+            )}
+
+            {/* Readiness badge */}
+            {workoutSubTab === 'plan' && readinessScore && (
+              <View style={{
+                flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8,
+                backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10,
+                borderWidth: 1, borderColor: themeColors.border,
+              }}>
+                <Ionicons
+                  name={readinessScore.score >= 65 ? 'battery-full' : readinessScore.score >= 40 ? 'battery-half' : 'battery-dead'}
+                  size={20}
+                  color={readinessScore.score >= 65 ? '#22C55E' : readinessScore.score >= 40 ? '#F59E0B' : '#EF4444'}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                    Recovery: {readinessScore.label}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                    {readinessScore.score}% readiness based on recent activity
+                  </Text>
+                </View>
+              </View>
             )}
 
             {/* Plan actions row — Why + Log + Edit */}
@@ -3365,7 +3444,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (authToken) {
             try {
               const { logWorkoutDone } = await import('../services/api');
-              await logWorkoutDone(authToken, dk(new Date(session.date)), session.focus, session.durationSeconds);
+              await logWorkoutDone(
+                authToken,
+                dk(new Date(session.date)),
+                session.focus,
+                session.durationSeconds,
+                undefined,
+                session.manualActivity ? {
+                  category: session.manualActivity.category,
+                  subtype: session.manualActivity.subtype,
+                  intensity: session.manualActivity.intensity,
+                  source: session.manualActivity.source,
+                  cardioStyle: session.manualActivity.cardioStyle,
+                } : undefined,
+              );
             } catch {}
           }
           import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
@@ -4024,8 +4116,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 style={[styles.trainerInput, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textPrimary }]}
                 multiline
               />
-              <TouchableOpacity style={[styles.trainerSendBtn, { backgroundColor: themeColors.primary }]} onPress={handleAskTrainer} disabled={trainerLoading}>
-                {trainerLoading ? <ActivityIndicator size="small" color={themeColors.background} /> : <Text style={styles.trainerSendText}>Send</Text>}
+              <TouchableOpacity
+                style={[styles.trainerSendBtn, { backgroundColor: trainerLoading ? themeColors.error : themeColors.primary }]}
+                onPress={trainerLoading ? () => {
+                  trainerAbortRef.current?.abort();
+                  setTrainerLoading(false);
+                  setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Request cancelled.' }]);
+                } : handleAskTrainer}>
+                {trainerLoading ? <Text style={styles.trainerSendText}>Cancel</Text> : <Text style={styles.trainerSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
               </>
@@ -4058,9 +4156,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }]}
                       onPress={() => { setSelectedSkipReason(r.label); setCustomSkipReason(''); }}
                       activeOpacity={0.8}>
-                      <Text style={[styles.skipReasonChipText, { color: active ? themeColors.warning : themeColors.textSecondary }]}>
-                        {r.emoji}  {r.label}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Ionicons name={r.icon} size={16} color={active ? themeColors.warning : themeColors.textSecondary} />
+                        <Text style={[styles.skipReasonChipText, { color: active ? themeColors.warning : themeColors.textSecondary }]}>
+                          {r.label}
+                        </Text>
+                      </View>
                     </TouchableOpacity>
                   );
                 })}
@@ -4088,9 +4189,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     backgroundColor: skipType === 'push' ? workoutPalette.strong + '15' : themeColors.surfaceRaised,
                   }}
                   onPress={() => setSkipType('push')}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: skipType === 'push' ? workoutPalette.strong : themeColors.textSecondary }}>
-                    📅 Do it tomorrow
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <Ionicons name="calendar-outline" size={15} color={skipType === 'push' ? workoutPalette.strong : themeColors.textSecondary} />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: skipType === 'push' ? workoutPalette.strong : themeColors.textSecondary }}>
+                      Do it tomorrow
+                    </Text>
+                  </View>
                   <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2, textAlign: 'center', paddingHorizontal: 4 }}>
                     This workout shifts to your next training day
                   </Text>
@@ -4471,14 +4575,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   style={{ marginBottom: 6 }}
                   contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 4, gap: 6 }}>
                   {[
-                    { key: 'all', label: 'All' },
-                    { key: 'Protein', label: '🥛 Protein' },
-                    { key: 'Performance', label: '⚡ Performance' },
-                    { key: 'Recovery', label: '💪 Recovery' },
-                    { key: 'Health', label: '❤️ Health' },
-                    { key: 'Weight Management', label: '🔥 Weight' },
-                    { key: 'Sleep & Stress', label: '😴 Sleep' },
-                  ].map(({ key, label }) => (
+                    { key: 'all', label: 'All', icon: 'apps-outline' as const },
+                    { key: 'Protein', label: 'Protein', icon: 'nutrition-outline' as const },
+                    { key: 'Performance', label: 'Performance', icon: 'flash-outline' as const },
+                    { key: 'Recovery', label: 'Recovery', icon: 'fitness-outline' as const },
+                    { key: 'Health', label: 'Health', icon: 'heart-outline' as const },
+                    { key: 'Weight Management', label: 'Weight', icon: 'flame-outline' as const },
+                    { key: 'Sleep & Stress', label: 'Sleep', icon: 'moon-outline' as const },
+                  ].map(({ key, label, icon }) => (
                     <TouchableOpacity
                       key={key}
                       style={{
@@ -4488,9 +4592,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         backgroundColor: suppLibCategory === key ? themeColors.primary + '22' : themeColors.surfaceRaised,
                       }}
                       onPress={() => setSuppLibCategory(key)}>
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: suppLibCategory === key ? themeColors.primary : themeColors.textMuted }}>
-                        {label}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Ionicons name={icon} size={13} color={suppLibCategory === key ? themeColors.primary : themeColors.textMuted} />
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: suppLibCategory === key ? themeColors.primary : themeColors.textMuted }}>
+                          {label}
+                        </Text>
+                      </View>
                     </TouchableOpacity>
                   ))}
                 </ScrollView>
@@ -4547,7 +4654,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.noteModalSheet, { backgroundColor: themeColors.surface, borderTopColor: mealPalette.strong + '60' }]}>
             <View style={[styles.sheetHandle, { backgroundColor: themeColors.border }]} />
             <View style={styles.noteModalHeader}>
-              <Text style={[styles.noteModalIcon]}>🥗</Text>
+              <Ionicons name="nutrition" size={28} color={themeColors.primary} style={{ marginRight: 4 }} />
               <View style={{ flex: 1 }}>
                 <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>Nutritionist note</Text>
                 <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>Why this plan</Text>
@@ -4593,7 +4700,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={[styles.noteModalText, { color: themeColors.textSecondary }]}>{cleanAiText(trainerNote)}</Text>
               ) : (
                 <View style={[styles.noteModalEmpty, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                  <Text style={styles.noteModalEmptyIcon}>🏗️</Text>
+                  <Ionicons name="construct-outline" size={32} color={themeColors.textMuted} />
                   <Text style={[styles.noteModalEmptyTitle, { color: themeColors.textPrimary }]}>Generate a plan to unlock</Text>
                   <Text style={[styles.noteModalEmptyText, { color: themeColors.textSecondary }]}>
                     Your trainer's rationale for the split + exercise picks lands here.

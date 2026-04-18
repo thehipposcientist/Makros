@@ -39,6 +39,41 @@ export interface PhysicalStats {
   gender: Gender;
 }
 
+// ─── Manual activity logging ──────────────────────────────────────────────────
+
+export type ActivityCategory = 'strength' | 'cardio' | 'mobility' | 'sport' | 'recovery';
+export type StrengthSubtype = 'push' | 'pull' | 'legs' | 'upper_body' | 'lower_body' | 'full_body';
+export type CardioSubtype = 'walk' | 'run' | 'ride' | 'hike' | 'swim' | 'row' | 'stair' | 'elliptical' | 'bootcamp' | 'other';
+export type MobilitySubtype = 'yoga' | 'stretching' | 'foam_roll' | 'pilates';
+export type SportSubtype = 'basketball' | 'soccer' | 'tennis' | 'golf' | 'climbing' | 'boxing' | 'kickboxing' | 'martial_arts' | 'skiing' | 'other';
+export type RecoverySubtype = 'sauna' | 'ice_bath' | 'walk' | 'sleep' | 'meditation' | 'general';
+export type ActivityIntensity = 'easy' | 'moderate' | 'hard';
+export type CardioStyle = 'recovery' | 'steady' | 'intervals' | 'class';
+export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin';
+
+export interface ManualActivity {
+  id: string;
+  date: string;
+  category: ActivityCategory;
+  subtype: string;
+  intensity: ActivityIntensity;
+  durationMinutes: number;
+  notes?: string;
+  cardioStyle?: CardioStyle;
+  source?: ActivitySource;
+  distanceMiles?: number;
+  caloriesBurned?: number;
+  avgHeartRate?: number;
+}
+
+// ─── Weight tracking ─────────────────────────────────────────────────────────
+
+export interface WeightEntry {
+  date: string;   // ISO date YYYY-MM-DD
+  weightLbs: number;
+  source?: 'manual' | 'onboarding' | 'coach' | 'checkin';
+}
+
 export interface GoalDetails {
   pace: GoalPace;
   targetWeightLbs?: number;  // for fat-loss / muscle-gain goals
@@ -171,6 +206,7 @@ export interface UserProfile {
   preferredSplit?: string;
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
+  weightHistory?: WeightEntry[];
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
@@ -556,6 +592,17 @@ export interface WorkoutSession {
   skipped?: boolean;      // true when the user skipped this day
   skipReason?: string;    // reason selected or typed by user
   feedback?: PostWorkoutFeedback;  // collected after finish
+  manualActivity?: {      // structured data from the redesigned LogActivityModal
+    category: ActivityCategory;
+    subtype: string;
+    intensity: ActivityIntensity;
+    cardioStyle?: CardioStyle;
+    notes?: string;
+    source?: ActivitySource;
+    distanceMiles?: number;
+    caloriesBurned?: number;
+    avgHeartRate?: number;
+  };
 }
 
 // ─── Post-workout feedback ────────────────────────────────────────────────────

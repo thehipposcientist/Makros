@@ -47,6 +47,11 @@ class WorkoutCompleteRequest(BaseModel):
     # Backward compatible — older mobile builds omit the field and
     # only the lightweight WorkoutCompletion row is written.
     exercises: list[CompletedExercisePayload] | None = None
+    activity_category: str | None = None
+    activity_subtype: str | None = None
+    activity_intensity: str | None = None
+    activity_source: str | None = None
+    cardio_style: str | None = None
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
@@ -169,10 +174,152 @@ def mark_workout_started(
         focus_label=body.focus_label,
         duration_seconds=0,
         stimulus=body.stimulus,
+        activity_category=body.activity_category,
+        activity_subtype=body.activity_subtype,
+        activity_intensity=body.activity_intensity,
+        activity_source=body.activity_source,
+        cardio_style=body.cardio_style,
         completed_at=datetime.now(timezone.utc),
     ))
     db.commit()
     return {"ok": True, "already_exists": False}
+
+
+# ─── Per-day workout generation ───────────────────────────────────────────────
+
+
+class GenerateDayRequest(BaseModel):
+    """Generate one day's workout exercises using the planner with history."""
+    goal: str
+    day_index: int = 0                     # position in the recipe rotation
+    days_per_week: int = 4
+    session_minutes: int = 60
+    experience: str = "intermediate"
+    equipment: list[str] = []
+    preferred_split: str | None = None
+    priority_region: str = "balanced"
+    focused_muscle: str | None = None
+    injuries: list[str] = []
+
+
+@router.post("/generate-day")
+def generate_single_day(
+    body: GenerateDayRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Generate exercises for ONE day using the full deterministic planner
+    pipeline with the user's recent history. The recipe (split structure)
+    is computed fresh each time so the day type matches the rotation, and
+    exercise selection uses the last 14 days of history to avoid repeats.
+
+    This replaces the old "rotate through cached 7-day plan" approach
+    with fresh per-day generation that varies exercises across sessions."""
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.services.workout.history import (
+        build_history_familiarity, most_recent_completed_focus,
+        recent_exercise_slugs_by_muscle,
+    )
+
+    # Resolve equipment slugs
+    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    owned_slugs = _resolve_owned_equipment_slugs(body.equipment)
+
+    # Get recent history for rotation + exercise variation
+    recent_focus_buckets: tuple[str, ...] = ()
+    recent_focus_families: tuple[str, ...] = ()
+    history_familiarity: dict[str, int] = {}
+    recent_muscle_exercises: dict[str, set[str]] = {}
+    try:
+        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
+        recent_focus_buckets = tuple(buckets)
+        recent_focus_families = tuple(families)
+    except Exception:
+        pass
+    try:
+        history_familiarity = build_history_familiarity(current_user.id, db)
+    except Exception:
+        pass
+    try:
+        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
+    except Exception:
+        pass
+
+    # Get fatigue data to influence day selection
+    blocked_focuses: list[str] = []
+    fatigue_readiness = 100
+    try:
+        from app.services.workout.history import get_recent_completions_for_fatigue
+        from app.services.workout.activity_impact import compute_rolling_fatigue
+        completions = get_recent_completions_for_fatigue(current_user.id, db)
+        if completions:
+            snapshot = compute_rolling_fatigue(completions)
+            blocked_focuses = snapshot.blocked_focuses
+            fatigue_readiness = snapshot.readiness_score
+            print(f"[generate-day] fatigue: readiness={fatigue_readiness} blocked={blocked_focuses}")
+    except Exception as e:
+        print(f"[generate-day] fatigue check failed: {e}")
+
+    # Build planner inputs
+    inputs = PlannerInputs(
+        goal=body.goal,
+        days_per_week=body.days_per_week,
+        session_minutes=body.session_minutes,
+        experience=body.experience.lower(),
+        equipment_slugs=tuple(sorted(owned_slugs)),
+        preferred_split=body.preferred_split,
+        focused_muscle=body.focused_muscle,
+        priority_region=body.priority_region,
+        injuries=tuple(body.injuries),
+        rng_seed=current_user.id + body.day_index,
+        recent_focus_buckets=recent_focus_buckets,
+        recent_focus_families=recent_focus_families,
+    )
+
+    # Generate full plan (fast — deterministic, no AI)
+    plan = generate_workout_plan(
+        inputs, SEED_EXERCISES,
+        history_familiarity=history_familiarity,
+        recent_muscle_exercises=recent_muscle_exercises,
+    )
+
+    days = plan.get("workout_plan", {}).get("days", [])
+    if not days:
+        raise HTTPException(status_code=500, detail="Planner produced no days")
+
+    # Pick the requested day from the generated plan.
+    # If fatigue data blocks the planned focus, try to find a better day.
+    idx = body.day_index % len(days)
+    day = days[idx]
+
+    if blocked_focuses and day.get("focus"):
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        day_family = normalize_focus_to_family(day["focus"])
+        if day_family and day_family in blocked_focuses:
+            for alt_idx, alt_day in enumerate(days):
+                alt_fam = normalize_focus_to_family(alt_day.get("focus", ""))
+                if alt_fam and alt_fam not in blocked_focuses:
+                    print(
+                        f"[generate-day] fatigue override: swapping day {idx} "
+                        f"({day_family}) → day {alt_idx} ({alt_fam})"
+                    )
+                    day = alt_day
+                    idx = alt_idx
+                    break
+
+    # If heavily fatigued (readiness < 30), downgrade stimulus label
+    if fatigue_readiness < 30 and day.get("stimulus") in ("strength", "power"):
+        day = {**day, "stimulus": "volume"}
+        print(f"[generate-day] readiness {fatigue_readiness}% — downgraded stimulus to volume")
+
+    return {
+        "day": day,
+        "total_days_in_recipe": len(days),
+        "day_index": idx,
+        "plan_name": plan.get("workout_plan", {}).get("name", ""),
+        "readiness_score": fatigue_readiness,
+    }
 
 
 # ─── Workout completion ───────────────────────────────────────────────────────
@@ -201,10 +348,15 @@ def mark_workout_complete(
         .where(WorkoutCompletion.workout_date == body.workout_date)
     ).first()
     if existing:
-        existing.focus_label      = body.focus_label
-        existing.duration_seconds = body.duration_seconds
-        existing.stimulus         = body.stimulus
-        existing.completed_at     = datetime.now(timezone.utc)
+        existing.focus_label        = body.focus_label
+        existing.duration_seconds   = body.duration_seconds
+        existing.stimulus           = body.stimulus
+        existing.activity_category  = body.activity_category or existing.activity_category
+        existing.activity_subtype   = body.activity_subtype or existing.activity_subtype
+        existing.activity_intensity = body.activity_intensity or existing.activity_intensity
+        existing.activity_source    = body.activity_source or existing.activity_source
+        existing.cardio_style       = body.cardio_style or existing.cardio_style
+        existing.completed_at       = datetime.now(timezone.utc)
         db.add(existing)
     else:
         db.add(WorkoutCompletion(
@@ -213,6 +365,11 @@ def mark_workout_complete(
             focus_label=body.focus_label,
             duration_seconds=body.duration_seconds,
             stimulus=body.stimulus,
+            activity_category=body.activity_category,
+            activity_subtype=body.activity_subtype,
+            activity_intensity=body.activity_intensity,
+            activity_source=body.activity_source,
+            cardio_style=body.cardio_style,
         ))
 
     # Also persist structured per-exercise data if the client sent it.
@@ -316,6 +473,29 @@ def get_workout_status(
         .where(WorkoutCompletion.workout_date == workout_date)
     ).first()
     return {"done": completion is not None}
+
+
+@router.get("/fatigue")
+def get_fatigue_score(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Returns the user's current fatigue/recovery score based on recent activity."""
+    from app.services.workout.history import get_recent_completions_for_fatigue
+    from app.services.workout.activity_impact import compute_rolling_fatigue
+
+    completions = get_recent_completions_for_fatigue(current_user.id, db)
+    snapshot = compute_rolling_fatigue(completions)
+    return {
+        "readiness_score": snapshot.readiness_score,
+        "readiness_label": snapshot.readiness_label,
+        "total_fatigue": snapshot.total_fatigue,
+        "total_cardio": snapshot.total_cardio,
+        "fatigued_regions": snapshot.fatigued_regions,
+        "blocked_focuses": snapshot.blocked_focuses,
+        "days_analyzed": snapshot.days_analyzed,
+        "activities": snapshot.activities,
+    }
 
 
 # ─── Create ───────────────────────────────────────────────────────────────────

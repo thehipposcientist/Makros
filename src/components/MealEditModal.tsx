@@ -18,7 +18,7 @@ import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
-import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood } from '../utils/mealItems';
+import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
 
 interface Props {
   visible: boolean;
@@ -134,14 +134,52 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   // shapes are migrated via `ensureItems()` on open so downstream code only
   // has to handle the structured form. Each item gets a baseline rate
   // captured at mount so the scaling math survives going through zero.
-  const seedItemBaselines = (arr: MealItem[]): MealItem[] => arr.map(it => ({
-    ...it,
-    baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
-    baseCalories: it.baseCalories ?? it.calories,
-    baseProtein:  it.baseProtein  ?? it.protein,
-    baseCarbs:    it.baseCarbs    ?? it.carbs,
-    baseFat:      it.baseFat      ?? it.fat,
-  }));
+  // When items came from the even-divide path (all items share identical macros),
+  // enrich from the food library so quantity edits scale realistically.
+  const seedItemBaselines = (arr: MealItem[]): MealItem[] => {
+    const allSameCal = arr.length > 1 && arr.every(it => Math.round(it.calories ?? 0) === Math.round(arr[0].calories ?? 0));
+    return arr.map(it => {
+      if (it.baseCalories != null && it.baseCalories > 0 && !allSameCal) {
+        return {
+          ...it,
+          baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
+          baseCalories: it.baseCalories,
+          baseProtein:  it.baseProtein  ?? it.protein,
+          baseCarbs:    it.baseCarbs    ?? it.carbs,
+          baseFat:      it.baseFat      ?? it.fat,
+        };
+      }
+      const lib = lookupFood(it.name, allFoods);
+      if (lib && (lib.calories ?? 0) > 0) {
+        const libParsed = lib.unit ? parseAmountString(lib.unit) : null;
+        const libQty = libParsed?.quantity ?? 1;
+        const libUnit = libParsed?.unit ?? it.unit;
+        const conv = libUnit !== it.unit ? convertQuantity(it.quantity, it.unit, libUnit) : it.quantity;
+        const effectiveQty = conv ?? it.quantity;
+        const ratio = libQty > 0 ? effectiveQty / libQty : 1;
+        return {
+          ...it,
+          baseQuantity: it.quantity > 0 ? it.quantity : 1,
+          calories:     Math.round((lib.calories ?? 0) * ratio),
+          protein:      Math.round((lib.protein  ?? 0) * ratio),
+          carbs:        Math.round((lib.carbs    ?? 0) * ratio),
+          fat:          Math.round((lib.fat      ?? 0) * ratio),
+          baseCalories: Math.round((lib.calories ?? 0) * ratio),
+          baseProtein:  Math.round((lib.protein  ?? 0) * ratio),
+          baseCarbs:    Math.round((lib.carbs    ?? 0) * ratio),
+          baseFat:      Math.round((lib.fat      ?? 0) * ratio),
+        };
+      }
+      return {
+        ...it,
+        baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
+        baseCalories: it.baseCalories ?? it.calories,
+        baseProtein:  it.baseProtein  ?? it.protein,
+        baseCarbs:    it.baseCarbs    ?? it.carbs,
+        baseFat:      it.baseFat      ?? it.fat,
+      };
+    });
+  };
   const [items, setItems] = useState<MealItem[]>(() => seedItemBaselines(ensureItems(meal).items ?? []));
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
@@ -709,9 +747,15 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                       <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} <Ionicons name="chevron-down" size={11} /></Text>
                     </TouchableOpacity>
                   </View>
-                  {unitPickerIdx === idx && (
+                  {unitPickerIdx === idx && (() => {
+                    const allowed = new Set(validUnitsForFood(it.name));
+                    if (!allowed.has(it.unit)) allowed.add(it.unit);
+                    const filtered = FOOD_UNIT_GROUPS
+                      .map(g => ({ ...g, units: g.units.filter(u => allowed.has(u)) }))
+                      .filter(g => g.units.length > 0);
+                    return (
                     <View style={s.unitPicker}>
-                      {FOOD_UNIT_GROUPS.map(group => (
+                      {filtered.map(group => (
                         <View key={group.label} style={s.unitGroup}>
                           <Text style={s.unitGroupLabel}>{group.label}</Text>
                           <View style={s.unitGroupRow}>
@@ -732,7 +776,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                         </View>
                       ))}
                     </View>
-                  )}
+                    );
+                  })()}
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                     <Text style={{ fontSize: 11, color: colors.accent, fontWeight: '600' }}>{Math.round(it.calories)} cal</Text>
                     <Text style={{ fontSize: 11, color: colors.primary, fontWeight: '600' }}>{Math.round(it.protein)}g P</Text>

@@ -228,6 +228,28 @@ def ask_trainer_question(
         "You are an expert fitness coach, strength trainer, and registered dietitian — a single unified coach. "
         "You handle BOTH workout programming AND nutrition advice in the same conversation. "
         "Reference specific exercises, foods, macros, and plan details from the user's actual data. "
+        "\n\n"
+        "CRITICAL — RESPECT THE USER'S SETTINGS:\n"
+        "The user's profile contains `preferredSplit` and `priorityRegion`. When modifying the workout plan:\n"
+        "- If they chose a split (e.g. PPL, Upper/Lower), keep that split structure. Do NOT switch to a different split.\n"
+        "- If they set a priority region (lower_body, upper_body), maintain emphasis on that region.\n"
+        "- Keep the same number of training days (`daysPerWeek`) unless they explicitly ask to change it.\n"
+        "- Only use exercises compatible with their `equipment` list.\n"
+        "- Respect their `experienceLevel` for exercise complexity and volume.\n"
+        "- You can swap exercises, reorder days, change focus within a day, or adjust volume — but stay within the user's chosen framework.\n"
+        "- Respect `workoutDurationMinutes` — keep each day's exercises within the user's time limit. A 45-minute session should have fewer exercises than a 75-minute session.\n"
+        "- Use the app's exact naming: 'Push', 'Pull', 'Legs', 'Upper', 'Lower', 'Full Body' — not 'Chest/Shoulders/Triceps Day'.\n"
+        "- Stimulus labels must be exactly: 'strength', 'hypertrophy', or 'volume' — lowercase.\n"
+        "- Day focus must match the split pattern. PPL days use: Push, Pull, Legs. U/L days use: Upper, Lower.\n"
+        "\n"
+        "\n"
+        "WORKOUT HISTORY — RESPECT COMPLETED SESSIONS:\n"
+        "The `progress.workoutHistory` and `progress.recentDays` fields show what the user ACTUALLY did recently.\n"
+        "- Entries with `completed: true` are real workouts the user finished — even if `exercises` is empty (manually logged).\n"
+        "- A manually logged 'Upper' workout with no exercise details STILL counts. Do NOT schedule Upper again the next day.\n"
+        "- When modifying the plan, check `recentDays` first. If the user already did 'Push' today, tomorrow should be 'Pull' or 'Legs' — not 'Push' again.\n"
+        "- NEVER mark a day as 'done' or override a day the user already completed. Completed days are immutable.\n"
+        "\n"
         "WORKOUT CHANGES: If the user asks to modify workouts, swap exercises, change days, or report injuries, "
         "set needs_plan_update=true and return the COMPLETE updated_workout_plan. "
         "Use structure: { name, totalDays, days: [{ day, focus, stimulus, exercises: [{ name, sets, reps, restSeconds, equipment }] }] }. "
@@ -301,6 +323,7 @@ def ask_trainer_question(
         + (
             "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
             '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "stimulus": "strength|hypertrophy|volume|conditioning|mixed", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}. '
+            "CRITICAL: Every day MUST have at least 3 exercises. NEVER return a day with an empty exercises array. "
             "STIMULUS FIELD: Every day MUST include a `stimulus` field. Use 'strength' for heavy/low-rep days (3-5 reps), "
             "'hypertrophy' for moderate rep days (6-10 reps), 'volume' for high-rep days (10-15 reps), "
             "'conditioning' for cardio/circuit days, 'mixed' for combination days. "
@@ -538,6 +561,19 @@ def ask_trainer_question(
             # Pick up any injury updates from phase-2 if phase-1 didn't have them
             if not result.get("updated_injuries") and result2.get("updated_injuries"):
                 result["updated_injuries"] = result2["updated_injuries"]
+
+        # Validate workout plan — reject if any day has 0 exercises
+        wp = result.get("updated_workout_plan")
+        if isinstance(wp, dict) and "days" in wp:
+            days = wp.get("days", [])
+            empty_days = [d.get("day", f"Day {i+1}") for i, d in enumerate(days) if not d.get("exercises")]
+            if empty_days:
+                print(f"[trainer-question] REJECTING plan: days with 0 exercises: {empty_days}")
+                result["updated_workout_plan"] = None
+                result["needs_plan_update"] = False
+                result["answer"] = (result.get("answer", "") +
+                    "\n\n(I tried to update the plan but some days came back empty. "
+                    "Could you ask again with more detail about what you'd like changed?)")
 
         print(f"[trainer-question] final: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
         print(f"[trainer-question] answer preview: {repr(result.get('answer', '')[:200])}")

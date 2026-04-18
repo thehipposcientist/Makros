@@ -865,6 +865,30 @@ export type LoggedExercisePayload = {
   sets: LoggedSetPayload[];
 };
 
+/** Generate one day's workout using the deterministic planner with history.
+ *  Returns fresh exercises that vary from recent sessions. */
+export async function generateWorkoutDay(
+  token: string,
+  params: {
+    goal: string;
+    day_index: number;
+    days_per_week: number;
+    session_minutes?: number;
+    experience?: string;
+    equipment: string[];
+    preferred_split?: string;
+    priority_region?: string;
+    focused_muscle?: string;
+    injuries?: string[];
+  },
+): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string }> {
+  return request('/workouts/generate-day', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(params),
+  }, 15000);
+}
+
 export async function logWorkoutStarted(
   token: string,
   workout_date: string,
@@ -884,6 +908,13 @@ export async function logWorkoutDone(
   focus_label: string,
   duration_seconds: number,
   exercises?: LoggedExercisePayload[],
+  activity?: {
+    category?: string;
+    subtype?: string;
+    intensity?: string;
+    source?: string;
+    cardioStyle?: string;
+  },
 ) {
   return request('/workouts/complete', {
     method: 'POST',
@@ -892,10 +923,40 @@ export async function logWorkoutDone(
       workout_date,
       focus_label,
       duration_seconds,
-      // Only include the exercises field when we actually have data,
-      // to stay compatible with older backend builds that don't read it.
       ...(exercises && exercises.length > 0 ? { exercises } : {}),
+      ...(activity?.category ? {
+        activity_category: activity.category,
+        activity_subtype: activity.subtype,
+        activity_intensity: activity.intensity,
+        activity_source: activity.source,
+        cardio_style: activity.cardioStyle,
+      } : {}),
     }),
+  });
+}
+
+export interface FatigueScore {
+  readiness_score: number;
+  readiness_label: string;
+  total_fatigue: number;
+  total_cardio: number;
+  fatigued_regions: string[];
+  blocked_focuses: string[];
+  days_analyzed: number;
+  activities: Array<{
+    date: string;
+    days_ago: number;
+    focus: string;
+    category: string;
+    intensity: string;
+    fatigue: number;
+    cardio: number;
+  }>;
+}
+
+export async function getFatigueScore(token: string): Promise<FatigueScore> {
+  return request<FatigueScore>('/workouts/fatigue', {
+    headers: { Authorization: `Bearer ${token}` },
   });
 }
 

@@ -148,7 +148,7 @@ export function useMetaData(): MetaData {
           .map(k => ({
             key:   k,
             label: (foodCategoryMeta as any)[k]?.label ?? k,
-            icon:  (foodCategoryMeta as any)[k]?.icon  ?? '🍽️',
+            icon:  (foodCategoryMeta as any)[k]?.icon  ?? 'restaurant-outline',
             foods: foodsByCat[k],
           }));
 
@@ -159,15 +159,15 @@ export function useMetaData(): MetaData {
           equipByCat[e.category].push({ name: e.name, icon: e.icon });
         }
         const categoryIcons: Record<string, string> = {
-          'Bodyweight & Home': '🏠',
-          'Free Weights':      '🏋️',
-          'Benches & Racks':   '🪑',
-          'Gym Machines':      '⚙️',
-          'Cardio':            '🏃',
+          'Bodyweight & Home': 'home-outline',
+          'Free Weights':      'barbell-outline',
+          'Benches & Racks':   'resize-outline',
+          'Gym Machines':      'cog-outline',
+          'Cardio':            'bicycle-outline',
         };
         const equipmentCategories: EquipmentCategoryGroup[] = Object.entries(equipByCat).map(([label, items]) => ({
           label,
-          icon: categoryIcons[label] ?? '🔧',
+          icon: categoryIcons[label] ?? 'build-outline',
           items,
         }));
 

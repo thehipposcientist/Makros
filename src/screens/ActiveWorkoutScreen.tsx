@@ -89,7 +89,7 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
-const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry/i;
+const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
@@ -110,7 +110,7 @@ function isTimedExercise(name: string, targetReps?: string | number): boolean {
  *  emphasize; both are always shown. */
 function isLongCardioExercise(name: string, targetReps?: string | number): boolean {
   const lowered = (name || '').toLowerCase();
-  if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run/.test(lowered)) {
+  if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/.test(lowered)) {
     return true;
   }
   // If the target is expressed in minutes and is ≥ 3, treat as long.
@@ -914,7 +914,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           })) as unknown as ExerciseLibraryItem[];
         }
       } catch {}
-      setExerciseLibrary([...customs, ...rows]);
+      const timedActivities: ExerciseLibraryItem[] = [
+        { name: 'Boxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Kickboxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Shadow Boxing', equipment: 'bodyweight', primary_muscle: 'shoulders' },
+        { name: 'Bag Work', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Vinyasa Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Stretching', equipment: 'bodyweight', primary_muscle: 'full_body' },
+        { name: 'Mobility Flow', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      ];
+      const existingNames = new Set([...customs, ...rows].map(e => e.name.toLowerCase()));
+      const newTimed = timedActivities.filter(t => !existingNames.has(t.name.toLowerCase()));
+      setExerciseLibrary([...customs, ...newTimed, ...rows]);
     } catch {
       setExerciseLibrary([]);
     } finally {
@@ -923,11 +935,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [exerciseLibrary.length]);
 
   const handleAddExercise = useCallback((item: ExerciseLibraryItem) => {
+    const timed = isTimedExercise(item.name);
     const nextExercise: SessionExercise = {
       name: item.name,
-      targetSets: 3,
-      targetReps: '10',
-      targetRestSeconds: 60,
+      targetSets: timed ? 1 : 3,
+      targetReps: timed ? '15 min' : '10',
+      targetRestSeconds: timed ? 0 : 60,
       equipment: item.equipment ? String(item.equipment) : 'bodyweight',
       sets: [],
       aiRecommendation: undefined,

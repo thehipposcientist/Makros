@@ -273,3 +273,13 @@ export async function clearPreservedMeal(date: string, _mealType: string, mealLo
   if (all[date].length === 0) delete all[date];
   await _writePreserved(all);
 }
+
+/** Clear a preserved meal by content signature (name + rounded calories). */
+export async function clearPreservedMealBySignature(date: string, mealName: string, calories: number): Promise<void> {
+  const all = await _readPreserved();
+  if (!all[date]) return;
+  const sig = `${mealName}__${Math.round(calories)}`;
+  all[date] = all[date].filter(e => `${e.meal}__${Math.round(e.calories ?? 0)}` !== sig);
+  if (all[date].length === 0) delete all[date];
+  await _writePreserved(all);
+}

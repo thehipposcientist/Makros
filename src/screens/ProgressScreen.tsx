@@ -115,6 +115,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // fresh users see "log a meal to start tracking" instead of nothing.
   const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+  const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
+  const [weightInputVisible, setWeightInputVisible] = useState(false);
+  const [weightInputValue, setWeightInputValue] = useState('');
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -130,9 +133,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
           .catch(() => null);
       }
-      // Fetch estimated 1RMs for showcase compound lifts. Returns an
-      // empty array for users with no recent compound-lift history;
-      // the card handles the empty state.
+      import('../utils/weightHistory').then(({ loadWeightHistory }) =>
+        loadWeightHistory().then(setWeightEntries).catch(() => null)
+      );
       if (authToken) {
         import('../services/api').then(({ getOneRepMaxShowcase }) =>
           getOneRepMaxShowcase(authToken)
@@ -588,8 +591,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               </View>
               <Text style={styles.fitnessScoreRating}>
-                {dietScore.total >= 80 ? '🥗 Dialed In'
-                  : dietScore.total >= 60 ? '🍽️ On Track'
+                {dietScore.total >= 80 ? 'Dialed In'
+                  : dietScore.total >= 60 ? 'On Track'
                   : dietScore.total >= 40 ? 'Building'
                   : dietScore.total >= 20 ? 'Starting'
                   : 'Log a Meal'}
@@ -1151,7 +1154,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </Text>
           {summaries.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>🏆</Text>
+              <Ionicons name="trophy-outline" size={40} color={tc.textMuted} />
               <Text style={styles.emptyTitle}>No summaries yet</Text>
               <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
             </View>
@@ -1282,7 +1285,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </Text>
           {planChanges.length === 0 ? (
             <View style={[styles.emptyBox, { marginBottom: 24 }]}>
-              <Text style={styles.emptyIcon}>📋</Text>
+              <Ionicons name="clipboard-outline" size={40} color={tc.textMuted} />
               <Text style={styles.emptyTitle}>No plan changes yet</Text>
               <Text style={styles.emptyBody}>When your trainer or nutritionist updates your plan via chat, the changes will be logged here.</Text>
             </View>
@@ -1326,6 +1329,71 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Weight Trend */}
+          <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <Ionicons name="scale-outline" size={22} color={tc.primary} />
+              <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Weight</Text>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
+                onPress={() => {
+                  setWeightInputValue(weightEntries.length > 0 ? String(weightEntries[weightEntries.length - 1].weightLbs) : '');
+                  setWeightInputVisible(true);
+                }}>
+                <Ionicons name="add" size={16} color="#fff" />
+                <Text style={{ fontSize: 13, fontWeight: '600', color: '#fff' }}>Log</Text>
+              </TouchableOpacity>
+            </View>
+            {weightEntries.length === 0 ? (
+              <Text style={{ fontSize: 13, color: tc.textMuted, textAlign: 'center', paddingVertical: 8 }}>
+                Update your weight in profile settings to start tracking.
+              </Text>
+            ) : (
+              <>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <View>
+                    <Text style={{ fontSize: 28, fontWeight: '800', color: tc.textPrimary }}>
+                      {weightEntries[weightEntries.length - 1].weightLbs} <Text style={{ fontSize: 14, fontWeight: '500', color: tc.textMuted }}>lbs</Text>
+                    </Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                      {new Date(weightEntries[weightEntries.length - 1].date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </Text>
+                  </View>
+                  {weightEntries.length >= 2 && (() => {
+                    const first = weightEntries[0];
+                    const last = weightEntries[weightEntries.length - 1];
+                    const diff = Math.round((last.weightLbs - first.weightLbs) * 10) / 10;
+                    const color = diff < 0 ? (tc.success ?? '#22C55E') : diff > 0 ? (tc.warning ?? '#F59E0B') : tc.textMuted;
+                    return (
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name={diff < 0 ? 'trending-down' : diff > 0 ? 'trending-up' : 'remove'} size={18} color={color} />
+                          <Text style={{ fontSize: 16, fontWeight: '700', color }}>
+                            {diff > 0 ? '+' : ''}{diff} lbs
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                          since {new Date(first.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </Text>
+                      </View>
+                    );
+                  })()}
+                </View>
+                {/* Mini weight log */}
+                {weightEntries.slice(-10).reverse().map((e, i) => (
+                  <View key={e.date} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary }}>
+                      {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                    </Text>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>
+                      {e.weightLbs} lbs
+                    </Text>
+                  </View>
+                ))}
+              </>
+            )}
+          </View>
+
           {/* Scan buttons */}
           <View style={styles.bodyScanPrompt}>
             <Ionicons name="body-outline" size={40} color={tc.primary} style={{ alignSelf: 'center' }} />
@@ -1446,21 +1514,70 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : null}
+      {/* Weight Log Modal */}
+      {weightInputVisible && (
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
+          <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 24, width: '80%', maxWidth: 320, borderWidth: 1, borderColor: tc.border }}>
+            <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, marginBottom: 16, textAlign: 'center' }}>Log Weight</Text>
+            <TextInput
+              style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, padding: 14, fontSize: 18, color: tc.textPrimary, backgroundColor: tc.background, textAlign: 'center', fontWeight: '700' }}
+              value={weightInputValue}
+              onChangeText={setWeightInputValue}
+              keyboardType="decimal-pad"
+              placeholder="e.g. 175"
+              placeholderTextColor={tc.textMuted}
+              autoFocus
+            />
+            <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>lbs</Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                onPress={() => setWeightInputVisible(false)}>
+                <Text style={{ fontSize: 15, fontWeight: '600', color: tc.textSecondary }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 12, borderRadius: radius.md, backgroundColor: tc.primary, alignItems: 'center' }}
+                onPress={async () => {
+                  const val = parseFloat(weightInputValue);
+                  if (!val || val < 50 || val > 700) {
+                    Alert.alert('Invalid weight', 'Please enter a weight between 50 and 700 lbs.');
+                    return;
+                  }
+                  const { saveWeightEntry } = await import('../utils/weightHistory');
+                  const updated = await saveWeightEntry(val, 'manual');
+                  setWeightEntries(updated);
+                  setWeightInputVisible(false);
+                  import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                }}>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
       <LogActivityModal
         visible={showLogActivity}
         onClose={() => setShowLogActivity(false)}
         themeName={themeName}
         onSave={async (session) => {
           await saveWorkoutSession(session);
-          // Also log to backend
           if (authToken) {
             try {
               const { logWorkoutDone } = await import('../services/api');
               const dk = dateKey(new Date(session.date));
-              await logWorkoutDone(authToken, dk, session.focus, session.durationSeconds);
+              await logWorkoutDone(
+                authToken, dk, session.focus, session.durationSeconds,
+                undefined,
+                session.manualActivity ? {
+                  category: session.manualActivity.category,
+                  subtype: session.manualActivity.subtype,
+                  intensity: session.manualActivity.intensity,
+                  source: session.manualActivity.source,
+                  cardioStyle: session.manualActivity.cardioStyle,
+                } : undefined,
+              );
             } catch {}
           }
-          // Refresh history
           const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
           setHistory(h);
           setSummaries(s);

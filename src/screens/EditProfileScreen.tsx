@@ -989,7 +989,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     );
   };
 
-  const doHandleSave = () => {
+  const doHandleSave = async () => {
+    const newWeight = currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs;
+    if (newWeight !== profile.physicalStats.weightLbs && newWeight > 0) {
+      const { saveWeightEntry } = await import('../utils/weightHistory');
+      await saveWeightEntry(newWeight, 'manual');
+    }
     const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
     const goalSel: GoalSelection = {
       primaryGoal: selectedGoal,
@@ -1313,7 +1318,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 const statusLabels: Record<InjuryStatus, string> = {
                   active:     '🔴 Active',
                   recovering: '🟡 Recovering',
-                  resolved:   '✅ Resolved',
+                  resolved:   'Resolved',
                 };
                 return (
                   <View key={entry.id} style={[styles.injuryCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
@@ -1433,7 +1438,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               the Foods sub-tab. Previously these were at the bottom and
               the inconsistency was confusing. */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>📅  Training Days / Week</Text>
+            <Text style={styles.chipGroupLabel}>Training Days / Week</Text>
             <View style={[styles.daysRow, { marginTop: 8 }]}>
               <TouchableOpacity
                 style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
@@ -1507,7 +1512,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <>
               {meta.equipmentCategories.map(category => (
                 <View key={category.label} style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>{category.icon}  {category.label}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
+                    <Text style={styles.chipGroupLabel}>{category.label}</Text>
+                  </View>
                   <View style={styles.chips}>
                     {category.items.map(item => {
                       const selected = equipment.includes(item.name);
@@ -1525,7 +1533,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               ))}
               {customEquipItems.length > 0 && (
                 <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>⚙️  Custom</Text>
+                  <Text style={styles.chipGroupLabel}>Custom</Text>
                   <View style={styles.chips}>
                     {customEquipItems.map(name => (
                       <TouchableOpacity
@@ -1975,7 +1983,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               how many meals the algorithm generates after subtracting
               pinned routines. Range 1–10. */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>🍽  Meals per Day</Text>
+            <Text style={styles.chipGroupLabel}>Meals per Day</Text>
             <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
               How many meals per day. Pinned routines count toward the total.
             </Text>
@@ -2150,7 +2158,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
               {filteredFoodCategories.map(category => (
                 <View key={category.key} style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>{category.icon}  {category.label}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
+                    <Text style={styles.chipGroupLabel}>{category.label}</Text>
+                  </View>
                   <View style={styles.chips}>
                     {category.foods.map(food => {
                       const selected = foods.includes(food.name);

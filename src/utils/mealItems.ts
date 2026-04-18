@@ -287,6 +287,45 @@ export function guessUnitForFood(name: string): { quantity: number; unit: FoodUn
   return { quantity: 3, unit: 'oz' };
 }
 
+export type FoodCategory = 'liquid' | 'solid' | 'countable' | 'spreadable' | 'powder';
+
+export function classifyFood(name: string): FoodCategory {
+  const n = name.toLowerCase();
+  const has = (...ks: string[]) => ks.some(k => n.includes(k));
+  if (has('milk', 'juice', 'water', 'broth', 'soup', 'smoothie', 'shake', 'coffee', 'tea',
+         'beverage', 'drink', 'kombucha', 'wine', 'beer', 'soda', 'cream', 'half and half',
+         'almond milk', 'oat milk', 'soy milk', 'coconut milk', 'coconut water'))
+    return 'liquid';
+  if (has('protein powder', 'whey', 'casein', 'creatine', 'pre-workout', 'preworkout',
+         'bcaa', 'electrolyte powder', 'collagen powder', 'matcha powder', 'cocoa powder'))
+    return 'powder';
+  if (has('oil', 'butter', 'peanut butter', 'almond butter', 'dressing', 'sauce', 'honey',
+         'maple syrup', 'jam', 'jelly', 'mayo', 'ketchup', 'mustard', 'hummus', 'tahini',
+         'nutella', 'cream cheese', 'sour cream', 'guacamole', 'salsa'))
+    return 'spreadable';
+  if (has('egg', 'apple', 'banana', 'orange', 'peach', 'pear', 'plum', 'kiwi', 'avocado',
+         'bread', 'toast', 'tortilla', 'wrap', 'muffin', 'bagel', 'waffle', 'pancake',
+         'bacon', 'sausage link', 'pizza', 'cookie', 'brownie', 'bar'))
+    return 'countable';
+  return 'solid';
+}
+
+const _LIQUID_UNITS: FoodUnit[] = ['ml', 'l', 'fl_oz', 'cup', 'pint', 'quart', 'gallon', 'tbsp', 'tsp'];
+const _SOLID_UNITS: FoodUnit[] = ['g', 'kg', 'oz', 'lb', 'cup', 'tbsp', 'tsp'];
+const _COUNTABLE_UNITS: FoodUnit[] = ['piece', 'slice', 'g', 'oz'];
+const _SPREADABLE_UNITS: FoodUnit[] = ['tbsp', 'tsp', 'g', 'oz', 'cup'];
+const _POWDER_UNITS: FoodUnit[] = ['scoop', 'g', 'oz', 'tbsp', 'tsp'];
+
+export function validUnitsForFood(name: string): FoodUnit[] {
+  switch (classifyFood(name)) {
+    case 'liquid':     return _LIQUID_UNITS;
+    case 'solid':      return _SOLID_UNITS;
+    case 'countable':  return _COUNTABLE_UNITS;
+    case 'spreadable': return _SPREADABLE_UNITS;
+    case 'powder':     return _POWDER_UNITS;
+  }
+}
+
 /** Normalize a meal item's unit. Replaces "serving" with a food-type guess
  *  and rescales macros so the displayed quantity stays accurate. Idempotent. */
 export function normalizeServingUnit(item: MealItem): MealItem {

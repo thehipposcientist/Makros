@@ -1646,7 +1646,36 @@ def validate_plan(
                     f"total_sets={total_focus_sets:.1f}"
                 )
 
-    # ── Check 7: region priority audit ──────────────────────────────
+    # ── Check 7: consecutive heavy/resistance day audit ─────────────
+    stimuli = [d.get("stimulus", "") for d in days]
+    heavy_types = {"strength", "power", "mixed"}
+    heavy_streak = 0
+    max_heavy_streak = 0
+    resistance_streak = 0
+    max_resistance_streak = 0
+    for stim in stimuli:
+        if stim in heavy_types:
+            heavy_streak += 1
+            max_heavy_streak = max(max_heavy_streak, heavy_streak)
+        else:
+            heavy_streak = 0
+        if stim not in ("conditioning", "mobility", "recovery", ""):
+            resistance_streak += 1
+            max_resistance_streak = max(max_resistance_streak, resistance_streak)
+        else:
+            resistance_streak = 0
+    if max_heavy_streak >= 3:
+        print(
+            f"[validate_plan] WARNING: {max_heavy_streak} consecutive heavy days "
+            f"detected — stimuli={stimuli}. Consider rebalancing."
+        )
+    if max_resistance_streak >= 4:
+        print(
+            f"[validate_plan] WARNING: {max_resistance_streak} consecutive resistance "
+            f"days without recovery — stimuli={stimuli}"
+        )
+
+    # ── Check 8: region priority audit ──────────────────────────────
     from .region_priority import normalize_region, validate_region_exposure
     region = normalize_region(inputs.priority_region)
     if region != "balanced" and days:

@@ -64,31 +64,31 @@ const SUPPLEMENT_CATEGORIES = [
   },
   {
     key: 'performance',
-    icon: '⚡',
+    icon: 'flash-outline',
     label: 'Performance',
     items: ['Creatine Monohydrate', 'Beta-Alanine', 'L-Citrulline', 'Pre-Workout', 'Caffeine', 'HMB'],
   },
   {
     key: 'recovery',
-    icon: '💪',
+    icon: 'fitness-outline',
     label: 'Recovery & Muscle',
     items: ['BCAA', 'EAA', 'L-Glutamine', 'Tart Cherry Extract', 'Electrolytes'],
   },
   {
     key: 'health',
-    icon: '❤️',
+    icon: 'heart-outline',
     label: 'Health & Vitamins',
     items: ['Vitamin D', 'Omega-3 / Fish Oil', 'Zinc', 'Multivitamin', 'Vitamin C', 'Iron', 'B12'],
   },
   {
     key: 'weight',
-    icon: '🔥',
+    icon: 'flame-outline',
     label: 'Weight Management',
     items: ['L-Carnitine', 'CLA', 'Green Tea Extract', 'Psyllium Fiber', 'Thermogenic'],
   },
   {
     key: 'sleep',
-    icon: '😴',
+    icon: 'moon-outline',
     label: 'Sleep & Stress',
     items: ['Melatonin', 'Ashwagandha', 'ZMA', 'Magnesium Glycinate', 'L-Theanine'],
   },
@@ -484,7 +484,11 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
     }
   };
 
-  const handleComplete = () => {
+  const handleComplete = async () => {
+    if (weightLbs) {
+      const { saveWeightEntry } = await import('../utils/weightHistory');
+      await saveWeightEntry(parseFloat(weightLbs), 'onboarding');
+    }
     const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
 
     const goalSel: GoalSelection = {
@@ -1092,7 +1096,10 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           if (filteredItems.length === 0) return null;
           return (
             <View key={category.label} style={styles.foodCategory}>
-              <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
+                <Text style={styles.foodCategoryLabel}>{category.label}</Text>
+              </View>
               <View style={styles.foodChips}>
                 {filteredItems.map(item => {
                   const selected = selectedEquipment.includes(item.name);
@@ -1236,7 +1243,10 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
           if (filteredFoods.length === 0) return null;
           return (
             <View key={category.key} style={styles.foodCategory}>
-              <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
+                <Text style={styles.foodCategoryLabel}>{category.label}</Text>
+              </View>
               <View style={styles.foodChips}>
                 {filteredFoods.map(food => {
                   const selected = foodsAvailable.includes(food.name);
@@ -1359,7 +1369,10 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
 
       {SUPPLEMENT_CATEGORIES.map(category => (
         <View key={category.key} style={styles.foodCategory}>
-          <Text style={styles.foodCategoryLabel}>{category.icon}  {category.label}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
+                <Text style={styles.foodCategoryLabel}>{category.label}</Text>
+              </View>
           <View style={styles.foodChips}>
             {category.items.map(item => {
               const selected = supplementsAvailable.includes(item);
