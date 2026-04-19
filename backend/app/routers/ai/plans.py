@@ -2221,12 +2221,18 @@ async def run_full_plan_generation(
             print(f"[plan-gen] {len(thin_items)} meal items missing Layer 2 micros — enriching")
             from app.routers.ai.utils import _ai_backfill_micros
             # Build food-shaped dicts for the backfill function
-            food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in thin_items[:20]]
-            backfill = _ai_backfill_micros(client, food_dicts)
-            if backfill:
-                for it in thin_items[:20]:
+            # Batch in groups of 20 to cover ALL thin items, not just the first 20
+            all_backfill: dict[str, dict] = {}
+            for batch_start in range(0, len(thin_items), 20):
+                batch = thin_items[batch_start:batch_start + 20]
+                food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in batch]
+                chunk = _ai_backfill_micros(client, food_dicts)
+                if chunk:
+                    all_backfill.update(chunk)
+            if all_backfill:
+                for it in thin_items:
                     key = str(it.get("name", "")).strip().lower()
-                    micros = backfill.get(key)
+                    micros = all_backfill.get(key)
                     if not micros:
                         continue
                     # Write micros onto the item
@@ -2277,6 +2283,15 @@ async def run_full_plan_generation(
                     it["food_quality"] = classify_food_quality(it)
     except Exception:
         pass
+
+    # ── Allergen safety net — remove items matching user allergens ───────
+    try:
+        from app.services.nutrition.allergen_filter import filter_allergens
+        user_allergens = getattr(req, "allergies", None) or []
+        if user_allergens:
+            filter_allergens(plans_list, allergens=user_allergens)
+    except Exception as exc:
+        print(f"[plan-gen] allergen filter failed (non-fatal): {exc}")
 
     print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
@@ -2539,12 +2554,18 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
         if thin_items:
             print(f"[plan-gen nutrition] {len(thin_items)} items missing micros — enriching")
             from app.routers.ai.utils import _ai_backfill_micros
-            food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in thin_items[:20]]
-            backfill = _ai_backfill_micros(client, food_dicts)
-            if backfill:
-                for it in thin_items[:20]:
+            # Batch in groups of 20 to cover ALL thin items
+            all_backfill: dict[str, dict] = {}
+            for batch_start in range(0, len(thin_items), 20):
+                batch = thin_items[batch_start:batch_start + 20]
+                food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in batch]
+                chunk = _ai_backfill_micros(client, food_dicts)
+                if chunk:
+                    all_backfill.update(chunk)
+            if all_backfill:
+                for it in thin_items:
                     key = str(it.get("name", "")).strip().lower()
-                    micros = backfill.get(key)
+                    micros = all_backfill.get(key)
                     if not micros:
                         continue
                     it_mn = it.get("micronutrients") or {}
@@ -2576,6 +2597,15 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
                 print(f"[plan-gen nutrition] enriched {len(backfill)} items")
     except Exception as exc:
         print(f"[plan-gen nutrition] post-assembly enrichment failed: {exc}")
+
+    # ── Allergen safety net ───────────────────────────────────────────
+    try:
+        from app.services.nutrition.allergen_filter import filter_allergens
+        user_allergens = getattr(plan_req, "allergies", None) or []
+        if user_allergens:
+            filter_allergens(plans_list, allergens=user_allergens)
+    except Exception as exc:
+        print(f"[plan-gen nutrition] allergen filter failed (non-fatal): {exc}")
 
     return result
 

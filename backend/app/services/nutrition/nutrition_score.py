@@ -185,10 +185,21 @@ _DEFAULT_WEIGHTS = (0.35, 0.40, 0.25)
 def compute_nutrition_score(
     indicators: NutritionIndicators,
     goal: str = "body_recomp",
+    sex: str | None = None,
 ) -> NutritionScore:
-    """Compute a daily nutrition score from indicators."""
+    """Compute a daily nutrition score from indicators.
+
+    Args:
+        sex: "male" or "female". When "male", iron RDA is 8mg instead of 18mg.
+             Defaults to 18mg (female RDA) when unknown to avoid false negatives.
+    """
 
     w_adh, w_qual, w_micro = _GOAL_WEIGHTS.get(goal, _DEFAULT_WEIGHTS)
+
+    # Sex-aware RDA overrides
+    rda = dict(RDA)
+    if sex and sex.lower() == "male":
+        rda["iron_mg"] = 8
 
     # ── Adherence (0-100) ────────────────────────────────────────────
     # Logging completeness affects confidence, not the adherence score directly.
@@ -214,7 +225,7 @@ def compute_nutrition_score(
         checked = 0
         gaps = []
         for key in KEY_MICROS:
-            rda_val = RDA.get(key, 0)
+            rda_val = rda.get(key, 0)
             if rda_val <= 0:
                 continue
             checked += 1

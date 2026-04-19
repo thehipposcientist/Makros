@@ -138,6 +138,7 @@ function collectAllItems(plan: DailyNutritionPlan): MealItem[] {
 export function computeNutritionScore(
   plan: DailyNutritionPlan | null,
   goal: string = 'body_recomp',
+  sex?: string,
 ): NutritionScoreResult {
   const empty: NutritionScoreResult = {
     score: 0, adherence: 0, quality: 0, micro: 0,
@@ -145,6 +146,12 @@ export function computeNutritionScore(
     likely_gaps: [], indicators: {},
   };
   if (!plan || !plan.meals.length) return empty;
+
+  // Sex-aware iron RDA: male = 8mg, female/unknown = 18mg
+  const effectiveRDA = { ...RDA };
+  if (sex && sex.toLowerCase() === 'male') {
+    effectiveRDA.iron = 8;
+  }
 
   const targets = plan.targets;
   const removed = new Set(plan.removedMealIds ?? []);
@@ -223,7 +230,9 @@ export function computeNutritionScore(
   const processedPenalty = Math.min(20, processedPct / 100 * 20);
   const fiberPts = fiberAlignment * 20;
   const fvPts = Math.min(15, (fvServings / 5) * 15);
-  const quality = Math.round(Math.min(100, Math.max(0, wholePts - processedPenalty + fiberPts + fvPts)));
+  // Hydration bonus (0-10 pts) — infrastructure for when client-side tracking is added
+  const hydrationPts = 0;
+  const quality = Math.round(Math.min(100, Math.max(0, wholePts - processedPenalty + fiberPts + fvPts + hydrationPts)));
 
   // ── Micronutrient Coverage (0-100) ──
   const foodsWithMicros = items.filter(it => it.micronutrients && Object.keys(it.micronutrients).length > 0).length;
@@ -237,7 +246,7 @@ export function computeNutritionScore(
   if (microConfidence !== 'none') {
     let hits = 0, checked = 0;
     for (const key of KEY_MICROS) {
-      const rdaVal = RDA[key] || 0;
+      const rdaVal = effectiveRDA[key] || 0;
       if (rdaVal <= 0) continue;
       checked++;
       const logged = micros[key] || 0;

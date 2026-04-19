@@ -5,7 +5,8 @@ Derived readiness: computed per focus-type from the muscle buckets.
 
 Architecture:
   1. Exercises contribute fatigue to specific muscles via primary/secondary
-  2. Fatigue decays over time (50% at 24h, 25% at 48h, 10% at 72h)
+  2. Fatigue decays over time (50% at 24h, 25% at 48h, 10% at 72h,
+     5% at 96h, 2% at 120h — days 4-5 apply to systemic only)
   3. The planner derives readiness for any focus type from the muscle state
   4. Decisions are graduated (proceed / downgrade / swap / recover), not binary
 """
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
-_DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10}
+_DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10, 4: 0.05, 5: 0.02}
 
 # The 12 fatigue dimensions. Matches MuscleGroup enum minus the
 # ultra-granular ones (traps→back, forearms→biceps, adductors→quads).
@@ -285,7 +286,7 @@ def compute_rolling_fatigue(
         if not isinstance(wd, date):
             continue
         days_ago = (today - wd).days
-        if days_ago < 0 or days_ago > 3:
+        if days_ago < 0 or days_ago > 5:
             continue
         decay = _DECAY.get(days_ago, 0.0)
         resolved = c.get("resolved_muscle_fatigue")
@@ -300,10 +301,15 @@ def compute_rolling_fatigue(
 
     # Pass 1: positive fatigue only (workouts, cardio, etc.)
     for wd, decay, resolved, c in parsed:
+        days_ago = (today - wd).days
         has_positive = any(v > 0 for v in resolved.values())
         if has_positive:
             for muscle, value in resolved.items():
                 if muscle in FATIGUE_MUSCLES and value > 0:
+                    # Days 4-5: only systemic fatigue lingers; local
+                    # muscle fatigue has fully recovered by then.
+                    if days_ago >= 4 and muscle != "systemic":
+                        continue
                     mf.add(muscle, value * decay)
         activities.append({
             "date": wd.isoformat(),

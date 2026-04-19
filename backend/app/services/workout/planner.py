@@ -825,7 +825,7 @@ def prescribe_sets_reps(
     # ── Reps ───────────────────────────────────────────────────────────
     if bucket == "strength":
         if is_compound and role == "primary":
-            reps = "4-6"
+            reps = "3-5"
             rest = 180
             rir = 1.5
         elif is_compound:
@@ -863,20 +863,19 @@ def prescribe_sets_reps(
             rest = 60
             rir = 1.5
     elif bucket == "endurance":
-        # Endurance strength-maintenance days — enough load to keep
-        # muscle mass without fighting recovery from cardio. Low sets,
-        # mid-rep hypertrophy range, short rest.
+        # Endurance strength-maintenance days — muscular endurance rep
+        # ranges with short rest to complement the cardio-heavy week.
         if is_compound and role == "primary":
-            reps = "6-10"
-            rest = 120
+            reps = "15-20"
+            rest = 45
             rir = 2.5
         elif is_compound:
-            reps = "8-12"
-            rest = 90
+            reps = "12-15"
+            rest = 45
             rir = 2.5
         else:
-            reps = "12-15"
-            rest = 60
+            reps = "15-20"
+            rest = 30
             rir = 2.0
     elif bucket == "athletic_performance":
         # Hybrid strength days inside an athletic plan lean on power

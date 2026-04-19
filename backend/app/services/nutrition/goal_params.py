@@ -195,7 +195,8 @@ ENDURANCE = GoalBucketParams(
         "aggressive":   300,
     },
     # Lower than strength/muscle — endurance prioritizes carbs for glycogen
-    # replenishment. ACSM: 1.2-1.4 g/kg (~0.55-0.65 g/lb) is sufficient.
+    # replenishment. 0.8 g/lb ≈ 1.76 g/kg — above the ACSM minimum of
+    # 1.2 g/kg, reflecting that our users also do resistance training.
     protein_per_lb=0.8,
     # Lowest fat % — endurance athletes run on carbs.
     fat_percent_of_calories=0.22,

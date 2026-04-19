@@ -407,16 +407,18 @@ def get_guardrails(
 
 @router.get("/coach-memory")
 def get_coach_memory(
-    limit: int = 20,
+    limit: int = 10,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
+    clamped = max(1, min(50, limit))
     entries = session.exec(
         select(CoachMemory)
         .where(CoachMemory.user_id == current_user.id)
         .order_by(CoachMemory.created_at.desc())
+        .limit(clamped)
     ).all()
-    return entries[: max(1, min(100, limit))]
+    return entries
 
 
 # ──────────────────────────────────────────────────────────────────────────────

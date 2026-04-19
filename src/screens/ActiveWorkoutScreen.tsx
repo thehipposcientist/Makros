@@ -2364,7 +2364,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
                                 onPress={() => {
                                   if (!isLogged) { handleLogSetInline(i, slot, false); }
-                                }}>
+                                }}
+                                accessibilityRole="button"
+                                accessibilityLabel={isLogged ? `Set ${slot + 1} logged` : `Log set ${slot + 1}`}>
                                 <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
                                   {isLogged ? <Ionicons name="checkmark" size={14} color="#fff" /> : <Ionicons name="radio-button-off" size={14} />}
                                 </Text>
@@ -2428,6 +2430,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <PressableScale
               style={[styles.finishBtn, completedCount === 0 && styles.finishBtnDisabled]}
               disabled={completedCount === 0}
+              accessibilityRole="button"
+              accessibilityLabel="Finish workout"
               onPress={() => {
                 if (completedCount === 0) {
                   Alert.alert('No sets logged', 'Log at least one set before finishing.');
@@ -2513,13 +2517,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {mRunning ? (
                     <TouchableOpacity
                       style={[styles.timerModalBigBtn, { backgroundColor: '#E53935' }]}
-                      onPress={() => stopExerciseTimer(timerModalKey)}>
+                      onPress={() => stopExerciseTimer(timerModalKey)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Pause timer">
                       <Text style={styles.timerModalBigBtnText}>Pause</Text>
                     </TouchableOpacity>
                   ) : (
                     <TouchableOpacity
                       style={[styles.timerModalBigBtn, { backgroundColor: themeColors.primary }]}
-                      onPress={() => startExerciseTimer(timerModalKey)}>
+                      onPress={() => startExerciseTimer(timerModalKey)}
+                      accessibilityRole="button"
+                      accessibilityLabel={mElapsed > 0 ? 'Resume timer' : 'Start timer'}>
                       <Text style={styles.timerModalBigBtnText}>{mElapsed > 0 ? 'Resume' : 'Start'}</Text>
                     </TouchableOpacity>
                   )}
@@ -2528,12 +2536,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <View style={styles.timerModalSecondaryRow}>
                   <TouchableOpacity
                     style={[styles.timerModalSecondaryBtn, { borderColor: themeColors.border }]}
-                    onPress={() => resetExerciseTimer(timerModalKey)}>
+                    onPress={() => resetExerciseTimer(timerModalKey)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Reset timer">
                     <Text style={[styles.timerModalSecondaryBtnText, { color: themeColors.textSecondary }]}>Reset</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.timerModalSecondaryBtn, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }]}
-                    onPress={writeDurationAndClose}>
+                    onPress={writeDurationAndClose}
+                    accessibilityRole="button"
+                    accessibilityLabel={mElapsed > 0 ? 'Done with timer' : 'Close timer'}>
                     <Text style={[styles.timerModalSecondaryBtnText, { color: '#fff', fontWeight: '800' }]}>
                       {mElapsed > 0 ? 'Done' : 'Close'}
                     </Text>
@@ -2590,7 +2602,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.logConfirmBtn} onPress={handleLogSet}>
+              <TouchableOpacity style={styles.logConfirmBtn} onPress={handleLogSet} accessibilityRole="button" accessibilityLabel="Save set">
                 <Text style={styles.logConfirmText}>Save Set</Text>
               </TouchableOpacity>
             </View>
@@ -2993,7 +3005,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <TextInput
                 value={coachInput}
                 onChangeText={setCoachInput}
-                placeholder="Ask about form or pain..."
+                placeholder="Ask about form, weight, alternatives, or pain..."
                 placeholderTextColor={themeColors.textMuted}
                 style={styles.coachInput}
                 multiline

@@ -30,6 +30,7 @@ import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
+import { formatWaterTarget } from '../utils/hydration';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -2945,7 +2946,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             setShowTrainerModal(true);
           }}
           activeOpacity={0.85}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Open AI Coach">
           <Ionicons name="chatbubble-ellipses-outline" size={15} color={themeColors.textSecondary} />
           <Text style={[styles.askAiText, { color: themeColors.textSecondary }]}>Coach</Text>
         </TouchableOpacity>
@@ -3522,6 +3525,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     }
                     return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Training day — keep protein high for muscle recovery</Text>;
                   })()}
+                  {userProfile?.physicalStats?.weightLbs ? (
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                      Water: {formatWaterTarget(userProfile.physicalStats.weightLbs, userProfile.workoutDurationMinutes ?? 0)} daily
+                    </Text>
+                  ) : null}
                 </View>
               );
             })()}
@@ -4494,11 +4502,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
               {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
-                <Text style={[styles.trainerEmpty, { color: themeColors.textMuted }]}>
-                  {coachMode === 'nutritionist'
-                    ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
-                    : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
-                </Text>
+                <View style={{ padding: 16, gap: 6 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>Ask your coach about:</Text>
+                  <View style={{ gap: 4 }}>
+                    {[
+                      { icon: 'swap-horizontal-outline' as const, text: 'Swap exercises or foods' },
+                      { icon: 'nutrition-outline' as const, text: 'Meal suggestions & macro advice' },
+                      { icon: 'barbell-outline' as const, text: 'Workout modifications' },
+                      { icon: 'bandage-outline' as const, text: 'Report injuries or pain' },
+                      { icon: 'analytics-outline' as const, text: 'Progress questions' },
+                      { icon: 'help-circle-outline' as const, text: 'Nutrition & training tips' },
+                    ].map(item => (
+                      <View key={item.text} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Ionicons name={item.icon} size={14} color={themeColors.textMuted} />
+                        <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{item.text}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 4 }}>
+                    The coach can update your workout plan, nutrition targets, and injury tracking directly.
+                  </Text>
+                  <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, marginTop: 8 }]}>
+                    {coachMode === 'nutritionist'
+                      ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
+                      : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
+                  </Text>
+                </View>
               ) : (() => {
                 // Display cap: show the 50 most recent messages.
                 // Older turns remain in state so `conversation`
@@ -5333,7 +5362,10 @@ function BottomTabButton({
       style={btStyles.btn}
       onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); onPress(); }}
       activeOpacity={0.7}
-      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}>
+      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+      accessibilityRole="tab"
+      accessibilityLabel={`${label} tab`}
+      accessibilityState={{ selected: active }}>
       <Ionicons
         name={(active ? iconName.replace('-outline', '') : iconName) as any}
         size={20}
@@ -5606,7 +5638,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
               <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000}>
                 <PressableScale
                   style={{ marginBottom: 14 }}
-                  onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}>
+                  onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Start workout">
                   <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
                     <Ionicons name="play-circle" size={22} color="#fff" />
                     <Text style={styles.startWorkoutBtnText}>Start Workout</Text>

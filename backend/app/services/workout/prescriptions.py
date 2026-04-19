@@ -196,8 +196,8 @@ def _prescribe_conditioning(
         to 45 if not provided.
       - Pool of ~10 min for warmup + cooldown leaves `work_minutes`
         for the main block.
-      - Short intervals: ~1.9 min per interval (45s on + 75s rest)
-        so `interval_count = round(work_minutes / 1.9)`, clamped 6-16.
+      - Short intervals: ~2.75 min per interval (45s on + 120s rest)
+        so `interval_count = round(work_minutes / 2.75)`, clamped 6-16.
       - Long intervals: ~5 min per (3 min on + 2:30 rest),
         `count = round(work_minutes / 5)`, clamped 4-8.
       - Tempo / Zone 2: main block uses the full remaining work time.
@@ -223,9 +223,10 @@ def _prescribe_conditioning(
             return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
         if "cooldown" in label:
             return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # ~1.9 min per interval (45s work + 75s rest). Budget-scaled.
-        count = max(6, min(16, round(work_minutes / 1.9)))
-        return Prescription(sets=count, reps="30-45s", rest_seconds=75, rir_target=1.5)
+        # ~2.75 min per interval (45s work + 120s rest, 1:3 work:rest
+        # ratio for near-maximal short intervals). Budget-scaled.
+        count = max(6, min(16, round(work_minutes / 2.75)))
+        return Prescription(sets=count, reps="30-45s", rest_seconds=120, rir_target=1.5)
 
     if archetype == DayArchetype.COND_INTERVALS_LONG:
         if "warmup" in label:

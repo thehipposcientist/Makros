@@ -599,7 +599,10 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         <TouchableOpacity
           style={[styles.checkbox, checked && styles.checkboxDone]}
           onPress={() => onToggle?.(mealType)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="checkbox"
+          accessibilityLabel={`Mark ${meal.meal} as ${checked ? 'not done' : 'done'}`}
+          accessibilityState={{ checked }}>
           {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
         </TouchableOpacity>
         <View style={{ flex: 1, minWidth: 0 }}>
@@ -636,7 +639,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         {/* Edit button — primary visible action */}
         <View style={styles.iconStrip}>
           {onEdit && (
-            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn}>
+            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel={`Edit ${meal.meal}`}>
               <Ionicons name="create-outline" size={17} color={mealAccent.strong} />
             </TouchableOpacity>
           )}

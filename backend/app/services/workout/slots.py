@@ -119,6 +119,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
             Slot("Single-leg",        "lunge",            "quads",      "secondary"),
             Slot("Hinge Pattern",     "hinge",            "hamstrings", "secondary"),
             Slot("Quad Isolation",    "isolation",        "quads",      "isolation"),
+            Slot("Glute Isolation",   "isolation",        "glutes",     "isolation"),
             Slot("Calves",            "isolation",        "calves",     "isolation"),
             Slot("Core",              "anti_extension",   "core",       "core"),
         ]
@@ -129,6 +130,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
             Slot("Squat Pattern",     "squat",            "quads",      "secondary"),
             Slot("Single-leg",        "lunge",            "glutes",     "secondary"),
             Slot("Hamstring Isolation","isolation",       "hamstrings", "isolation"),
+            Slot("Glute Isolation",   "isolation",        "glutes",     "isolation"),
             Slot("Calves",            "isolation",        "calves",     "isolation"),
             Slot("Core",              "anti_extension",   "core",       "core"),
         ]
@@ -138,6 +140,7 @@ def _lower_slots(cycle_index: int) -> list[Slot]:
         Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
         Slot("Single-leg",        "lunge",            "quads",      "secondary"),
         Slot("Hamstring Accessory","isolation",       "hamstrings", "isolation"),
+        Slot("Glute Isolation",   "isolation",        "glutes",     "isolation"),
         Slot("Calves",            "isolation",        "calves",     "isolation"),
         Slot("Core",              "anti_extension",   "core",       "core"),
     ]
@@ -174,6 +177,7 @@ def _legs_slots() -> list[Slot]:
         Slot("Hinge Pattern",     "hinge",            "hamstrings", "primary"),
         Slot("Single-leg",        "lunge",            "quads",      "secondary"),
         Slot("Hamstring Accessory","isolation",       "hamstrings", "isolation"),
+        Slot("Glute Isolation",   "isolation",        "glutes",     "isolation"),
         Slot("Calves",            "isolation",        "calves",     "isolation"),
         Slot("Core",              "anti_extension",   "core",       "core"),
     ]
@@ -245,6 +249,7 @@ def _upper_heavy_slots() -> list[Slot]:
         Slot("Primary Horizontal Press", "horizontal_press", "chest",     "primary"),
         Slot("Primary Vertical Press",   "vertical_press",   "shoulders", "primary"),
         Slot("Horizontal Pull",          "horizontal_pull",  "back",      "secondary"),
+        Slot("Vertical Pull",            "vertical_pull",    "back",      "secondary"),
         Slot("Isolation",                "isolation",         "biceps",    "isolation"),
         Slot("Core",                     "anti_extension",   "core",      "core"),
     ]
@@ -285,6 +290,7 @@ def _lower_hypertrophy_slots() -> list[Slot]:
         Slot("Secondary Lunge",      "lunge",         "quads",      "secondary"),
         Slot("Quad Isolation",       "isolation",      "quads",     "isolation"),
         Slot("Hamstring Isolation",  "isolation",      "hamstrings","isolation"),
+        Slot("Glute Isolation",      "isolation",      "glutes",    "isolation"),
         Slot("Core",                 "anti_extension", "core",      "core"),
         Slot("Calves",               "isolation",      "calves",    "isolation"),
     ]
@@ -374,6 +380,7 @@ def _legs_volume_slots() -> list[Slot]:
         Slot("Leg Press",          "squat",          "quads",      "secondary"),
         Slot("Quad Isolation",     "isolation",       "quads",     "isolation"),
         Slot("Hamstring Isolation","isolation",       "hamstrings","isolation"),
+        Slot("Glute Isolation",    "isolation",       "glutes",    "isolation"),
         Slot("Calves",             "isolation",       "calves",    "isolation"),
     ]
 

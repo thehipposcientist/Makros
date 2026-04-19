@@ -59,6 +59,69 @@ def _extract_nutrients(food: dict) -> dict[str, float]:
     return out
 
 
+_HOUSEHOLD_UNIT_GRAMS: dict[str, float] = {
+    "tbsp": 15.0,
+    "tablespoon": 15.0,
+    "tablespoons": 15.0,
+    "tsp": 5.0,
+    "teaspoon": 5.0,
+    "teaspoons": 5.0,
+    "cup": 240.0,
+    "cups": 240.0,
+    "oz": 28.0,
+    "ounce": 28.0,
+    "ounces": 28.0,
+    "slice": 30.0,
+    "slices": 30.0,
+    "piece": 30.0,
+    "pieces": 30.0,
+    "fl oz": 30.0,
+    "each": 50.0,
+    "link": 45.0,
+    "links": 45.0,
+    "patty": 85.0,
+    "strip": 10.0,
+    "strips": 10.0,
+}
+
+
+def _parse_household_grams(text: str) -> float | None:
+    """Estimate grams from household serving text like '1 cup' or '2 tbsp'.
+
+    Returns estimated grams, or None if parsing fails.
+    """
+    if not text:
+        return None
+    text = text.strip().lower()
+    # Try to match patterns like "1 cup", "2.5 tbsp", "1/2 cup"
+    m = re.match(r"^(\d+(?:\.\d+)?(?:\s*/\s*\d+)?)\s+(.+)$", text)
+    if not m:
+        # Try without a leading number (assume 1)
+        unit = text.strip()
+        if unit in _HOUSEHOLD_UNIT_GRAMS:
+            return _HOUSEHOLD_UNIT_GRAMS[unit]
+        return None
+    qty_str, unit = m.group(1).strip(), m.group(2).strip()
+    # Handle fractions like "1/2"
+    if "/" in qty_str:
+        parts = qty_str.split("/")
+        try:
+            qty = float(parts[0]) / float(parts[1])
+        except (ValueError, ZeroDivisionError):
+            return None
+    else:
+        try:
+            qty = float(qty_str)
+        except ValueError:
+            return None
+    # Strip trailing description words: "1 cup chopped" → "cup"
+    unit_first = unit.split()[0] if unit else ""
+    grams_per = _HOUSEHOLD_UNIT_GRAMS.get(unit) or _HOUSEHOLD_UNIT_GRAMS.get(unit_first)
+    if grams_per:
+        return round(qty * grams_per, 1)
+    return None
+
+
 def _extract_serving(food: dict) -> tuple[str, float]:
     """Best-effort serving description + gram weight from USDA data.
 
@@ -72,7 +135,9 @@ def _extract_serving(food: dict) -> tuple[str, float]:
     if hs and ss and ss > 0:
         return hs, ss
     if hs:
-        return hs, ss or 100.0
+        # Try to estimate grams from household text instead of defaulting to 100g
+        estimated = _parse_household_grams(hs)
+        return hs, ss or estimated or 100.0
     if ss and ss > 0:
         ssu = food.get("servingSizeUnit", "g")
         return f"{round(ss)} {ssu}", ss

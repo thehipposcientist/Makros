@@ -59,29 +59,29 @@ All 10 test modules (183 tests) now registered in `run_all.py`.
 
 ## High — Fitness Domain
 
-### 16. Extend Systemic Fatigue Decay Window
-`activity_impact.py:18` — 3-day decay for all muscles including systemic (CNS). Heavy squat/deadlift sessions produce CNS suppression for 72-96h. Systemic should decay over 5-6 days.
+### ~~16. Extend Systemic Fatigue Decay Window~~ DONE
+Extended to 5 days for systemic (CNS): days 4=0.05, 5=0.02. Non-systemic muscles still zero after day 3.
 
 ### 17. Add Deload / Periodization Mechanism
 No deload weeks, no volume periodization, no block structure. At minimum, add auto-deload after 4 weeks of progressive loading.
 
-### 18. Fix Strength Prescription Reps
-`planner.py` — strength primary compounds prescribe "4-6" reps. Should be "3-5" for pure strength.
+### ~~18. Fix Strength Prescription Reps~~ DONE
+Changed strength primary compound reps from "4-6" to "3-5".
 
-### 19. Fix Endurance Strength-Maintenance Prescription
-`planner.py` — endurance maintenance prescribes "6-10" reps at 2min rest (hypertrophy range). Should be 15-20+ reps at 30-60s rest.
+### ~~19. Fix Endurance Strength-Maintenance Prescription~~ DONE
+Changed endurance primary to "15-20" reps at 45s rest. Secondary to "12-15" at 45s. Isolation to "15-20" at 30s.
 
-### 20. Add Glute Isolation to Standard Lower Days
-Lower hypertrophy has quad + hamstring isolation but no glute isolation.
+### ~~20. Add Glute Isolation to Standard Lower Days~~ DONE
+Added Glute Isolation slot to `_lower_slots` (all 3 cycles), `_legs_slots`, `_lower_hypertrophy_slots`, `_legs_volume_slots`.
 
-### 21. Add Vertical Pull to Upper Heavy
-Upper heavy has horizontal pull but no vertical pull (pull-ups/lat pulldown).
+### ~~21. Add Vertical Pull to Upper Heavy~~ DONE
+Added `Slot("Vertical Pull", "vertical_pull", "back", "secondary")` to `_upper_heavy_slots`.
 
-### 22. Fix Short Interval Rest Ratios
-30-45s work with 75s rest (1:2 ratio). Should be 1:3 to 1:4 for near-maximal intervals.
+### ~~22. Fix Short Interval Rest Ratios~~ DONE
+Changed COND_INTERVALS_SHORT rest from 75s to 120s (1:3 work:rest ratio).
 
-### 23. Muscle Gain at 3 Days — Frequency Too Low
-PPL at 3 days = 1x/week per muscle. Consider anchoring full-body at 3 days.
+### ~~23. Muscle Gain at 3 Days — Frequency Too Low~~ DONE
+Full body split now preferred at ≤3 days for muscle_gain (+12 score bonus). PPL bonus removed at 3 days.
 
 ### 24. HYROX Missing Tempo Running at Low Day Counts
 3-day HYROX needs at least one dedicated running tempo session.
@@ -93,36 +93,36 @@ Z2 can reach 70 minutes. Cap at 45-50 for recreational users.
 
 ## High — Nutrition Domain
 
-### 26. Fix Nutrition Score Micronutrient Pipeline
-Micronutrient data rarely populated on plan items. `food_quality` field now persisted which partially addresses this. Full fix needs USDA micro data flowing to plan items.
+### ~~26. Fix Nutrition Score Micronutrient Pipeline~~ DONE
+Removed 20-item cap on micro backfill — now batches all items in groups of 20. All plan items get micronutrient enrichment.
 
-### 27. Iron RDA is Sex-Blind
-Uses 18mg universally (female RDA). Male RDA is 8mg.
+### ~~27. Iron RDA is Sex-Blind~~ DONE
+Both backend `compute_nutrition_score(sex=)` and client `computeNutritionScore(plan, goal, sex)` now accept sex parameter. Male = 8mg iron RDA, female/unknown = 18mg.
 
-### 28. Hydration Bonus Missing from Client Score
-`nutritionScore.ts` omits the 10-point hydration bonus.
+### ~~28. Hydration Bonus + Daily Water Target~~ DONE
+Added hydration infrastructure to client score. Created `hydration.ts` utility with `dailyWaterOz`/`formatWaterTarget` based on bodyweight + workout duration. Water recommendation shown on meals Plan tab.
 
-### 29. Endurance Protein Comment Incorrect
-Comment says "1.2-1.4 g/kg" but actual value is 1.76 g/kg.
+### ~~29. Endurance Protein Comment Incorrect~~ DONE
+Fixed comment to "0.8 g/lb = 1.76 g/kg — above ACSM minimum of 1.2 g/kg".
 
-### 30. USDA Serving Size 100g Fallback
-When gram weight absent, defaults to 100g. Overstates macros for small servings.
+### ~~30. USDA Serving Size 100g Fallback~~ DONE
+Added `_parse_household_grams()` with unit→grams mapping (tbsp=15g, cup=240g, oz=28g, etc.). Falls back to 100g only if parsing fails.
 
-### 31. Allergen Filter is AI-Only
-No programmatic allergen filter. Safety net is entirely AI-dependent.
+### ~~31. Allergen Filter~~ DONE
+New `allergen_filter.py` with `filter_allergens()` checking 8 categories (peanuts, tree_nuts, dairy, gluten, soy, eggs, shellfish, fish). Called after AI meal generation in both plan paths. Removes matching items and logs warnings.
 
 ---
 
 ## Medium — Polish
 
-### 32. Accessibility Labels
-Only 3 `accessibilityLabel` instances in the entire app. App Store compliance risk.
+### ~~32. Accessibility Labels~~ DONE
+Added ~15 labels to key elements: bottom tabs (role="tab" + selected state), Coach button, Start/Finish Workout, log-set badges, timer controls, meal checkboxes, edit buttons.
 
 ### 33. Apple Health Auto-Import
 Code exists for reading. Missing: auto-import workouts into fatigue system.
 
-### 34. Coach Memory Pagination
-Unbounded query, Python-side slicing. Add SQL LIMIT.
+### ~~34. Coach Memory Pagination~~ DONE
+SQL LIMIT added to query. Default 10, max 50. Python-side slicing removed.
 
 ### 35. Workout-Aware Macro Adjustment
 Currently shows tips. Phase 2: adjust actual macro targets by +/-10% on hard vs rest days.
@@ -223,6 +223,24 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Manual activity history shows full detail ("Recovery · Sauna (easy)") | Done |
 | Serving display: "1 serving (~200g)" for vague units | Done |
 | Dark theme fixes: MealEditModal text, image placeholders, skeleton loader | Done |
+| Systemic fatigue decay extended to 5 days (0.05/0.02 for days 4-5) | Done |
+| Strength prescription: "3-5" reps for pure strength | Done |
+| Endurance maintenance: "15-20" reps at 45s rest | Done |
+| Short interval rest: 120s (1:3 ratio) | Done |
+| Muscle gain at 3 days: full body preferred over PPL | Done |
+| Micronutrient backfill: no 20-item cap, batches all items | Done |
+| Iron RDA sex-aware: male=8mg, female=18mg (backend + client) | Done |
+| Endurance protein comment fixed (1.76 g/kg) | Done |
+| USDA serving size: household text parser (tbsp→15g, cup→240g, etc.) | Done |
+| Allergen filter: 8 categories, runs post-AI generation | Done |
+| Accessibility labels on ~15 key interactive elements | Done |
+| Coach memory: SQL LIMIT (default 10, max 50) | Done |
+| Glute isolation added to all standard lower/legs day templates | Done |
+| Vertical pull added to upper heavy slots | Done |
+| Hydration: client score infrastructure + `hydration.ts` utility + water target on meals tab | Done |
+| Coach timeout: `askWorkoutQuestion` increased to 60s | Done |
+| Coach capabilities hint in empty chat (6 categories + description) | Done |
+| Active workout coach placeholder: "Ask about form, weight, alternatives, or pain..." | Done |
 
 ---
 
@@ -240,13 +258,18 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | ~~Password validation~~ | ~~Medium~~ | ~~DONE~~ |
 | ~~Print → logger~~ | ~~Medium~~ | ~~DONE~~ |
 | ~~Response models~~ | ~~Medium~~ | ~~DONE~~ |
-| Systemic fatigue decay too short | High | 30 min |
+| ~~Systemic fatigue decay~~ | ~~High~~ | ~~DONE~~ |
 | No deload mechanism | High | 4 hrs |
-| Iron RDA sex-blind | High | 30 min |
-| Strength/endurance prescription mismatch | High | 30 min |
+| ~~Iron RDA sex-blind~~ | ~~High~~ | ~~DONE~~ |
+| ~~Strength/endurance prescription~~ | ~~High~~ | ~~DONE~~ |
+| ~~Short interval rest ratio~~ | ~~High~~ | ~~DONE~~ |
+| ~~Muscle gain 3-day frequency~~ | ~~High~~ | ~~DONE~~ |
+| ~~Micro backfill cap~~ | ~~High~~ | ~~DONE~~ |
+| ~~Allergen filter~~ | ~~High~~ | ~~DONE~~ |
+| ~~USDA 100g fallback~~ | ~~Medium~~ | ~~DONE~~ |
+| ~~Accessibility labels~~ | ~~Medium~~ | ~~DONE~~ |
+| ~~Coach memory pagination~~ | ~~Medium~~ | ~~DONE~~ |
 | Production API URL hardcoded | Medium | 15 min |
-| Accessibility labels | Medium | 4 hrs |
-| USDA 100g fallback | Medium | 30 min |
 
 ---
 

@@ -174,6 +174,9 @@ def _base_split_score(split_id: str, bucket: str, days: int, experience: str) ->
         elif days == 4: s += 5
         else: s -= 10
         if bucket in ("fat_loss", "general_health"): s += 10
+        # At ≤3 days, full body gives 3x/week muscle frequency — far
+        # better than PPL's 1x/week for hypertrophy goals.
+        if days <= 3 and bucket == "muscle_gain": s += 12
     elif split_id == SPLIT_UPPER_LOWER:
         if days == 4: s += 20
         elif days == 5: s += 12
@@ -181,7 +184,9 @@ def _base_split_score(split_id: str, bucket: str, days: int, experience: str) ->
         else: s += 3
         if bucket in ("body_recomp", "strength", "muscle_gain"): s += 8
     elif split_id == SPLIT_PPL:
-        if days == 3 and bucket in ("muscle_gain", "strength", "body_recomp"): s += 18
+        # PPL at 3 days = 1x/week per muscle — too low for muscle_gain.
+        # Only boost PPL at 3 days for strength/body_recomp (not muscle_gain).
+        if days == 3 and bucket in ("strength", "body_recomp"): s += 18
         elif days == 6: s += 20
         elif days == 4: s += 10
         elif days == 5: s += 8

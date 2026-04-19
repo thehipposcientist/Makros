@@ -1408,7 +1408,7 @@ export async function askWorkoutQuestion(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
 
   console.log('[askWorkoutQuestion] RECV ←', {
     answerPreview: resp.answer?.slice(0, 150),
