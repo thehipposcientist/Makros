@@ -890,7 +890,7 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
     gpt-5 family (reasoning models):
       - strip temperature and top_p (reasoning models reject these)
       - rename max_tokens -> max_completion_tokens
-      - add reasoning={"effort": "minimal"} if not already set
+      - add reasoning_effort="minimal" if not already set
     All other models: params passed through unchanged.
     """
     model = kwargs.get("model", "")
@@ -902,9 +902,13 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
         # Rename max_tokens -> max_completion_tokens for reasoning models
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
-        # Ensure reasoning effort is set
-        if "reasoning" not in kwargs:
-            kwargs["reasoning"] = {"effort": "minimal"}
+        # chat.completions API uses reasoning_effort (string), not reasoning (dict — that's Responses API)
+        if "reasoning" in kwargs:
+            r = kwargs.pop("reasoning")
+            if isinstance(r, dict) and "effort" in r:
+                kwargs.setdefault("reasoning_effort", r["effort"])
+        if "reasoning_effort" not in kwargs:
+            kwargs["reasoning_effort"] = "minimal"
     return client.chat.completions.create(**kwargs)
 
 
@@ -920,7 +924,7 @@ def _build_chat_kwargs(
 
     gpt-4o family  → response_format=json_object, max_tokens, temperature
     gpt-5 family   → max_completion_tokens (includes reasoning tokens),
-                     reasoning={"effort": "minimal"} for fast responses,
+                     reasoning_effort="minimal" for fast responses,
                      NO temperature/top_p (reasoning models reject these).
                      response_format=json_schema when schema provided,
                      falls back to prompt-enforced JSON otherwise.
@@ -931,7 +935,7 @@ def _build_chat_kwargs(
         # do NOT pass temperature or top_p.
         if max_tokens is not None:
             kwargs["max_completion_tokens"] = max_tokens
-        kwargs["reasoning"] = {"effort": "minimal"}
+        kwargs["reasoning_effort"] = "minimal"
         if json_schema:
             kwargs["response_format"] = {
                 "type": "json_schema",
