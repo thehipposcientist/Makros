@@ -10,7 +10,7 @@ We use the second contract because every test module already ships
 that pattern. We just import and run their `__main__` equivalent.
 
 Run:
-    docker exec makros-backend python -m tests.run_all
+    docker exec thallo-backend python -m tests.run_all
 """
 from __future__ import annotations
 

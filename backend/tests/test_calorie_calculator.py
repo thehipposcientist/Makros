@@ -2,7 +2,7 @@
 Sanity tests for calorie_calculator.py — NO external deps, no pytest.
 
 Run manually from inside the backend container:
-    docker exec -it makros-backend python -m app.services.test_calorie_calculator
+    docker exec -it thallo-backend python -m app.services.test_calorie_calculator
 
 Purpose: give you concrete "170 lb male fat-loss moderate → X cal / Y protein"
 numbers to eyeball before trusting the calculator in production. Every case

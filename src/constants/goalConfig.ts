@@ -27,7 +27,7 @@ export interface GoalCategory {
 export const GOAL_CATEGORIES: GoalCategory[] = [
   { id: 'muscle_physique',       label: 'Muscle & Physique',       icon: 'body-outline' },
   { id: 'fat_loss',              label: 'Fat Loss',                icon: 'flame-outline' },
-  { id: 'strength',              label: 'Strength',                icon: 'trophy-outline' },
+  { id: 'strength',              label: 'Compound Strength',       icon: 'trophy-outline' },
   { id: 'cardio_endurance',      label: 'Cardio & Endurance',      icon: 'heart-outline' },
   { id: 'athletic_performance',  label: 'Athletic Performance',    icon: 'flash-outline' },
   { id: 'health_longevity',      label: 'Health & Longevity',      icon: 'leaf-outline' },

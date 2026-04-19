@@ -3103,7 +3103,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
             {/* Weekly check-in countdown */}
-            {workoutSubTab === 'plan' && daysUntilCheckin != null && daysUntilCheckin <= 2 && (
+            {workoutSubTab === 'plan' && daysUntilCheckin != null && (
               <TouchableOpacity
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.primary + '44' }}
                 onPress={() => setShowWeeklyCheckin(true)}
@@ -4472,9 +4472,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   ))}
                 </View>
 
-                {/* Coach check-in — lives under the topic grid so users have
-                    one clear entry point to rate how they're doing. Opens the
-                    CoachCheckinModal (doesn't start a chat thread). */}
+                {/* Coach check-in button removed — weekly review auto-pops from workout plan tab */}
+                {false && (
                 <TouchableOpacity
                   style={[styles.checkinCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border, marginHorizontal: 0, marginTop: 24 }]}
                   onPress={() => {
@@ -4495,6 +4494,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                   <Text style={[styles.checkinCardChevron, { color: themeColors.textMuted }]}>›</Text>
                 </TouchableOpacity>
+                )}
               </View>
             ) : (
               /* ── Chat UI (topic selected) ──────────────────────── */

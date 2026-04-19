@@ -1,4 +1,4 @@
-# Makros — Fitness & Nutrition App
+# Thallo — Fitness & Nutrition App
 
 React Native + Expo fitness app with a deterministic workout planner, AI-assisted nutrition, and structured coaching.
 

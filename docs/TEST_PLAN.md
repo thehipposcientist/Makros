@@ -548,13 +548,13 @@ npx expo install jest-expo @testing-library/react-native @testing-library/jest-n
 ```bash
 # Backend unit tests (current)
 make test
-# or: docker exec makros-backend python -m tests.run_all
+# or: docker exec thallo-backend python -m tests.run_all
 
 # All 10 modules registered — 183 tests
 make test
 
 # Future: pytest migration
-docker exec makros-backend python -m pytest tests/ -v --tb=short
+docker exec thallo-backend python -m pytest tests/ -v --tb=short
 
 # Future: frontend
 npx jest --config jest.config.js

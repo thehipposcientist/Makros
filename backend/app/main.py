@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from app.database import create_db_and_tables, engine
 from app.routers import auth, profile, workouts, meals, meta, ai, coach
 
-app = FastAPI(title="Makros API", version="0.1.0")
+app = FastAPI(title="Thallo API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

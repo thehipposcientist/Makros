@@ -7,7 +7,7 @@ echo  ██║╚██╔╝██║██╔══██║██╔═█�
 echo  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║  ██║╚██████╔╝███████║
 echo  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 echo.
-echo Starting Makros (TUNNEL mode)...
+echo Starting Thallo (TUNNEL mode)...
 echo.
 echo NOTE: Tunnel mode requires a free ngrok account.
 echo       If you see an error, run: npx ngrok authtoken YOUR_TOKEN

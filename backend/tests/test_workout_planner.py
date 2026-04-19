@@ -2,7 +2,7 @@
 Sanity tests for workout_planner.py. No external deps, no pytest.
 
 Run from inside the backend container:
-    docker exec -it makros-backend python -m app.services.test_workout_planner
+    docker exec -it thallo-backend python -m app.services.test_workout_planner
 
 Each test prints a one-line result and the planner's structured output so
 you can eyeball whether the algorithm is producing sensible plans.

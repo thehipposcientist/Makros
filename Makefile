@@ -14,7 +14,7 @@ start:
 	@echo "  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║  ██║╚██████╔╝███████║"
 	@echo "  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝"
 	@echo ""
-	@echo "Starting Makros..."
+	@echo "Starting Thallo..."
 	@echo ""
 	@echo "[1/3] Starting PostgreSQL + Backend (Docker Compose)..."
 	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
@@ -32,7 +32,7 @@ start:
 
 tunnel:
 	@echo ""
-	@echo "Starting Makros (TUNNEL mode)..."
+	@echo "Starting Thallo (TUNNEL mode)..."
 	@echo ""
 	@echo "NOTE: Tunnel mode requires a free ngrok account."
 	@echo "      If you see an error, run: npx ngrok authtoken YOUR_TOKEN"
@@ -50,7 +50,7 @@ tunnel:
 
 stop:
 	@echo ""
-	@echo "Stopping Makros..."
+	@echo "Stopping Thallo..."
 	@echo ""
 	@echo "[1/2] Stopping Expo / Metro (port 8081)..."
 	@lsof -ti:8081 | xargs kill -9 2>/dev/null || true
@@ -92,4 +92,4 @@ test:
 	@echo ""
 	@echo "Running backend test suites..."
 	@echo ""
-	@docker exec makros-backend python -m tests.run_all
+	@docker exec thallo-backend python -m tests.run_all

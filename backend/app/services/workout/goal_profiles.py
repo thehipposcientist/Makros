@@ -117,31 +117,36 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
 
     "strength": GoalProfile(
         bucket="strength",
-        label="Strength",
+        label="Compound Strength",
         mix=TrainingMix(
-            strength=0.70, hypertrophy=0.20,
-            conditioning=0.05, mobility=0.05,
+            strength=0.80, hypertrophy=0.10,
+            conditioning=0.0, mobility=0.10,
         ),
+        # Strength training is compound-dominant. Heavy variants are
+        # anchored so every week has heavy squat, heavy bench/press,
+        # and heavy deadlift/row days. Volume/hypertrophy variants are
+        # allowed but never anchored — they appear as secondary days.
+        # No bro split, no push/pull split — upper/lower only so the
+        # big lifts get full attention with long rest periods.
         allowed_archetypes=frozenset({
-            DayArchetype.LIFT_FULL_BODY, DayArchetype.LIFT_UPPER,
-            DayArchetype.LIFT_LOWER, DayArchetype.LIFT_PUSH,
-            DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
-            # Stimulus-differentiated
-            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
-            DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
-            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY,
+            DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER,
+            DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_LOWER_HEAVY,
+            DayArchetype.LIFT_UPPER_HYPERTROPHY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
+            DayArchetype.LIFT_FULL_BODY, DayArchetype.LIFT_FULL_BODY_STRENGTH,
             DayArchetype.LIFT_LEGS_HEAVY,
-            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
-            DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
             DayArchetype.MOBILITY_FLOW,
         }),
         anchor_archetypes=(
-            DayArchetype.LIFT_LOWER,
-            DayArchetype.LIFT_UPPER,
+            DayArchetype.LIFT_UPPER_HEAVY,
+            DayArchetype.LIFT_LOWER_HEAVY,
         ),
         planner_mode="lifting",
         stable_lifts=True,
-        notes="Low-rep heavy compounds, long rest, stable lift selection.",
+        notes=(
+            "Compound Strength: heavy compounds dominate (squat/bench/deadlift/OHP). "
+            "Upper/Lower split only. 3-5 reps on primaries, 3+ min rest. "
+            "Fewer accessories than muscle gain. Heavy variants anchored."
+        ),
     ),
 
     "body_recomp": GoalProfile(

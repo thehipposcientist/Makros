@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
@@ -303,6 +304,17 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // the UI is just gone. Routines are now pinned per-meal from Home.
   const mealRoutine = profile.mealRoutine ?? '';
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
+  const injuryMountedRef = useRef(false);
+  // Auto-save injuries to AsyncStorage on every change so they survive tab switches
+  useEffect(() => {
+    if (!injuryMountedRef.current) { injuryMountedRef.current = true; return; }
+    AsyncStorage.getItem('userProfile').then(raw => {
+      if (!raw) return;
+      const p = JSON.parse(raw);
+      p.injuryEntries = injuryEntries.length > 0 ? injuryEntries : undefined;
+      AsyncStorage.setItem('userProfile', JSON.stringify(p)).catch(() => {});
+    }).catch(() => {});
+  }, [injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [equipmentExpanded, setEquipmentExpanded] = useState(false);
   const [foodsExpanded, setFoodsExpanded] = useState(false);
@@ -1418,14 +1430,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                       'Elbow': ['biceps', 'triceps'], 'Wrist': ['shoulders'],
                       'Neck': ['shoulders', 'core'], 'Chest': ['chest', 'triceps'],
                     };
-                    setInjuryEntries(prev => [...prev, {
+                    const newInjury: InjuryEntry = {
                       id: Date.now().toString(),
                       description: desc,
                       bodyPart: part,
                       muscleGroups: muscleMap[part] ?? [],
                       reportedAt: new Date().toISOString(),
                       status: 'active',
-                    }]);
+                    };
+                    setInjuryEntries(prev => [...prev, newInjury]);
                     setShowAddInjury(false);
                   }}>
                   <Text style={[styles.modalConfirmText, { color: '#fff' }]}>Add</Text>

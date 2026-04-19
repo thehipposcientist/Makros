@@ -337,18 +337,20 @@ def ask_trainer_question(
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
         "INJURY HANDLING — IMPORTANT:\n"
         "When a user reports pain or injury, follow this exact protocol:\n"
-        "1. Ask ONE clarifying question if needed (where exactly, when it started, what triggers it). Set injury_clarification_needed=true.\n"
-        "2. Once you have enough info, create the injury by setting updated_injuries with structured data.\n"
-        "3. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries.\n"
-        "   The app will automatically regenerate the plan using its deterministic planner which knows how to block\n"
-        "   dangerous movement patterns and adjust readiness scores for the injured muscles.\n"
-        "4. In your answer, explain:\n"
+        "1. Ask clarifying questions (where exactly, when it started, what triggers it, severity). "
+        "Set injury_clarification_needed=true. Do NOT create the injury yet.\n"
+        "2. Once you have enough info, ASSESS the injury and explain:\n"
         "   - What the injury likely is (in simple terms)\n"
-        "   - What movements will be automatically avoided (e.g., 'hinge movements like deadlifts will be removed')\n"
+        "   - What your assessment is (severity, affected muscles)\n"
+        "   - What movements would be avoided (e.g., 'hinge movements like deadlifts')\n"
         "   - Estimated recovery timeline\n"
         "   - What to watch for (warning signs to see a doctor)\n"
-        "   - That you'll check back when the estimated recovery date arrives\n"
-        "5. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
+        "3. Then ASK the user: 'Would you like me to add this to your injuries and regenerate your workout plan?'\n"
+        "   Do NOT set updated_injuries yet — wait for the user to confirm.\n"
+        "4. Only when the user confirms (says yes, sure, do it, add it, etc.), THEN set updated_injuries with the structured data.\n"
+        "   The app will automatically save the injury and regenerate the plan.\n"
+        "5. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries.\n"
+        "6. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
         "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
@@ -455,15 +457,38 @@ def ask_trainer_question(
 
     # ── Topic-specific system prompt additions ─────────────────────────────
     _topic_hints = {
-        "change_plan": "The user wants to modify their workout or nutrition plan. Focus on plan changes.",
-        "log_activity": "The user wants to log a workout or activity they completed. Focus on extracting date, focus, duration, and exercises.",
-        "report_injury": "The user is reporting pain or an injury. Prioritise injury assessment, ask clarifying questions, and suggest exercise modifications.",
-        "change_meals": "The user wants to modify their meal plan. Focus on meal/food swaps and macro adjustments.",
-        "log_food": "The user wants to log food they ate. Focus on identifying foods, portions, and macros.",
-        "general": "The user has a general question. Keep your answer concise and conversational.",
+        "change_plan": {
+            "scope": "The user selected WORKOUT MODIFICATIONS. You may ONLY help with exercise swaps, workout plan changes, day modifications, and training adjustments.",
+            "redirect": "If they ask about nutrition, meals, injuries, or general questions, say: 'That's outside this topic. Please go back and select the right category — Modify Meals for nutrition, Report Injury for pain, or General Questions for tips.'"
+        },
+        "log_activity": {
+            "scope": "The user selected LOG ACTIVITY. You may ONLY help log completed workouts. Extract: date, focus, duration, exercises if mentioned.",
+            "redirect": "If they ask about anything else, say: 'I can only log workouts here. Go back and pick the right category for your question.'"
+        },
+        "report_injury": {
+            "scope": "The user selected REPORT INJURY. You may ONLY help assess and log injuries or pain. Ask about location, severity, triggers.",
+            "redirect": "If they ask about logging workouts, changing plans, or nutrition, say: 'This topic is for injuries only. Please go back and select the right category — like Swap Exercise or General Questions.'"
+        },
+        "change_meals": {
+            "scope": "The user selected MODIFY MEALS. You may ONLY help with meal swaps, food changes, and nutrition plan modifications.",
+            "redirect": "If they ask about workouts, injuries, or general questions, say: 'That's outside this topic. Go back and pick Swap Exercise for workouts, Report Injury for pain, or General Questions for tips.'"
+        },
+        "log_food": {
+            "scope": "The user selected LOG FOOD. You may ONLY help log food they ate. Extract food names, portions, and macros.",
+            "redirect": "If they ask about anything else, say: 'I can only log food here. Go back and pick the right category.'"
+        },
+        "change_goal": {
+            "scope": "The user selected CHANGE GOAL. You may ONLY help change their fitness goal and explain the implications.",
+            "redirect": "If they ask about specific exercises, meals, or injuries, say: 'Go back and select the right category for that.'"
+        },
+        "general": {
+            "scope": "The user selected GENERAL QUESTIONS. Provide informational answers only. Do NOT modify any plans, log any data, or create any injuries.",
+            "redirect": "If they want to make changes, say: 'I can only answer questions here. Go back and select the right category — Swap Exercise, Modify Meals, or Report Injury.'"
+        },
     }
     if topic and topic in _topic_hints:
-        system_prompt += f"\n\nTOPIC CONTEXT: {_topic_hints[topic]}"
+        hint = _topic_hints[topic]
+        system_prompt += f"\n\nTOPIC ENFORCEMENT (STRICT):\n{hint['scope']}\n{hint['redirect']}"
 
     # Debug: log what we're sending
     print(f"[trainer-question] mode={body.mode} topic={topic} question={repr(q[:120])}")

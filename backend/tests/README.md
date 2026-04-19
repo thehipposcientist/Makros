@@ -15,15 +15,15 @@ make test                  # runs every test suite inside the backend container
 Or one suite at a time:
 
 ```bash
-docker exec makros-backend python -m tests.test_workout_planner
-docker exec makros-backend python -m tests.test_calorie_calculator
-docker exec makros-backend python -m tests.test_meal_assembler
+docker exec thallo-backend python -m tests.test_workout_planner
+docker exec thallo-backend python -m tests.test_calorie_calculator
+docker exec thallo-backend python -m tests.test_meal_assembler
 ```
 
 Or all at once via the runner:
 
 ```bash
-docker exec makros-backend python -m tests.run_all
+docker exec thallo-backend python -m tests.run_all
 ```
 
 ## What's covered

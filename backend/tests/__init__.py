@@ -6,8 +6,8 @@ Run all tests:
     make test
 
 Or directly:
-    docker exec makros-backend python -m tests.run_all
+    docker exec thallo-backend python -m tests.run_all
 
 Or one suite at a time:
-    docker exec makros-backend python -m tests.test_workout_planner
+    docker exec thallo-backend python -m tests.test_workout_planner
 """

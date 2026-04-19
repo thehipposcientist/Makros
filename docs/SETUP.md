@@ -23,8 +23,8 @@ npx expo start --tunnel       # If phone can't connect over WiFi
 ```bash
 docker compose build backend && docker compose up -d backend   # Rebuild after code changes
 docker compose restart backend                                  # Restart without rebuild
-docker logs makros-backend --tail 50                            # View logs
-docker exec makros-backend python enrich_food_micros.py         # Seed food micronutrients
+docker logs thallo-backend --tail 50                            # View logs
+docker exec thallo-backend python enrich_food_micros.py         # Seed food micronutrients
 ```
 
 ## Environment Variables (backend/.env)
@@ -51,7 +51,7 @@ STARTUP_ENRICH_FOODS_ENABLED=1
 
 ## Database
 
-- PostgreSQL 16 in Docker (`makros-pg` container, port 5433)
+- PostgreSQL 16 in Docker (`thallo-pg` container, port 5433)
 - Schema auto-created on startup via `create_db_and_tables()`
 - Food/exercise seed data runs on every boot (idempotent)
 - Micronutrient enrichment runs as background thread on boot

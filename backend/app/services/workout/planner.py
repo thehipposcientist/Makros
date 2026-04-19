@@ -811,30 +811,33 @@ def prescribe_sets_reps(
         return Prescription(sets=sets, reps=reps, rest_seconds=rest, rir_target=1.0)
 
     # ── Sets ───────────────────────────────────────────────────────────
-    if role == "primary" and is_compound:
+    if bucket == "strength" and role == "primary" and is_compound:
+        # Compound Strength: 5 working sets on primary compounds
+        sets = 5 if inputs.experience != "beginner" else 4
+    elif role == "primary" and is_compound:
         sets = 4 if inputs.experience != "beginner" else 3
     elif role == "primary":
         sets = 3
     elif role == "secondary":
-        sets = 3
+        sets = 3 if bucket != "strength" else 2  # fewer accessories for strength
     elif role == "core":
-        sets = 3
+        sets = 3 if bucket != "strength" else 2
     else:  # isolation
-        sets = 3
+        sets = 3 if bucket != "strength" else 2  # strength deemphasizes isolation
 
     # ── Reps ───────────────────────────────────────────────────────────
     if bucket == "strength":
         if is_compound and role == "primary":
             reps = "3-5"
-            rest = 180
-            rir = 1.5
+            rest = 240  # 4 min — heavy compounds need full CNS recovery
+            rir = 1.0   # closer to failure on main lifts
         elif is_compound:
             reps = "5-8"
-            rest = 150
+            rest = 180  # 3 min
             rir = 2.0
         else:
-            reps = "8-12"
-            rest = 90
+            reps = "6-10"  # heavier than muscle gain isolation
+            rest = 120
             rir = 2.0
     elif bucket == "muscle_gain":
         if is_compound and role == "primary":
