@@ -49,7 +49,7 @@ class MuscleFatigue:
     def add(self, muscle: str, value: float):
         current = getattr(self, muscle, None)
         if current is not None:
-            setattr(self, muscle, current + value)
+            setattr(self, muscle, max(0.0, current + value))
 
     def to_dict(self) -> dict[str, float]:
         return {m: round(getattr(self, m, 0.0), 3) for m in FATIGUE_MUSCLES}
@@ -177,8 +177,12 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         "shoulders":  {"shoulders": 0.6, "triceps": 0.2, "systemic": 0.15},
         "arms":       {"biceps": 0.5, "triceps": 0.5, "systemic": 0.1},
         "cardio":     {"cardio": 0.5, "quads": 0.15, "hamstrings": 0.1, "calves": 0.1, "systemic": 0.2},
-        "recovery":   {},
-        "mobility":   {},
+        # Recovery and mobility REDUCE existing fatigue — active recovery
+        # (foam rolling, stretching, light movement) increases blood flow
+        # and accelerates recovery more than complete rest. Negative values
+        # subtract from accumulated fatigue when processed by the rolling calc.
+        "recovery":   {"chest": -0.08, "back": -0.08, "shoulders": -0.06, "quads": -0.08, "hamstrings": -0.08, "glutes": -0.06, "core": -0.05, "systemic": -0.10},
+        "mobility":   {"chest": -0.05, "back": -0.05, "shoulders": -0.05, "quads": -0.05, "hamstrings": -0.05, "glutes": -0.05, "core": -0.05, "systemic": -0.08},
         "yoga":       {"core": 0.1, "systemic": 0.05},
         "walking":    {"cardio": 0.1, "systemic": 0.05},
         "running":    {"cardio": 0.5, "quads": 0.2, "hamstrings": 0.15, "calves": 0.15, "systemic": 0.25},
@@ -203,7 +207,9 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         elif any(k in fl for k in ("recovery", "rest")): base = _FOCUS_FATIGUE["recovery"]
         else:                                            base = {"systemic": 0.3}
 
-    return {k: round(min(1.0, v * scale), 3) for k, v in base.items()}
+    # Don't scale recovery bonuses (negative values) by intensity/duration —
+    # a recovery session helps the same whether it's "easy" or 30 vs 60 min.
+    return {k: round(v if v < 0 else min(1.0, v * scale), 3) for k, v in base.items()}
 
 
 # ─── Rolling fatigue / recovery score ─────────��──────────────────────────────
@@ -240,6 +246,12 @@ def compute_rolling_fatigue(
     mf = MuscleFatigue()
     activities: list[dict] = []
 
+    # Two-pass approach:
+    #   Pass 1: accumulate positive fatigue from workouts
+    #   Pass 2: apply recovery bonus (negative values), capped at one per day
+    # This prevents stacking 5 saunas to wipe out a heavy leg day.
+
+    parsed: list[tuple[date, float, dict, dict]] = []  # (wd, decay, resolved, raw_completion)
     for c in completions:
         wd = c.get("workout_date")
         if isinstance(wd, str):
@@ -249,14 +261,10 @@ def compute_rolling_fatigue(
                 continue
         if not isinstance(wd, date):
             continue
-
         days_ago = (today - wd).days
         if days_ago < 0 or days_ago > 3:
             continue
-
         decay = _DECAY.get(days_ago, 0.0)
-
-        # Prefer pre-resolved muscle fatigue; fall back to focus-label estimate
         resolved = c.get("resolved_muscle_fatigue")
         if not resolved or not isinstance(resolved, dict):
             dur = max(1, (c.get("duration_seconds") or 0) // 60)
@@ -265,18 +273,42 @@ def compute_rolling_fatigue(
                 intensity=c.get("activity_intensity") or "moderate",
                 duration_minutes=dur,
             )
+        parsed.append((wd, decay, resolved, c))
 
-        for muscle, value in resolved.items():
-            if muscle in FATIGUE_MUSCLES:
-                mf.add(muscle, value * decay)
-
+    # Pass 1: positive fatigue only (workouts, cardio, etc.)
+    for wd, decay, resolved, c in parsed:
+        has_positive = any(v > 0 for v in resolved.values())
+        if has_positive:
+            for muscle, value in resolved.items():
+                if muscle in FATIGUE_MUSCLES and value > 0:
+                    mf.add(muscle, value * decay)
         activities.append({
             "date": wd.isoformat(),
-            "days_ago": days_ago,
+            "days_ago": (today - wd).days,
             "focus": c.get("focus_label", ""),
             "intensity": c.get("activity_intensity", ""),
             "muscles": {k: round(v * decay, 2) for k, v in resolved.items() if v > 0},
         })
+
+    # Pass 2: recovery bonus (negative values), max one per day.
+    # Recovery only reduces EXISTING fatigue — can't recover below 0.
+    # Benefit is proportional: 15% of current fatigue removed, not a flat amount.
+    recovery_applied_dates: set[date] = set()
+    for wd, decay, resolved, c in parsed:
+        has_negative = any(v < 0 for v in resolved.values())
+        if not has_negative:
+            continue
+        if wd in recovery_applied_dates:
+            continue  # already applied one recovery session this day
+        recovery_applied_dates.add(wd)
+        for muscle in FATIGUE_MUSCLES:
+            current = mf.get(muscle)
+            if current <= 0:
+                continue
+            # Recovery removes ~15% of current fatigue (diminishing returns)
+            # Capped so it never removes more than 0.15 per session
+            reduction = min(0.15, current * 0.15) * decay
+            mf.add(muscle, -reduction)
 
     # Overall readiness from systemic + average muscle fatigue
     muscle_avg = sum(getattr(mf, m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0

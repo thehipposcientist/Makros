@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
-  LayoutAnimation, UIManager,
+  LayoutAnimation, UIManager, AppState,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
@@ -74,6 +74,7 @@ interface ActiveWorkoutScreenProps {
   weightLbs?: number;
   onFinish: (session: WorkoutSession) => void;
   onCancel: () => void;
+  onDislikeExercise?: (exerciseName: string) => void;
 }
 
 function formatTime(seconds: number): string {
@@ -92,6 +93,11 @@ function getTargetSetCount(targetSets: unknown): number {
 
 const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
+const BODYWEIGHT_ONLY_RE = /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|face pull|wall slide/i;
+
+function isBodyweightOnly(name: string): boolean {
+  return BODYWEIGHT_ONLY_RE.test(name);
+}
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
   if (TIMED_EXERCISE_RE.test(name)) return true;
@@ -312,7 +318,7 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
 const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
 
-export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel }: ActiveWorkoutScreenProps) {
+export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
     // Warm-up state
     const [warmupDone, setWarmupDone] = useState(true);
     // When the user has started the workout, the warm-up card collapses
@@ -380,6 +386,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const workoutPalette = theme.sections.workout;
   const styles = createStyles(themeColors);
   const startTime = useRef(Date.now());
+  // Persist start time so elapsed timer survives app restart
+  useEffect(() => {
+    AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
+      if (saved) {
+        const ts = parseInt(saved, 10);
+        if (!isNaN(ts) && ts > 0) startTime.current = ts;
+      } else {
+        AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
+      }
+    });
+  }, []);
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
   // Ref-based rest timer — avoids interval churn from re-running useEffect every second
@@ -1190,6 +1207,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }, 500); // 500ms tick for smooth countdown without drift
   }, []);
 
+  // Force-update timers when app returns from background
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        // Catch up elapsed workout time
+        setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+        // Catch up rest timer
+        if (restStartAtRef.current > 0 && restTotalSecondsRef.current > 0) {
+          const restElapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
+          const remaining = Math.max(0, restTotalSecondsRef.current - restElapsed);
+          setRestRemaining(remaining);
+          if (remaining === 0 && restTimerRef.current) {
+            clearInterval(restTimerRef.current);
+            restTimerRef.current = null;
+          }
+        }
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
   const clearRestState = useCallback(() => {
     if (restTimerRef.current) {
       clearInterval(restTimerRef.current);
@@ -1504,7 +1542,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleFinish = async () => {
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -1560,8 +1598,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
         });
+        console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[workout] logWorkoutDone FAILED:', e);
+    }
 
     // Show summary modal and fetch AI content
     setSummaryVisible(true);
@@ -1811,7 +1852,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
           'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); onCancel(); } }]
+          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); onCancel(); } }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
         </TouchableOpacity>
@@ -1880,11 +1921,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {formatTime(restRemaining)}
             </Text>
           </View>
-          {/* Center: next set info + cue */}
+          {/* Center: next set info + AI recommendation */}
           <View style={styles.restBannerCenter}>
             {restForExercise ? <Text style={styles.restExerciseText} numberOfLines={1}>{restForExercise}</Text> : null}
-            {restNextTarget ? <Text style={styles.restTargetText} numberOfLines={1}>{restNextTarget}</Text> : null}
-            {restCue ? <Text style={styles.restCueText} numberOfLines={2}>{restCue}</Text> : null}
+            {restNextTarget ? (
+              <View style={{ backgroundColor: workoutPalette.strong + '22', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, marginVertical: 2 }}>
+                <Text style={{ fontSize: 16, color: workoutPalette.strong, fontWeight: '900' }} numberOfLines={1}>{restNextTarget}</Text>
+              </View>
+            ) : null}
+            {restCue ? <Text style={{ fontSize: 12, color: workoutPalette.text, fontWeight: '600', lineHeight: 16 }} numberOfLines={2}>{restCue}</Text> : null}
           </View>
           {/* Right: adjust + skip */}
           <View style={styles.restBannerActions}>
@@ -1958,6 +2003,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {`${ex.sets.length}/${totalSetCount}`}
                   </Text>
                 </View>
+                {/* Dislike — exclude from future plans */}
+                {onDislikeExercise && !isDone && (
+                  <TouchableOpacity
+                    style={{ padding: 6, marginLeft: 2 }}
+                    onPress={() => {
+                      Alert.alert(
+                        'Don\'t like this exercise?',
+                        `"${ex.name}" will be excluded from future workout plans. You can undo this in Settings.`,
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: 'Exclude', style: 'destructive', onPress: () => {
+                            onDislikeExercise(ex.name);
+                            handleRemoveExercise(i);
+                          }},
+                        ],
+                      );
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Ionicons name="thumbs-down-outline" size={16} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                )}
                 {/* Small red remove button — only when more than one exercise */}
                 {exercises.length > 1 && (
                   <TouchableOpacity
@@ -2180,15 +2246,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         })()}
 
                         {/* ── Standard set header + rows for non-timed exercises ── */}
-                        {!timed && (
+                        {!timed && (() => {
+                          const hideWeight = isBodyweightOnly(ex.name);
+                          return (
                         <View style={styles.inlineSetsHeader}>
                           <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
-                              <Text style={styles.inlineSetsLabel}>Weight</Text>
+                              {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight</Text>}
                               <Text style={styles.inlineSetsLabel}>Reps</Text>
                           <Text style={styles.inlineSetsLabel}>Last time</Text>
                           <View style={{ width: 40 }} />
                         </View>
-                        )}
+                          );
+                        })()}
 
                         {!timed && Array.from({ length: totalSetCount }, (_, slot) => {
                           const logged = ex.sets[slot];
@@ -2196,6 +2265,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const input = setInputs[inputKey] ?? { weight: '', reps: '', duration: '' };
                           const lastSet = lastExerciseSets[ex.name]?.[slot] ?? lastExerciseSets[ex.name]?.[lastExerciseSets[ex.name]?.length - 1];
                           const isLogged = !!logged;
+                          const hideWeight = isBodyweightOnly(ex.name);
 
                           const lastTimeLabel = lastSet
                             ? (lastSet.durationSeconds != null
@@ -2243,7 +2313,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           return (
                             <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
-                              <TextInput
+                              {!hideWeight && <TextInput
                                 style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
                                 value={isLogged ? (editingSetKey === inputKey ? (editDraft.weight ?? String(logged.weightLbs)) : String(logged.weightLbs)) : input.weight}
                                 onChangeText={v => {
@@ -2265,7 +2335,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 placeholder="lbs"
                                 placeholderTextColor={themeColors.textMuted}
                                 selectTextOnFocus
-                              />
+                              />}
                               <TextInput
                                 style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
                                 value={isLogged ? (editingSetKey === inputKey ? (editDraft.reps ?? String(logged.reps)) : String(logged.reps)) : input.reps}

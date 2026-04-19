@@ -133,6 +133,7 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
+            DayArchetype.MOBILITY_FLOW,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_LOWER,

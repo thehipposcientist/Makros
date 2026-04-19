@@ -1059,7 +1059,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Sub-tab inside each main tab.
   // Workouts: plan | exercises | muscles | equipment
   // Meals:    plan | foods     | supplements | macros
-  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'exercises' | 'muscles' | 'equipment'>('plan');
+  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment'>('plan');
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
@@ -1220,7 +1220,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
-  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }> } | null>(null);
+  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }>; muscleFatigue?: Record<string, number>; activities?: Array<{ date: string; focus: string; muscles: Record<string, number> }> } | null>(null);
+  const [recoveryExpanded, setRecoveryExpanded] = useState(false);
   const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [username, setUsername] = useState('');
 
@@ -1344,9 +1345,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     planRefreshKey,
   ]);
 
-  // Clear fresh-day flag only when workout-specific settings change
+  // Clear fresh-day flag only when workout-specific settings actually change
+  // (not on initial mount). Uses a ref to track previous values.
+  const prevWorkoutSettings = useRef<string | null>(null);
   useEffect(() => {
-    AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`).catch(() => {});
+    const current = `${userProfile?.goal}|${userProfile?.daysPerWeek}|${userProfile?.workoutDurationMinutes}|${userProfile?.preferredSplit}`;
+    if (prevWorkoutSettings.current === null) {
+      // First mount — store but don't clear
+      prevWorkoutSettings.current = current;
+      return;
+    }
+    if (prevWorkoutSettings.current !== current) {
+      prevWorkoutSettings.current = current;
+      AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`).catch(() => {});
+      console.log('[loadPlans] workout settings changed — fresh day flag cleared');
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userProfile?.goal, userProfile?.daysPerWeek, userProfile?.workoutDurationMinutes, userProfile?.preferredSplit]);
 
@@ -1455,7 +1468,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { getFatigueScore } = await import('../services/api');
         const fs = await getFatigueScore(authToken);
-        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label, topFatigued: fs.top_fatigued ?? [] });
+        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label, topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {}, activities: fs.activities ?? [] });
         console.log(`[fatigue] readiness=${fs.readiness_score}% top=${(fs.top_fatigued ?? []).map((t: any) => t.muscle).join(',')}`);
       } catch (e) {
         console.log('[fatigue] fetch failed:', e);
@@ -1519,7 +1532,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (authToken && baseWorkout?.days?.length) {
       const freshDayKey = `freshDayGenerated_${todayKey()}`;
       const alreadyGenerated = await AsyncStorage.getItem(freshDayKey).catch(() => null);
+      // Also write the key immediately to prevent concurrent calls
       if (!alreadyGenerated) {
+        await AsyncStorage.setItem(freshDayKey, 'pending').catch(() => {});
         try {
           const { generateWorkoutDay } = await import('../services/api');
           const todayIdx = completedDates.size % baseWorkout.days.length;
@@ -1532,15 +1547,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             equipment: profile.equipment ?? [],
             preferred_split: profile.preferredSplit,
             priority_region: profile.priorityRegion ?? 'balanced',
-            injuries: profile.injuriesOrLimitations ?? [],
+            injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
+            disliked_exercises: profile.dislikedExercises ?? [],
           });
           if (freshDay?.day) {
             const updatedDays = [...baseWorkout.days];
             updatedDays[todayIdx % updatedDays.length] = freshDay.day;
             const updatedPlan = { ...baseWorkout, days: updatedDays };
             setWorkoutPlan(updatedPlan);
+            // Persist to AsyncStorage so the fresh day survives app restart
+            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
             await AsyncStorage.setItem(freshDayKey, '1').catch(() => {});
-            console.log(`[loadPlans] fresh day generated: ${freshDay.day.focus} (idx ${todayIdx})`);
+            console.log(`[loadPlans] fresh day generated & saved: ${freshDay.day.focus} (idx ${todayIdx})`);
           }
         } catch (e) {
           console.log('[loadPlans] fresh day generation failed (using cached):', e);
@@ -2283,14 +2301,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (profileRaw) {
             const storedProfile: UserProfile = JSON.parse(profileRaw);
             const existingEntries: InjuryEntry[] = storedProfile.injuryEntries ?? [];
-            const incoming: InjuryEntry[] = resp.updated_injuries.map((inj: any) => ({
-              id: inj.id || Date.now().toString() + Math.random().toString(36).slice(2),
-              description: inj.description ?? '',
-              bodyPart: inj.bodyPart ?? '',
-              reportedAt: new Date().toISOString(),
-              status: inj.status ?? 'active',
-              notes: inj.notes,
-            }));
+            const incoming: InjuryEntry[] = resp.updated_injuries.map((inj: any) => {
+              const now = new Date().toISOString();
+              const recoveryDays = inj.estimatedRecoveryDays ? Number(inj.estimatedRecoveryDays) : undefined;
+              const recoveryDate = recoveryDays
+                ? new Date(Date.now() + recoveryDays * 86400000).toISOString().slice(0, 10)
+                : undefined;
+              return {
+                id: inj.id || Date.now().toString() + Math.random().toString(36).slice(2),
+                description: inj.description ?? '',
+                bodyPart: inj.bodyPart ?? '',
+                muscleGroups: Array.isArray(inj.muscleGroups) ? inj.muscleGroups : undefined,
+                severity: ['mild', 'moderate', 'severe'].includes(inj.severity) ? inj.severity : undefined,
+                reportedAt: now,
+                estimatedRecoveryDays: recoveryDays,
+                estimatedRecoveryDate: recoveryDate,
+                status: inj.status ?? 'active',
+                statusUpdatedAt: now,
+                notes: inj.notes,
+              };
+            });
             const merged = [...existingEntries];
             for (const entry of incoming) {
               const idx = merged.findIndex(e => e.id === entry.id);
@@ -2891,15 +2921,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           resizeMode="contain"
         />
         <TouchableOpacity
-          style={[styles.askAiBtn, { backgroundColor: aiPalette.strong }]}
+          style={[styles.askAiBtn, { backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }]}
           onPress={() => {
             import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
             setShowTrainerModal(true);
           }}
           activeOpacity={0.85}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Ionicons name="chatbubble-ellipses" size={16} color="#fff" style={{ marginRight: 5 }} />
-          <Text style={styles.askAiText}>Coach</Text>
+          <Ionicons name="chatbubble-ellipses-outline" size={15} color={themeColors.textSecondary} />
+          <Text style={[styles.askAiText, { color: themeColors.textSecondary }]}>Coach</Text>
         </TouchableOpacity>
       </LinearGradient>
 
@@ -2972,9 +3002,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <SubTabBtn label="Plan"      active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-            <SubTabBtn label="Exercises" active={workoutSubTab === 'exercises'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('exercises'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
-            <SubTabBtn label="Muscles"   active={workoutSubTab === 'muscles'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('muscles');   setLibraryActiveTab('muscles');   setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+            <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
           </View>
         </View>
@@ -2984,10 +3013,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <SubTabBtn label="Plan"        active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
-            <SubTabBtn label="My Foods"    active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            <SubTabBtn label="Supps"       active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
-            <SubTabBtn label="Targets"     active={mealsSubTab === 'macros'}      tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('macros')} />
+            <SubTabBtn label="Plan"   active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
+            <SubTabBtn label="Foods"  active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
+            <SubTabBtn label="Supps"  active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
           </View>
         </View>
       )}
@@ -3077,42 +3105,79 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             )}
 
-            {/* Readiness badge */}
+            {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
-              <View style={{
-                flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8,
-                backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10,
-                borderWidth: 1, borderColor: themeColors.border,
-              }}>
-                <Ionicons
-                  name={readinessScore.score >= 65 ? 'battery-full' : readinessScore.score >= 40 ? 'battery-half' : 'battery-dead'}
-                  size={20}
-                  color={readinessScore.score >= 65 ? '#22C55E' : readinessScore.score >= 40 ? '#F59E0B' : '#EF4444'}
-                />
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
-                    Recovery: {readinessScore.label} ({readinessScore.score}%)
-                  </Text>
-                  {readinessScore.topFatigued && readinessScore.topFatigued.length > 0 ? (
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                      {readinessScore.topFatigued.map(({ muscle, value }) => {
-                        const pct = Math.round(value * 100);
-                        const color = pct >= 70 ? '#EF4444' : pct >= 40 ? '#F59E0B' : themeColors.textMuted;
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setRecoveryExpanded(p => !p); }}
+                style={{
+                  marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10,
+                  borderWidth: 1, borderColor: themeColors.border,
+                }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Ionicons
+                    name={readinessScore.score >= 65 ? 'battery-full' : readinessScore.score >= 40 ? 'battery-half' : 'battery-dead'}
+                    size={20}
+                    color={readinessScore.score >= 65 ? '#22C55E' : readinessScore.score >= 40 ? '#F59E0B' : '#EF4444'}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                      Recovery: {readinessScore.label} ({readinessScore.score}%)
+                    </Text>
+                    {!recoveryExpanded && readinessScore.topFatigued && readinessScore.topFatigued.length > 0 && (
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }} numberOfLines={1}>
+                        Most fatigued: {readinessScore.topFatigued.slice(0, 3).map(t => t.muscle.replace('_', ' ')).join(', ')}
+                      </Text>
+                    )}
+                    {!recoveryExpanded && (!readinessScore.topFatigued || readinessScore.topFatigued.length === 0) && (
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>All muscle groups fresh</Text>
+                    )}
+                  </View>
+                  <Ionicons name={recoveryExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
+                </View>
+                {recoveryExpanded && readinessScore.muscleFatigue && (
+                  <View style={{ marginTop: 10, gap: 4 }}>
+                    {Object.entries(readinessScore.muscleFatigue)
+                      .filter(([k]) => k !== 'cardio' && k !== 'systemic')
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([muscle, fatigue]) => {
+                        const pct = Math.round(fatigue * 100);
+                        const recovery = Math.max(0, 100 - pct);
+                        const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
                         return (
-                          <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                            <View style={{ width: 30, height: 4, borderRadius: 2, backgroundColor: themeColors.border }}>
-                              <View style={{ width: `${Math.min(100, pct)}%` as any, height: 4, borderRadius: 2, backgroundColor: color }} />
+                          <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75, textTransform: 'capitalize' }}>
+                              {muscle.replace('_', ' ')}
+                            </Text>
+                            <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
+                              <View style={{ width: `${Math.min(100, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
                             </View>
-                            <Text style={{ fontSize: 10, fontWeight: '600', color }}>{muscle.replace('_', ' ')}</Text>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
                           </View>
                         );
                       })}
-                    </View>
-                  ) : (
-                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>All muscle groups fresh</Text>
-                  )}
-                </View>
-              </View>
+                    {readinessScore.muscleFatigue.systemic > 0 && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75 }}>CNS / Systemic</Text>
+                        <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
+                          <View style={{ width: `${Math.min(100, Math.max(0, 100 - Math.round(readinessScore.muscleFatigue.systemic * 100)))}%` as any, height: 5, borderRadius: 3, backgroundColor: readinessScore.muscleFatigue.systemic > 0.5 ? '#EF4444' : '#F59E0B' }} />
+                        </View>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: readinessScore.muscleFatigue.systemic > 0.5 ? '#EF4444' : '#F59E0B', width: 32, textAlign: 'right' }}>{Math.max(0, 100 - Math.round(readinessScore.muscleFatigue.systemic * 100))}%</Text>
+                      </View>
+                    )}
+                    {readinessScore.activities && readinessScore.activities.length > 0 && (
+                      <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, marginBottom: 4 }}>RECENT ACTIVITY</Text>
+                        {readinessScore.activities.map((a, i) => (
+                          <Text key={i} style={{ fontSize: 10, color: themeColors.textSecondary }}>
+                            {a.date} · {a.focus} · {Object.keys(a.muscles).length} muscles
+                          </Text>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                )}
+              </TouchableOpacity>
             )}
 
             {/* Plan actions row — Why + Log + Edit */}
@@ -3242,7 +3307,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           equipment: userProfile.equipment ?? [],
                           preferred_split: userProfile.preferredSplit,
                           priority_region: userProfile.priorityRegion ?? 'balanced',
-                          injuries: (userProfile as any).injuriesOrLimitations ?? [],
+                          injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
+                          disliked_exercises: userProfile.dislikedExercises ?? [],
                           focus_override: newFocus,
                         });
                         if (freshDay?.day) {
@@ -3266,7 +3332,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                 equipment: userProfile.equipment ?? [],
                                 preferred_split: userProfile.preferredSplit,
                                 priority_region: userProfile.priorityRegion ?? 'balanced',
-                                injuries: (userProfile as any).injuriesOrLimitations ?? [],
+                                injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
+                                disliked_exercises: userProfile.dislikedExercises ?? [],
                                 focus_override: oldFocus,
                               });
                               if (rebalanced?.day) {
@@ -3409,94 +3476,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Training day — keep protein high for muscle recovery</Text>;
                   })()}
                 </View>
-              );
-            })()}
-
-            {/* Nutrition score badge — tap to expand breakdown */}
-            {mealsSubTab === 'plan' && nutritionScoreData && (() => {
-              const sc = nutritionScoreData;
-              const scoreColor = sc.score >= 70 ? '#22C55E' : sc.score >= 45 ? '#F59E0B' : '#EF4444';
-              return (
-                <TouchableOpacity
-                  activeOpacity={0.7}
-                  onPress={() => setNutritionScoreExpanded(p => !p)}
-                  style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.border }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: scoreColor + '22', alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ fontSize: 16, fontWeight: '900', color: scoreColor }}>{sc.score}</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>Today's Nutrition Score</Text>
-                      {sc.wins.length > 0 ? (
-                        <Text style={{ fontSize: 11, color: '#22C55E' }} numberOfLines={1}>{sc.wins.join(' · ')}</Text>
-                      ) : sc.improvements.length > 0 ? (
-                        <Text style={{ fontSize: 11, color: '#F59E0B' }} numberOfLines={1}>{sc.improvements.join(' · ')}</Text>
-                      ) : null}
-                    </View>
-                    <Ionicons name={nutritionScoreExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
-                  </View>
-                  {nutritionScoreExpanded && (
-                    <View style={{ marginTop: 10, gap: 6 }}>
-                      {[
-                        { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? '#22C55E' : sc.adherence >= 45 ? '#F59E0B' : '#EF4444' },
-                        { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? '#22C55E' : sc.quality >= 45 ? '#F59E0B' : '#EF4444' },
-                        { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? '#22C55E' : sc.micro >= 45 ? '#F59E0B' : '#EF4444' },
-                      ].map(sub => (
-                        <View key={sub.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 85 }}>{sub.label}</Text>
-                          <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
-                            <View style={{ width: `${Math.min(100, sub.value)}%` as any, height: 5, borderRadius: 3, backgroundColor: sub.color }} />
-                          </View>
-                          <Text style={{ fontSize: 11, fontWeight: '700', color: sub.color, width: 26, textAlign: 'right' }}>{sub.value}</Text>
-                        </View>
-                      ))}
-                      {sc.indicators && (
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                          {sc.indicators.total_calories > 0 && (
-                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                              {Math.round(sc.indicators.total_calories)} / {Math.round(sc.indicators.target_calories)} cal
-                            </Text>
-                          )}
-                          {sc.indicators.total_protein > 0 && (
-                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                              {Math.round(sc.indicators.total_protein)} / {Math.round(sc.indicators.target_protein)}g protein
-                            </Text>
-                          )}
-                          {sc.indicators.whole_food_pct > 0 && (
-                            <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                              {sc.indicators.whole_food_pct}% whole foods
-                            </Text>
-                          )}
-                        </View>
-                      )}
-                      {sc.tags.length > 0 && (
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-                          {sc.tags.slice(0, 5).map(tag => (
-                            <View key={tag} style={{ backgroundColor: themeColors.surface, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: themeColors.border }}>
-                              <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textSecondary }}>{tag}</Text>
-                            </View>
-                          ))}
-                        </View>
-                      )}
-                      {(sc.wins.length > 0 || sc.improvements.length > 0) && (
-                        <View style={{ marginTop: 4, gap: 3 }}>
-                          {sc.wins.map(w => (
-                            <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                              <Ionicons name="checkmark-circle" size={12} color="#22C55E" />
-                              <Text style={{ fontSize: 10, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
-                            </View>
-                          ))}
-                          {sc.improvements.map(imp => (
-                            <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                              <Ionicons name="arrow-up-circle" size={12} color="#F59E0B" />
-                              <Text style={{ fontSize: 10, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
-                            </View>
-                          ))}
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </TouchableOpacity>
               );
             })()}
 
@@ -3847,29 +3826,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             ))}
           </View>
 
-          {/* Data export */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>DATA</Text>
-          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <TouchableOpacity style={styles.profileMenuItem} onPress={async () => {
-              try {
-                const { exportWorkoutHistory } = await import('../utils/dataExport');
-                await exportWorkoutHistory();
-              } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
-            }}>
-              <Ionicons name="download-outline" size={18} color={themeColors.textPrimary} />
-              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary, marginLeft: 8 }]}>Export Workout History</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.profileMenuItem} onPress={async () => {
-              try {
-                const { exportWeightHistory } = await import('../utils/dataExport');
-                await exportWeightHistory();
-              } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
-            }}>
-              <Ionicons name="download-outline" size={18} color={themeColors.textPrimary} />
-              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary, marginLeft: 8 }]}>Export Weight History</Text>
-            </TouchableOpacity>
-          </View>
-
           {/* Account + Sign out */}
           <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
           <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
@@ -3995,6 +3951,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {showExerciseLibrary && (
         <View style={[styles.libraryInlineWrap, { top: insets.top + 70 + 52, backgroundColor: themeColors.background }]}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
+
+            {/* Library sub-toggle: Exercises / Muscles */}
+            {!selectedExercise && !selectedMuscle && (
+              <View style={{ flexDirection: 'row', gap: 0, borderRadius: 8, overflow: 'hidden', marginBottom: 10, borderWidth: 1, borderColor: themeColors.border }}>
+                <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: libraryActiveTab === 'exercises' ? themeColors.primary + '18' : 'transparent' }}
+                  onPress={() => setLibraryActiveTab('exercises')}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: libraryActiveTab === 'exercises' ? themeColors.primary : themeColors.textMuted }}>Exercises</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: libraryActiveTab === 'muscles' ? themeColors.primary + '18' : 'transparent' }}
+                  onPress={() => setLibraryActiveTab('muscles')}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: libraryActiveTab === 'muscles' ? themeColors.primary : themeColors.textMuted }}>Muscles</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {/* Back header — only when drilled into a detail view. */}
             {(selectedExercise || selectedMuscle) && (
@@ -4814,7 +4786,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const p: UserProfile = JSON.parse(profileRaw);
                       const updated = (p.injuryEntries ?? []).map(inj =>
                         checkinInjuryStatuses[inj.id] !== undefined
-                          ? { ...inj, status: checkinInjuryStatuses[inj.id] }
+                          ? { ...inj, status: checkinInjuryStatuses[inj.id], statusUpdatedAt: new Date().toISOString() }
                           : inj
                       );
                       await AsyncStorage.setItem('userProfile', JSON.stringify({ ...p, injuryEntries: updated }));
@@ -5788,16 +5760,10 @@ const styles = StyleSheet.create({
   askAiBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: radius.full,
-    borderWidth: 0,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 3,
   },
   askAiIcon: { width: 16, height: 16 },
   askAiText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.3, color: '#FFFFFF' },

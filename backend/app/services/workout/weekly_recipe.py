@@ -41,6 +41,66 @@ from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket,
 from .goal_profiles import GoalProfile
 
 
+# ── Recovery allocation ─────────────────────────────────────────────
+#
+# Recovery is a distinct concept from conditioning. Zone 2 and intervals
+# are training stress; recovery is active rest (mobility flow, easy walk,
+# stretching). The allocation is frequency-driven, not mix-driven:
+#
+#   ≤5 days/week → 0 recovery days (user already has 2+ off days)
+#   6 days/week  → 0 by default; 1 for recovery-friendly goals
+#   7 days/week  → 1 always (user has no off days)
+#
+# Conditioning allocation then fills from remaining non-lifting,
+# non-recovery days. This prevents the old bug where 7-day recomp
+# users got 5 lifting + 2 conditioning with zero actual rest.
+
+_RECOVERY_FRIENDLY_GOALS = frozenset({
+    "general_health", "maintain", "longevity", "healthy_aging",
+})
+
+
+def _derive_recovery_days(
+    total_days: int,
+    goal_bucket: str,
+    recovery_mix_frac: float = 0.0,
+    mobility_mix_frac: float = 0.0,
+) -> int:
+    """Determine how many days should be true active recovery / mobility.
+
+    Returns 0 or 1. The planner fills this with MOBILITY_FLOW or
+    RECOVERY_EASY — never with conditioning archetypes.
+    """
+    if total_days <= 5:
+        return 0
+    if total_days == 6:
+        # Only place a recovery day at 6 if the goal emphasizes it
+        # or the mix explicitly allocates meaningful recovery+mobility
+        if goal_bucket in _RECOVERY_FRIENDLY_GOALS:
+            return 1
+        if (recovery_mix_frac + mobility_mix_frac) >= 0.15:
+            return 1
+        return 0
+    # 7 days: always 1 recovery day — the user has no off days
+    return 1
+
+
+def _pick_recovery_archetype(profile: GoalProfile) -> DayArchetype:
+    """Choose the best recovery archetype from the profile's allowed set."""
+    # Prefer MOBILITY_FLOW (most useful active recovery) over RECOVERY_EASY
+    prefs = [
+        DayArchetype.MOBILITY_FLOW,
+        DayArchetype.RECOVERY_EASY,
+        DayArchetype.STRESS_RELIEF_EASY,
+    ]
+    for pref in prefs:
+        if pref in profile.allowed_archetypes:
+            return pref
+    # If the profile doesn't allow any recovery archetype, use MOBILITY_FLOW
+    # anyway — it's always safe and low-stress
+    return DayArchetype.MOBILITY_FLOW
+
+
 # ── Lifting mode ────────────────────────────────────────────────────
 
 
@@ -272,40 +332,44 @@ def _lifting_plus_cardio_recipe(
     the user isn't stacking two hard sessions back to back.
     """
     conditioning_frac = getattr(profile.mix, "conditioning", 0.0) or 0.0
+    recovery_frac = getattr(profile.mix, "recovery", 0.0) or 0.0
+    mobility_frac = getattr(profile.mix, "mobility", 0.0) or 0.0
 
-    # Decide how many days to reserve for cardio based on the mix.
-    # Availability != recovery capacity. A user training 7 days/week
-    # does NOT want 6 hard lifting days + 1 token cardio day. At high
-    # frequencies, reserve more low-stress days for sustainability.
+    # ── Step 1: Recovery allocation (frequency-driven, not mix-driven) ──
+    # Recovery is not conditioning. Zone 2 and intervals are training stress.
+    # 7-day users get 1 true rest day; ≤5-day users already have off days.
+    recovery_days = _derive_recovery_days(
+        days, profile.bucket, recovery_frac, mobility_frac,
+    )
+
+    # ── Step 2: Conditioning allocation (from remaining non-recovery days) ──
+    available_for_training = days - recovery_days
     if conditioning_frac < 0.10:
         cond_days = 0
     elif conditioning_frac < 0.30:
-        # Body-recomp band: conservative recovery at high frequency
-        if days <= 3:
+        # Body-recomp band
+        if available_for_training <= 3:
             cond_days = 0
-        elif days <= 5:
+        elif available_for_training <= 5:
             cond_days = 1
-        elif days == 6:
-            cond_days = 1  # 5 lift + 1 cardio
         else:
-            cond_days = 2  # 7 days → 5 lift + 2 low-stress
+            cond_days = 1  # cap at 1 true conditioning day
     else:
-        # Fat-loss band: meaningful conditioning starting at 3 days
-        if days <= 2:
+        # Fat-loss / endurance band
+        if available_for_training <= 2:
             cond_days = 0
-        elif days <= 4:
+        elif available_for_training <= 4:
             cond_days = 1
-        elif days == 5:
-            cond_days = 2
-        elif days == 6:
+        elif available_for_training <= 5:
             cond_days = 2
         else:
-            cond_days = 3  # 7 days → 4 lift + 3 cardio/recovery
+            cond_days = 2  # cap at 2
 
-    if cond_days == 0:
+    # ── Step 3: Lifting fills the rest ──
+    lift_days = days - recovery_days - cond_days
+
+    if cond_days == 0 and recovery_days == 0:
         return _lifting_recipe(profile, lifting_split, days, priority_region=priority_region)
-
-    lift_days = days - cond_days
     # Split-compatibility fix: a 3-move PPL cycle on 4 lift days emits
     # [Push, Pull, Legs, Push] — which creates two Pushes that can
     # never be fully spaced once you add cardio + run rotation for
@@ -326,24 +390,13 @@ def _lifting_plus_cardio_recipe(
         effective_split = SPLIT_UPPER_LOWER
     lifting = _lifting_recipe(profile, effective_split, lift_days, priority_region=priority_region)
 
-    # Cardio sequence: zone-2 first so any plan with ≥1 cardio day
-    # gets an easy/steady aerobic session (the high-value, low-cost
-    # pick for recomp). Short intervals come second for a meaningful
-    # hard day; circuit third for variety at 3+ cardio days. This
-    # ordering means recomp at 6 days (2 cardio) lands Z2 + intervals
-    # — at least one easy/steady day guaranteed — instead of two hard
-    # sessions back to back.
-    # For recomp goals, the second low-stress day should be
-    # mobility/recovery, not another hard cardio session.
-    is_recomp_band = conditioning_frac < 0.30
+    # ── Build conditioning archetype sequence ──
+    # Zone 2 first (high-value, low-cost), then intervals, then circuit.
     cond_sequence = [
         DayArchetype.COND_ZONE2,
-        DayArchetype.MOBILITY_FLOW if is_recomp_band else DayArchetype.COND_INTERVALS_SHORT,
-        DayArchetype.COND_INTERVALS_SHORT if is_recomp_band else DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
+        DayArchetype.COND_INTERVALS_SHORT,
+        DayArchetype.HYBRID_FULL_BODY_CIRCUIT,
     ]
-    # Only append cardio archetypes the profile actually allows. A
-    # profile that opts out of circuits (e.g. strength) won't see
-    # HYBRID_FULL_BODY_CIRCUIT slipped in.
     cond: list[DayArchetype] = []
     ci = 0
     while len(cond) < cond_days and ci < len(cond_sequence) * 3:
@@ -351,17 +404,18 @@ def _lifting_plus_cardio_recipe(
         if candidate in profile.allowed_archetypes:
             cond.append(candidate)
         ci += 1
-    # Last-resort: if the profile didn't allow any of the above,
-    # fall back to zone-2 only (every cardio-allowing profile has it).
     while len(cond) < cond_days:
         cond.append(DayArchetype.COND_ZONE2)
+
+    # ── Build recovery archetype(s) ──
+    recovery: list[DayArchetype] = []
+    for _ in range(recovery_days):
+        recovery.append(_pick_recovery_archetype(profile))
 
     # Interleave cardio into the lifting sequence at positions that
     # DON'T break the split's natural rotation. For PPL, cardio goes
     # after each full Push→Pull→Legs cycle. For UL, after each U→L
-    # pair. For Full Body, evenly spaced. This preserves the training
-    # pattern the user chose instead of fragmenting it with cardio
-    # in the middle of a rotation.
+    # pair. For Full Body, evenly spaced.
     from .day_templates import SPLIT_PPL, SPLIT_PPL_UL, SPLIT_UPPER_LOWER, SPLIT_FULL_BODY
     if effective_split in (SPLIT_PPL, SPLIT_PPL_UL):
         cycle_len = 3  # PPL cycle
@@ -378,12 +432,17 @@ def _lifting_plus_cardio_recipe(
     while li < len(lifting) or ci < len(cond):
         if li < len(lifting):
             out.append(lifting[li]); li += 1; since_last_cond += 1
-            # Place cardio after a full rotation cycle
             if ci < len(cond) and since_last_cond >= cycle_len:
                 out.append(cond[ci]); ci += 1; since_last_cond = 0
         elif ci < len(cond):
             out.append(cond[ci]); ci += 1
 
+    # Recovery day(s) go at the END of the week. Placing them last
+    # means the user's final training day before the weekend (or the
+    # cycle restart) is low-stress, giving the CNS a full reset.
+    out.extend(recovery)
+
+    assert len(out) == days, f"Recipe length {len(out)} != requested {days} days (lift={lift_days} cond={cond_days} recovery={recovery_days})"
     return _repair_adjacent_duplicates(out)
 
 
@@ -1022,9 +1081,25 @@ def generate_weekly_recipe(
     days = max(1, min(7, int(days_per_week or 3)))
     mode = profile.planner_mode
 
+    # ── Recovery injection for pure-lifting modes ──
+    # _lifting_plus_cardio_recipe handles recovery internally.
+    # All other modes need a post-hoc injection if recovery days are warranted.
+    # Modes that are inherently low-stress (mobility, recovery, maintain)
+    # skip this — they don't need a recovery day carved out.
+    _modes_with_internal_recovery = {"fat_loss_mix", "lifting_plus_cardio"}
+    _modes_skip_recovery = {"mobility", "recovery", "maintain"}
+
     if mode == "lifting":
-        recipe = _lifting_recipe(profile, lifting_split or "full_body", days, priority_region=priority_region)
-    elif mode in ("fat_loss_mix", "lifting_plus_cardio"):
+        recovery_days = _derive_recovery_days(
+            days, profile.bucket,
+            getattr(profile.mix, "recovery", 0.0),
+            getattr(profile.mix, "mobility", 0.0),
+        )
+        lift_days = days - recovery_days
+        recipe = _lifting_recipe(profile, lifting_split or "full_body", lift_days, priority_region=priority_region)
+        for _ in range(recovery_days):
+            recipe.append(_pick_recovery_archetype(profile))
+    elif mode in _modes_with_internal_recovery:
         recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower", user_chose_split=user_chose_split, priority_region=priority_region)
     elif mode == "endurance":
         recipe = _endurance_recipe(profile, days)
@@ -1043,6 +1118,7 @@ def generate_weekly_recipe(
         recipe = _maintain_recipe(profile, days)
 
     pre_rotation = [a.value for a in recipe]
+    print(f"[weekly_recipe] mode={mode} days={days} recipe={pre_rotation}")
     # Use fine-grained focus families for rotation when available.
     # Families preserve split identity (push != pull) while coarse
     # buckets collapse both to "upper_body" -- which means the rotation

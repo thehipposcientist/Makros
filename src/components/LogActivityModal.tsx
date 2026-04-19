@@ -40,6 +40,7 @@ const SUBTYPES: Record<ActivityCategory, SubtypeDef[]> = {
     { key: 'walk',       label: 'Walk',       icon: 'walk-outline' },
     { key: 'run',        label: 'Run',        icon: 'footsteps-outline' },
     { key: 'ride',       label: 'Ride',       icon: 'bicycle-outline' },
+    { key: 'spin',       label: 'Spin Class', icon: 'fitness-outline' },
     { key: 'hike',       label: 'Hike',       icon: 'trail-sign-outline' },
     { key: 'swim',       label: 'Swim',       icon: 'water-outline' },
     { key: 'row',        label: 'Row',        icon: 'boat-outline' },
@@ -92,8 +93,8 @@ const CARDIO_STYLES: { key: CardioStyle; label: string }[] = [
 
 const LEGACY_FOCUS: Record<string, Record<string, string>> = {
   strength: { push: 'Push', pull: 'Pull', legs: 'Legs', upper_body: 'Upper Body', lower_body: 'Lower Body', full_body: 'Full Body' },
-  cardio:   { walk: 'Walking', run: 'Running', ride: 'Cycling', hike: 'Hiking', swim: 'Swimming', row: 'Rowing', stair: 'Cardio', elliptical: 'Cardio', bootcamp: 'Cardio', other: 'Cardio' },
-  mobility: { yoga: 'Yoga', stretching: 'Stretching', foam_roll: 'Foam Rolling', pilates: 'Mobility' },
+  cardio:   { walk: 'Walking', run: 'Running', ride: 'Cycling', spin: 'Spin Class', hike: 'Hiking', swim: 'Swimming', row: 'Rowing', stair: 'Cardio', elliptical: 'Cardio', bootcamp: 'Cardio', other: 'Cardio' },
+  mobility: { yoga: 'Yoga', stretching: 'Stretching', foam_roll: 'Foam Rolling', pilates: 'Pilates' },
   sport:    { basketball: 'Cardio', soccer: 'Cardio', tennis: 'Cardio', golf: 'Cardio', climbing: 'Cardio', boxing: 'Cardio', kickboxing: 'Cardio', martial_arts: 'Cardio', other: 'Cardio' },
   recovery: { sauna: 'Recovery', ice_bath: 'Recovery', walk: 'Recovery', sleep: 'Recovery', meditation: 'Recovery', general: 'Recovery' },
 };

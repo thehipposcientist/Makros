@@ -38,6 +38,7 @@ async function setPlanGenMarker(kind: PlanGenMarker['kind']): Promise<void> {
 }
 async function clearPlanGenMarker(): Promise<void> {
   try { await AsyncStorage.removeItem(PLAN_GEN_MARKER_KEY); } catch {}
+  try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
 }
 async function readPlanGenMarker(): Promise<PlanGenMarker | null> {
   try {
@@ -250,6 +251,7 @@ export default function Index() {
   const [showAccount, setShowAccount]     = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
   const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
+  const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
   const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
     setActiveWorkoutRaw(w);
     if (w) {
@@ -358,29 +360,16 @@ export default function Index() {
           const loggedCount = savedSets
             ? (JSON.parse(savedSets) as any[]).filter(e => e.sets?.length > 0).length
             : 0;
-          Alert.alert(
-            'Resume Workout?',
-            `You have an unfinished ${parsed.focus || 'workout'}${loggedCount > 0 ? ` with ${loggedCount} exercise${loggedCount === 1 ? '' : 's'} logged` : ''}. Pick up where you left off?`,
-            [
-              {
-                text: 'Discard',
-                style: 'destructive',
-                onPress: () => {
-                  AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
-                  AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
-                  console.log('[initApp] discarded saved workout session');
-                },
-              },
-              {
-                text: 'Resume',
-                style: 'default',
-                onPress: () => {
-                  setActiveWorkoutRaw(parsed);
-                  console.log('[initApp] resumed active workout session');
-                },
-              },
-            ],
-          );
+          // Only prompt resume if the user actually logged at least one set.
+          // Without this, starting a workout then force-killing the app
+          // before logging anything shows a confusing resume prompt.
+          if (loggedCount > 0) {
+            setResumeWorkoutData({ workout: parsed, loggedCount });
+          } else {
+            AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
+            AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+            AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+          }
         }
       }
     } catch {}
@@ -491,6 +480,20 @@ export default function Index() {
     if (!authToken) return;
     const marker = await getPendingPlanMarker();
     if (!marker) return;
+    // If the user already has a completed plan in AsyncStorage, the pending
+    // marker is stale from a previous generation that already finished.
+    // Clear it instead of re-applying the plan on every app restart.
+    const existingPlan = await AsyncStorage.getItem('aiWorkoutPlan').catch(() => null);
+    if (existingPlan) {
+      // Also check the local marker — if it has a startedAt, compare age
+      const localMarker = await readPlanGenMarker();
+      const age = localMarker?.startedAt ? Date.now() - localMarker.startedAt : Infinity;
+      if (age > 5 * 60 * 1000) {
+        console.log(`[plan-gen] stale marker (plan exists, marker ${Math.round(age / 60000)}min old) — clearing`);
+        await clearPlanGenMarker();
+        return;
+      }
+    }
     // IMPORTANT: we do NOT bail when updating flags are already set.
     // The original polling promise may be stuck in a suspended setTimeout
     // (iOS freezes JS when the app backgrounds) and will never finish on
@@ -499,17 +502,24 @@ export default function Index() {
     // loser throws `cancelled` which we swallow.
 
     console.log(`[plan-gen] resuming pending job id=${marker.id} kind=${marker.kind}`);
-    // Section-specific loading — only set the flag(s) for the slice that's
-    // actually being regenerated so the user returns to the same tab view
-    // they left instead of a full-screen overlay.
-    if (marker.kind === 'workout' || marker.kind === 'full') setIsWorkoutUpdating(true);
-    if (marker.kind === 'nutrition' || marker.kind === 'full') setIsNutritionUpdating(true);
+    // Only show the loading overlay if the user has no existing plan to display.
+    // If they already have a plan, poll silently — the updating overlay causes
+    // a jarring white flash on cold start when the existing plan is perfectly usable.
+    const hasExistingPlan = !!(await AsyncStorage.getItem('aiWorkoutPlan').catch(() => null));
+    if (!hasExistingPlan) {
+      if (marker.kind === 'workout' || marker.kind === 'full') setIsWorkoutUpdating(true);
+      if (marker.kind === 'nutrition' || marker.kind === 'full') setIsNutritionUpdating(true);
+    }
     holdPlanGenAwake();
     try {
       const aiPlans = await resumePendingPlanJob(authToken);
       if (aiPlans) {
         await applyPlanResult(aiPlans);
+        await clearPlanGenMarker();
         Alert.alert('Plan ready', 'Your new plan is done — tap anywhere to continue.');
+      } else {
+        // Job completed with no data or already consumed — clear the stale marker
+        await clearPlanGenMarker();
       }
     } catch (err: any) {
       const msg = err?.message ?? '';
@@ -529,6 +539,7 @@ export default function Index() {
         Alert.alert('Plan generation failed', msg || 'Try again from the profile menu.');
       }
     } finally {
+      await clearPlanGenMarker();
       setIsWorkoutUpdating(false);
       setIsNutritionUpdating(false);
       releasePlanGenAwake();
@@ -965,6 +976,12 @@ export default function Index() {
         weightLbs={userProfile.physicalStats.weightLbs}
         onFinish={handleWorkoutFinish}
         onCancel={() => setActiveWorkout(null)}
+        onDislikeExercise={(name) => {
+          const existing = userProfile.dislikedExercises ?? [];
+          if (existing.some(d => d.toLowerCase() === name.toLowerCase())) return;
+          const updated = [...existing, name];
+          handleProfileUpdate({ dislikedExercises: updated } as any, true);
+        }}
       />
     );
   }
@@ -1172,6 +1189,45 @@ export default function Index() {
           />
         )}
       </Modal>
+
+      {/* Resume workout — themed modal */}
+      {resumeWorkoutData && (() => {
+        const tc = getTheme(userProfile?.themePreference).colors;
+        return (
+          <Modal visible transparent animationType="fade" onRequestClose={() => {}}>
+            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+              <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
+                {(() => { try { const { Ionicons: Ic } = require('@expo/vector-icons'); return <Ic name="barbell-outline" size={36} color={tc.primary} style={{ alignSelf: 'center', marginBottom: 12 }} />; } catch { return null; } })()}
+                <Text style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
+                  Resume Workout?
+                </Text>
+                <Text style={{ fontSize: 14, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 20 }}>
+                  You have an unfinished {resumeWorkoutData.workout.focus || 'workout'} with{' '}
+                  {resumeWorkoutData.loggedCount} exercise{resumeWorkoutData.loggedCount !== 1 ? 's' : ''} logged.
+                </Text>
+                <TouchableOpacity
+                  style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                  onPress={() => {
+                    setActiveWorkoutRaw(resumeWorkoutData.workout);
+                    setResumeWorkoutData(null);
+                  }}>
+                  <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>Resume</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                  onPress={() => {
+                    AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
+                    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+                    AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+                    setResumeWorkoutData(null);
+                  }}>
+                  <Text style={{ color: tc.error ?? '#EF4444', fontSize: 15, fontWeight: '600' }}>Discard</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+        );
+      })()}
     </>
   );
 }
@@ -1253,28 +1309,6 @@ function SplashLoadingScreen() {
         {TIPS[tipIndex]}
       </Animated.Text>
 
-      {/* Feature chips — same style as auth screen */}
-      <Animated.View style={{
-        flexDirection: 'row', flexWrap: 'wrap', gap: 8,
-        justifyContent: 'center', marginTop: 48, opacity: fadeAnim,
-      }}>
-        {['Custom workout plans', 'Personalised nutrition', 'AI coaching that adapts'].map(f => (
-          <View key={f} style={{
-            backgroundColor: '#161A22', borderRadius: 20,
-            paddingHorizontal: 12, paddingVertical: 6,
-            borderWidth: 1, borderColor: '#2A3242',
-          }}>
-            <Text style={{ fontSize: 12, color: '#6A7888', fontWeight: '600' }}>{f}</Text>
-          </View>
-        ))}
-      </Animated.View>
-
-      <Animated.Text style={{
-        color: '#3A4050', fontSize: 13, fontWeight: '500',
-        marginTop: 12, opacity: fadeAnim,
-      }}>
-        Set up in under 3 minutes
-      </Animated.Text>
     </View>
   );
 }

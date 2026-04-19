@@ -1805,66 +1805,132 @@ def _find_best_accessory_host_day(days_out: list[dict], muscle: str, exclude: se
 
 
 
-# Injury tags → movement patterns to exclude. Keys are lower-cased and
-# whitespace/punctuation is stripped before lookup. Prefix match is
-# also attempted so "left_knee" resolves via the "knee" entry.
+# ─── Injury system ───────────────────────────────────────────────────────────
 #
-# These are conservative defaults a real trainer would apply — not a
-# medical recommendation. Users can always override by toggling the
-# specific exercise off in their disliked list.
-_INJURY_BLOCKED_PATTERNS: dict[str, set[str]] = {
-    "shoulder":             {"vertical_press"},
-    "rotator_cuff":         {"vertical_press"},
-    "shoulder_impingement": {"vertical_press"},
-    "ac_joint":             {"vertical_press"},
-    "lower_back":           {"hinge"},
-    "low_back":             {"hinge"},
-    "lumbar":               {"hinge"},
-    "herniated_disc":       {"hinge", "squat"},
-    "sciatica":             {"hinge"},
-    "knee":                 {"lunge"},
-    "patellar":             {"lunge"},
-    "patellar_tendonitis":  {"lunge"},
-    "meniscus":             {"squat", "lunge"},
-    "acl":                  {"squat", "lunge"},
-    "mcl":                  {"lunge"},
-    "hip":                  {"hinge"},
-    "hip_flexor":           {"hinge"},
-    "ankle":                {"lunge"},
-    "achilles":             {"lunge"},
-    # Elbow / wrist are tracked so future scorer penalties can read
-    # them, but they don't block a whole movement pattern today.
-    "elbow":                set(),
-    "tennis_elbow":         set(),
-    "golfer_elbow":         set(),
-    "wrist":                set(),
+# Three layers of injury handling:
+#   1. Movement pattern blocking — hard-excludes exercises for active injuries
+#   2. Muscle group mapping — boosts fatigue on affected muscles so readiness
+#      scores reflect injuries (e.g. "lower back" → back/core/hamstrings fatigued)
+#   3. Recovering mode — allows exercises at reduced volume instead of full block
+#
+# Each injury keyword maps to blocked patterns, recovering patterns, and
+# affected muscle groups. The 'status: recovering' string in the injury tag
+# triggers the gentler recovering path.
+
+from dataclasses import dataclass as _injury_dc
+
+@_injury_dc
+class _InjuryMapping:
+    blocked_patterns: set[str]       # hard-block when active
+    recovering_patterns: set[str]    # allow at reduced volume when recovering
+    muscle_groups: list[str]         # for fatigue system integration
+
+_INJURY_MAP: dict[str, _InjuryMapping] = {
+    # Shoulder
+    "shoulder":             _InjuryMapping({"vertical_press", "horizontal_press"}, {"horizontal_press"}, ["shoulders", "chest"]),
+    "rotator_cuff":         _InjuryMapping({"vertical_press", "horizontal_press"}, {"horizontal_press"}, ["shoulders"]),
+    "shoulder_impingement": _InjuryMapping({"vertical_press"}, {"horizontal_press"}, ["shoulders"]),
+    "ac_joint":             _InjuryMapping({"vertical_press", "horizontal_press"}, set(), ["shoulders"]),
+    # Back
+    "lower_back":           _InjuryMapping({"hinge"}, {"squat"}, ["back", "core", "hamstrings"]),
+    "low_back":             _InjuryMapping({"hinge"}, {"squat"}, ["back", "core", "hamstrings"]),
+    "lumbar":               _InjuryMapping({"hinge"}, {"squat"}, ["back", "core"]),
+    "herniated_disc":       _InjuryMapping({"hinge", "squat"}, set(), ["back", "core", "hamstrings"]),
+    "sciatica":             _InjuryMapping({"hinge"}, {"squat", "lunge"}, ["back", "hamstrings", "glutes"]),
+    # Knee
+    "knee":                 _InjuryMapping({"lunge", "squat"}, {"squat"}, ["quads", "hamstrings"]),
+    "patellar":             _InjuryMapping({"lunge", "squat"}, {"squat"}, ["quads"]),
+    "patellar_tendonitis":  _InjuryMapping({"lunge", "squat"}, set(), ["quads"]),
+    "meniscus":             _InjuryMapping({"squat", "lunge"}, set(), ["quads", "hamstrings"]),
+    "acl":                  _InjuryMapping({"squat", "lunge"}, set(), ["quads", "hamstrings", "glutes"]),
+    "mcl":                  _InjuryMapping({"lunge"}, {"squat"}, ["quads"]),
+    # Hip / ankle
+    "hip":                  _InjuryMapping({"hinge", "lunge"}, {"squat"}, ["glutes", "hamstrings"]),
+    "hip_flexor":           _InjuryMapping({"hinge", "lunge"}, set(), ["quads", "core"]),
+    "ankle":                _InjuryMapping({"lunge"}, {"squat"}, ["calves"]),
+    "achilles":             _InjuryMapping({"lunge"}, set(), ["calves"]),
+    # Elbow / wrist — now blocks appropriate patterns
+    "elbow":                _InjuryMapping({"isolation"}, {"horizontal_press", "horizontal_pull"}, ["biceps", "triceps"]),
+    "tennis_elbow":         _InjuryMapping({"isolation", "horizontal_pull"}, {"horizontal_press"}, ["biceps", "triceps"]),
+    "golfer_elbow":         _InjuryMapping({"isolation"}, {"horizontal_pull"}, ["biceps"]),
+    "wrist":                _InjuryMapping({"vertical_press"}, {"horizontal_press"}, ["shoulders"]),
+    # Chest
+    "chest":                _InjuryMapping({"horizontal_press"}, set(), ["chest", "triceps"]),
+    "pec":                  _InjuryMapping({"horizontal_press"}, set(), ["chest"]),
+    # Neck
+    "neck":                 _InjuryMapping({"vertical_press"}, {"horizontal_press"}, ["shoulders", "core"]),
 }
 
 
+def _normalize_injury_key(raw: str) -> str:
+    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(raw).lower().strip())
+
+
+def _lookup_injury(raw: str) -> _InjuryMapping | None:
+    key = _normalize_injury_key(raw)
+    if key in _INJURY_MAP:
+        return _INJURY_MAP[key]
+    for known, mapping in _INJURY_MAP.items():
+        if known and known in key:
+            return mapping
+    return None
+
+
 def _injury_blocked_patterns(injuries: tuple[str, ...] | list[str] | None) -> set[str]:
-    """Return the union of movement patterns blocked by the user's
-    injury tags. Tags are normalized (lowercase, underscores) and
-    matched against `_INJURY_BLOCKED_PATTERNS` with a substring
-    fallback so `"left knee pain"` still resolves via `"knee"`."""
+    """Movement patterns to hard-exclude. Active injuries block fully;
+    recovering injuries block a smaller subset."""
     if not injuries:
         return set()
     blocked: set[str] = set()
     for inj in injuries:
         if not inj:
             continue
-        key = "".join(
-            ch if ch.isalnum() or ch == "_" else "_"
-            for ch in str(inj).lower().strip()
-        )
-        # Exact match first
-        if key in _INJURY_BLOCKED_PATTERNS:
-            blocked |= _INJURY_BLOCKED_PATTERNS[key]
-            continue
-        # Substring fallback — "left_knee_pain" → "knee"
-        for known, patterns in _INJURY_BLOCKED_PATTERNS.items():
-            if known and known in key:
-                blocked |= patterns
+        is_recovering = "recovering" in str(inj).lower()
+        mapping = _lookup_injury(inj)
+        if mapping:
+            if is_recovering:
+                blocked |= (mapping.blocked_patterns - mapping.recovering_patterns)
+            else:
+                blocked |= mapping.blocked_patterns
     return blocked
+
+
+def _injury_recovering_patterns(injuries: tuple[str, ...] | list[str] | None) -> set[str]:
+    """Movement patterns that should have reduced volume (not fully blocked).
+    Only applies to injuries with status=recovering."""
+    if not injuries:
+        return set()
+    recovering: set[str] = set()
+    for inj in injuries:
+        if not inj or "recovering" not in str(inj).lower():
+            continue
+        mapping = _lookup_injury(inj)
+        if mapping:
+            recovering |= mapping.recovering_patterns
+    return recovering
+
+
+def injury_muscle_fatigue_boost(injuries: tuple[str, ...] | list[str] | None) -> dict[str, float]:
+    """Extra fatigue to apply to muscle groups affected by injuries.
+
+    Active injuries: +0.5 fatigue (heavily suppresses readiness for that focus).
+    Recovering injuries: +0.25 (moderately suppresses).
+    Feeds into the fatigue system so readiness scores reflect injuries.
+    """
+    if not injuries:
+        return {}
+    boosts: dict[str, float] = {}
+    for inj in injuries:
+        if not inj:
+            continue
+        is_recovering = "recovering" in str(inj).lower()
+        mapping = _lookup_injury(inj)
+        if not mapping:
+            continue
+        boost = 0.25 if is_recovering else 0.5
+        for muscle in mapping.muscle_groups:
+            boosts[muscle] = max(boosts.get(muscle, 0), boost)
+    return boosts
 
 
 # ─── Phase 2 placeholder — session-to-session progression ───────────────────
@@ -2025,3 +2091,65 @@ def _infer_bucket(equipment_label: str) -> str:
     if "bodyweight" in s or not s:
         return "bodyweight"
     return "other"
+
+
+# ─── On-demand day generators for focus overrides ────────────────────────────
+
+def generate_recovery_day(session_minutes: int = 45) -> dict:
+    """Generate an active recovery day with light movement."""
+    exercises = [
+        {"name": "Foam Rolling", "sets": 1, "reps": "5-8 min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core"]},
+        {"name": "Cat-Cow Stretch", "sets": 2, "reps": "10", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
+        {"name": "Hip 90/90 Stretch", "sets": 2, "reps": "8 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "World's Greatest Stretch", "sets": 2, "reps": "6 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
+        {"name": "Supine Spinal Twist", "sets": 2, "reps": "30s each side", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
+        {"name": "Child's Pose", "sets": 2, "reps": "45s hold", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["back", "shoulders"]},
+    ]
+    if session_minutes >= 30:
+        exercises.append({"name": "Easy Walk", "sets": 1, "reps": f"{min(20, session_minutes - 15)} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["cardio"]})
+    return {
+        "day": "Recovery Day",
+        "focus": "Recovery",
+        "stimulus": "recovery",
+        "exercises": exercises,
+    }
+
+
+def generate_mobility_day(session_minutes: int = 45) -> dict:
+    """Generate a mobility/stretching day."""
+    exercises = [
+        {"name": "Foam Rolling", "sets": 1, "reps": "8-10 min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
+        {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "8", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
+        {"name": "Hip 90/90 Stretch", "sets": 3, "reps": "8 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "Thoracic Spine Rotation", "sets": 3, "reps": "10 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "core"]},
+        {"name": "World's Greatest Stretch", "sets": 3, "reps": "6 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
+        {"name": "Pigeon Pose", "sets": 2, "reps": "45s each side", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "Shoulder Dislocates", "sets": 2, "reps": "12", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+    ]
+    return {
+        "day": "Mobility Day",
+        "focus": "Mobility",
+        "stimulus": "mobility",
+        "exercises": exercises,
+    }
+
+
+def generate_cardio_day(session_minutes: int = 45, goal: str = "body_recomp") -> dict:
+    """Generate a cardio day appropriate for the user's goal."""
+    if goal in ("fat_loss", "endurance", "hyrox", "athletic_performance"):
+        exercises = [
+            {"name": "Jump Rope", "sets": 1, "reps": "5 min warm-up", "rest_seconds": 60, "equipment": "bodyweight", "slot_role": "warmup", "muscles_targeted": ["cardio", "calves"]},
+            {"name": "Rowing Machine", "sets": 1, "reps": f"{min(25, session_minutes - 15)} min steady", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "back", "core"]},
+            {"name": "Assault Bike Intervals", "sets": 6, "reps": "30s on / 60s off", "rest_seconds": 60, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "quads"]},
+        ]
+    else:
+        exercises = [
+            {"name": "Incline Treadmill Walk", "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"]},
+            {"name": "Stair Climber", "sets": 1, "reps": "10 min", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "quads", "glutes"]},
+        ]
+    return {
+        "day": "Cardio Day",
+        "focus": "Cardio",
+        "stimulus": "conditioning",
+        "exercises": exercises,
+    }

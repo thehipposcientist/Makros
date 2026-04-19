@@ -252,7 +252,13 @@ function buildLogContext(
 function buildInjuries(profile: import('../types').UserProfile): string[] {
   const list: string[] = (profile.injuryEntries ?? [])
     .filter((e: any) => e.status !== 'resolved')
-    .map((e: any) => `${e.description} (${e.bodyPart}, status: ${e.status})`);
+    .map((e: any) => {
+      const parts = [e.description, `(${e.bodyPart}, status: ${e.status})`];
+      if (e.muscleGroups?.length) parts.push(`muscles: ${e.muscleGroups.join(',')}`);
+      if (e.severity) parts.push(`severity: ${e.severity}`);
+      if (e.estimatedRecoveryDate) parts.push(`est. recovery: ${e.estimatedRecoveryDate}`);
+      return parts.join(' ');
+    });
   if (profile.injuries && list.length === 0) list.push(profile.injuries);
   return list;
 }
@@ -880,6 +886,7 @@ export async function generateWorkoutDay(
     priority_region?: string;
     focused_muscle?: string;
     injuries?: string[];
+    disliked_exercises?: string[];
     focus_override?: string;
   },
 ): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string; readiness_score?: number }> {

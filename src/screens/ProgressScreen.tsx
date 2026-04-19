@@ -447,197 +447,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'prs' ? (
         <ScrollView contentContainerStyle={styles.content} style={{ backgroundColor: tc.background }}>
-          {/* Skeleton placeholder while the fitness score is fetching.
-              Without this, tapping into Records flashes an empty tab
-              for the duration of the network round-trip. */}
-          {compositeFitnessLoading && !compositeFitness && (
-            <View style={[styles.fitnessScoreCard, { alignItems: 'center', justifyContent: 'center', minHeight: 200 }]}>
-              <ActivityIndicator color={tc.primary} />
-              <Text style={{ marginTop: 10, color: tc.textMuted, fontSize: 12 }}>
-                Loading your fitness score…
-              </Text>
-            </View>
-          )}
-          {/* ── 4-Pillar Fitness Score Card ── */}
-          {compositeFitness && (
-            <ViewShot ref={fitnessScoreRef} options={{ format: 'png', quality: 1 }}>
-            <View style={styles.fitnessScoreCard}>
-              {sharingScore && (
-                <Image
-                  source={tc.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
-                  style={styles.shareCardLogo}
-                  resizeMode="contain"
-                />
-              )}
-              {/* Plain-language verdict — never show a score without
-                  a one-line read the user can act on. */}
-              <Text style={styles.fitnessVerdict}>
-                {compositeFitness.total >= 80 ? "You're in elite shape."
-                  : compositeFitness.total >= 65 ? "You're trending strong."
-                  : compositeFitness.total >= 45 ? "You're building — keep going."
-                  : compositeFitness.total >= 25 ? "Early days. Consistency is the lever."
-                  : "Let's get moving."}
-              </Text>
-              <View style={styles.fitnessScoreHeader}>
-                <View>
-                  <Text style={styles.fitnessScoreLabel}>FITNESS SCORE · 14 DAYS</Text>
-                  <Text style={styles.fitnessScoreSubtext}>4-pillar composite</Text>
-                </View>
-                <View style={styles.fitnessScoreCircle}>
-                  <AnimatedNumber value={Math.round(compositeFitness.total)} style={styles.fitnessScoreValue} />
-                </View>
-              </View>
-
-              {/* Score rating — comes directly from the backend so the
-                  thresholds stay in one place (fitness_score._rating_for). */}
-              <Text style={styles.fitnessScoreRating}>
-                {compositeFitness.rating === 'Elite' ? 'Elite'
-                  : compositeFitness.rating === 'Strong' ? 'Strong'
-                  : compositeFitness.rating === 'Solid' ? 'Solid'
-                  : compositeFitness.rating === 'Building' ? 'Building'
-                  : 'Starting'}
-              </Text>
-
-              {/* Pillar breakdown — each pillar is a 0-100 subscore
-                  with a human-readable reason string so the user can
-                  see *what* is pulling their score. Data quality dims
-                  partial/missing pillars so users know which inputs
-                  are sparse. */}
-              <View style={styles.fitnessBreakdown}>
-                {compositeFitness.pillars.map(p => (
-                  <View key={p.name} style={styles.fitnessBarRow}>
-                    <View style={styles.fitnessBarLabel}>
-                      <Text style={[
-                        styles.fitnessBarLabelText,
-                        p.dataQuality === 'missing' && { opacity: 0.55 },
-                      ]}>
-                        {p.name}
-                      </Text>
-                      <Text style={[
-                        styles.fitnessBarDetail,
-                        p.dataQuality === 'missing' && { opacity: 0.55 },
-                      ]} numberOfLines={2}>
-                        {p.reason}
-                      </Text>
-                    </View>
-                    <View style={styles.fitnessBarTrack}>
-                      <View style={[
-                        styles.fitnessBarFill,
-                        { width: `${Math.round(p.score)}%` as any },
-                        p.dataQuality === 'missing' && { opacity: 0.35 },
-                      ]} />
-                    </View>
-                    <Text style={styles.fitnessBarScore}>{Math.round(p.score)}</Text>
-                  </View>
-                ))}
-              </View>
-
-              {/* Apple Health metrics — compact row below the pillar breakdown.
-                  Recovery is already shown as a pillar above, so we only
-                  show the quick health stats here, not a second "Recovery" heading. */}
-              {healthSummary && (
-                <View style={{ marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border }}>
-                  <View style={styles.healthMetricsGrid}>
-                    {healthSummary.restingHeartRate != null && (
-                      <View style={styles.healthMetric}>
-                        <Text style={styles.healthMetricValue}>{healthSummary.restingHeartRate}</Text>
-                        <Text style={styles.healthMetricLabel}>Resting HR</Text>
-                      </View>
-                    )}
-                    {healthSummary.avgSteps7d != null && (
-                      <View style={styles.healthMetric}>
-                        <Text style={styles.healthMetricValue}>{Math.round(healthSummary.avgSteps7d / 1000)}k</Text>
-                        <Text style={styles.healthMetricLabel}>Avg Steps</Text>
-                      </View>
-                    )}
-                    {healthSummary.avgSleepHours7d != null && (
-                      <View style={styles.healthMetric}>
-                        <Text style={styles.healthMetricValue}>{healthSummary.avgSleepHours7d}h</Text>
-                        <Text style={styles.healthMetricLabel}>Avg Sleep</Text>
-                      </View>
-                    )}
-                    {healthSummary.workouts7d != null && (
-                      <View style={styles.healthMetric}>
-                        <Text style={styles.healthMetricValue}>{healthSummary.workouts7d}</Text>
-                        <Text style={styles.healthMetricLabel}>Workouts 7d</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.healthFetchedAt}>
-                    Updated {new Date(healthSummary.fetchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-                  </Text>
-                </View>
-              )}
-              {!healthScore && !healthSummary && (
-                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 10 }}>
-                  Connect Apple Health for recovery tracking, sleep, and heart rate data.
-                </Text>
-              )}
-
-              {/* Share button */}
-              <TouchableOpacity
-                style={styles.fitnessShareBtn}
-                onPress={handleShareFitnessScore}
-                disabled={shareLoading}>
-                {shareLoading
-                  ? <ActivityIndicator size="small" color={tc.primary} />
-                  : <Text style={styles.fitnessShareBtnText}>Share Score</Text>
-                }
-              </TouchableOpacity>
-            </View>
-            </ViewShot>
-          )}
-
-          {/* Diet Consistency Score — mirrors the fitness score card so
-              users treat diet adherence with the same weight as workouts. */}
-          {dietScore && (
-            <View style={styles.fitnessScoreCard}>
-              <Text style={styles.fitnessVerdict}>
-                {dietScore.total >= 80 ? "Nutrition is dialed in."
-                  : dietScore.total >= 60 ? "Nutrition is on track."
-                  : dietScore.total >= 40 ? `${dietScore.mealsChecked} of ${dietScore.mealsExpected} meals logged — keep going.`
-                  : dietScore.total >= 20 ? "Log one more meal today to build the habit."
-                  : "Log a meal to unlock insights."}
-              </Text>
-              <View style={styles.fitnessScoreHeader}>
-                <View>
-                  <Text style={styles.fitnessScoreLabel}>DIET CONSISTENCY · 14 DAYS</Text>
-                  <Text style={styles.fitnessScoreSubtext}>
-                    {dietScore.mealsChecked} / {dietScore.mealsExpected} meals logged
-                  </Text>
-                </View>
-                <View style={styles.fitnessScoreCircle}>
-                  <AnimatedNumber value={dietScore.total} style={styles.fitnessScoreValue} />
-                </View>
-              </View>
-              <Text style={styles.fitnessScoreRating}>
-                {dietScore.total >= 80 ? 'Dialed In'
-                  : dietScore.total >= 60 ? 'On Track'
-                  : dietScore.total >= 40 ? 'Building'
-                  : dietScore.total >= 20 ? 'Starting'
-                  : 'Log a Meal'}
-              </Text>
-              <View style={styles.fitnessBreakdown}>
-                {([
-                  { label: 'Adherence',   value: dietScore.adherence, max: 60, detail: `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals` },
-                  { label: 'Active Days', value: dietScore.streak,    max: 25, detail: `${dietScore.daysTracked}/14 days` },
-                  { label: 'Evenness',    value: dietScore.spread,    max: 15, detail: dietScore.spread >= 10 ? 'Consistent' : dietScore.spread >= 5 ? 'Clustered' : 'Spotty' },
-                ] as const).map(item => (
-                  <View key={item.label} style={styles.fitnessBarRow}>
-                    <View style={styles.fitnessBarLabel}>
-                      <Text style={styles.fitnessBarLabelText}>{item.label}</Text>
-                      <Text style={styles.fitnessBarDetail}>{item.detail}</Text>
-                    </View>
-                    <View style={styles.fitnessBarTrack}>
-                      <View style={[styles.fitnessBarFill, { width: `${Math.round((item.value / item.max) * 100)}%` as any }]} />
-                    </View>
-                    <Text style={styles.fitnessBarScore}>{item.value}/{item.max}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          )}
-
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
             <View style={styles.insightsCard}>
               <Text style={styles.insightsTitle}>Coach Insights</Text>
@@ -955,12 +764,26 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {history.length} workout{history.length !== 1 ? 's' : ''}
                   {history.length > 30 ? ' · most recent 30' : ''}
                 </Text>
-                <TouchableOpacity
-                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.primary + '15' }}
-                  onPress={() => setShowLogActivity(true)}>
-                  <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Log Activity</Text>
-                </TouchableOpacity>
+                <View style={{ flexDirection: 'row', gap: 6 }}>
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border }}
+                    onPress={async () => {
+                      try {
+                        const { exportWorkoutHistory } = await import('../utils/dataExport');
+                        const uname = await AsyncStorage.getItem('user_username').catch(() => null);
+                        await exportWorkoutHistory(uname || undefined);
+                      } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
+                    }}>
+                    <Ionicons name="share-outline" size={14} color={tc.textSecondary} />
+                    <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>Share</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.primary + '15' }}
+                    onPress={() => setShowLogActivity(true)}>
+                    <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Log Activity</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
               {history.slice(0, 30).map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
@@ -1287,63 +1110,68 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Combined Health Score */}
+          {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
-            const fitnessScore = healthScore?.fitnessScore ?? null;
-            const nutScore = nutritionScore?.score ?? null;
-            // Combine available scores with weighted average
-            const scores: Array<{ label: string; value: number; weight: number; color: string }> = [];
-            if (fitnessScore != null) scores.push({ label: 'Fitness', value: fitnessScore, weight: 0.5, color: tc.primary });
-            if (nutScore != null) scores.push({ label: 'Nutrition', value: nutScore, weight: 0.5, color: '#22C55E' });
-            const totalWeight = scores.reduce((s, x) => s + x.weight, 0);
-            const combined = totalWeight > 0 ? Math.round(scores.reduce((s, x) => s + x.value * (x.weight / totalWeight), 0)) : null;
+            const completedWorkouts = history.filter(s => s.completed);
+            const allDates = new Set(completedWorkouts.map(s => s.date?.slice(0, 10)).filter(Boolean));
+            const daysOfData = allDates.size;
+            const DAYS_REQUIRED = 14;
 
-            return combined != null ? (
+            if (daysOfData < DAYS_REQUIRED) {
+              return (
+                <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 20, marginBottom: 14, borderWidth: 1, borderColor: tc.border, alignItems: 'center' }}>
+                  <Ionicons name="heart-circle-outline" size={32} color={tc.textMuted} />
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Health Score</Text>
+                  <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginTop: 4, lineHeight: 18 }}>
+                    {DAYS_REQUIRED - daysOfData} more day{DAYS_REQUIRED - daysOfData !== 1 ? 's' : ''} of logging to unlock your score
+                  </Text>
+                  <View style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: tc.border, marginTop: 12 }}>
+                    <View style={{ width: `${Math.min(100, (daysOfData / DAYS_REQUIRED) * 100)}%` as any, height: 4, borderRadius: 2, backgroundColor: tc.primary }} />
+                  </View>
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>{daysOfData} / {DAYS_REQUIRED} days</Text>
+                </View>
+              );
+            }
+
+            // Compute backward-looking scores
+            const targetPerWeek = userProfile.daysPerWeek || 4;
+            const expectedWorkouts = Math.round(targetPerWeek * (daysOfData / 7));
+            const workoutAdherence = expectedWorkouts > 0 ? Math.min(1, completedWorkouts.length / expectedWorkouts) : 0;
+            const activityScore = Math.round(workoutAdherence * 100);
+
+            // Nutrition: use diet consistency score as proxy for backward-looking nutrition
+            const nutScore = dietScore ? dietScore.total : 50;
+            const combined = Math.round(activityScore * 0.5 + nutScore * 0.5);
+            const scoreColor = combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444';
+            const rating = combined >= 80 ? 'Excellent' : combined >= 65 ? 'Good' : combined >= 45 ? 'Fair' : 'Needs work';
+
+            return (
               <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                   <Ionicons name="heart-circle-outline" size={22} color={tc.primary} />
                   <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Health Score</Text>
-                  <Text style={{ fontSize: 28, fontWeight: '900', color: combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444' }}>{combined}</Text>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor }}>{combined}</Text>
+                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{rating} · {daysOfData}d data</Text>
+                  </View>
                 </View>
-                {/* Sub-scores */}
-                {scores.map(s => (
-                  <View key={s.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{s.label}</Text>
-                    <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                      <View style={{ width: `${Math.min(100, s.value)}%` as any, height: 6, borderRadius: 3, backgroundColor: s.color }} />
+                {[
+                  { label: 'Activity', value: activityScore, color: tc.primary, detail: `${completedWorkouts.length}/${expectedWorkouts} workouts` },
+                  { label: 'Nutrition', value: nutScore, color: '#22C55E', detail: dietScore ? `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals logged` : '' },
+                ].map(s => (
+                  <View key={s.label} style={{ marginBottom: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{s.label}</Text>
+                      <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                        <View style={{ width: `${Math.min(100, s.value)}%` as any, height: 6, borderRadius: 3, backgroundColor: s.color }} />
+                      </View>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: s.color, width: 28, textAlign: 'right' }}>{s.value}</Text>
                     </View>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: s.color, width: 28, textAlign: 'right' }}>{s.value}</Text>
+                    {s.detail ? <Text style={{ fontSize: 10, color: tc.textMuted, marginLeft: 78, marginTop: 2 }}>{s.detail}</Text> : null}
                   </View>
                 ))}
-                {/* Nutrition tags */}
-                {nutritionScore && nutritionScore.tags.length > 0 && (
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
-                    {nutritionScore.tags.slice(0, 5).map(tag => (
-                      <View key={tag} style={{ backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: tc.border }}>
-                        <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textSecondary }}>{tag}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-                {/* Wins + Improvements */}
-                {nutritionScore && (nutritionScore.wins.length > 0 || nutritionScore.improvements.length > 0) && (
-                  <View style={{ marginTop: 10, gap: 4 }}>
-                    {nutritionScore.wins.map(w => (
-                      <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
-                        <Text style={{ fontSize: 11, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
-                      </View>
-                    ))}
-                    {nutritionScore.improvements.map(imp => (
-                      <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <Ionicons name="arrow-up-circle" size={14} color="#F59E0B" />
-                        <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
               </View>
-            ) : null;
+            );
           })()}
 
           {/* Muscle Recovery */}

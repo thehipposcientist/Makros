@@ -304,6 +304,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const mealRoutine = profile.mealRoutine ?? '';
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
   const [showAddInjury, setShowAddInjury] = useState(false);
+  const [equipmentExpanded, setEquipmentExpanded] = useState(false);
+  const [foodsExpanded, setFoodsExpanded] = useState(false);
   const [injuryDesc, setInjuryDesc]   = useState('');
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
@@ -461,7 +463,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // and retry. This catches the test-user case where signup happened on
   // top of a stale local profile and onboarding sync was never triggered.
   useEffect(() => {
-    if (mode === 'mealplan' && mealplanTab === 'macros' && authToken && !calorieRanges && !calorieRangesLoading) {
+    if (mode === 'mealplan' && (mealplanTab === 'macros' || mealplanTab === 'foods') && authToken && !calorieRanges && !calorieRangesLoading) {
       setCalorieRangesLoading(true);
       const fetchOnce = () => getCalorieRanges(authToken);
       const trySync = async () => {
@@ -1349,71 +1351,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           );
         })()}
 
-        {/* ── Injuries & Limitations ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Injuries & Limitations</Text>
-          <Text style={styles.sectionHint}>
-            Your trainer tracks these and adjusts your plan. Update status as you recover.
-          </Text>
-          {injuryEntries.length === 0 ? (
-            <View style={[styles.injuryEmptyCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
-              <Text style={[styles.injuryEmptyText, { color: tc.textMuted }]}>No injuries logged — great!</Text>
-            </View>
-          ) : (
-            <View style={styles.injuryList}>
-              {injuryEntries.map((entry, idx) => {
-                const statusColors: Record<InjuryStatus, string> = {
-                  active:     '#FF5555',
-                  recovering: '#FFB300',
-                  resolved:   '#00C488',
-                };
-                const statusLabels: Record<InjuryStatus, string> = {
-                  active:     '🔴 Active',
-                  recovering: '🟡 Recovering',
-                  resolved:   'Resolved',
-                };
-                return (
-                  <View key={entry.id} style={[styles.injuryCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
-                    <View style={styles.injuryCardTop}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.injuryDesc, { color: tc.textPrimary }]}>{entry.description}</Text>
-                        <Text style={[styles.injuryBodyPart, { color: tc.textMuted }]}>{entry.bodyPart}</Text>
-                      </View>
-                      <TouchableOpacity
-                        onPress={() => setInjuryEntries(prev => prev.filter((_, i) => i !== idx))}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                        <Text style={[{ color: tc.error, fontSize: 13, fontWeight: '700' }]}>Remove</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.statusRow}>
-                      {(['active', 'recovering', 'resolved'] as InjuryStatus[]).map(s => (
-                        <TouchableOpacity
-                          key={s}
-                          style={[
-                            styles.statusBtn,
-                            { borderColor: entry.status === s ? statusColors[s] : tc.border },
-                            entry.status === s && { backgroundColor: statusColors[s] + '22' },
-                          ]}
-                          onPress={() => setInjuryEntries(prev =>
-                            prev.map((e, i) => i === idx ? { ...e, status: s } : e)
-                          )}>
-                          <Text style={[styles.statusBtnText, { color: entry.status === s ? statusColors[s] : tc.textMuted }]}>
-                            {statusLabels[s]}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </View>
-                );
-              })}
-            </View>
-          )}
-          <TouchableOpacity
-            style={[styles.addInjuryBtn, { borderColor: tc.border }]}
-            onPress={() => { setInjuryDesc(''); setInjuryBodyPart(''); setShowAddInjury(true); }}>
-            <Text style={[styles.addInjuryBtnText, { color: tc.primary }]}>+ Add Injury / Limitation</Text>
-          </TouchableOpacity>
-        </View>
         </>
         )}
 
@@ -1434,23 +1371,54 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   autoFocus
                 />
                 <Text style={[styles.modalFieldLabel, { color: tc.textSecondary, marginTop: 12 }]}>Body Part</Text>
-                <TextInput
-                  style={[styles.modalInput, { color: tc.textPrimary, borderColor: tc.border, backgroundColor: tc.background }]}
-                  placeholder="e.g. Lower back, knee, shoulder"
-                  placeholderTextColor={tc.textMuted}
-                  value={injuryBodyPart}
-                  onChangeText={setInjuryBodyPart}
-                />
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                  {[
+                    { key: 'Shoulder', muscles: ['shoulders', 'chest'] },
+                    { key: 'Rotator Cuff', muscles: ['shoulders'] },
+                    { key: 'Lower Back', muscles: ['back', 'core', 'hamstrings'] },
+                    { key: 'Knee', muscles: ['quads', 'hamstrings'] },
+                    { key: 'Hip', muscles: ['glutes', 'hamstrings'] },
+                    { key: 'Ankle', muscles: ['calves'] },
+                    { key: 'Elbow', muscles: ['biceps', 'triceps'] },
+                    { key: 'Wrist', muscles: ['shoulders'] },
+                    { key: 'Neck', muscles: ['shoulders', 'core'] },
+                    { key: 'Chest', muscles: ['chest', 'triceps'] },
+                  ].map(bp => (
+                    <TouchableOpacity
+                      key={bp.key}
+                      style={{
+                        paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: injuryBodyPart === bp.key ? tc.primary : tc.border,
+                        backgroundColor: injuryBodyPart === bp.key ? tc.primary + '18' : tc.background,
+                      }}
+                      onPress={() => setInjuryBodyPart(bp.key)}>
+                      <Text style={{ fontSize: 13, fontWeight: injuryBodyPart === bp.key ? '700' : '500', color: injuryBodyPart === bp.key ? tc.primary : tc.textPrimary }}>
+                        {bp.key}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
                 <TouchableOpacity
-                  style={[styles.modalConfirmBtn, { backgroundColor: tc.primary, marginTop: 20 }]}
+                  style={[styles.modalConfirmBtn, { backgroundColor: tc.primary, marginTop: 20, opacity: !injuryDesc.trim() || !injuryBodyPart ? 0.5 : 1 }]}
+                  disabled={!injuryDesc.trim() || !injuryBodyPart}
                   onPress={() => {
                     const desc = injuryDesc.trim();
-                    const part = injuryBodyPart.trim();
+                    const part = injuryBodyPart;
                     if (!desc) { Alert.alert('Required', 'Please enter a description.'); return; }
+                    if (!part) { Alert.alert('Required', 'Please select a body part.'); return; }
+                    const muscleMap: Record<string, string[]> = {
+                      'Shoulder': ['shoulders', 'chest'], 'Rotator Cuff': ['shoulders'],
+                      'Lower Back': ['back', 'core', 'hamstrings'], 'Knee': ['quads', 'hamstrings'],
+                      'Hip': ['glutes', 'hamstrings'], 'Ankle': ['calves'],
+                      'Elbow': ['biceps', 'triceps'], 'Wrist': ['shoulders'],
+                      'Neck': ['shoulders', 'core'], 'Chest': ['chest', 'triceps'],
+                    };
                     setInjuryEntries(prev => [...prev, {
                       id: Date.now().toString(),
                       description: desc,
-                      bodyPart: part || 'Unspecified',
+                      bodyPart: part,
+                      muscleGroups: muscleMap[part] ?? [],
                       reportedAt: new Date().toISOString(),
                       status: 'active',
                     }]);
@@ -1584,17 +1552,26 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             })()}
           </View>
 
-          <View style={styles.sectionTopRow}>
-            <Text style={styles.sectionLabel}>
-              Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
-            </Text>
-            <TouchableOpacity
-              style={styles.sectionAddBtn}
-              onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
-              <Text style={styles.sectionAddBtnText}>+ Add</Text>
-            </TouchableOpacity>
-          </View>
-          {meta.loading ? <ActivityIndicator color={tc.primary} /> : (
+          <TouchableOpacity
+            style={[styles.sectionTopRow, { backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: tc.border }]}
+            onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setEquipmentExpanded(p => !p); }}
+            activeOpacity={0.7}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+              <Ionicons name="barbell-outline" size={16} color={tc.textSecondary} style={{ marginRight: 8 }} />
+              <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>
+                Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <TouchableOpacity
+                style={styles.sectionAddBtn}
+                onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
+                <Text style={styles.sectionAddBtnText}>+ Add</Text>
+              </TouchableOpacity>
+              <Ionicons name={equipmentExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+            </View>
+          </TouchableOpacity>
+          {equipmentExpanded && (meta.loading ? <ActivityIndicator color={tc.primary} /> : (
             <>
               {meta.equipmentCategories.map(category => (
                 <View key={category.label} style={styles.chipGroup}>
@@ -1633,7 +1610,80 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 </View>
               )}
             </>
+          ))}
+
+          {/* ── Injuries & Limitations ── */}
+          <Text style={styles.sectionLabel}>Injuries & Limitations</Text>
+          <Text style={styles.sectionHint}>
+            Your trainer tracks these and adjusts your plan. Update status as you recover.
+          </Text>
+          {injuryEntries.length === 0 ? (
+            <View style={[styles.injuryEmptyCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+              <Text style={[styles.injuryEmptyText, { color: tc.textMuted }]}>No injuries logged — great!</Text>
+            </View>
+          ) : (
+            <View style={styles.injuryList}>
+              {injuryEntries.map((entry, idx) => {
+                const statusColors: Record<InjuryStatus, string> = {
+                  active:     '#FF5555',
+                  recovering: '#FFB300',
+                  resolved:   '#00C488',
+                };
+                const statusLabels: Record<InjuryStatus, string> = {
+                  active:     'Active',
+                  recovering: 'Recovering',
+                  resolved:   'Resolved',
+                };
+                return (
+                  <View key={entry.id} style={[styles.injuryCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                    <View style={styles.injuryCardTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.injuryDesc, { color: tc.textPrimary }]}>{entry.description}</Text>
+                        <Text style={[styles.injuryBodyPart, { color: tc.textMuted }]}>
+                          {entry.bodyPart}
+                          {entry.severity ? ` · ${entry.severity}` : ''}
+                          {entry.estimatedRecoveryDate ? ` · est. ${entry.estimatedRecoveryDate}` : ''}
+                        </Text>
+                        {entry.muscleGroups?.length ? (
+                          <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
+                            Affects: {entry.muscleGroups.join(', ')}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => setInjuryEntries(prev => prev.filter((_, i) => i !== idx))}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Ionicons name="close-circle" size={20} color={tc.error ?? '#EF4444'} />
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.statusRow}>
+                      {(['active', 'recovering', 'resolved'] as InjuryStatus[]).map(s => (
+                        <TouchableOpacity
+                          key={s}
+                          style={[
+                            styles.statusBtn,
+                            { borderColor: entry.status === s ? statusColors[s] : tc.border },
+                            entry.status === s && { backgroundColor: statusColors[s] + '22' },
+                          ]}
+                          onPress={() => setInjuryEntries(prev =>
+                            prev.map((e, i) => i === idx ? { ...e, status: s, statusUpdatedAt: new Date().toISOString() } : e)
+                          )}>
+                          <Text style={[styles.statusBtnText, { color: entry.status === s ? statusColors[s] : tc.textMuted }]}>
+                            {statusLabels[s]}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
           )}
+          <TouchableOpacity
+            style={[styles.addInjuryBtn, { borderColor: tc.border }]}
+            onPress={() => { setInjuryDesc(''); setInjuryBodyPart(''); setShowAddInjury(true); }}>
+            <Text style={[styles.addInjuryBtnText, { color: tc.primary }]}>+ Add Injury / Limitation</Text>
+          </TouchableOpacity>
         </View>
         )}
 
@@ -2134,11 +2184,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
 
           <View style={{ marginBottom: 8 }}>
-            <View style={styles.sectionTopRow}>
-              <Text style={styles.sectionLabel}>
+            <TouchableOpacity
+              style={[styles.sectionTopRow, { backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: tc.border }]}
+              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setFoodsExpanded(p => !p); }}
+              activeOpacity={0.7}>
+              <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>
                 Foods in Kitchen{(() => { const count = foods.filter(f => !f.startsWith('__supp__')).length; return count > 0 ? `  ·  ${count} selected` : ''; })()}
               </Text>
-            </View>
+              <Ionicons name={foodsExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+            </TouchableOpacity>
+            <View style={{ display: foodsExpanded ? 'flex' : 'none', marginTop: 8 }}>
             <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
               <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('camera')} disabled={scanFoodsLoading}>
                 <Text style={styles.sectionAddBtnText}><Ionicons name="camera-outline" size={14} /> Camera</Text>
@@ -2172,7 +2227,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 </TouchableOpacity>
               </View>
             )}
-          </View>
           {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
             <>
               <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
@@ -2319,6 +2373,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   exact meal the user is looking at. No duplicate UI. */}
             </>
           )}
+          </View>
+          </View>
         </View>
         )}
 
@@ -2466,7 +2522,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </View>
         )}
 
-        {mealplanTab === 'macros' && (
+        {(mealplanTab === 'macros' || mealplanTab === 'foods') && (
         <>
         {/* Reference card: cut / maintain / bulk calories at a glance.
             Informational only — doesn't change the user's actual goal.

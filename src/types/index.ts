@@ -150,8 +150,13 @@ export interface InjuryEntry {
   id: string;
   description: string;           // e.g. "Lower back pain when deadlifting"
   bodyPart: string;              // e.g. "Lower back"
+  muscleGroups?: string[];       // mapped muscle groups: ["back", "core", "hamstrings"]
+  severity?: 'mild' | 'moderate' | 'severe';
   reportedAt: string;            // ISO date string
+  estimatedRecoveryDays?: number; // AI-estimated recovery time
+  estimatedRecoveryDate?: string; // ISO date — reportedAt + estimatedRecoveryDays
   status: InjuryStatus;
+  statusUpdatedAt?: string;      // ISO date — last status change
   notes?: string;                // optional follow-up notes
 }
 
@@ -210,6 +215,7 @@ export interface UserProfile {
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
+  dislikedExercises?: string[];  // exercise names excluded from plan generation
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────

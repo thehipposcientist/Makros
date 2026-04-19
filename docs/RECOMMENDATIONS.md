@@ -57,8 +57,8 @@ Only auth endpoints have `response_model`. All others return raw dicts — no ou
 ### 14. Replace Print Statements with Logger
 `workouts.py` has ~8 `print(f"[generate-day] ...")` calls with internal state details. Use `logging.debug()`.
 
-### 15. Register All Test Modules
-`run_all.py` only includes 7 of 10 test files. `test_workout_goals`, `test_focus_differentiation`, `test_workout_archetypes` (60 tests) are silently skipped by `make test`.
+### ~~15. Register All Test Modules~~ DONE
+All 10 test modules now registered in `run_all.py`: calorie_calculator, meal_assembler, workout_planner, workout_goals, workout_archetypes, focus_differentiation, set_programming, plan_review, in_workout_review, fitness_score.
 
 ---
 
@@ -104,7 +104,7 @@ Client-side scoring (`nutritionScore.ts`) only gets micronutrients from `MealIte
 - USDA foods may have them but they're not persisted to the plan items
 - Food quality classification is keyword-based on client vs category-based on backend
 
-The score always shows "Micronutrient coverage: low" and the quality sub-score is depressed because it can't count whole-food % without category data. See fix plan in the test document.
+The score always shows "Micronutrient coverage: low" and the quality sub-score is depressed because it can't count whole-food % without category data. `food_quality` field is now persisted on `MealItem` for backend-generated plans, which partially addresses this.
 
 ### 27. Iron RDA is Sex-Blind
 `nutrition_score.py:30` — uses 18mg universally (female RDA). Male RDA is 8mg. A man at 10mg iron gets flagged as deficient when he's above his actual RDA.
@@ -161,6 +161,36 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 
 ---
 
+## Recently Completed
+
+| Change | Status |
+|--------|--------|
+| All 10 test modules registered in `run_all.py` | Done |
+| Recovery/mobility days have negative fatigue (active recovery) | Done |
+| Fatigue floor clamped at 0.0 | Done |
+| Recovery day allocation separate from conditioning in weekly recipe | Done |
+| Injury system: 3-layer (block, recover, fatigue) with expanded body parts | Done |
+| Focus auto-correction on workout completion | Done |
+| Exercise dislike feature (thumbs down, excluded from plans) | Done |
+| `food_quality` field persisted on MealItem | Done |
+| Image MIME fix (`_fix_image_mime` for HEIC) | Done |
+| Missing import fix in `history.py` | Done |
+| Workout sub-tabs: Plan / Library / Settings | Done |
+| Meals sub-tabs: Plan / Foods / Supps | Done |
+| Per-day nutrition scores on NutritionCard headers | Done |
+| Food quality dots on meal items | Done |
+| Resume workout themed modal (only if sets logged) | Done |
+| Rest timer AI badge prominent (16px bold) | Done |
+| Stretches/bodyweight hide weight column | Done |
+| AppState listener for timer catch-up | Done |
+| Barcode scanner ref-based lock | Done |
+| Meal edits auto-persist to AsyncStorage | Done |
+| Spin Class cardio subtype added | Done |
+| Pilates label fixed | Done |
+| History export moved to Progress > History | Done |
+
+---
+
 ## Technical Debt Summary
 
 | Issue | Severity | Effort |
@@ -181,7 +211,6 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Print -> logger | Medium | 30 min |
 | Accessibility labels | Medium | 4 hrs |
 | Response models on endpoints | Medium | 3 hrs |
-| Test module registration | Medium | 5 min |
 | USDA 100g fallback | Medium | 30 min |
 
 ---
@@ -201,9 +230,13 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Timed exercise support | Done |
 | Exercise images from wger.de | Done (32/201) |
 | Exercise search (wger + AI) | Done |
+| Exercise dislike (thumbs down) | Done |
 | 12-muscle-group fatigue system | Done (needs extended CNS decay) |
-| Recovery readiness + muscle bars | Done |
+| Negative fatigue for recovery/mobility | Done |
+| Recovery readiness + muscle bars | Done (expandable badge) |
 | Progressive overload display | Done (needs deload) |
+| Set programming (warmup/heavy/backoff) | Done |
+| In-workout AI set review | Done (deterministic first, AI when suspicious) |
 | Manual activity logging | Done |
 | Weight tracking (unified) | Done |
 | Food search (USDA + AI) | Done |
@@ -211,16 +244,19 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Meal planning (AI) | Done |
 | Food photo scanning | Done |
 | Nutrition scoring (client-side) | Done (micronutrient pipeline needs fix) |
-| Combined health score | Done |
+| Combined health score | Done (activity 50% + nutrition 50%) |
+| Food quality classification | Done (keyword client, category backend) |
 | AI coach (unified) | Done |
 | Body scan (AI) | Done |
+| Injury tracking (structured) | Done (3-layer system) |
 | Progress history + PRs | Done |
-| Data export (CSV) | Done |
+| Data export (CSV) | Done (moved to Progress > History) |
 | 27 themes | Done |
 | Weekly check-in | Done |
 | Push notifications | Done |
 | Splash screen | Done |
-| Automated test suite | Partial — 181 unit tests, no integration/frontend |
+| Fitness score (4-pillar) | Done |
+| Automated test suite | 10 modules registered, no integration/frontend |
 | Error boundaries | Not built |
 | CI/CD | Not configured |
 | Apple Health write | Not wired |

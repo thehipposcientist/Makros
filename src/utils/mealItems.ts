@@ -259,8 +259,25 @@ export function syncLegacyFieldsFromItems(meal: MealSuggestion): MealSuggestion 
 /** "2 piece" → "2", "3 oz" → "3 oz", "1 serving" → "1 serving". The piece
  *  unit collapses because it's implicit — "2 eggs" not "2 piece eggs". */
 export function formatItemAmount(item: MealItem): string {
-  if (item.unit === 'piece') return `${formatQty(item.quantity)}`;
-  return `${formatQty(item.quantity)} ${item.unit}`;
+  const qty = formatQty(item.quantity);
+  if (item.unit === 'piece') return qty;
+
+  const label = `${qty} ${item.unit}`;
+
+  // For vague units, show gram/oz equivalent or calorie context
+  if (item.unit === 'serving' && item.calories > 0) {
+    // Estimate grams from calories using ~1.5 cal/g average for mixed food
+    const estGrams = Math.round(item.calories / 1.5);
+    if (estGrams >= 20 && estGrams <= 1000) {
+      return `${label} (~${estGrams}g)`;
+    }
+    return `${label} (${Math.round(item.calories)} cal)`;
+  }
+  if (item.unit === 'scoop' && item.calories > 0) {
+    return `${label} (${Math.round(item.calories)} cal)`;
+  }
+
+  return label;
 }
 
 function formatQty(n: number): string {

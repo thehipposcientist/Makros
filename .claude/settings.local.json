@@ -132,7 +132,10 @@
       "Bash(awk '/^_STRENGTH_EXERCISES = \\\\[/,/^\\\\]/' /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/seed_exercises_data.py)",
       "Bash(head -20 /Users/sawyerhannel/Documents/GitHub/Makros/backend/app/services/workout/*.py)",
       "Bash(find *)",
-      "Bash(node_modules/.bin/tsc --noEmit --pretty)"
+      "Bash(node_modules/.bin/tsc --noEmit --pretty)",
+      "Bash(sips -g pixelWidth -g pixelHeight assets/images/thallo-logo-black.png assets/images/thallo-logo-white.png)",
+      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")",
+      "Bash(/opt/homebrew/bin/npm install *)"
     ]
   }
 }

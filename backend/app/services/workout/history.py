@@ -257,6 +257,8 @@ def get_recent_completions_for_fatigue(
     Returns the last `days` worth of completions with all structured
     activity fields. Used by `compute_rolling_fatigue` in activity_impact.py.
     """
+    from sqlmodel import select
+    from app.models import WorkoutCompletion
     cutoff = date.today() - timedelta(days=days)
     rows = db_session.exec(
         select(WorkoutCompletion)

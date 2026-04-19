@@ -11,6 +11,22 @@ from app.models import (
 from app.auth import get_current_user
 
 
+def _infer_focus_from_muscles(top_muscles: list[str]) -> str | None:
+    """Infer a focus label from the top worked muscle groups."""
+    s = set(top_muscles[:4])
+    if s & {'quads', 'hamstrings', 'glutes', 'calves'}:
+        if not (s & {'chest', 'back', 'shoulders'}):
+            return 'Legs'
+        return 'Full Body'
+    if s & {'chest', 'triceps'} and not (s & {'back', 'biceps'}):
+        return 'Push'
+    if s & {'back', 'biceps'} and not (s & {'chest', 'triceps'}):
+        return 'Pull'
+    if s & {'chest', 'back', 'shoulders'}:
+        return 'Upper Body'
+    return None
+
+
 class CompletedSetPayload(BaseModel):
     """One logged set from the mobile active-workout screen. Reps and
     weight are the actual values the user put in — not planned."""
@@ -200,6 +216,7 @@ class GenerateDayRequest(BaseModel):
     priority_region: str = "balanced"
     focused_muscle: str | None = None
     injuries: list[str] = []
+    disliked_exercises: list[str] = []     # exercises to exclude from selection
     focus_override: str | None = None      # force a specific focus (e.g. "Legs")
 
 
@@ -256,6 +273,19 @@ def generate_single_day(
         completions = get_recent_completions_for_fatigue(current_user.id, db)
         if completions:
             fatigue_snapshot = compute_rolling_fatigue(completions)
+            # Apply injury-based fatigue boosts so readiness reflects injured muscles
+            from app.services.workout.planner import injury_muscle_fatigue_boost
+            injury_boosts = injury_muscle_fatigue_boost(tuple(body.injuries))
+            for muscle, boost in injury_boosts.items():
+                current = fatigue_snapshot.muscle_fatigue.get(muscle)
+                fatigue_snapshot.muscle_fatigue.add(muscle, boost)
+            if injury_boosts:
+                # Recompute readiness and focus readiness after applying boosts
+                from app.services.workout.activity_impact import derive_all_readiness
+                fatigue_snapshot.focus_readiness = derive_all_readiness(fatigue_snapshot.muscle_fatigue)
+                avg_fatigue = sum(fatigue_snapshot.muscle_fatigue.get(m) for m in ("chest", "back", "shoulders", "quads", "hamstrings", "glutes", "core")) / 7
+                fatigue_snapshot.readiness_score = round(max(0, (1 - avg_fatigue) * 100))
+                print(f"[generate-day] injury fatigue boost applied: {injury_boosts}")
             fatigue_readiness = fatigue_snapshot.readiness_score
             print(f"[generate-day] fatigue: readiness={fatigue_readiness} focus_readiness={fatigue_snapshot.focus_readiness}")
     except Exception as e:
@@ -272,6 +302,7 @@ def generate_single_day(
         focused_muscle=body.focused_muscle,
         priority_region=body.priority_region,
         injuries=tuple(body.injuries),
+        disliked_exercises=tuple(body.disliked_exercises),
         rng_seed=current_user.id + body.day_index,
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
@@ -319,17 +350,30 @@ def generate_single_day(
     # Find the recipe day that matches, so exercises are correct for that focus.
     if body.focus_override:
         override_lower = body.focus_override.lower().strip()
-        for alt_idx, alt_day in enumerate(days):
-            if alt_day.get("focus", "").lower().strip() == override_lower:
-                day = alt_day
-                idx = alt_idx
-                print(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
-                break
+
+        # Special focus types that need a generated day, not a recipe match
+        if override_lower in ("recovery", "active recovery"):
+            from app.services.workout.planner import generate_recovery_day
+            day = generate_recovery_day(body.session_minutes or 45)
+            print(f"[generate-day] focus override → generated Recovery day")
+        elif override_lower in ("mobility", "stretching"):
+            from app.services.workout.planner import generate_mobility_day
+            day = generate_mobility_day(body.session_minutes or 45)
+            print(f"[generate-day] focus override → generated Mobility day")
+        elif override_lower == "cardio":
+            from app.services.workout.planner import generate_cardio_day
+            day = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
+            print(f"[generate-day] focus override → generated Cardio day")
         else:
-            # No exact match — override the focus label on the current day.
-            # Exercises won't perfectly match but it's better than ignoring the request.
-            day = {**day, "focus": body.focus_override}
-            print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
+            for alt_idx, alt_day in enumerate(days):
+                if alt_day.get("focus", "").lower().strip() == override_lower:
+                    day = alt_day
+                    idx = alt_idx
+                    print(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
+                    break
+            else:
+                day = {**day, "focus": body.focus_override}
+                print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
 
     # Graduated fatigue response — 5 tiers from force-recovery to proceed
     if fatigue_snapshot and not body.focus_override:
@@ -427,14 +471,16 @@ def mark_workout_complete(
          give downstream systems (plan_review, progression engine,
          analytics) real per-set history instead of just a duration.
     """
-    # Upsert the lightweight completion row.
+    # Upsert by (user, date, focus). Multiple activities per day are allowed
+    # (e.g. legs workout in the morning + sauna recovery in the evening).
+    # Each gets its own completion row so fatigue accumulates correctly.
     existing = db.exec(
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
         .where(WorkoutCompletion.workout_date == body.workout_date)
+        .where(WorkoutCompletion.focus_label == body.focus_label)
     ).first()
     if existing:
-        existing.focus_label        = body.focus_label
         existing.duration_seconds   = body.duration_seconds
         existing.stimulus           = body.stimulus
         existing.activity_category  = body.activity_category or existing.activity_category
@@ -550,6 +596,7 @@ def mark_workout_complete(
             select(WorkoutCompletion)
             .where(WorkoutCompletion.user_id == current_user.id)
             .where(WorkoutCompletion.workout_date == body.workout_date)
+            .where(WorkoutCompletion.focus_label == body.focus_label)
         ).first()
         if completion_row:
             if body.exercises:
@@ -577,11 +624,32 @@ def mark_workout_complete(
                     duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
                 )
             completion_row.resolved_muscle_fatigue = resolved
+            # If exercises were provided, infer the correct focus from the
+            # primary muscles worked. The client may send a stale focus_label
+            # (e.g. "Recovery" from the plan day) even though the user did
+            # actual lifting exercises.
+            if body.exercises and resolved:
+                top_muscles = sorted(resolved.items(), key=lambda x: -x[1])
+                top = [m for m, v in top_muscles if m != 'systemic' and v > 0.1]
+                if top:
+                    inferred = _infer_focus_from_muscles(top)
+                    if inferred and inferred != completion_row.focus_label:
+                        print(f"[workouts/complete] focus corrected: {completion_row.focus_label!r} → {inferred!r} (from exercises)")
+                        completion_row.focus_label = inferred
             db.add(completion_row)
     except Exception as e:
         print(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
 
     db.commit()
+    print(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
+    # Verify the row exists
+    verify = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == body.workout_date)
+        .where(WorkoutCompletion.focus_label == body.focus_label)
+    ).first()
+    print(f"[workouts/complete] VERIFY: row={'FOUND' if verify else 'MISSING'} resolved_fatigue={bool(verify.resolved_muscle_fatigue) if verify else 'N/A'}")
     return {"ok": True, "structured_persisted": bool(session_rows_created)}
 
 
@@ -610,7 +678,9 @@ def get_fatigue_score(
     from app.services.workout.activity_impact import compute_rolling_fatigue
 
     completions = get_recent_completions_for_fatigue(current_user.id, db)
+    print(f"[fatigue] user={current_user.id} completions={len(completions)} dates={[c.get('workout_date') for c in completions]}")
     snapshot = compute_rolling_fatigue(completions)
+    print(f"[fatigue] readiness={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
     return {
         "readiness_score": snapshot.readiness_score,
         "readiness_label": snapshot.readiness_label,

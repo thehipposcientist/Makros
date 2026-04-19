@@ -275,6 +275,10 @@ def ask_trainer_question(
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
         "INJURY HANDLING: ask ONE clarifying question if needed, set injury_clarification_needed=true. "
         "Once you have info, set updated_injuries and update the workout plan to avoid the area. "
+        "For each injury, estimate: severity (mild/moderate/severe), affected muscleGroups from "
+        "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
+        "estimatedRecoveryDays (conservative estimate based on injury type and severity). "
+        "A mild strain might be 5-10 days, moderate 14-28, severe 42-90+. Be conservative. "
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
         "Return JSON only."
         + _capability_instructions
@@ -286,7 +290,9 @@ def ask_trainer_question(
         '  "logged_workouts": null,\n'
     )
     injury_schema = (
-        '  "updated_injuries": [{"id": "uuid", "description": "...", "bodyPart": "...", "status": "active|recovering|resolved", "notes": "..."}] or null,\n'
+        '  "updated_injuries": [{"id": "uuid", "description": "...", "bodyPart": "...", '
+        '"muscleGroups": ["back", "core"], "severity": "mild|moderate|severe", '
+        '"estimatedRecoveryDays": 14, "status": "active|recovering|resolved", "notes": "..."}] or null,\n'
         '  "injury_clarification_needed": true|false\n'
         if not is_nutritionist else
         '  "updated_injuries": null,\n'
