@@ -73,6 +73,7 @@ class PlannerInputs:
     experience: str = "intermediate"       # "beginner" | "intermediate" | "advanced"
     equipment_slugs: tuple[str, ...] = ()  # owned Equipment slugs
     preferred_split: str | None = None     # "auto" | "full_body" | "upper_lower" | "ppl" | "bro"
+    focused_muscle: str | None = None       # legacy; used by split selection & focus profiles
     priority_region: str = "balanced"      # "balanced" | "lower_body" | "upper_body"
     preferred_exercises: tuple[str, ...] = ()
     disliked_exercises: tuple[str, ...] = ()
