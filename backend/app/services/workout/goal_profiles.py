@@ -140,12 +140,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_UPPER_HEAVY,
             DayArchetype.LIFT_LOWER_HEAVY,
         ),
-        planner_mode="lifting",
+        planner_mode="strength",
         stable_lifts=True,
         notes=(
             "Compound Strength: heavy compounds dominate (squat/bench/deadlift/OHP). "
-            "Upper/Lower split only. 3-5 reps on primaries, 3+ min rest. "
-            "Fewer accessories than muscle gain. Heavy variants anchored."
+            "Upper/Lower split only. 3-5 reps on primaries, 4 min rest. "
+            "5 working sets on main lifts. Fewer accessories than muscle gain."
         ),
     ),
 

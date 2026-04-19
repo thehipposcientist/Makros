@@ -1092,7 +1092,34 @@ def generate_weekly_recipe(
     _modes_with_internal_recovery = {"fat_loss_mix", "lifting_plus_cardio"}
     _modes_skip_recovery = {"mobility", "recovery", "maintain"}
 
-    if mode == "lifting":
+    if mode == "strength":
+        # Compound Strength: always upper/lower, heavy variants dominate.
+        # Alternates heavy and lighter (hypertrophy) days for the same
+        # split so the user hits each major lift pattern heavy once per
+        # week with a lighter volume day as backup.
+        recovery_days = _derive_recovery_days(
+            days, profile.bucket,
+            getattr(profile.mix, "recovery", 0.0),
+            getattr(profile.mix, "mobility", 0.0),
+        )
+        lift_days = days - recovery_days
+        _A = DayArchetype
+        if lift_days <= 3:
+            # 3d: Heavy Upper, Heavy Lower, Full Body Strength
+            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH]
+        elif lift_days == 4:
+            # 4d: Heavy Upper, Heavy Lower, Volume Upper, Volume Lower
+            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
+        elif lift_days == 5:
+            # 5d: Heavy Upper, Heavy Lower, Full Body Strength, Volume Upper, Volume Lower
+            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
+        else:
+            # 6d: Heavy Upper, Heavy Lower, Full Body Strength, Volume Upper, Volume Lower, Full Body
+            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY, _A.LIFT_FULL_BODY]
+        recipe = _str_cycle[:lift_days]
+        for _ in range(recovery_days):
+            recipe.append(_pick_recovery_archetype(profile))
+    elif mode == "lifting":
         recovery_days = _derive_recovery_days(
             days, profile.bucket,
             getattr(profile.mix, "recovery", 0.0),
@@ -1143,7 +1170,7 @@ def generate_weekly_recipe(
     )
     # Fatigue-aware rotation: if user has real muscle fatigue data,
     # prefer starting the week with the freshest focus.
-    if muscle_fatigue and mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
+    if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
         recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
     # Rotation can reintroduce adjacent same-bucket duplicates.
     recipe = _repair_adjacent_duplicates(recipe)

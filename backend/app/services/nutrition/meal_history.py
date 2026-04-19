@@ -208,18 +208,19 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
             day_data["carbs_g"] += it.carbs_g
             day_data["fat_g"] += it.fat_g
 
-    num_days = max(len(daily), 1)
-    total_days_in_window = window
+    # Use the full window as the denominator so that days with no data
+    # count as zero, giving a true daily average over the period.
+    denom = max(window, 1)
 
     return {
         "window_days": window,
         "days_with_data": len(daily),
-        "avg_calories": round(sum(d["calories"] for d in daily.values()) / num_days, 1),
-        "avg_protein_g": round(sum(d["protein_g"] for d in daily.values()) / num_days, 1),
-        "avg_carbs_g": round(sum(d["carbs_g"] for d in daily.values()) / num_days, 1),
-        "avg_fat_g": round(sum(d["fat_g"] for d in daily.values()) / num_days, 1),
+        "avg_calories": round(sum(d["calories"] for d in daily.values()) / denom, 1),
+        "avg_protein_g": round(sum(d["protein_g"] for d in daily.values()) / denom, 1),
+        "avg_carbs_g": round(sum(d["carbs_g"] for d in daily.values()) / denom, 1),
+        "avg_fat_g": round(sum(d["fat_g"] for d in daily.values()) / denom, 1),
         "avg_meals_per_day": round(
-            sum(d["meal_count"] for d in daily.values()) / num_days, 1
+            sum(d["meal_count"] for d in daily.values()) / denom, 1
         ),
         "total_meals_logged": sum(d["meal_count"] for d in daily.values()),
     }

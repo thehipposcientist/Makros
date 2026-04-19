@@ -11,6 +11,8 @@ Usage:
 """
 from __future__ import annotations
 
+import re
+
 
 # Allergen category → food name keywords that indicate presence.
 # Keys are the canonical allergen names the client sends.
@@ -45,10 +47,10 @@ ALLERGEN_KEYWORDS: dict[str, list[str]] = {
 
 
 def _item_matches_allergen(item_name: str, keywords: list[str]) -> bool:
-    """Check if a food item name contains any allergen keyword."""
+    """Check if a food item name contains any allergen keyword (word-boundary match)."""
     name_lower = item_name.lower()
     for kw in keywords:
-        if kw in name_lower:
+        if re.search(r'\b' + re.escape(kw) + r'\b', name_lower):
             return True
     return False
 

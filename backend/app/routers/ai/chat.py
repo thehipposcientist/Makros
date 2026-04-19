@@ -185,9 +185,20 @@ def ask_trainer_question(
     if body.userContext:
         context_blob["recentActivityLog"] = body.userContext[:800]
 
-    # ── Topic-based context trimming ─────────────────────────────────────────
-    # When a topic is specified, drop irrelevant keys to reduce token count
+    # ── Auto-detect topic from question keywords for context trimming ────────
     topic = body.topic
+    if not topic or topic == 'general':
+        _ql = q.lower()
+        if any(k in _ql for k in ('swap', 'replace', 'change exercise', 'add exercise', 'remove exercise', 'modify workout', 'my workout')):
+            topic = 'change_plan'
+        elif any(k in _ql for k in ('meal', 'food', 'eat', 'breakfast', 'lunch', 'dinner', 'snack', 'sugar', 'carb', 'protein target', 'calorie')):
+            topic = 'change_meals'
+        elif any(k in _ql for k in ('hurt', 'pain', 'injury', 'sore', 'strain', 'ache', 'sharp')):
+            topic = 'report_injury'
+        elif any(k in _ql for k in ('goal', 'switch to', 'change to', 'fat loss', 'muscle gain', 'strength', 'recomp')):
+            topic = 'change_goal'
+        elif any(k in _ql for k in ('logged', 'did a workout', 'completed', 'i did', 'just finished')):
+            topic = 'log_activity'
     if topic:
         print(f"[trainer-question] topic={topic} — trimming context")
         if is_nutritionist:
@@ -456,39 +467,19 @@ def ask_trainer_question(
         user_message = {"role": "user", "content": user_text}
 
     # ── Topic-specific system prompt additions ─────────────────────────────
-    _topic_hints = {
-        "change_plan": {
-            "scope": "The user selected WORKOUT MODIFICATIONS. You may ONLY help with exercise swaps, workout plan changes, day modifications, and training adjustments.",
-            "redirect": "If they ask about nutrition, meals, injuries, or general questions, say: 'That's outside this topic. Please go back and select the right category — Modify Meals for nutrition, Report Injury for pain, or General Questions for tips.'"
-        },
-        "log_activity": {
-            "scope": "The user selected LOG ACTIVITY. You may ONLY help log completed workouts. Extract: date, focus, duration, exercises if mentioned.",
-            "redirect": "If they ask about anything else, say: 'I can only log workouts here. Go back and pick the right category for your question.'"
-        },
-        "report_injury": {
-            "scope": "The user selected REPORT INJURY. You may ONLY help assess and log injuries or pain. Ask about location, severity, triggers.",
-            "redirect": "If they ask about logging workouts, changing plans, or nutrition, say: 'This topic is for injuries only. Please go back and select the right category — like Swap Exercise or General Questions.'"
-        },
-        "change_meals": {
-            "scope": "The user selected MODIFY MEALS. You may ONLY help with meal swaps, food changes, and nutrition plan modifications.",
-            "redirect": "If they ask about workouts, injuries, or general questions, say: 'That's outside this topic. Go back and pick Swap Exercise for workouts, Report Injury for pain, or General Questions for tips.'"
-        },
-        "log_food": {
-            "scope": "The user selected LOG FOOD. You may ONLY help log food they ate. Extract food names, portions, and macros.",
-            "redirect": "If they ask about anything else, say: 'I can only log food here. Go back and pick the right category.'"
-        },
-        "change_goal": {
-            "scope": "The user selected CHANGE GOAL. You may ONLY help change their fitness goal and explain the implications.",
-            "redirect": "If they ask about specific exercises, meals, or injuries, say: 'Go back and select the right category for that.'"
-        },
-        "general": {
-            "scope": "The user selected GENERAL QUESTIONS. Provide informational answers only. Do NOT modify any plans, log any data, or create any injuries.",
-            "redirect": "If they want to make changes, say: 'I can only answer questions here. Go back and select the right category — Swap Exercise, Modify Meals, or Report Injury.'"
-        },
+    # Topic is used for backend context trimming only (not shown to user).
+    # The unified coach handles all requests in a single chat.
+    _topic_context_hints = {
+        "change_plan": "The user's question is about their workout plan.",
+        "log_activity": "The user wants to log a completed workout.",
+        "report_injury": "The user may be reporting pain or injury.",
+        "change_meals": "The user's question is about their meal plan.",
+        "log_food": "The user wants to log food they ate.",
+        "change_goal": "The user may want to change their fitness goal.",
+        "general": "General fitness or nutrition question.",
     }
-    if topic and topic in _topic_hints:
-        hint = _topic_hints[topic]
-        system_prompt += f"\n\nTOPIC ENFORCEMENT (STRICT):\n{hint['scope']}\n{hint['redirect']}"
+    if topic and topic in _topic_context_hints:
+        system_prompt += f"\n\nCONTEXT HINT: {_topic_context_hints[topic]}"
 
     # Debug: log what we're sending
     print(f"[trainer-question] mode={body.mode} topic={topic} question={repr(q[:120])}")

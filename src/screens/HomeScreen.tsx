@@ -1145,17 +1145,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [showTrainerModal, setShowTrainerModal] = useState(false);
   const [coachMode, setCoachMode] = useState<'trainer' | 'nutritionist'>('trainer');
-  const [chatTopic, setChatTopic] = useState<string | null>(null);
+  const [chatTopic, setChatTopic] = useState<string | null>('general');
   const [trainerInput, setTrainerInput] = useState('');
   const [trainerLoading, setTrainerLoading] = useState(false);
   const trainerAbortRef = useRef<AbortController | null>(null);
   const [isChatPlanUpdating, setIsChatPlanUpdating] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<PendingPlanUpdate | null>(null);
+  const [pendingInjuries, setPendingInjuries] = useState<InjuryEntry[] | null>(null);
   const chatProgressAnim = useRef(new Animated.Value(0)).current;
   const [attachedImage, setAttachedImage] = useState<{ base64: string; uri: string } | null>(null);
   const [workoutChat, setWorkoutChat] = useState<TrainerChatMessage[]>([]);
-  const nutritionChat = workoutChat;
-  const setNutritionChat = setWorkoutChat;
   const [workoutUpdateSummary, setWorkoutUpdateSummary] = useState<string | null>(null);
   const [nutritionUpdateSummary, setNutritionUpdateSummary] = useState<string | null>(null);
 
@@ -2044,9 +2043,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
 
     const isTrainer = coachMode === 'trainer';
-    const activeChat = isTrainer ? workoutChat : nutritionChat;
-    const setActiveChat = isTrainer ? setWorkoutChat : setNutritionChat;
-    const setUpdateSummary = isTrainer ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
+    const activeChat = isTrainer ? workoutChat : workoutChat;
+    const setActiveChat = setWorkoutChat;  // unified single chat
+    const setUpdateSummary = setWorkoutUpdateSummary;  // unified
 
     const userMsg: TrainerChatMessage = { role: 'user', content: q + (attachedImage ? ' [photo attached]' : '') };
     const nextChat = [...activeChat, userMsg];
@@ -2186,7 +2185,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       const resp = await askTrainerQuestion(authToken, {
         question: q,
-        mode: coachMode,
+        mode: 'trainer',  // unified coach — handles both workout and nutrition
         topic: chatTopic,
         profile: slimProfile,
         workoutPlan: workoutPlan ?? undefined,
@@ -2303,50 +2302,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         console.log('[handleAskTrainer] pending update stored for approval:', summary);
       }
 
-      // Handle injury updates immediately (no approval needed)
+      // Handle injury updates — store as pending, show Apply button in chat
       if (coachMode === 'trainer' && resp.updated_injuries && Array.isArray(resp.updated_injuries) && resp.updated_injuries.length > 0) {
-        try {
-          const profileRaw = await AsyncStorage.getItem('userProfile');
-          if (profileRaw) {
-            const storedProfile: UserProfile = JSON.parse(profileRaw);
-            const existingEntries: InjuryEntry[] = storedProfile.injuryEntries ?? [];
-            const incoming: InjuryEntry[] = resp.updated_injuries.map((inj: any) => {
-              const now = new Date().toISOString();
-              const recoveryDays = inj.estimatedRecoveryDays ? Number(inj.estimatedRecoveryDays) : undefined;
-              const recoveryDate = recoveryDays
-                ? new Date(Date.now() + recoveryDays * 86400000).toISOString().slice(0, 10)
-                : undefined;
-              return {
-                id: inj.id || Date.now().toString() + Math.random().toString(36).slice(2),
-                description: inj.description ?? '',
-                bodyPart: inj.bodyPart ?? '',
-                muscleGroups: Array.isArray(inj.muscleGroups) ? inj.muscleGroups : undefined,
-                severity: ['mild', 'moderate', 'severe'].includes(inj.severity) ? inj.severity : undefined,
-                reportedAt: now,
-                estimatedRecoveryDays: recoveryDays,
-                estimatedRecoveryDate: recoveryDate,
-                status: inj.status ?? 'active',
-                statusUpdatedAt: now,
-                notes: inj.notes,
-              };
-            });
-            const merged = [...existingEntries];
-            for (const entry of incoming) {
-              const idx = merged.findIndex(e => e.id === entry.id);
-              if (idx >= 0) merged[idx] = entry;
-              else merged.push(entry);
-            }
-            const updatedProfile = { ...storedProfile, injuryEntries: merged };
-            await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
-            console.log('[handleAskTrainer] updated injuryEntries saved:', merged.length, 'entries');
-            // Trigger plan regeneration — the deterministic planner will
-            // block dangerous patterns and adjust readiness for the injury.
-            onProfileUpdate?.(updatedProfile, false);
-            console.log('[handleAskTrainer] plan regeneration triggered for injury');
-          }
-        } catch (injErr) {
-          console.error('[handleAskTrainer] failed to save injury update:', injErr);
-        }
+        const incoming: InjuryEntry[] = resp.updated_injuries.map((inj: any) => {
+          const now = new Date().toISOString();
+          const recoveryDays = inj.estimatedRecoveryDays ? Number(inj.estimatedRecoveryDays) : undefined;
+          const recoveryDate = recoveryDays
+            ? new Date(Date.now() + recoveryDays * 86400000).toISOString().slice(0, 10)
+            : undefined;
+          return {
+            id: inj.id || Date.now().toString() + Math.random().toString(36).slice(2),
+            description: inj.description ?? '',
+            bodyPart: inj.bodyPart ?? '',
+            muscleGroups: Array.isArray(inj.muscleGroups) ? inj.muscleGroups : undefined,
+            severity: ['mild', 'moderate', 'severe'].includes(inj.severity) ? inj.severity : undefined,
+            reportedAt: now,
+            estimatedRecoveryDays: recoveryDays,
+            estimatedRecoveryDate: recoveryDate,
+            status: inj.status ?? 'active',
+            statusUpdatedAt: now,
+            notes: inj.notes,
+          };
+        });
+        setPendingInjuries(incoming);
+        console.log('[handleAskTrainer] injury pending approval:', incoming.length, 'entries');
       }
 
       // Handle workout logging immediately (no approval needed)
@@ -2399,13 +2378,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setTrainerLoading(false);
     }
-  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, nutritionChat, coachMode, chatTopic, persistDayState]);
+  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, workoutChat, coachMode, chatTopic, persistDayState]);
 
   // ── Approval flow for plan changes ───────────────────────────────────────
   const applyPendingUpdate = useCallback(async () => {
     if (!pendingUpdate) return;
     const { resp, question: q, coachMode: mode, profileChanges } = pendingUpdate;
-    const setActiveChat = mode === 'trainer' ? setWorkoutChat : setNutritionChat;
+    const setActiveChat = mode === 'trainer' ? setWorkoutChat : setWorkoutChat;
     setIsChatPlanUpdating(true);
     setPendingUpdate(null);
     try {
@@ -2523,7 +2502,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
       const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
       setUpdateSummary(changeSummary);
-      setActiveChat(prev => [...prev, { role: 'assistant', content: `Changes applied! Close this chat to see them on your home screen.` }]);
+      setActiveChat(prev => [...prev, { role: 'assistant', content: `Changes applied!` }]);
+      // Auto-close chat after a short delay so user sees the confirmation
+      setTimeout(() => {
+        setShowTrainerModal(false);
+        setWorkoutChat([]); setWorkoutChat([]);
+        setPendingUpdate(null); setPendingInjuries(null);
+        setWorkoutUpdateSummary(null); setNutritionUpdateSummary(null);
+      }, 1500);
       await savePlanChange({
         id: Date.now().toString(),
         changedAt: new Date().toISOString(),
@@ -2540,7 +2526,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [pendingUpdate, workoutPlan, nutritionPlansByDate, persistDayState, onProfileUpdate, onBackendSync, summarizeTrainerUpdate]);
 
   const dismissPendingUpdate = useCallback(() => {
-    const setActiveChat = pendingUpdate?.coachMode === 'trainer' ? setWorkoutChat : setNutritionChat;
+    const setActiveChat = setWorkoutChat;  // unified
     setPendingUpdate(null);
     setActiveChat(prev => [...prev, { role: 'assistant', content: 'Changes dismissed. Let me know if you\'d like something different.' }]);
   }, [pendingUpdate]);
@@ -4428,179 +4414,45 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Ionicons name="chatbubble-ellipses" size={20} color={themeColors.primary} />
                 <Text style={[styles.libraryTitle, { color: themeColors.textPrimary }]}>AI Coach</Text>
               </View>
-              <TouchableOpacity onPress={() => setShowTrainerModal(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <TouchableOpacity onPress={() => { setShowTrainerModal(false); setWorkoutChat([]); setWorkoutChat([]); setPendingUpdate(null); setPendingInjuries(null); setWorkoutUpdateSummary(null); setNutritionUpdateSummary(null); }} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Ionicons name="close" size={22} color={themeColors.textMuted} />
               </TouchableOpacity>
             </View>
             </FadeInView>
 
-            {chatTopic === null ? (
-              /* ── Topic Picker — unified coach, no mode toggle ── */
-              <View style={{ flex: 1, paddingHorizontal: 16, paddingTop: 16 }}>
-                <Text style={[styles.trainerHint, { color: themeColors.textSecondary, marginBottom: 16 }]}>
-                  What can I help with?
-                </Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center' }}>
-                  {([
-                    { key: 'change_plan', label: 'Swap Exercise', icon: 'swap-horizontal-outline' as const, mode: 'trainer' as const },
-                    { key: 'change_goal', label: 'Change Goal', icon: 'flag-outline' as const, mode: 'trainer' as const },
-                    { key: 'change_meals', label: 'Modify Meals', icon: 'nutrition-outline' as const, mode: 'nutritionist' as const },
-                    { key: 'log_activity', label: 'Log Activity', icon: 'create-outline' as const, mode: 'trainer' as const },
-                    { key: 'log_food', label: 'Log Food', icon: 'cafe-outline' as const, mode: 'nutritionist' as const },
-                    { key: 'report_injury', label: 'Report Injury', icon: 'bandage-outline' as const, mode: 'trainer' as const },
-                    { key: 'general', label: 'General Questions', icon: 'help-circle-outline' as const, mode: 'trainer' as const },
-                  ]).map(t => (
-                    <TouchableOpacity
-                      key={t.key}
-                      style={{
-                        width: '47%',
-                        paddingVertical: 16,
-                        paddingHorizontal: 12,
-                        borderRadius: 12,
-                        backgroundColor: themeColors.surfaceRaised,
-                        borderWidth: 1,
-                        borderColor: themeColors.border,
-                        alignItems: 'center',
-                        gap: 6,
-                      }}
-                      activeOpacity={0.7}
-                      onPress={() => { setCoachMode(t.mode); setChatTopic(t.key); }}
-                    >
-                      <Ionicons name={t.icon} size={24} color={themeColors.primary} />
-                      <Text style={{ color: themeColors.textPrimary, fontSize: 13, fontWeight: '600', textAlign: 'center' }}>{t.label}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+            {/* Single unified chat */}
 
-                {/* Coach check-in button removed — weekly review auto-pops from workout plan tab */}
-                {false && (
-                <TouchableOpacity
-                  style={[styles.checkinCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border, marginHorizontal: 0, marginTop: 24 }]}
-                  onPress={() => {
-                    // React Native can't reliably stack a second <Modal>
-                    // on top of an already-open one (iOS silently drops
-                    // the new modal). Close the trainer sheet first,
-                    // then open the check-in on the next tick.
-                    setShowTrainerModal(false);
-                    setTimeout(() => setShowCheckin(true), 350);
-                  }}
-                  activeOpacity={0.8}>
-                  <View style={styles.checkinCardIconWrap}>
-                    <Text style={styles.checkinCardIcon}>🩺</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.checkinCardTitle, { color: themeColors.textPrimary }]}>Check in with coach</Text>
-                    <Text style={[styles.checkinCardSub, { color: themeColors.textSecondary }]}>15-second rate — no typing needed.</Text>
-                  </View>
-                  <Text style={[styles.checkinCardChevron, { color: themeColors.textMuted }]}>›</Text>
-                </TouchableOpacity>
-                )}
-              </View>
-            ) : (
-              /* ── Chat UI (topic selected) ──────────────────────── */
-              <>
-              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 4 }}>
-                <TouchableOpacity onPress={() => setChatTopic(null)} style={{ paddingRight: 8 }}>
-                  <Text style={{ color: themeColors.primary, fontSize: 15, fontWeight: '600' }}>{'\u2190'} Topics</Text>
-                </TouchableOpacity>
-                <Text style={[styles.trainerHint, { color: themeColors.textSecondary, flex: 1 }]}>
-                  {chatTopic === 'change_plan' ? 'Change My Plan' : chatTopic === 'log_activity' ? 'Log Activity' : chatTopic === 'report_injury' ? 'Report Injury' : chatTopic === 'change_meals' ? 'Change My Meals' : chatTopic === 'log_food' ? 'Log Food' : 'General Question'}
-                </Text>
-              </View>
-
-            {(coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary) && (
+            {workoutUpdateSummary && (
               <View style={[styles.trainerSummaryCard, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                <Text style={[styles.trainerSummaryTitle, { color: themeColors.primary }]}>{coachMode === 'nutritionist' ? 'Meal Plan Updated' : 'Workout Plan Updated'}</Text>
-                <Text style={[styles.trainerSummaryText, { color: themeColors.textSecondary }]}>{coachMode === 'trainer' ? workoutUpdateSummary : nutritionUpdateSummary}</Text>
+                <Text style={[styles.trainerSummaryTitle, { color: themeColors.primary }]}>Plan Updated</Text>
+                <Text style={[styles.trainerSummaryText, { color: themeColors.textSecondary }]}>{workoutUpdateSummary}</Text>
               </View>
             )}
 
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
-              {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
-                <View style={{ padding: 16, gap: 6 }}>
+              {(workoutChat).length === 0 ? (
+                <View style={{ padding: 16, gap: 8 }}>
                   {(() => {
-                    const topicHints: Record<string, { title: string; items: Array<{ icon: string; text: string }>; note: string }> = {
-                      change_plan: {
-                        title: 'Workout Modifications',
-                        items: [
+                    return (<>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>Your AI Coach</Text>
+                      <Text style={{ fontSize: 12, color: themeColors.textSecondary, lineHeight: 18 }}>
+                        Ask me anything about your workouts, nutrition, injuries, or goals. I can also make changes to your plans.
+                      </Text>
+                      <View style={{ gap: 4, marginTop: 4 }}>
+                        {[
                           { icon: 'swap-horizontal-outline', text: '"Swap bench press for dumbbell press"' },
-                          { icon: 'add-circle-outline', text: '"Add a core exercise to leg day"' },
-                          { icon: 'remove-circle-outline', text: '"Remove the overhead press"' },
-                          { icon: 'calendar-outline', text: '"Make it 5 days instead of 6"' },
-                        ],
-                        note: 'For day swaps (e.g. make tomorrow legs), use the Switch Day button on the workout card instead.',
-                      },
-                      change_goal: {
-                        title: 'Change Your Goal',
-                        items: [
+                          { icon: 'nutrition-outline', text: '"Suggest lower sugar breakfast options"' },
+                          { icon: 'bandage-outline', text: '"My knee hurts when squatting"' },
                           { icon: 'flag-outline', text: '"Switch me to fat loss"' },
-                          { icon: 'barbell-outline', text: '"I want to focus on strength"' },
-                          { icon: 'trending-up-outline', text: '"Change to body recomp"' },
-                        ],
-                        note: 'This will regenerate your workout and nutrition plans to match the new goal.',
-                      },
-                      change_meals: {
-                        title: 'Meal Plan Changes',
-                        items: [
-                          { icon: 'swap-horizontal-outline', text: '"Replace chicken with salmon for dinner"' },
-                          { icon: 'nutrition-outline', text: '"Make breakfast higher protein"' },
-                          { icon: 'leaf-outline', text: '"Suggest lower sugar alternatives"' },
-                          { icon: 'restaurant-outline', text: '"I need a quick lunch idea"' },
-                        ],
-                        note: 'For macro targets (e.g. set protein to 200g), update in Foods > Targets section.',
-                      },
-                      log_food: {
-                        title: 'Log What You Ate',
-                        items: [
-                          { icon: 'cafe-outline', text: '"I had a chicken salad for lunch"' },
-                          { icon: 'fast-food-outline', text: '"Logged a burger and fries"' },
-                        ],
-                        note: 'For faster logging, check off meals on your plan or use the barcode scanner.',
-                      },
-                      report_injury: {
-                        title: 'Report Pain or Injury',
-                        items: [
-                          { icon: 'bandage-outline', text: '"My lower back hurts when deadlifting"' },
-                          { icon: 'alert-circle-outline', text: '"Sharp pain in my left shoulder"' },
-                          { icon: 'medical-outline', text: '"My knee feels unstable on squats"' },
-                        ],
-                        note: 'I\'ll assess the injury and your plan will automatically update to avoid the affected area.',
-                      },
-                      log_activity: {
-                        title: 'Log a Workout',
-                        items: [
-                          { icon: 'barbell-outline', text: '"I did legs today for 45 min"' },
-                          { icon: 'bicycle-outline', text: '"30 min cycling this morning"' },
-                        ],
-                        note: 'For structured logging with sets/reps, use the Log Activity button on the Progress tab.',
-                      },
-                      general: {
-                        title: 'General Questions',
-                        items: [
                           { icon: 'help-circle-outline', text: '"How much protein do I need?"' },
-                          { icon: 'leaf-outline', text: '"What are good sources of fiber?"' },
-                          { icon: 'fitness-outline', text: '"Should I do cardio on rest days?"' },
-                          { icon: 'water-outline', text: '"How much water should I drink?"' },
-                        ],
-                        note: 'Informational only — your plan won\'t be modified. For changes, use the specific topics above.',
-                      },
-                    };
-                    const hint = topicHints[chatTopic ?? 'general'] ?? topicHints.general;
-                    return (
-                      <>
-                        <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>{hint.title}</Text>
-                        <View style={{ gap: 4 }}>
-                          {hint.items.map(item => (
-                            <View key={item.text} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                              <Ionicons name={item.icon as any} size={14} color={themeColors.textMuted} />
-                              <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{item.text}</Text>
-                            </View>
-                          ))}
-                        </View>
-                        <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 4 }}>
-                          {hint.note}
-                        </Text>
-                      </>
+                        ].map(item => (
+                          <View key={item.text} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Ionicons name={item.icon as any} size={14} color={themeColors.textMuted} />
+                            <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{item.text}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </>
                     );
                   })()}
                   <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, marginTop: 8 }]}>
@@ -4616,7 +4468,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // the full history, just trimmed to the last 6 there.
                 // This cap is purely visual — prevents the scroll
                 // view from growing unbounded over a long session.
-                const fullChat = coachMode === 'trainer' ? workoutChat : nutritionChat;
+                const fullChat = workoutChat;
                 const visibleChat = fullChat.length > 50 ? fullChat.slice(-50) : fullChat;
                 const hiddenCount = fullChat.length - visibleChat.length;
                 return (
@@ -4676,6 +4528,65 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center', borderWidth: 1, borderColor: themeColors.border }}
                       activeOpacity={0.8}>
                       <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textSecondary }}>Dismiss</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+              {/* Injury approval buttons */}
+              {pendingInjuries && pendingInjuries.length > 0 && (
+                <View style={[styles.trainerBubble, { backgroundColor: themeColors.surfaceRaised, borderColor: '#F59E0B44', alignSelf: 'flex-start', maxWidth: '95%', paddingVertical: 12, paddingHorizontal: 16, gap: 8 }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name="bandage-outline" size={16} color="#F59E0B" />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                      Add {pendingInjuries.length === 1 ? 'injury' : `${pendingInjuries.length} injuries`} to your profile?
+                    </Text>
+                  </View>
+                  {pendingInjuries.map(inj => (
+                    <Text key={inj.id} style={{ fontSize: 11, color: themeColors.textSecondary }}>
+                      {inj.bodyPart} — {inj.severity ?? 'unknown'} · est. {inj.estimatedRecoveryDays ?? '?'} days
+                    </Text>
+                  ))}
+                  <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
+                    Your workout plan will automatically update to avoid the injured area.
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                    <TouchableOpacity
+                      onPress={async () => {
+                        try {
+                          const profileRaw = await AsyncStorage.getItem('userProfile');
+                          if (profileRaw) {
+                            const storedProfile: UserProfile = JSON.parse(profileRaw);
+                            const existing = storedProfile.injuryEntries ?? [];
+                            const merged = [...existing];
+                            for (const entry of pendingInjuries) {
+                              const idx = merged.findIndex(e => e.id === entry.id);
+                              if (idx >= 0) merged[idx] = entry;
+                              else merged.push(entry);
+                            }
+                            const updatedProfile = { ...storedProfile, injuryEntries: merged };
+                            await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
+                            onProfileUpdate?.(updatedProfile, false);
+                          }
+                        } catch (e) { console.error('[injury apply] failed:', e); }
+                        setPendingInjuries(null);
+                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged — plan updating...' }]);
+                        setTimeout(() => {
+                          setShowTrainerModal(false);
+                          setWorkoutChat([]); setWorkoutChat([]);
+                          setPendingUpdate(null); setPendingInjuries(null);
+                          setWorkoutUpdateSummary(null); setNutritionUpdateSummary(null);
+                        }, 1500);
+                      }}
+                      style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: 8, paddingVertical: 10, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#fff' }}>Add & Update Plan</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setPendingInjuries(null);
+                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'No injury added.' }]);
+                      }}
+                      style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderRadius: 8, paddingVertical: 10, alignItems: 'center', borderWidth: 1, borderColor: themeColors.border }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textSecondary }}>Skip</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -4749,8 +4660,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {trainerLoading ? <Text style={styles.trainerSendText}>Cancel</Text> : <Text style={styles.trainerSendText}>Send</Text>}
               </TouchableOpacity>
             </View>
-              </>
-            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>

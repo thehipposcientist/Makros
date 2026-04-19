@@ -135,7 +135,13 @@
       "Bash(node_modules/.bin/tsc --noEmit --pretty)",
       "Bash(sips -g pixelWidth -g pixelHeight assets/images/thallo-logo-black.png assets/images/thallo-logo-white.png)",
       "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")",
-      "Bash(/opt/homebrew/bin/npm install *)"
+      "Bash(/opt/homebrew/bin/npm install *)",
+      "Bash(ngrok version *)",
+      "Bash(mkdir -p ~/.config/ngrok)",
+      "Bash(cp ~/.ngrok2/ngrok.yml ~/.config/ngrok/ngrok.yml)",
+      "Bash(/opt/homebrew/lib/node_modules/@expo/ngrok/node_modules/@expo/ngrok-bin-darwin-arm64/ngrok authtoken *)",
+      "Bash(npm ls *)",
+      "Bash(NGROK_AUTHTOKEN=3Cab1cZ9BMThL0WeUhMWjJexi4y_2YvfaHC3pujd4Yn3DqvB5 npx expo start --tunnel --clear)"
     ]
   }
 }

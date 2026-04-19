@@ -241,6 +241,40 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Coach timeout: `askWorkoutQuestion` increased to 60s | Done |
 | Coach capabilities hint in empty chat (6 categories + description) | Done |
 | Active workout coach placeholder: "Ask about form, weight, alternatives, or pain..." | Done |
+| `focused_muscle` removed entirely — replaced by `priority_region` | Done |
+| Readiness formula: extracted `recompute_readiness()`, fixed 3 inline mismatches | Done |
+| Rolling nutrition averages: denominator changed to window days (not logged days) | Done |
+| ProgressScreen `goal_type` → `goal` dep fix | Done |
+| Allergen filter: word-boundary regex matching (no more egg→eggplant) | Done |
+| Injury boost: no longer accumulates — caps at injury level | Done |
+| `NutritionCard` + `WorkoutCard`: `useMemo` for expensive computations | Done |
+| Dead `nutritionChat`/`setNutritionChat` aliases removed | Done |
+| gpt-5-mini migration: scanning endpoints with reasoning params | Done |
+| `_build_chat_kwargs`: `max_completion_tokens` + `reasoning: {effort: minimal}` for gpt-5 | Done |
+| Direct OpenAI calls in scanning.py routed through helpers | Done |
+| Unified single coach chat (topic picker removed) | Done |
+| Injury approval via buttons (not auto-apply) + chat clears after | Done |
+| Plan update approval: chat auto-closes 1.5s after applying | Done |
+| Backend auto-detects topic from keywords for context trimming | Done |
+| Compound Strength: dedicated recipe, 5 sets primary, 4 min rest, UL only | Done |
+| Marathon goal enabled (`train_marathon` launch: true) | Done |
+| Injury auto-save to AsyncStorage on every change | Done |
+| Injury removal fix: sync effect tracks last profile value, no overwrite | Done |
+| Weekly check-in restored (auto-popup only, countdown banner) | Done |
+| Coach check-in button removed from AI chat | Done |
+| "General Questions" renamed, informational only note | Done |
+| CORS: needs production origin (still `*`) | Open |
+| Production API URL: still placeholder | Open |
+| Fitness score gender-blind | Open |
+| `get_common_meals` no date limit | Open |
+| `list_meals` unbounded without date | Open |
+| Recovery bonus too slow (1-5% effective) | Open |
+| Hydration bonus always 0 (no tracking) | Open |
+| MealEditModal reseeds on prop identity change | Open |
+| `MIN_SAFE_CALORIES` constant unused / inconsistent | Open |
+| Reference ranges don't apply safety floor | Open |
+| N+1 in `progression_insights` endpoint | Open |
+| `_ai_backfill_micros` bypasses helpers (direct OpenAI call) | Open |
 
 ---
 
@@ -280,7 +314,7 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Auth (login/signup, min 8 char password) | Done |
 | Onboarding (5 steps, compressed) | Done |
 | Training day selector | Done |
-| Goal selection (10 goals + HYROX) | Done |
+| Goal selection (11 goals + HYROX + Marathon) | Done |
 | Deterministic workout planner | Done |
 | Per-day generation with history | Done |
 | Day swap (deterministic UI + generated recovery/mobility/cardio) | Done |
@@ -289,7 +323,7 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 | Exercise images from wger.de | Done (32/201) |
 | Exercise search (wger + AI) | Done |
 | Exercise dislike (thumbs down) | Done |
-| 12-muscle-group fatigue system | Done (needs extended CNS decay) |
+| 12-muscle-group fatigue system + extended CNS decay | Done |
 | Two-pass recovery (proportional, capped, no stacking) | Done |
 | Negative fatigue for recovery/mobility | Done |
 | Nutrition recovery integration (4 protein tiers + penalty) | Done |

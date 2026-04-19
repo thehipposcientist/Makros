@@ -249,13 +249,8 @@ def food_nutrition_search(
         },
     ]
     try:
-        resp = client.chat.completions.create(
-            model=model_meal_parsing(),
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=1500,
-            timeout=30,
-        )
+        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=1500, timeout_secs=30)
+        resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
         for r in results:
@@ -364,13 +359,8 @@ def exercise_ai_search(
 
     client = OpenAI(api_key=api_key)
     try:
-        resp = client.chat.completions.create(
-            model=model_meal_parsing(),
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=800,
-            timeout=20,
-        )
+        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=800, timeout_secs=20)
+        resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
         return {"results": results}
@@ -452,15 +442,14 @@ def generate_meal_instructions(
 
     try:
         client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model=model_meal_parsing(),
-            messages=[
-                {"role": "system", "content": "You are a practical home cook. Return plain text only."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=400,
-            timeout=20,
-        )
+        _mi_messages = [
+            {"role": "system", "content": "You are a practical home cook. Return plain text only."},
+            {"role": "user", "content": prompt},
+        ]
+        kwargs = _build_chat_kwargs(model_meal_parsing(), _mi_messages, max_tokens=400, timeout_secs=20)
+        # meal-instructions returns plain text, not JSON — remove response_format
+        kwargs.pop("response_format", None)
+        resp = _chat_create(client, **kwargs)
         text = (resp.choices[0].message.content or "").strip()
         if not text:
             raise ValueError("empty response")

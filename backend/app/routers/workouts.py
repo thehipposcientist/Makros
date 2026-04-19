@@ -248,7 +248,6 @@ class GenerateDayRequest(BaseModel):
     equipment: list[str] = []
     preferred_split: str | None = None
     priority_region: str = "balanced"
-    focused_muscle: str | None = None
     injuries: list[str] = []
     disliked_exercises: list[str] = []     # exercises to exclude from selection
     focus_override: str | None = None      # force a specific focus (e.g. "Legs")
@@ -313,13 +312,11 @@ def generate_single_day(
             injury_boosts = injury_muscle_fatigue_boost(tuple(body.injuries))
             for muscle, boost in injury_boosts.items():
                 current = fatigue_snapshot.muscle_fatigue.get(muscle)
-                fatigue_snapshot.muscle_fatigue.add(muscle, boost)
+                if current < boost:  # only boost up to the injury level, don't stack
+                    fatigue_snapshot.muscle_fatigue.add(muscle, boost - current)
             if injury_boosts:
-                # Recompute readiness and focus readiness after applying boosts
-                from app.services.workout.activity_impact import derive_all_readiness
-                fatigue_snapshot.focus_readiness = derive_all_readiness(fatigue_snapshot.muscle_fatigue)
-                avg_fatigue = sum(fatigue_snapshot.muscle_fatigue.get(m) for m in ("chest", "back", "shoulders", "quads", "hamstrings", "glutes", "core")) / 7
-                fatigue_snapshot.readiness_score = round(max(0, (1 - avg_fatigue) * 100))
+                from app.services.workout.activity_impact import recompute_readiness
+                fatigue_snapshot.readiness_score, fatigue_snapshot.focus_readiness = recompute_readiness(fatigue_snapshot.muscle_fatigue)
                 logger.debug(f"[generate-day] injury fatigue boost applied: {injury_boosts}")
             fatigue_readiness = fatigue_snapshot.readiness_score
             logger.debug(f"[generate-day] fatigue: readiness={fatigue_readiness} focus_readiness={fatigue_snapshot.focus_readiness}")
@@ -334,7 +331,6 @@ def generate_single_day(
         experience=body.experience.lower(),
         equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=body.preferred_split,
-        focused_muscle=body.focused_muscle,
         priority_region=body.priority_region,
         injuries=tuple(body.injuries),
         disliked_exercises=tuple(body.disliked_exercises),
@@ -757,10 +753,8 @@ def get_fatigue_score(
                     current = snapshot.muscle_fatigue.get(muscle)
                     if current > 0:
                         snapshot.muscle_fatigue.add(muscle, -current * recovery_bonus)
-                from app.services.workout.activity_impact import derive_all_readiness, FATIGUE_MUSCLES
-                snapshot.focus_readiness = derive_all_readiness(snapshot.muscle_fatigue)
-                muscle_avg = sum(snapshot.muscle_fatigue.get(m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
-                snapshot.readiness_score = int(round(max(0, (1 - (muscle_avg * 0.6 + snapshot.muscle_fatigue.systemic * 0.4)) * 100)))
+                from app.services.workout.activity_impact import recompute_readiness
+                snapshot.readiness_score, snapshot.focus_readiness = recompute_readiness(snapshot.muscle_fatigue)
                 nutrition_context["recovery_bonus_applied"] = True
                 logger.debug(f"[fatigue] nutrition bonus: protein={protein:.0f}g bonus={recovery_bonus:.3f} readiness={snapshot.readiness_score}%")
             elif protein >= 50:
@@ -770,10 +764,8 @@ def get_fatigue_score(
                     current = snapshot.muscle_fatigue.get(muscle)
                     if current > 0:
                         snapshot.muscle_fatigue.add(muscle, current * penalty)
-                from app.services.workout.activity_impact import derive_all_readiness, FATIGUE_MUSCLES
-                snapshot.focus_readiness = derive_all_readiness(snapshot.muscle_fatigue)
-                muscle_avg = sum(snapshot.muscle_fatigue.get(m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
-                snapshot.readiness_score = int(round(max(0, (1 - (muscle_avg * 0.6 + snapshot.muscle_fatigue.systemic * 0.4)) * 100)))
+                from app.services.workout.activity_impact import recompute_readiness as _recompute
+                snapshot.readiness_score, snapshot.focus_readiness = _recompute(snapshot.muscle_fatigue)
                 logger.debug(f"[fatigue] low protein penalty: protein={protein:.0f}g readiness={snapshot.readiness_score}%")
     except Exception as e:
         logger.debug(f"[fatigue] nutrition recovery check failed (non-fatal): {e}")

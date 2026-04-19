@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Pressable, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { WorkoutDay, AppThemeName } from '../types';
@@ -92,26 +93,28 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
     return null;
   };
 
-  const estimatedSeconds = workout.exercises.reduce((total, ex) => {
-    const sets = Number(ex.sets) || 3;
-    const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
-    const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
-    if (timedWorkSec != null) {
-      // Timed exercise: actual working time per set + rest between sets.
-      // Mobility/stretch exercises get minimal setup (10s); strength/cardio get 60s.
-      // No extra setup time — the work time + rest already accounts for
-      // transitions. The old +60s per exercise inflated mobility/recovery
-      // estimates by 10+ minutes.
-      return total + sets * timedWorkSec + Math.max(0, sets - 1) * rest;
-    }
-    // Classic strength set: ~45s of work + prescribed rest. The
-    // backend's density budget already bakes ramp-up/warmup time
-    // into its primary-slot cost (primary=12 min includes warmup),
-    // so we do NOT add extra warmup seconds here — that would
-    // double-count against the session_minutes budget.
-    return total + sets * 45 + Math.max(0, sets - 1) * rest;
-  }, 0);
-  const estimatedMinutes = Math.max(1, Math.round(estimatedSeconds / 60));
+  const { estimatedSeconds, estimatedMinutes } = useMemo(() => {
+    const secs = workout.exercises.reduce((total, ex) => {
+      const sets = Number(ex.sets) || 3;
+      const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
+      const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
+      if (timedWorkSec != null) {
+        // Timed exercise: actual working time per set + rest between sets.
+        // Mobility/stretch exercises get minimal setup (10s); strength/cardio get 60s.
+        // No extra setup time — the work time + rest already accounts for
+        // transitions. The old +60s per exercise inflated mobility/recovery
+        // estimates by 10+ minutes.
+        return total + sets * timedWorkSec + Math.max(0, sets - 1) * rest;
+      }
+      // Classic strength set: ~45s of work + prescribed rest. The
+      // backend's density budget already bakes ramp-up/warmup time
+      // into its primary-slot cost (primary=12 min includes warmup),
+      // so we do NOT add extra warmup seconds here — that would
+      // double-count against the session_minutes budget.
+      return total + sets * 45 + Math.max(0, sets - 1) * rest;
+    }, 0);
+    return { estimatedSeconds: secs, estimatedMinutes: Math.max(1, Math.round(secs / 60)) };
+  }, [workout.exercises]);
 
   return (
     <View style={styles.card}>

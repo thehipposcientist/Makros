@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -50,7 +50,7 @@ export default function NutritionCard({
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
   const [scoreExpanded, setScoreExpanded] = useState(false);
-  const dayScore = computeNutritionScore(nutritionPlan, goal ?? 'body_recomp');
+  const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
   const theme = getTheme(themeName);

@@ -884,7 +884,6 @@ export async function generateWorkoutDay(
     equipment: string[];
     preferred_split?: string;
     priority_region?: string;
-    focused_muscle?: string;
     injuries?: string[];
     disliked_exercises?: string[];
     focus_override?: string;

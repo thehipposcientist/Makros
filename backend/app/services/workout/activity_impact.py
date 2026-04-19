@@ -102,6 +102,15 @@ def derive_all_readiness(fatigue: MuscleFatigue) -> dict[str, float]:
     return {focus: round(derive_focus_readiness(fatigue, focus), 2) for focus in _FOCUS_MUSCLES}
 
 
+def recompute_readiness(mf: MuscleFatigue) -> tuple[int, dict[str, float]]:
+    """Recompute readiness score and focus readiness from current fatigue state."""
+    focus_readiness = derive_all_readiness(mf)
+    muscle_avg = sum(getattr(mf, m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
+    overall = max(0.0, 1.0 - (muscle_avg * 0.6 + mf.systemic * 0.4))
+    score = int(round(overall * 100))
+    return score, focus_readiness
+
+
 # ─── Exercise → muscle fatigue resolution ─────────────────────────────────────
 
 # Granular muscles that roll up into our 12 buckets

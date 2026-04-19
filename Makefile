@@ -1,4 +1,4 @@
-.PHONY: start tunnel stop reset-db wait-backend test
+.PHONY: start tunnel stop reset-db wait-backend test dev
 
 # Run recipes in a login zsh so ~/.zprofile (brew shellenv, etc.) is sourced
 # and tools like `npx` / `node` are on PATH.
@@ -7,12 +7,12 @@ SHELL := /bin/zsh
 
 start:
 	@echo ""
-	@echo "  ███╗   ███╗ █████╗ ██╗  ██╗██████╗  ██████╗ ███████╗"
-	@echo "  ████╗ ████║██╔══██╗██║ ██╔╝██╔══██╗██╔═══██╗██╔════╝"
-	@echo "  ██╔████╔██║███████║█████╔╝ ██████╔╝██║   ██║███████╗"
-	@echo "  ██║╚██╔╝██║██╔══██║██╔═██╗ ██╔══██╗██║   ██║╚════██║"
-	@echo "  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║  ██║╚██████╔╝███████║"
-	@echo "  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝"
+	@echo "  ████████╗██╗  ██╗ █████╗ ██╗     ██╗      ██████╗ "
+	@echo "  ╚══██╔══╝██║  ██║██╔══██╗██║     ██║     ██╔═══██╗"
+	@echo "     ██║   ███████║███████║██║     ██║     ██║   ██║"
+	@echo "     ██║   ██╔══██║██╔══██║██║     ██║     ██║   ██║"
+	@echo "     ██║   ██║  ██║██║  ██║███████╗███████╗╚██████╔╝"
+	@echo "     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ "
 	@echo ""
 	@echo "Starting Thallo..."
 	@echo ""
@@ -34,8 +34,26 @@ tunnel:
 	@echo ""
 	@echo "Starting Thallo (TUNNEL mode)..."
 	@echo ""
-	@echo "NOTE: Tunnel mode requires a free ngrok account."
-	@echo "      If you see an error, run: npx ngrok authtoken YOUR_TOKEN"
+	@echo "[1/4] Starting PostgreSQL + Backend (Docker Compose)..."
+	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
+	@echo "      Done."
+	@echo ""
+	@echo "[2/4] Waiting for backend to be ready..."
+	@$(MAKE) wait-backend
+	@echo "      Done."
+	@echo ""
+	@echo "[3/4] Checking ngrok..."
+	@npx @expo/ngrok --version >/dev/null 2>&1 || (echo "      Installing @expo/ngrok..." && npm install -g @expo/ngrok)
+	@echo "      Done."
+	@echo ""
+	@echo "[4/4] Starting Expo (tunnel)..."
+	@echo "      This creates a public URL so any device can connect."
+	@echo ""
+	npx expo start --clear --tunnel
+
+dev:
+	@echo ""
+	@echo "Starting Thallo (dev client)..."
 	@echo ""
 	@echo "[1/3] Starting PostgreSQL + Backend (Docker Compose)..."
 	@docker compose up -d --build || (echo "      ERROR: Docker Compose failed. Is Docker Desktop running?" && exit 1)
@@ -45,8 +63,10 @@ tunnel:
 	@$(MAKE) wait-backend
 	@echo "      Done."
 	@echo ""
-	@echo "[3/3] Starting Expo (tunnel)..."
-	npx expo start --clear --tunnel
+	@echo "[3/3] Starting Expo (dev client)..."
+	@echo "      Open the Thallo dev build on your phone."
+	@echo ""
+	npx expo start --dev-client
 
 stop:
 	@echo ""
@@ -57,8 +77,6 @@ stop:
 	@echo "      Done."
 	@echo ""
 	@echo "[2/2] Stopping PostgreSQL + Backend (Docker Compose)..."
-	@# Use `stop` (not `down`) so containers + network + volumes are preserved.
-	@# Only `make reset-db` is allowed to destroy database state.
 	@docker compose stop
 	@echo "      Done."
 	@echo ""

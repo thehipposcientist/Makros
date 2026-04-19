@@ -887,19 +887,24 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
     Drop-in wrapper for client.chat.completions.create() that normalises params
     per model family.
 
-    gpt-5 family:
-      - strip temperature (only default accepted)
-      - strip response_format=json_object (use json_schema instead)
+    gpt-5 family (reasoning models):
+      - strip temperature and top_p (reasoning models reject these)
       - rename max_tokens -> max_completion_tokens
+      - add reasoning={"effort": "minimal"} if not already set
     All other models: params passed through unchanged.
     """
     model = kwargs.get("model", "")
-    print(f"[_chat_create] CODE_VERSION=V6_NONE_FIX model={model!r} keys={list(kwargs.keys())} rf={kwargs.get('response_format')}")
+    print(f"[_chat_create] CODE_VERSION=V7_GPT5_MINI model={model!r} keys={list(kwargs.keys())} rf={kwargs.get('response_format')}")
     if _is_gpt5(model):
-        kwargs["temperature"] = 1
-        # gpt-5 supports json_object and json_schema — keep response_format as-is
+        # Reasoning models reject temperature and top_p
+        kwargs.pop("temperature", None)
+        kwargs.pop("top_p", None)
+        # Rename max_tokens -> max_completion_tokens for reasoning models
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        # Ensure reasoning effort is set
+        if "reasoning" not in kwargs:
+            kwargs["reasoning"] = {"effort": "minimal"}
     return client.chat.completions.create(**kwargs)
 
 
@@ -913,15 +918,20 @@ def _build_chat_kwargs(
     """
     Build kwargs for _chat_create adapted to model family.
 
-    gpt-4o family  → response_format=json_object
-    gpt-5 family   → response_format=json_schema (strict flag from schema def)
-                     Falls back to prompt-enforced JSON if no schema provided.
+    gpt-4o family  → response_format=json_object, max_tokens, temperature
+    gpt-5 family   → max_completion_tokens (includes reasoning tokens),
+                     reasoning={"effort": "minimal"} for fast responses,
+                     NO temperature/top_p (reasoning models reject these).
+                     response_format=json_schema when schema provided,
+                     falls back to prompt-enforced JSON otherwise.
     """
     kwargs: dict = dict(model=model, messages=messages, timeout=timeout_secs)
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
     if _is_gpt5(model):
-        kwargs["temperature"] = 1
+        # Reasoning model: use max_completion_tokens, add reasoning control,
+        # do NOT pass temperature or top_p.
+        if max_tokens is not None:
+            kwargs["max_completion_tokens"] = max_tokens
+        kwargs["reasoning"] = {"effort": "minimal"}
         if json_schema:
             kwargs["response_format"] = {
                 "type": "json_schema",
@@ -931,10 +941,11 @@ def _build_chat_kwargs(
                     "schema": json_schema["schema"],
                 },
             }
-        else:
-            # No strict schema — still force JSON output to avoid None content
-            kwargs["response_format"] = {"type": "json_object"}
+        # gpt-5 with no schema: rely on prompt-enforced JSON.
+        # Do NOT set response_format=json_object — let the prompt handle it.
     else:
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         kwargs["response_format"] = {"type": "json_object"}
     return kwargs
 

@@ -305,7 +305,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const mealRoutine = profile.mealRoutine ?? '';
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
   const injuryMountedRef = useRef(false);
-  // Auto-save injuries to AsyncStorage on every change so they survive tab switches
+  // Auto-save injuries on every change to AsyncStorage
   useEffect(() => {
     if (!injuryMountedRef.current) { injuryMountedRef.current = true; return; }
     AsyncStorage.getItem('userProfile').then(raw => {
@@ -315,6 +315,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       AsyncStorage.setItem('userProfile', JSON.stringify(p)).catch(() => {});
     }).catch(() => {});
   }, [injuryEntries]);
+  // Re-read from profile prop only on actual prop identity change (new profile object),
+  // NOT when local state differs. This prevents the sync from overwriting local edits.
+  const lastProfileInjuryRef = useRef(JSON.stringify(profile.injuryEntries ?? []));
+  useEffect(() => {
+    const incoming = JSON.stringify(profile.injuryEntries ?? []);
+    if (incoming !== lastProfileInjuryRef.current) {
+      lastProfileInjuryRef.current = incoming;
+      setInjuryEntries(profile.injuryEntries ?? []);
+    }
+  }, [profile.injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [equipmentExpanded, setEquipmentExpanded] = useState(false);
   const [foodsExpanded, setFoodsExpanded] = useState(false);

@@ -181,7 +181,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       const goal = userProfile?.goal ?? 'body_recomp';
       setNutritionScore(computeNutritionScore(nutritionPlan, goal));
     });
-  }, [nutritionPlan, userProfile?.goal_type]);
+  }, [nutritionPlan, userProfile?.goal]);
 
   const handleShareBodyScan = async () => {
     try {
