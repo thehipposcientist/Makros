@@ -1886,7 +1886,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       )}
 
-      {warmupDone && (
+      {false && warmupDone && (
         <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupExpanded(v => !v); }}
@@ -1926,7 +1926,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             {restForExercise ? <Text style={styles.restExerciseText} numberOfLines={1}>{restForExercise}</Text> : null}
             {restNextTarget ? (
               <View style={{ backgroundColor: workoutPalette.strong + '22', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, marginVertical: 2 }}>
-                <Text style={{ fontSize: 16, color: workoutPalette.strong, fontWeight: '900' }} numberOfLines={1}>{restNextTarget}</Text>
+                <Text style={{ fontSize: 14, color: workoutPalette.strong, fontWeight: '900' }} numberOfLines={2}>{restNextTarget}</Text>
               </View>
             ) : null}
             {restCue ? <Text style={{ fontSize: 12, color: workoutPalette.text, fontWeight: '600', lineHeight: 16 }} numberOfLines={2}>{restCue}</Text> : null}
@@ -1948,6 +1948,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
       {/* Exercise list */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+        {/* Warm-up collapsed header — scrolls with exercises */}
+        {warmupDone && warmupSteps.length > 0 && (
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupExpanded(v => !v); }}
+            style={[styles.warmupCollapsed, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}>
+            <View style={styles.warmupCollapsedHeader}>
+              <Text style={[styles.warmupCollapsedTitle, { color: workoutPalette.text }]}>
+                Warm-Up <Ionicons name={warmupExpanded ? 'chevron-down' : 'chevron-forward'} size={12} />
+              </Text>
+              <Text style={[styles.warmupCollapsedHint, { color: workoutPalette.text }]}>
+                {warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps`}
+              </Text>
+            </View>
+            {warmupExpanded && (
+              <View style={{ marginTop: 8 }}>
+                {warmupSteps.map((step, index) => (
+                  <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+                ))}
+              </View>
+            )}
+          </TouchableOpacity>
+        )}
         {warmupDone && exercises.map((ex, i) => {
           const targetSetCount  = getTargetSetCount(ex.targetSets);
           // Effective set count: base target + user-added extras, minus
@@ -1992,9 +2015,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
                     <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '600', marginTop: 1 }}>
                       Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
-                      {(workout as any).exercises?.[i]?.targetWeightLbs
-                        ? ` → Try ${(workout as any).exercises[i].targetWeightLbs} lbs`
-                        : ''}
                     </Text>
                   )}
                 </View>

@@ -2170,11 +2170,6 @@ async def run_full_plan_generation(
         "supplementStack":  nutrition_data.get("supplementStack", []),
         "workout_plan":     workout_data["workout_plan"],
         "nutrition_plans":  plans_list,
-        # Legacy keys kept populated so older client builds still work — map
-        # the first three templates (repeating the last if fewer than 3).
-        "nutrition_plan_a": plans_list[0] if plans_list else None,
-        "nutrition_plan_b": plans_list[1] if len(plans_list) > 1 else (plans_list[0] if plans_list else None),
-        "nutrition_plan_c": plans_list[2] if len(plans_list) > 2 else (plans_list[-1] if plans_list else None),
     }
     # Forward plan-review debug sidecar so the client can log what
     # the reviewer saw + decided. Absent when the reviewer skipped.
@@ -2524,9 +2519,6 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
         "nutrition_plans":  plans_list,
-        "nutrition_plan_a": plans_list[0] if plans_list else None,
-        "nutrition_plan_b": plans_list[1] if len(plans_list) > 1 else (plans_list[0] if plans_list else None),
-        "nutrition_plan_c": plans_list[2] if len(plans_list) > 2 else (plans_list[-1] if plans_list else None),
     }
     custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
     if custom_foods:

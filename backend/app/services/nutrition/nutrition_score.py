@@ -63,7 +63,13 @@ def classify_food_quality(food: dict) -> str:
 
     if prep in PROCESSED_INDICATORS:
         return "processed"
-    if any(w in name for w in ("protein bar", "granola bar", "cereal", "chips", "candy", "soda", "energy drink", "instant", "frozen dinner", "pizza")):
+    if any(w in name for w in (
+        "protein bar", "granola bar", "energy bar", "cereal", "chips", "candy",
+        "soda", "energy drink", "instant", "frozen dinner", "pizza", "hot dog",
+        "nugget", "bacon", "sausage", "deli", "ham", "salami", "pepperoni",
+        "granola", "rice cake", "bagel", "english muffin", "tortilla",
+        "bread (white", "trail mix", "dark chocolate", "cracker", "pretzel",
+    )):
         return "processed"
 
     if category == "supplements":

@@ -143,13 +143,15 @@ const USER_SCOPED_KEYS = [
  *  cache, in-flight plan job id, device-specific health toggles). */
 const SYNCED_STATE_KEYS = [
   'userProfile',
-  'aiWorkoutPlan',
+  // aiWorkoutPlan excluded — synced on plan change, not every background
   'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
   'trainerNote', 'nutritionistNote', 'supplementStack',
   'weekStartDate', 'mealEdits', 'mealChecks',
-  'workoutHistory', 'userLog', 'skippedWorkouts',
+  // workoutHistory excluded — synced via logWorkoutDone
+  'userLog', 'skippedWorkouts',
   'mealRoutines', 'planChangeHistory', 'goalHistory',
-  'workoutSummaries', 'preservedCompletedWorkouts', 'preservedCheckedMeals',
+  // workoutSummaries excluded — local-only derivative of workoutHistory
+  'preservedCompletedWorkouts', 'preservedCheckedMeals',
   'healthSummary', 'healthScoreResult',
 ];
 
@@ -241,6 +243,7 @@ export default function Index() {
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme'>('goal');
+  const [pendingSave, setPendingSave]     = useState<{ profile: UserProfile; mode: string } | null>(null);
   // Optional sub-tab to pre-select when opening the EditProfileScreen in
   // 'mealplan' mode. Lets HomeScreen jump straight into Foods/Supplements/Macros.
   const [editInitialMealTab, setEditInitialMealTab] = useState<'foods' | 'supplements' | 'macros' | undefined>(undefined);
@@ -798,6 +801,22 @@ export default function Index() {
   // would regenerate (or nothing would).
   const handleSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
     const effectiveMode = modeOverride ?? editMode;
+
+    // For goal and workout changes that trigger regen, show a confirmation first
+    if (effectiveMode === 'goal' || effectiveMode === 'workout') {
+      const willRegen = effectiveMode === 'goal'
+        ? (userProfile?.goal !== updated.goal || userProfile?.goalDetails?.pace !== updated.goalDetails?.pace)
+        : true;  // workout settings always regen
+      if (willRegen) {
+        setPendingSave({ profile: updated, mode: effectiveMode });
+        return;
+      }
+    }
+    await _doSaveProfile(updated, modeOverride);
+  };
+
+  const _doSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
+    const effectiveMode = modeOverride ?? editMode;
     const stamped = stampGoalStart(updated, userProfile);
     // Record goal history only when the user actually used the GOAL
     // edit screen AND the goal/pace changed. We used to compute this
@@ -891,13 +910,13 @@ export default function Index() {
             // (storage writes, templates version stamp, per-day saves wipe).
             await applyPlanResult(aiPlans);
             // Only reset week timer on full regens, not single-side edits.
-            if (aiPlans.nutrition_plan_a && regenWorkout && regenNutrition) {
+            if (aiPlans.nutrition_plans?.length && regenWorkout && regenNutrition) {
               await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
             }
             // Push the freshly-rotated plan onto the next 3 days of remote
             // day-state so cross-device reads don't briefly show the old
             // plan before HomeScreen catches up.
-            if (aiPlans.nutrition_plan_a) {
+            if (aiPlans.nutrition_plans?.length) {
               const todayDate = new Date();
               const tok = authToken;
               for (let i = 0; i < 3; i++) {
@@ -1228,6 +1247,44 @@ export default function Index() {
           </Modal>
         );
       })()}
+
+      {/* Save confirmation — themed modal */}
+      {pendingSave && (() => {
+        const tc = getTheme(userProfile?.themePreference).colors;
+        const isGoal = pendingSave.mode === 'goal';
+        return (
+          <Modal visible transparent animationType="fade" onRequestClose={() => setPendingSave(null)}>
+            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+              <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
+                <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
+                  {isGoal ? 'Update Your Plan?' : 'Regenerate Workout Plan?'}
+                </Text>
+                <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 18 }}>
+                  {isGoal
+                    ? 'Changing your goal will regenerate both your workout and nutrition plans to match. This may take 30-60 seconds.'
+                    : 'Your workout plan will be regenerated with the new settings. Your nutrition plan won\'t change.'}
+                </Text>
+                <TouchableOpacity
+                  style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                  onPress={() => {
+                    const saved = pendingSave;
+                    setPendingSave(null);
+                    _doSaveProfile(saved.profile, saved.mode as any);
+                  }}>
+                  <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
+                    {isGoal ? 'Update Plan' : 'Regenerate'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                  onPress={() => setPendingSave(null)}>
+                  <Text style={{ color: tc.textSecondary, fontSize: 15, fontWeight: '600' }}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+        );
+      })()}
     </>
   );
 }
@@ -1236,6 +1293,7 @@ export default function Index() {
 
 function SplashLoadingScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
   const spinAnim = useRef(new Animated.Value(0)).current;
   const [tipIndex, setTipIndex] = useState(0);
   const tipFade = useRef(new Animated.Value(1)).current;
@@ -1248,6 +1306,15 @@ function SplashLoadingScreen() {
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+
+    // Pulse the logo
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.85, duration: 1000, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
 
     // Continuous spinner rotation
     const spin = Animated.loop(
@@ -1262,7 +1329,7 @@ function SplashLoadingScreen() {
       });
     }, 2500);
 
-    return () => { spin.stop(); clearInterval(tipTimer); };
+    return () => { pulse.stop(); spin.stop(); clearInterval(tipTimer); };
   }, []);
 
   const spinInterpolate = spinAnim.interpolate({
@@ -1275,8 +1342,8 @@ function SplashLoadingScreen() {
       flex: 1, backgroundColor: '#0D0F14',
       alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32,
     }}>
-      {/* Logo — same size/position as auth screen */}
-      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12 }}>
+      {/* Logo — pulsing while loading */}
+      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12, transform: [{ scale: pulseAnim }] }}>
         <Image
           source={require('../assets/images/thallo-logo-white.png')}
           style={{ width: 260, height: 100 }}

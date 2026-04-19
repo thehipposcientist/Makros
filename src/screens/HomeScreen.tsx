@@ -38,7 +38,7 @@ import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
-import CoachCheckinModal from '../components/CoachCheckinModal';
+// CoachCheckinModal removed — coach chat handles check-ins now
 import { colors, getTheme, radius } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
@@ -1306,7 +1306,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     );
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
-    // Check if a weekly review is due
+    // Weekly check-in — auto-popup every 7 days
     AsyncStorage.getItem('weekStartDate').then(async raw => {
       if (!raw) {
         setDaysUntilCheckin(null);
@@ -1318,7 +1318,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setDaysUntilCheckin(Math.max(0, Math.ceil(7 - daysSince)));
       setNextCheckinDate(new Date(startMs + 7 * 24 * 60 * 60 * 1000));
       if (daysSince >= 7) {
-        // Pre-populate injury statuses from current profile
         const profileRaw = await AsyncStorage.getItem('userProfile');
         if (profileRaw) {
           const p: UserProfile = JSON.parse(profileRaw);
@@ -1511,7 +1510,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { getExercises } = await import('../services/api');
         const { refreshExerciseImageMap } = await import('../utils/exerciseImages');
-        const library = await getExercises({ forceRefresh: true });
+        const library = await getExercises({});
         const imgMap = await refreshExerciseImageMap(library);
         console.log(`[loadPlans] exercise image map: ${imgMap.size} images`);
         if (imgMap.size > 0) {
@@ -1884,7 +1883,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const cam = await ImagePicker.requestCameraPermissionsAsync();
       if (!cam.granted) { Alert.alert('Permission needed', 'Allow camera or photo library access.'); return; }
     }
-    const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any, maxWidth: 1024, maxHeight: 1024 } as any);
     if (result.canceled || !result.assets?.[0]?.base64) return;
     const asset = result.assets[0];
     setSuppAiLoading(true);
@@ -2340,6 +2339,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const updatedProfile = { ...storedProfile, injuryEntries: merged };
             await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
             console.log('[handleAskTrainer] updated injuryEntries saved:', merged.length, 'entries');
+            // Trigger plan regeneration — the deterministic planner will
+            // block dangerous patterns and adjust readiness for the injury.
+            onProfileUpdate?.(updatedProfile, false);
+            console.log('[handleAskTrainer] plan regeneration triggered for injury');
           }
         } catch (injErr) {
           console.error('[handleAskTrainer] failed to save injury update:', injErr);
@@ -2980,6 +2983,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
             {planStep || 'This usually takes 30–60 seconds.'}
           </Text>
+          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 8 }}>
+            You can leave the app — your plan will be ready when you return.
+          </Text>
           <View style={{ width: '80%', height: 6, borderRadius: 3, backgroundColor: themeColors.border, marginTop: 16, overflow: 'hidden' }}>
             <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 3, backgroundColor: themeColors.primary }} />
           </View>
@@ -3096,36 +3102,49 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            {/* Check-in countdown — shows when the next AI review is due.
-                Only on the Plan sub-tab so it doesn't clutter the library. */}
-            {workoutSubTab === 'plan' && daysUntilCheckin != null && (
+            {/* Weekly check-in countdown */}
+            {workoutSubTab === 'plan' && daysUntilCheckin != null && daysUntilCheckin <= 2 && (
               <TouchableOpacity
-                style={[styles.checkinIndicator, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '55' }]}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.primary + '44' }}
                 onPress={() => setShowWeeklyCheckin(true)}
                 activeOpacity={0.7}>
-                <View style={[styles.checkinDot, { backgroundColor: daysUntilCheckin === 0 ? workoutPalette.strong : workoutPalette.strong + '88' }]} />
-                <Text style={[styles.checkinLabel, { color: workoutPalette.text }]}>
-                  {daysUntilCheckin === 0
-                    ? 'AI check-in ready — tap to review'
-                    : `Next check-in ${nextCheckinDate ? nextCheckinDate.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : ''} · in ${daysUntilCheckin}d`}
+                <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary, flex: 1 }}>
+                  {daysUntilCheckin === 0 ? 'Weekly review ready' : `Review in ${daysUntilCheckin}d`}
                 </Text>
-                {/* 7-day progress dots */}
-                <View style={styles.checkinDots}>
-                  {Array.from({ length: 7 }).map((_, i) => {
-                    const filled = i < (7 - daysUntilCheckin);
-                    return (
-                      <View
-                        key={i}
-                        style={[
-                          styles.checkinTick,
-                          { backgroundColor: filled ? workoutPalette.strong : workoutPalette.strong + '33' },
-                        ]}
-                      />
-                    );
-                  })}
-                </View>
+                <Ionicons name="chevron-forward" size={14} color={themeColors.textMuted} />
               </TouchableOpacity>
             )}
+
+            {/* Active injuries banner */}
+            {workoutSubTab === 'plan' && (() => {
+              const active = (userProfile.injuryEntries ?? []).filter(i => i.status === 'active' || i.status === 'recovering');
+              if (active.length === 0) return null;
+              return (
+                <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#F59E0B44' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <Ionicons name="bandage-outline" size={16} color="#F59E0B" />
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#F59E0B' }}>
+                      {active.length} Active Injur{active.length === 1 ? 'y' : 'ies'}
+                    </Text>
+                  </View>
+                  {active.map(inj => (
+                    <View key={inj.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                      <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: inj.status === 'active' ? '#EF4444' : '#F59E0B' }} />
+                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, flex: 1 }} numberOfLines={1}>
+                        {inj.bodyPart || inj.description}
+                        {inj.severity ? ` · ${inj.severity}` : ''}
+                        {inj.estimatedRecoveryDate ? ` · est. ${inj.estimatedRecoveryDate}` : ''}
+                      </Text>
+                      <Text style={{ fontSize: 9, color: inj.status === 'active' ? '#EF4444' : '#F59E0B', fontWeight: '600', textTransform: 'capitalize' }}>{inj.status}</Text>
+                    </View>
+                  ))}
+                  <Text style={{ fontSize: 9, color: themeColors.textMuted, marginTop: 4 }}>
+                    Your plan automatically avoids movements that stress injured areas
+                  </Text>
+                </View>
+              );
+            })()}
 
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
@@ -3526,9 +3545,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Training day — keep protein high for muscle recovery</Text>;
                   })()}
                   {userProfile?.physicalStats?.weightLbs ? (
-                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
-                      Water: {formatWaterTarget(userProfile.physicalStats.weightLbs, userProfile.workoutDurationMinutes ?? 0)} daily
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6, backgroundColor: themeColors.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                      <Ionicons name="water-outline" size={16} color="#38BDF8" />
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary }}>
+                        {formatWaterTarget(userProfile.physicalStats.weightLbs, userProfile.workoutDurationMinutes ?? 0)}
+                      </Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>daily target</Text>
+                    </View>
                   ) : null}
                 </View>
               );
@@ -3901,14 +3924,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </ScrollView>
         );
       })()}</ErrorBoundary>)}
-
-      {/* Coach check-in modal */}
-      <CoachCheckinModal
-        visible={showCheckin}
-        authToken={authToken}
-        onClose={() => setShowCheckin(false)}
-        themeName={userProfile.themePreference}
-      />
 
       {/* Log Activity modal */}
       <LogActivityModal
@@ -4433,7 +4448,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     { key: 'log_activity', label: 'Log Activity', icon: 'create-outline' as const, mode: 'trainer' as const },
                     { key: 'log_food', label: 'Log Food', icon: 'cafe-outline' as const, mode: 'nutritionist' as const },
                     { key: 'report_injury', label: 'Report Injury', icon: 'bandage-outline' as const, mode: 'trainer' as const },
-                    { key: 'general', label: 'Ask Anything', icon: 'chatbubble-outline' as const, mode: 'trainer' as const },
+                    { key: 'general', label: 'General Questions', icon: 'help-circle-outline' as const, mode: 'trainer' as const },
                   ]).map(t => (
                     <TouchableOpacity
                       key={t.key}
@@ -4503,25 +4518,91 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.trainerChatList} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
               {(coachMode === 'trainer' ? workoutChat : nutritionChat).length === 0 ? (
                 <View style={{ padding: 16, gap: 6 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>Ask your coach about:</Text>
-                  <View style={{ gap: 4 }}>
-                    {[
-                      { icon: 'swap-horizontal-outline' as const, text: 'Swap exercises or foods' },
-                      { icon: 'nutrition-outline' as const, text: 'Meal suggestions & macro advice' },
-                      { icon: 'barbell-outline' as const, text: 'Workout modifications' },
-                      { icon: 'bandage-outline' as const, text: 'Report injuries or pain' },
-                      { icon: 'analytics-outline' as const, text: 'Progress questions' },
-                      { icon: 'help-circle-outline' as const, text: 'Nutrition & training tips' },
-                    ].map(item => (
-                      <View key={item.text} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                        <Ionicons name={item.icon} size={14} color={themeColors.textMuted} />
-                        <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{item.text}</Text>
-                      </View>
-                    ))}
-                  </View>
-                  <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 4 }}>
-                    The coach can update your workout plan, nutrition targets, and injury tracking directly.
-                  </Text>
+                  {(() => {
+                    const topicHints: Record<string, { title: string; items: Array<{ icon: string; text: string }>; note: string }> = {
+                      change_plan: {
+                        title: 'Workout Modifications',
+                        items: [
+                          { icon: 'swap-horizontal-outline', text: '"Swap bench press for dumbbell press"' },
+                          { icon: 'add-circle-outline', text: '"Add a core exercise to leg day"' },
+                          { icon: 'remove-circle-outline', text: '"Remove the overhead press"' },
+                          { icon: 'calendar-outline', text: '"Make it 5 days instead of 6"' },
+                        ],
+                        note: 'For day swaps (e.g. make tomorrow legs), use the Switch Day button on the workout card instead.',
+                      },
+                      change_goal: {
+                        title: 'Change Your Goal',
+                        items: [
+                          { icon: 'flag-outline', text: '"Switch me to fat loss"' },
+                          { icon: 'barbell-outline', text: '"I want to focus on strength"' },
+                          { icon: 'trending-up-outline', text: '"Change to body recomp"' },
+                        ],
+                        note: 'This will regenerate your workout and nutrition plans to match the new goal.',
+                      },
+                      change_meals: {
+                        title: 'Meal Plan Changes',
+                        items: [
+                          { icon: 'swap-horizontal-outline', text: '"Replace chicken with salmon for dinner"' },
+                          { icon: 'nutrition-outline', text: '"Make breakfast higher protein"' },
+                          { icon: 'leaf-outline', text: '"Suggest lower sugar alternatives"' },
+                          { icon: 'restaurant-outline', text: '"I need a quick lunch idea"' },
+                        ],
+                        note: 'For macro targets (e.g. set protein to 200g), update in Foods > Targets section.',
+                      },
+                      log_food: {
+                        title: 'Log What You Ate',
+                        items: [
+                          { icon: 'cafe-outline', text: '"I had a chicken salad for lunch"' },
+                          { icon: 'fast-food-outline', text: '"Logged a burger and fries"' },
+                        ],
+                        note: 'For faster logging, check off meals on your plan or use the barcode scanner.',
+                      },
+                      report_injury: {
+                        title: 'Report Pain or Injury',
+                        items: [
+                          { icon: 'bandage-outline', text: '"My lower back hurts when deadlifting"' },
+                          { icon: 'alert-circle-outline', text: '"Sharp pain in my left shoulder"' },
+                          { icon: 'medical-outline', text: '"My knee feels unstable on squats"' },
+                        ],
+                        note: 'I\'ll assess the injury and your plan will automatically update to avoid the affected area.',
+                      },
+                      log_activity: {
+                        title: 'Log a Workout',
+                        items: [
+                          { icon: 'barbell-outline', text: '"I did legs today for 45 min"' },
+                          { icon: 'bicycle-outline', text: '"30 min cycling this morning"' },
+                        ],
+                        note: 'For structured logging with sets/reps, use the Log Activity button on the Progress tab.',
+                      },
+                      general: {
+                        title: 'General Questions',
+                        items: [
+                          { icon: 'help-circle-outline', text: '"How much protein do I need?"' },
+                          { icon: 'leaf-outline', text: '"What are good sources of fiber?"' },
+                          { icon: 'fitness-outline', text: '"Should I do cardio on rest days?"' },
+                          { icon: 'water-outline', text: '"How much water should I drink?"' },
+                        ],
+                        note: 'Informational only — your plan won\'t be modified. For changes, use the specific topics above.',
+                      },
+                    };
+                    const hint = topicHints[chatTopic ?? 'general'] ?? topicHints.general;
+                    return (
+                      <>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>{hint.title}</Text>
+                        <View style={{ gap: 4 }}>
+                          {hint.items.map(item => (
+                            <View key={item.text} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                              <Ionicons name={item.icon as any} size={14} color={themeColors.textMuted} />
+                              <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{item.text}</Text>
+                            </View>
+                          ))}
+                        </View>
+                        <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 4 }}>
+                          {hint.note}
+                        </Text>
+                      </>
+                    );
+                  })()}
                   <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, marginTop: 8 }]}>
                     {coachMode === 'nutritionist'
                       ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
@@ -4630,7 +4711,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       text: 'Camera', onPress: async () => {
                         const perm = await ImagePicker.requestCameraPermissionsAsync();
                         if (!perm.granted) return;
-                        const res = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any });
+                        const res = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any, maxWidth: 1024, maxHeight: 1024 } as any);
                         if (!res.canceled && res.assets?.[0]?.base64) {
                           setAttachedImage({ base64: res.assets[0].base64!, uri: res.assets[0].uri });
                         }
@@ -4640,7 +4721,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       text: 'Photo Library', onPress: async () => {
                         const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
                         if (!perm.granted) return;
-                        const res = await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any });
+                        const res = await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] as any, maxWidth: 1024, maxHeight: 1024 } as any);
                         if (!res.canceled && res.assets?.[0]?.base64) {
                           setAttachedImage({ base64: res.assets[0].base64!, uri: res.assets[0].uri });
                         }
@@ -4777,7 +4858,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       </Modal>
 
-      {/* Weekly Check-in Modal */}
+      {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
           <View style={{ backgroundColor: themeColors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: themeColors.border, maxHeight: '90%' }}>

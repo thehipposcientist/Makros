@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import openai
+
+logger = logging.getLogger(__name__)
 from openai import OpenAI
 from fastapi import HTTPException, Depends
 
@@ -72,6 +75,65 @@ def ask_trainer_question(
         raise HTTPException(status_code=400, detail="Question is too short")
 
     is_nutritionist = body.mode == "nutritionist"
+
+    # ── Fast intent classification (deterministic, no AI call) ────────────────
+    # Simple questions get a lightweight code path that skips full context loading.
+    # This cuts response time from 15-30s to 2-5s for general knowledge questions.
+    _q_lower = q.lower()
+    _is_simple_knowledge = (
+        not body.conversation  # first message, not a follow-up
+        and not body.image_base64
+        and not any(kw in _q_lower for kw in (
+            "swap", "replace", "change", "update", "modify", "switch",
+            "my plan", "my workout", "my meal", "my diet", "my macro",
+            "log", "track", "record", "injury", "hurt", "pain",
+            "tomorrow", "today", "yesterday", "this week", "next week",
+            "day 1", "day 2", "day 3", "day 4", "day 5", "day 6", "day 7",
+        ))
+        and any(kw in _q_lower for kw in (
+            "what is", "what are", "how to", "how do", "how much", "how many",
+            "why", "should i", "can i", "is it", "best", "good", "tips",
+            "recommend", "suggest", "explain", "difference", "benefit",
+            "source", "sources of", "foods high in", "foods with",
+            "lower", "reduce", "increase", "improve",
+        ))
+    )
+
+    if _is_simple_knowledge:
+        logger.info(f"[trainer-question] FAST PATH: simple knowledge question detected")
+        client = OpenAI(api_key=api_key)
+        # Minimal context: just goal + basic profile
+        profile_slim_fast = body.profile or {}
+        goal = profile_slim_fast.get("goal", "body_recomp") if isinstance(profile_slim_fast, dict) else "body_recomp"
+        exp = profile_slim_fast.get("experienceLevel", "intermediate") if isinstance(profile_slim_fast, dict) else "intermediate"
+        fast_system = (
+            f"You are an expert fitness coach and registered dietitian. "
+            f"The user's goal is {goal}, experience level is {exp}. "
+            f"Give a concise, practical answer. Use bullet points for actionable advice. "
+            f"Keep it under 200 words. Return JSON: "
+            f'{{"answer": "...", "action_items": ["..."], "needs_plan_update": false, '
+            f'"safety_note": "", "updated_goal": null, "updated_macros": null, '
+            f'"updated_workout_plan": null, "updated_nutrition_plan": null, '
+            f'"updated_injuries": null, "injury_clarification_needed": false, '
+            f'"logged_workouts": null}}'
+        )
+        fast_messages = [
+            {"role": "system", "content": fast_system},
+            {"role": "user", "content": q},
+        ]
+        try:
+            from .utils import model_intent
+            fast_kwargs = _build_chat_kwargs(model_intent(), fast_messages, json_schema=None, max_tokens=800, timeout_secs=15)
+            fast_resp = _chat_create(client, **fast_kwargs)
+            fast_raw = fast_resp.choices[0].message.content
+            if fast_raw:
+                fast_result = _extract_json(fast_raw)
+                if fast_result.get("answer"):
+                    logger.info(f"[trainer-question] FAST PATH success: {len(fast_result['answer'])} chars")
+                    return fast_result
+        except Exception as e:
+            logger.warning(f"[trainer-question] FAST PATH failed, falling through to full path: {e}")
+        # Fall through to full path if fast path fails
 
     # Unified coach — send both workout and nutrition context regardless of mode
     profile_slim = body.profile or {}
@@ -273,12 +335,22 @@ def ask_trainer_question(
         "set needs_plan_update=true and return the COMPLETE updated_nutrition_plan. "
         "Preserve isRoutine=true meals exactly as-is. "
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
-        "INJURY HANDLING: ask ONE clarifying question if needed, set injury_clarification_needed=true. "
-        "Once you have info, set updated_injuries and update the workout plan to avoid the area. "
-        "For each injury, estimate: severity (mild/moderate/severe), affected muscleGroups from "
+        "INJURY HANDLING — IMPORTANT:\n"
+        "When a user reports pain or injury, follow this exact protocol:\n"
+        "1. Ask ONE clarifying question if needed (where exactly, when it started, what triggers it). Set injury_clarification_needed=true.\n"
+        "2. Once you have enough info, create the injury by setting updated_injuries with structured data.\n"
+        "3. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries.\n"
+        "   The app will automatically regenerate the plan using its deterministic planner which knows how to block\n"
+        "   dangerous movement patterns and adjust readiness scores for the injured muscles.\n"
+        "4. In your answer, explain:\n"
+        "   - What the injury likely is (in simple terms)\n"
+        "   - What movements will be automatically avoided (e.g., 'hinge movements like deadlifts will be removed')\n"
+        "   - Estimated recovery timeline\n"
+        "   - What to watch for (warning signs to see a doctor)\n"
+        "   - That you'll check back when the estimated recovery date arrives\n"
+        "5. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
-        "estimatedRecoveryDays (conservative estimate based on injury type and severity). "
-        "A mild strain might be 5-10 days, moderate 14-28, severe 42-90+. Be conservative. "
+        "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
         "Return JSON only."
         + _capability_instructions
@@ -472,7 +544,18 @@ def ask_trainer_question(
             raw = response.choices[0].message.content or raw
 
         result = _extract_json(raw)
-        print(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
+        logger.info(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
+
+        # ── Injury guard: NEVER modify the plan when reporting injuries ──
+        # The AI sometimes ignores the system prompt and returns both
+        # updated_injuries AND needs_plan_update. The deterministic planner
+        # handles injury-aware plan changes — not the AI.
+        if result.get("updated_injuries") and isinstance(result["updated_injuries"], list) and len(result["updated_injuries"]) > 0:
+            if result.get("needs_plan_update") or result.get("updated_workout_plan") or result.get("updated_nutrition_plan"):
+                logger.info("[trainer-question] injury guard: stripping plan update from injury response — planner handles this")
+                result["needs_plan_update"] = False
+                result["updated_workout_plan"] = None
+                result["updated_nutrition_plan"] = None
 
         # ── Intent-detection safety net ──────────────────────────────
         # The LLM sometimes describes a plan change in `answer` ("yes,

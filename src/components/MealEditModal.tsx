@@ -315,8 +315,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     // payloads trip the backend request size limit. Camera capture is
     // already cropped, so we only aggressively shrink the library path.
     const result = source === 'camera'
-      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images', exif: false })
-      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.4, mediaTypes: 'images', exif: false });
+      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any)
+      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.4, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any);
     if (result.canceled || !result.assets[0]?.base64) return;
     const asset = result.assets[0];
     setScanLoading(true);

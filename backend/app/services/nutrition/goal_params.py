@@ -273,6 +273,7 @@ GOAL_BUCKET_MAP: dict[str, GoalBucketParams] = {
     "body_recomp":       BODY_RECOMP,
     "maintain":          BODY_RECOMP,
     "maintain_physique": BODY_RECOMP,
+    "general_health":    GENERAL_HEALTH,
 
     # ── Strength / powerlifting ──────────────────────────────────────────────
     "strength":            STRENGTH,
@@ -311,6 +312,7 @@ GOAL_BUCKET_MAP: dict[str, GoalBucketParams] = {
     "work_capacity":       ENDURANCE,
 
     # ── Athletic performance ─────────────────────────────────────────────────
+    "hyrox":                ATHLETIC,
     "athletic_performance": ATHLETIC,
     "improve_athleticism":  ATHLETIC,
     "improve_speed":        ATHLETIC,

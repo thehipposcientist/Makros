@@ -86,6 +86,8 @@ const PROCESSED_KEYWORDS = [
   'mac and cheese', 'macaroni and cheese', 'canned soup', 'packaged',
   'microwave', 'toaster', 'processed', 'deli meat', 'bacon', 'sausage',
   'salami', 'pepperoni', 'jerky', 'slim jim',
+  'granola', 'rice cake', 'bagel', 'english muffin', 'flour tortilla',
+  'trail mix', 'dark chocolate',
 ];
 
 const FRUIT_VEG_KEYWORDS = [

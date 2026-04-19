@@ -1101,6 +1101,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         weightLbs: currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs,
       },
       customMacros: (() => {
+        // Goal changes always clear custom macros so the new goal's
+        // calorie/protein targets take effect. Custom macros only persist
+        // when explicitly editing from the mealplan/macros tab.
+        if (mode === 'goal') return undefined;
         const hasAny = useCustomMacros || mode === 'mealplan';
         if (!hasAny) return undefined;
         // Percentage mode: convert % → grams using the calorie target.
