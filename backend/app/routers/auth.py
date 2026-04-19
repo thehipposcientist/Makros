@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -43,3 +44,29 @@ def login(body: LoginRequest, session: Session = Depends(get_session)):
 @router.get("/me", response_model=UserRead)
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+    new_password: str
+
+
+@router.post("/reset-password", response_model=Token)
+def reset_password(body: PasswordResetRequest, session: Session = Depends(get_session)):
+    """Dev-mode reset: email match alone is enough to set a new password.
+    Returns a fresh access token so the client logs straight in."""
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    user = session.exec(select(User).where(User.email == body.email)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found for that email")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+
+    user.hashed_password = hash_password(body.new_password)
+    session.add(user)
+    session.commit()
+
+    token = create_access_token(user.id)
+    return Token(access_token=token)

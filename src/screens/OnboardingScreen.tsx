@@ -310,9 +310,10 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
 interface OnboardingScreenProps {
   authToken: string;
   onComplete: (profile: UserProfile) => void;
+  onExit?: () => void;
 }
 
-export default function OnboardingScreen({ authToken, onComplete }: OnboardingScreenProps) {
+export default function OnboardingScreen({ authToken, onComplete, onExit }: OnboardingScreenProps) {
   const meta = useMetaData();
   const scrollRef = useRef<ScrollView>(null);
 
@@ -1641,6 +1642,23 @@ export default function OnboardingScreen({ authToken, onComplete }: OnboardingSc
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
       >
+        {onExit && (
+          <TouchableOpacity
+            style={styles.exitButton}
+            onPress={() => {
+              Alert.alert(
+                'Exit sign up?',
+                'Your progress will be cleared and you can sign in with an existing account.',
+                [
+                  { text: 'Keep going', style: 'cancel' },
+                  { text: 'Exit', style: 'destructive', onPress: onExit },
+                ],
+              );
+            }}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <Ionicons name="close" size={20} color={colors.textSecondary} />
+          </TouchableOpacity>
+        )}
         <View style={styles.header}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
           <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}  ·  {
@@ -1700,6 +1718,12 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 24, paddingBottom: 200 },
   header: { marginTop: 20, marginBottom: 20 },
+  exitButton: {
+    position: 'absolute', top: 16, right: 16, zIndex: 10,
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+  },
   logo: { width: 360, height: 160 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },
 

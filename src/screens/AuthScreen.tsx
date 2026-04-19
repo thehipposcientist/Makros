@@ -4,7 +4,7 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image, Dimensions, Alert,
 } from 'react-native';
-import { login, register } from '../services/api';
+import { login, register, resetPassword } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -15,7 +15,7 @@ interface AuthScreenProps {
 }
 
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
-  const [mode, setMode] = useState<'login' | 'signup'>('login');
+  const [mode, setMode] = useState<'login' | 'signup' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -30,7 +30,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const confirmPasswordRef = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
 
-  const switchMode = (next: 'login' | 'signup') => {
+  const switchMode = (next: 'login' | 'signup' | 'reset') => {
     setMode(next);
     setError('');
     setPassword('');
@@ -45,8 +45,8 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       setError('Email and password are required');
       return;
     }
-    if (mode === 'signup') {
-      if (!username.trim()) {
+    if (mode === 'signup' || mode === 'reset') {
+      if (mode === 'signup' && !username.trim()) {
         setError('Username is required');
         return;
       }
@@ -63,7 +63,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     try {
       const isNewUser = mode === 'signup';
       if (isNewUser) await register(email.trim(), username.trim(), password);
-      const { access_token } = await login(email.trim(), password);
+      const { access_token } = mode === 'reset'
+        ? await resetPassword(email.trim(), password)
+        : await login(email.trim(), password);
 
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
@@ -155,13 +157,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             <TextInput
               ref={passwordRef}
               style={[styles.input, styles.passwordInput]}
-              placeholder="Password"
+              placeholder={mode === 'reset' ? 'New password' : 'Password'}
               placeholderTextColor={colors.textMuted}
               value={password}
               onChangeText={setPassword}
               secureTextEntry={!showPassword}
-              returnKeyType={mode === 'signup' ? 'next' : 'go'}
-              onSubmitEditing={() => mode === 'signup' ? confirmPasswordRef.current?.focus() : handleSubmit()}
+              returnKeyType={mode === 'login' ? 'go' : 'next'}
+              onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
               blurOnSubmit={false}
             />
             <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
@@ -169,13 +171,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {/* Confirm password (signup only) */}
-          {mode === 'signup' && (
+          {/* Confirm password (signup + reset) */}
+          {(mode === 'signup' || mode === 'reset') && (
             <View style={styles.passwordRow}>
               <TextInput
                 ref={confirmPasswordRef}
                 style={[styles.input, styles.passwordInput]}
-                placeholder="Confirm password"
+                placeholder={mode === 'reset' ? 'Confirm new password' : 'Confirm password'}
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
@@ -198,10 +200,21 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             {loading
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
-                  {mode === 'login' ? 'Log In' : 'Get Started'}
+                  {mode === 'login' ? 'Log In' : mode === 'reset' ? 'Reset Password' : 'Get Started'}
                 </Text>
             }
           </TouchableOpacity>
+
+          {mode === 'login' && (
+            <TouchableOpacity onPress={() => switchMode('reset')} style={styles.forgotBtn}>
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
+          )}
+          {mode === 'reset' && (
+            <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
+              <Text style={styles.forgotText}>Back to log in</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         <View style={{ height: 40 }} />
@@ -265,4 +278,7 @@ const styles = StyleSheet.create({
   },
   submitButtonDisabled: { opacity: 0.6 },
   submitText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700', letterSpacing: 0.3 },
+
+  forgotBtn: { alignSelf: 'center', paddingVertical: 8, marginTop: 2 },
+  forgotText: { fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
 });

@@ -204,19 +204,23 @@ def food_nutrition_search(
     current_user: User = Depends(get_current_user),
 ):
     """Search for food nutrition info. Uses USDA FoodData Central first,
-    falls back to AI only when USDA returns no results."""
+    falls back to AI only when USDA returns no results. Pass force_ai=true
+    to skip USDA entirely (useful for composite dishes USDA doesn't have)."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query is required")
 
-    # 1. Try USDA FoodData Central (free, accurate, fast)
-    from app.services.usda_fdc import search_foods as usda_search
-    usda_results = usda_search(body.query.strip(), max_results=5)
-    if usda_results:
-        print(f"[food-search] USDA hit: {len(usda_results)} results for '{body.query}'")
-        return {"results": usda_results}
+    # 1. Try USDA FoodData Central (free, accurate, fast) unless caller forced AI
+    if not body.force_ai:
+        from app.services.usda_fdc import search_foods as usda_search
+        usda_results = usda_search(body.query.strip(), max_results=5)
+        if usda_results:
+            print(f"[food-search] USDA hit: {len(usda_results)} results for '{body.query}'")
+            return {"results": usda_results}
+        print(f"[food-search] USDA miss for '{body.query}', falling back to AI")
+    else:
+        print(f"[food-search] force_ai=true, skipping USDA for '{body.query}'")
 
-    # 2. Fallback to AI when USDA has no match
-    print(f"[food-search] USDA miss for '{body.query}', falling back to AI")
+    # 2. Fallback to AI (or forced AI)
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="No USDA results and OpenAI API key not configured")

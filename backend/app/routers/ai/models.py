@@ -212,6 +212,7 @@ class FormPhotoRequest(BaseModel):
 
 class FoodNutritionSearchRequest(BaseModel):
     query: str   # free-text: "100g chicken breast" or "1 avocado" or "pizza slice"
+    force_ai: bool = False  # skip USDA, ask AI directly (e.g. for dishes USDA won't have)
 
 class ExerciseSearchRequest(BaseModel):
     query: str                            # free-text: "lower chest dumbbell", "knee-friendly quad"

@@ -61,6 +61,7 @@ const _GRAMS_PER_CUP: Record<string, number> = {
   berries: 150, berry: 150, blueberry: 148, strawberry: 152,
   // Proteins (cooked, chopped)
   chicken: 140, turkey: 140, beef: 135, pork: 135, fish: 140,
+  shrimp: 113, prawn: 113, salmon: 155, tuna: 150, tilapia: 140,
   // Nuts / spreads
   'peanut butter': 258, 'almond butter': 258, almonds: 143, nuts: 140,
   // Legumes
@@ -85,15 +86,19 @@ function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: numb
   const fromCount = !fromWeight && !fromVolume;
   const toCount = !toWeight && !toVolume;
 
-  // Weight ↔ Volume: use food-specific density estimate
+  // All cross-system conversions preserve the *physical amount* of food via a
+  // density estimate (g-per-cup). The macros describe that physical amount, so
+  // they don't scale — only the displayed quantity label changes. Ratio is
+  // always 1 here; callers should not re-scale macros on a unit switch.
+  const MIN_QTY = 0.01;
+
   if (fromWeight && toVolume) {
     const gpc = _estimateGramsPerCup(foodName ?? '');
     const fromGrams = fromUnit === 'g' ? fromQty : fromUnit === 'oz' ? fromQty * 28.35 : fromUnit === 'kg' ? fromQty * 1000 : fromUnit === 'lb' ? fromQty * 453.6 : fromQty;
     const cups = fromGrams / gpc;
-    // Convert cups to target volume unit
     const cupToTarget: Record<string, number> = { cup: 1, ml: 240, fl_oz: 8, tbsp: 16, tsp: 48, l: 0.24, pint: 0.5, quart: 0.25, gallon: 0.0625 };
     const targetQty = cups * (cupToTarget[toUnit] ?? 1);
-    return { qty: Math.round(targetQty * 100) / 100, ratio: targetQty / (fromQty || 1) };
+    return { qty: Math.max(MIN_QTY, Math.round(targetQty * 100) / 100), ratio: 1 };
   }
   if (fromVolume && toWeight) {
     const gpc = _estimateGramsPerCup(foodName ?? '');
@@ -101,18 +106,19 @@ function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: numb
     const fromMl = fromQty * (volToMl[fromUnit] ?? 240);
     const grams = fromMl * gpc / 240;
     const targetQty = toUnit === 'g' ? grams : toUnit === 'oz' ? grams / 28.35 : toUnit === 'kg' ? grams / 1000 : toUnit === 'lb' ? grams / 453.6 : grams;
-    return { qty: Math.round(targetQty * 100) / 100, ratio: targetQty / (fromQty || 1) };
+    return { qty: Math.max(MIN_QTY, Math.round(targetQty * 100) / 100), ratio: 1 };
   }
 
-  // Count ↔ Weight/Volume
+  // Count ↔ Weight/Volume: no density data for pieces, so we guess quantity
+  // and keep macros as-is (they represent the original physical amount).
   if (fromCount && toWeight) {
     const perServing = toUnit === 'g' ? 100 : toUnit === 'oz' ? 3.5 : toUnit === 'kg' ? 0.1 : toUnit === 'lb' ? 0.22 : 100;
-    const qty = Math.round(fromQty * perServing * 100) / 100;
+    const qty = Math.max(MIN_QTY, Math.round(fromQty * perServing * 100) / 100);
     return { qty, ratio: 1 };
   }
   if (fromCount && toVolume) {
     const perServing = toUnit === 'cup' ? 1 : toUnit === 'ml' ? 240 : toUnit === 'fl_oz' ? 8 : toUnit === 'tbsp' ? 16 : toUnit === 'tsp' ? 48 : 1;
-    const qty = Math.round(fromQty * perServing * 100) / 100;
+    const qty = Math.max(MIN_QTY, Math.round(fromQty * perServing * 100) / 100);
     return { qty, ratio: 1 };
   }
   if (toCount) {
@@ -234,7 +240,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [scanLoading, setScanLoading] = useState(false);
   const [barcodeScanning, setBarcodeScanning] = useState(false);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
-  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
+  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; source?: 'usda' | 'ai' }>>([]);
   // Track which item is currently showing the unit picker popover.
   const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
   // In-progress text for each row's quantity input. Lets the user type
@@ -490,24 +496,20 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             baseQuantity: baseConverted != null ? Math.round(baseConverted * 100) / 100 : current.baseQuantity,
           };
         } else {
-          // Cross-system switch (e.g. g→cup, piece→oz). Use food-specific
-          // density to estimate the equivalent quantity AND scale macros
-          // so the nutritional values stay proportional.
-          const { qty: defaultQty, ratio } = _crossSystemDefault(current.unit, patch.unit, current.quantity, current.name);
-          const macroScale = ratio !== 1 ? ratio : 1;
+          // Cross-system switch (e.g. g→cup, piece→oz). Density estimate
+          // converts the quantity label while preserving the same physical
+          // amount of food — macros don't change. Re-anchor baseQuantity to
+          // the new unit so future quantity edits scale correctly.
+          const { qty: defaultQty } = _crossSystemDefault(current.unit, patch.unit, current.quantity, current.name);
           next[idx] = {
             ...current,
             unit: patch.unit,
             quantity: defaultQty,
             baseQuantity: defaultQty,
-            calories: Math.round(current.calories * macroScale),
-            protein:  Math.round(current.protein * macroScale),
-            carbs:    Math.round(current.carbs * macroScale),
-            fat:      Math.round(current.fat * macroScale),
-            baseCalories: Math.round(current.calories * macroScale),
-            baseProtein:  Math.round(current.protein * macroScale),
-            baseCarbs:    Math.round(current.carbs * macroScale),
-            baseFat:      Math.round(current.fat * macroScale),
+            baseCalories: current.calories,
+            baseProtein:  current.protein,
+            baseCarbs:    current.carbs,
+            baseFat:      current.fat,
           };
         }
         return next;
@@ -573,15 +575,29 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const handleAiSearch = async () => {
+  const handleAiSearch = async (opts?: { forceAi?: boolean; append?: boolean }) => {
     if (!authToken || !search.trim()) return;
     setAiSearchLoading(true);
     try {
-      const res = await searchFoodNutrition(authToken, search.trim());
-      setAiResults(res.results ?? []);
-      if (!res.results?.length) Alert.alert('No results', `Could not find nutrition info for "${search}".`);
+      const res = await searchFoodNutrition(authToken, search.trim(), { forceAi: opts?.forceAi });
+      const incoming = res.results ?? [];
+      if (opts?.append) {
+        setAiResults(prev => {
+          const seen = new Set(prev.map(r => `${r.source ?? ''}:${r.name.toLowerCase()}`));
+          const merged = [...prev];
+          for (const r of incoming) {
+            const key = `${r.source ?? ''}:${r.name.toLowerCase()}`;
+            if (!seen.has(key)) merged.push(r);
+          }
+          return merged;
+        });
+      } else {
+        setAiResults(incoming);
+      }
+      if (!incoming.length && !opts?.append) Alert.alert('No results', `Could not find nutrition info for "${search}".`);
+      if (!incoming.length && opts?.append) Alert.alert('No AI results', `AI had nothing to add for "${search}".`);
     } catch (e: any) {
-      Alert.alert('Search failed', e.message ?? 'Could not reach the AI server.');
+      Alert.alert('Search failed', e.message ?? 'Could not reach the server.');
     } finally {
       setAiSearchLoading(false);
     }
@@ -1008,7 +1024,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 placeholder="Search foods..."
                 placeholderTextColor={colors.textMuted}
                 returnKeyType="search"
-                onSubmitEditing={authToken && search.length > 1 ? handleAiSearch : undefined}
+                onSubmitEditing={authToken && search.length > 1 ? () => handleAiSearch() : undefined}
               />
               {search.length > 0 && (
                 <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -1018,36 +1034,60 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               {authToken && search.length > 1 && (
                 <TouchableOpacity
                   style={[s.aiSearchInlineBtn, aiSearchLoading && { opacity: 0.5 }]}
-                  onPress={handleAiSearch}
+                  onPress={() => handleAiSearch()}
                   disabled={aiSearchLoading}>
                   {aiSearchLoading
                     ? <ActivityIndicator size="small" color="#FFFFFF" />
-                    : <Text style={s.aiSearchInlineBtnText}>AI Search</Text>}
+                    : <Text style={s.aiSearchInlineBtnText}>Search</Text>}
                 </TouchableOpacity>
               )}
             </View>
 
             {filteredCategories.length === 0 && search.length > 0 && !aiSearchLoading && aiResults.length === 0 && (
-              <Text style={s.emptyText}>No local matches — tap AI Search to find it</Text>
+              <Text style={s.emptyText}>No local matches — tap Search to look up nutrition</Text>
             )}
 
-            {aiResults.length > 0 && (
+            {aiResults.length > 0 && (() => {
+              const hasUsda = aiResults.some(r => r.source === 'usda');
+              const hasAi = aiResults.some(r => r.source === 'ai');
+              return (
               <View style={{ marginBottom: 16 }}>
-                <Text style={s.sectionLabel}>AI Results</Text>
-                {aiResults.map((item, idx) => (
-                  <TouchableOpacity key={`${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.aiResultName}>{item.name}</Text>
-                      <Text style={s.aiResultServing}>{item.serving}</Text>
-                      <Text style={s.aiResultMacros}>
-                        {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
-                      </Text>
-                    </View>
-                    <Text style={s.aiResultAdd}>+ Add</Text>
+                <Text style={s.sectionLabel}>Search Results</Text>
+                {aiResults.map((item, idx) => {
+                  const isUsda = item.source === 'usda';
+                  return (
+                    <TouchableOpacity key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <Text style={s.aiResultName}>{item.name}</Text>
+                          {item.source && (
+                            <View style={[s.sourceBadge, isUsda ? s.sourceBadgeUsda : s.sourceBadgeAi]}>
+                              <Text style={[s.sourceBadgeText, isUsda ? s.sourceBadgeTextUsda : s.sourceBadgeTextAi]}>
+                                {isUsda ? 'USDA' : 'AI'}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={s.aiResultServing}>{item.serving}</Text>
+                        <Text style={s.aiResultMacros}>
+                          {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
+                        </Text>
+                      </View>
+                      <Text style={s.aiResultAdd}>+ Add</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                {hasUsda && !hasAi && !aiSearchLoading && (
+                  <TouchableOpacity
+                    style={s.alsoAskAiBtn}
+                    onPress={() => handleAiSearch({ forceAi: true, append: true })}>
+                    <Ionicons name="sparkles-outline" size={14} color={colors.primary} />
+                    <Text style={s.alsoAskAiText}>Also ask AI for more options</Text>
                   </TouchableOpacity>
-                ))}
+                )}
               </View>
-            )}
+              );
+            })()}
 
             {filteredCategories.map(cat => (
               <View key={cat.key} style={s.catSection}>
@@ -1267,4 +1307,23 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   aiResultServing: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   aiResultMacros:  { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
   aiResultAdd:     { fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 },
+
+  sourceBadge: {
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: radius.sm ?? 4,
+    borderWidth: 1,
+  },
+  sourceBadgeUsda: { backgroundColor: '#10B98122', borderColor: '#10B98177' },
+  sourceBadgeAi:   { backgroundColor: colors.primary + '22', borderColor: colors.primary + '77' },
+  sourceBadgeText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
+  sourceBadgeTextUsda: { color: '#059669' },
+  sourceBadgeTextAi:   { color: colors.primary },
+
+  alsoAskAiBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 10, marginTop: 4,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.primary + '55',
+    backgroundColor: colors.primary + '11',
+  },
+  alsoAskAiText: { fontSize: 12, fontWeight: '700', color: colors.primary },
 }); }

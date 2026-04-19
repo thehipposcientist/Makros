@@ -1499,9 +1499,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     loadPlansInFlightRef.current = true;
     try {
-    // Check for an AI-generated plan saved after user saves plan settings
+    // Check for an AI-generated plan saved after user saves plan settings.
+    // We no longer silently fall back to a local client-side generator — that
+    // used to mask "plan missing" as "plan changed to a different split"
+    // because `generateWorkoutPlan` produces differently-named days ("Upper A
+    // — Strength", etc.) than the backend planner. If the user has no plan,
+    // HomeScreen renders its empty state and they can regenerate explicitly.
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
-    let baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
+    if (!aiWorkoutRaw) {
+      console.log('[loadPlans] no saved workout plan — skipping until user regenerates');
+      setWorkoutPlan(null as any);
+      return;
+    }
+    let baseWorkout = JSON.parse(aiWorkoutRaw);
 
     // Enrich all exercises with image URLs from the backend library.
     // This covers cached plans that were generated before image enrichment.
@@ -1546,6 +1556,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         try {
           const { generateWorkoutDay } = await import('../services/api');
           const todayIdx = completedDates.size % baseWorkout.days.length;
+          // Lock the backend to the existing day's focus so "fresh day"
+          // only regenerates exercises, never swaps the split (e.g. a PPL
+          // plan won't suddenly show "Upper A — Strength" for today).
+          const existingFocus = baseWorkout.days[todayIdx % baseWorkout.days.length]?.focus;
           const freshDay = await generateWorkoutDay(authToken, {
             goal: profile.goal,
             day_index: todayIdx,
@@ -1557,6 +1571,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             priority_region: profile.priorityRegion ?? 'balanced',
             injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
             disliked_exercises: profile.dislikedExercises ?? [],
+            focus_override: existingFocus,
           });
           if (freshDay?.day) {
             const updatedDays = [...baseWorkout.days];

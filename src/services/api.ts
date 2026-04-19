@@ -85,6 +85,13 @@ export async function login(email: string, password: string): Promise<{ access_t
   });
 }
 
+export async function resetPassword(email: string, newPassword: string): Promise<{ access_token: string }> {
+  return request('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ email, new_password: newPassword }),
+  });
+}
+
 export async function getMe(token: string) {
   return request('/auth/me', {
     headers: { Authorization: `Bearer ${token}` },
@@ -1283,11 +1290,12 @@ export async function lookupBarcode(
 export async function searchFoodNutrition(
   token: string,
   query: string,
-): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number }> }> {
+  opts?: { forceAi?: boolean },
+): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number; source?: 'usda' | 'ai' }> }> {
   return request<any>('/ai/food-search', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, force_ai: opts?.forceAi ?? false }),
   }, 15000);
 }
 

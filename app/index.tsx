@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
@@ -143,7 +144,10 @@ const USER_SCOPED_KEYS = [
  *  cache, in-flight plan job id, device-specific health toggles). */
 const SYNCED_STATE_KEYS = [
   'userProfile',
-  // aiWorkoutPlan excluded — synced on plan change, not every background
+  // aiWorkoutPlan included — without this, sign-out → sign-in (or cross-device)
+  // loses the user's generated plan, and loadPlans silently falls back to a
+  // local client-side generator that produces a totally different split.
+  'aiWorkoutPlan',
   'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
   'trainerNote', 'nutritionistNote', 'supplementStack',
   'weekStartDate', 'mealEdits', 'mealChecks',
@@ -616,8 +620,13 @@ export default function Index() {
   };
 
   const handleAuthenticated = async (token: string, isNewUser: boolean) => {
-    // Persist so switching apps / killing the process doesn't force re-login.
-    await saveAuthToken(token);
+    // For returning users, persist the token immediately so switching apps
+    // doesn't force re-login. For NEW signups, we hold off persisting until
+    // onboarding completes — if the user quits halfway through, the in-memory
+    // token dies with the process and they start over on next launch.
+    if (!isNewUser) {
+      await saveAuthToken(token);
+    }
 
     // Detect a user switch on the same device. If a different user signs in,
     // we wipe the previous user's cached state so their plans/notes/routines
@@ -683,6 +692,10 @@ export default function Index() {
       setUserProfile(stamped);
       return;
     }
+    // Onboarding is complete — NOW persist the auth token so the user stays
+    // signed in across app restarts. Held off until this point so a
+    // half-finished signup doesn't leave a stale token on disk.
+    await saveAuthToken(authToken);
     syncOnboarding(authToken, stamped).catch(() => null);
 
     // Show loading screen while generating the initial plan.
@@ -981,7 +994,25 @@ export default function Index() {
 
   if (isLoading) return <SplashLoadingScreen />;
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  if (!userProfile) return <OnboardingScreen authToken={authToken ?? ''} onComplete={handleProfileComplete} />;
+  if (!userProfile) return (
+    <OnboardingScreen
+      authToken={authToken ?? ''}
+      onComplete={handleProfileComplete}
+      onExit={async () => {
+        // Abandoning signup — wipe local state, clear in-memory token, and
+        // send the user back to the auth screen. The backend account
+        // lingers (they can sign in later), but nothing is left on device.
+        try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+        try { await AsyncStorage.removeItem(LAST_USER_ID_KEY); } catch {}
+        try { await clearAuthToken(); } catch {}
+        setAuthToken(null);
+        setUserProfile(null);
+        setTrainerNote(null);
+        setNutritionistNote(null);
+        setSupplementStack([]);
+      }}
+    />
+  );
 
   // ActiveWorkoutScreen is a long-duration full takeover — unmount HomeScreen
   // while a workout is active so its effects/timers stop.
@@ -1293,8 +1324,8 @@ export default function Index() {
 
 function SplashLoadingScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
   const spinAnim = useRef(new Animated.Value(0)).current;
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
   const [tipIndex, setTipIndex] = useState(0);
   const tipFade = useRef(new Animated.Value(1)).current;
 
@@ -1304,23 +1335,32 @@ function SplashLoadingScreen() {
     'Preparing your nutrition targets...',
   ];
 
+  // Logo dimensions — kept in one place so the shimmer band stays in sync.
+  const LOGO_W = 260;
+  const LOGO_H = 100;
+  const SHIMMER_W = 120;
+
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
-
-    // Pulse the logo
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 0.85, duration: 1000, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
-      ])
-    );
-    pulse.start();
 
     // Continuous spinner rotation
     const spin = Animated.loop(
       Animated.timing(spinAnim, { toValue: 1, duration: 1200, useNativeDriver: true })
     );
     spin.start();
+
+    // Shimmer sweep — 2.2s sweep + 0.8s pause. Uses easing so the band
+    // glides in and out softly rather than snapping edge-to-edge.
+    const shimmer = Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, {
+          toValue: 1, duration: 2200, useNativeDriver: true,
+          easing: Easing.inOut(Easing.cubic),
+        }),
+        Animated.delay(800),
+      ])
+    );
+    shimmer.start();
 
     const tipTimer = setInterval(() => {
       Animated.timing(tipFade, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => {
@@ -1329,7 +1369,7 @@ function SplashLoadingScreen() {
       });
     }, 2500);
 
-    return () => { pulse.stop(); spin.stop(); clearInterval(tipTimer); };
+    return () => { spin.stop(); shimmer.stop(); clearInterval(tipTimer); };
   }, []);
 
   const spinInterpolate = spinAnim.interpolate({
@@ -1337,18 +1377,37 @@ function SplashLoadingScreen() {
     outputRange: ['0deg', '360deg'],
   });
 
+  const shimmerTranslate = shimmerAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-SHIMMER_W, LOGO_W],
+  });
+
   return (
     <View style={{
       flex: 1, backgroundColor: '#0D0F14',
       alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32,
     }}>
-      {/* Logo — pulsing while loading */}
-      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12, transform: [{ scale: pulseAnim }] }}>
+      {/* Logo with shimmer sweep */}
+      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12, width: LOGO_W, height: LOGO_H, overflow: 'hidden' }}>
         <Image
           source={require('../assets/images/thallo-logo-white.png')}
-          style={{ width: 260, height: 100 }}
+          style={{ width: LOGO_W, height: LOGO_H }}
           resizeMode="contain"
         />
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: 'absolute', top: 0, left: 0, bottom: 0,
+            width: SHIMMER_W,
+            transform: [{ translateX: shimmerTranslate }, { skewX: '-20deg' }],
+          }}>
+          <LinearGradient
+            colors={['rgba(21,199,184,0)', 'rgba(21,199,184,0.35)', 'rgba(21,199,184,0)']}
+            start={{ x: 0, y: 0.5 }}
+            end={{ x: 1, y: 0.5 }}
+            style={{ flex: 1 }}
+          />
+        </Animated.View>
       </Animated.View>
 
       {/* Tagline — matches auth screen */}
