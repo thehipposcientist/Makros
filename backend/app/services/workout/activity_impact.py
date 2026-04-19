@@ -189,6 +189,20 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         "cycling":    {"cardio": 0.45, "quads": 0.25, "glutes": 0.15, "systemic": 0.2},
         "hiking":     {"cardio": 0.35, "quads": 0.2, "glutes": 0.15, "calves": 0.15, "systemic": 0.2},
         "swimming":   {"cardio": 0.4, "back": 0.2, "shoulders": 0.15, "systemic": 0.2},
+        # Active / labor — physical work that creates real fatigue
+        "yard_work":      {"back": 0.25, "shoulders": 0.2, "core": 0.15, "quads": 0.15, "systemic": 0.2},
+        "chopping_wood":  {"back": 0.35, "shoulders": 0.3, "core": 0.25, "biceps": 0.15, "systemic": 0.3},
+        "moving":         {"back": 0.3, "quads": 0.25, "glutes": 0.2, "shoulders": 0.2, "core": 0.2, "systemic": 0.35},
+        "gardening":      {"back": 0.15, "quads": 0.1, "core": 0.1, "systemic": 0.1},
+        "cleaning":       {"cardio": 0.15, "core": 0.1, "systemic": 0.1},
+        "construction":   {"back": 0.3, "shoulders": 0.25, "core": 0.2, "quads": 0.15, "systemic": 0.3},
+        "shoveling":      {"back": 0.35, "shoulders": 0.25, "core": 0.2, "quads": 0.15, "systemic": 0.3},
+        "playing":        {"cardio": 0.25, "quads": 0.15, "systemic": 0.15},
+        "dancing":        {"cardio": 0.3, "quads": 0.15, "calves": 0.1, "core": 0.1, "systemic": 0.15},
+        # Sports
+        "pickleball":     {"cardio": 0.3, "shoulders": 0.2, "quads": 0.15, "calves": 0.1, "systemic": 0.15},
+        "surfing":        {"back": 0.3, "shoulders": 0.25, "core": 0.2, "systemic": 0.2},
+        "skiing":         {"quads": 0.4, "glutes": 0.25, "hamstrings": 0.2, "core": 0.15, "systemic": 0.25},
     }
 
     focus = focus_label.lower().replace(" ", "_").replace("body", "").strip("_")
@@ -204,6 +218,15 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         elif any(k in fl for k in ("run",)):             base = _FOCUS_FATIGUE["running"]
         elif any(k in fl for k in ("cardio", "cycling", "bike")): base = _FOCUS_FATIGUE["cardio"]
         elif any(k in fl for k in ("yoga", "stretch", "mobil")): base = _FOCUS_FATIGUE["yoga"]
+        elif any(k in fl for k in ("chop", "wood", "shovel", "construct")): base = _FOCUS_FATIGUE["chopping_wood"]
+        elif any(k in fl for k in ("yard", "garden", "mow")): base = _FOCUS_FATIGUE["yard_work"]
+        elif any(k in fl for k in ("moving", "lifting", "haul")): base = _FOCUS_FATIGUE["moving"]
+        elif any(k in fl for k in ("clean", "house")): base = _FOCUS_FATIGUE["cleaning"]
+        elif any(k in fl for k in ("danc",)): base = _FOCUS_FATIGUE["dancing"]
+        elif any(k in fl for k in ("play", "kid")): base = _FOCUS_FATIGUE["playing"]
+        elif any(k in fl for k in ("ski",)): base = _FOCUS_FATIGUE["skiing"]
+        elif any(k in fl for k in ("surf",)): base = _FOCUS_FATIGUE["surfing"]
+        elif any(k in fl for k in ("pickle",)): base = _FOCUS_FATIGUE["pickleball"]
         elif any(k in fl for k in ("recovery", "rest")): base = _FOCUS_FATIGUE["recovery"]
         else:                                            base = {"systemic": 0.3}
 

@@ -18,7 +18,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -47,6 +47,7 @@ import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
 import { computeNutritionScore } from '../utils/nutritionScore';
+import ErrorBoundary from '../components/ErrorBoundary';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1061,9 +1062,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Meals:    plan | foods     | supplements | macros
   const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment'>('plan');
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
+  const [commonMeals, setCommonMeals] = useState<any[]>([]);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
   useEffect(() => { import('../utils/feedback').then(f => f.loadSettings()).then(setFeedbackSettings).catch(() => {}); }, []);
+  useEffect(() => {
+    if (mealsSubTab === 'foods' && authToken) {
+      import('../services/api').then(({ getCommonMeals }) =>
+        getCommonMeals(authToken).then(r => setCommonMeals(r.meals || [])).catch(() => {})
+      );
+    }
+  }, [mealsSubTab, authToken]);
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
   // re-loaded when the user changes tabs to profile so a fresh scan
@@ -1220,7 +1229,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
-  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }>; muscleFatigue?: Record<string, number>; activities?: Array<{ date: string; focus: string; muscles: Record<string, number> }> } | null>(null);
+  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }>; muscleFatigue?: Record<string, number>; activities?: Array<{ date: string; focus: string; muscles: Record<string, number> }>; nutritionContext?: { protein_avg: number; protein_status: string; message: string | null; recovery_bonus_applied: boolean } | null } | null>(null);
   const [recoveryExpanded, setRecoveryExpanded] = useState(false);
   const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [username, setUsername] = useState('');
@@ -1468,7 +1477,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { getFatigueScore } = await import('../services/api');
         const fs = await getFatigueScore(authToken);
-        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label, topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {}, activities: fs.activities ?? [] });
+        setReadinessScore({ score: fs.readiness_score, label: fs.readiness_label, topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {}, activities: fs.activities ?? [], nutritionContext: fs.nutrition_context ?? null });
         console.log(`[fatigue] readiness=${fs.readiness_score}% top=${(fs.top_fatigued ?? []).map((t: any) => t.muscle).join(',')}`);
       } catch (e) {
         console.log('[fatigue] fetch failed:', e);
@@ -2558,11 +2567,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (!isRoutineBacked) {
         await savePreservedMeal(date, mealType, meal);
       }
+      // Fire-and-forget: persist the checked meal to backend meal history.
+      if (authToken && meal) {
+        logMealChecked(authToken, {
+          meal_date: date,
+          meal_type: mealType,
+          meal: meal as Record<string, any>,
+          source: 'plan_check',
+        }).catch(err => console.log('[logMealChecked] background save failed:', err.message));
+      }
     } else {
       const localId = (meal as any)._localId;
       await clearPreservedMeal(date, mealType, localId);
     }
-  }, [checkedMealsByDate, persistDayState, nutritionPlansByDate]);
+  }, [checkedMealsByDate, persistDayState, nutritionPlansByDate, authToken]);
 
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
     console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0}`);
@@ -3025,6 +3043,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           Only the workout/meals tabs render the existing ScrollView body;
           goals/progress/profile render their own inline pages below. */}
       {(activeTab === 'workout' || activeTab === 'meals') && (
+      <ErrorBoundary>
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContentBelowSubTab} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {activeTab === 'workout' ? (
           (isWorkoutUpdating && !isNutritionUpdating) ? (
@@ -3158,7 +3177,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       })}
                     {readinessScore.muscleFatigue.systemic > 0 && (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: themeColors.border }}>
-                        <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75 }}>CNS / Systemic</Text>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75 }}>Overall Load</Text>
                         <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
                           <View style={{ width: `${Math.min(100, Math.max(0, 100 - Math.round(readinessScore.muscleFatigue.systemic * 100)))}%` as any, height: 5, borderRadius: 3, backgroundColor: readinessScore.muscleFatigue.systemic > 0.5 ? '#EF4444' : '#F59E0B' }} />
                         </View>
@@ -3173,6 +3192,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             {a.date} · {a.focus} · {Object.keys(a.muscles).length} muscles
                           </Text>
                         ))}
+                      </View>
+                    )}
+                    {readinessScore.nutritionContext?.message && (
+                      <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: themeColors.border, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Ionicons
+                          name={readinessScore.nutritionContext.protein_status === 'excellent' ? 'nutrition' : readinessScore.nutritionContext.protein_status === 'good' ? 'nutrition-outline' : 'alert-circle-outline'}
+                          size={14}
+                          color={readinessScore.nutritionContext.protein_status === 'excellent' || readinessScore.nutritionContext.protein_status === 'good' ? '#22C55E' : readinessScore.nutritionContext.protein_status === 'low' ? '#F59E0B' : readinessScore.nutritionContext.protein_status === 'very_low' ? '#EF4444' : themeColors.textMuted}
+                        />
+                        <Text style={{
+                          fontSize: 10, fontWeight: '600', flex: 1,
+                          color: readinessScore.nutritionContext.protein_status === 'excellent' || readinessScore.nutritionContext.protein_status === 'good' ? '#22C55E' : readinessScore.nutritionContext.protein_status === 'low' ? '#F59E0B' : readinessScore.nutritionContext.protein_status === 'very_low' ? '#EF4444' : themeColors.textMuted,
+                        }}>
+                          {readinessScore.nutritionContext.message}
+                        </Text>
                       </View>
                     )}
                   </View>
@@ -3345,8 +3379,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           const updatedPlan = { ...workoutPlan, days: updatedDays };
                           setWorkoutPlan(updatedPlan);
                           await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-                          // Clear fresh-day flags so future loads don't overwrite
-                          await AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`);
+                          // Mark fresh day as generated so loadPlans doesn't overwrite the switch
+                          await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
                           return;
                         }
                       } catch (e) {
@@ -3404,6 +3438,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 flash-through to the previous tab's content. */}
             {mealsSubTab !== 'plan' && (
               <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+                {mealsSubTab === 'foods' && commonMeals.length > 0 && (
+                  <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      {commonMeals.map(m => (
+                        <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>{m.name}</Text>
+                          <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{m.count}x · {Math.round(m.avg_calories)} cal · {Math.round(m.avg_protein_g)}g protein</Text>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
                 <EditProfileScreen
                   key={`meal-${mealsSubTab}`}
                   authToken={authToken}
@@ -3612,10 +3659,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           )
         )}
       </ScrollView>
+      </ErrorBoundary>
       )}
 
       {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
       {activeTab === 'goals' && (
+        <ErrorBoundary>
         <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
           <EditProfileScreen
             authToken={authToken}
@@ -3630,11 +3679,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onRoutinesChanged={() => { /* no-op in inline mode */ }}
           />
         </View>
+        </ErrorBoundary>
       )}
 
-      {/* ── Progress tab — inline ProgressScreen ──────────────────── */}
-      {activeTab === 'progress' && (
-        <View style={{ flex: 1, paddingBottom: 88 }}>
+      {/* ── Progress tab — kept mounted to avoid white flash on tab switch */}
+      <View style={{ flex: 1, paddingBottom: 88, display: activeTab === 'progress' ? 'flex' : 'none' }}>
+        <ErrorBoundary>
           <ProgressScreen
             authToken={authToken}
             userProfile={userProfile}
@@ -3647,11 +3697,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
             }}
           />
-        </View>
-      )}
+        </ErrorBoundary>
+      </View>
 
       {/* ── Profile tab ─────────────────────────────────────────────── */}
-      {activeTab === 'profile' && (() => {
+      {activeTab === 'profile' && (<ErrorBoundary>{(() => {
         const ps = userProfile.physicalStats;
         const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
         type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
@@ -3842,7 +3892,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           </TouchableOpacity>
         </ScrollView>
         );
-      })()}
+      })()}</ErrorBoundary>)}
 
       {/* Coach check-in modal */}
       <CoachCheckinModal

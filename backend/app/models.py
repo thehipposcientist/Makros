@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint
+from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text
 from datetime import datetime, date, timezone
 
 from app.enums import (
@@ -36,9 +36,16 @@ class UserProfile(SQLModel, table=True):
 
 class UserGoal(SQLModel, table=True):
     __tablename__ = "user_goals"
+    __table_args__ = (
+        Index(
+            'ix_user_goal_active_unique',
+            'user_id',
+            unique=True,
+            postgresql_where=text('is_active = true'),
+        ),
+    )
     # Only one active goal per user should exist at a time.
-    # Enforce at the application layer: deactivate all existing goals before
-    # inserting a new one. user_id is indexed for efficient active-goal queries.
+    # Enforced at the DB level via partial unique index above.
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     goal_type: GoalType = Field(sa_column=Column(SAEnum(GoalType), nullable=False))
@@ -430,6 +437,9 @@ class PaceOption(SQLModel, table=True):
 
 class WorkoutCompletion(SQLModel, table=True):
     __tablename__ = "workout_completions"
+    __table_args__ = (
+        Index('ix_completion_user_date_focus', 'user_id', 'workout_date', 'focus_label'),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     workout_date: date
@@ -453,6 +463,9 @@ class WorkoutCompletion(SQLModel, table=True):
 
 class WorkoutSession(SQLModel, table=True):
     __tablename__ = "workout_sessions"
+    __table_args__ = (
+        Index('ix_session_user_date', 'user_id', 'workout_date'),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     name: str
@@ -506,6 +519,9 @@ class ExerciseSet(SQLModel, table=True):
 
 class Meal(SQLModel, table=True):
     __tablename__ = "meals"
+    __table_args__ = (
+        Index('ix_meal_user_date', 'user_id', 'meal_date'),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     meal_date: date
@@ -538,7 +554,7 @@ class MealItem(SQLModel, table=True):
 class UserCreate(SQLModel):
     email: str
     username: str
-    password: str
+    password: str = Field(min_length=8)
 
 class UserRead(SQLModel):
     id: int

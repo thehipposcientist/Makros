@@ -41,7 +41,7 @@ export interface PhysicalStats {
 
 // ─── Manual activity logging ──────────────────────────────────────────────────
 
-export type ActivityCategory = 'strength' | 'cardio' | 'mobility' | 'sport' | 'recovery';
+export type ActivityCategory = 'strength' | 'cardio' | 'mobility' | 'sport' | 'active' | 'recovery';
 export type StrengthSubtype = 'push' | 'pull' | 'legs' | 'upper_body' | 'lower_body' | 'full_body';
 export type CardioSubtype = 'walk' | 'run' | 'ride' | 'hike' | 'swim' | 'row' | 'stair' | 'elliptical' | 'bootcamp' | 'other';
 export type MobilitySubtype = 'yoga' | 'stretching' | 'foam_roll' | 'pilates';

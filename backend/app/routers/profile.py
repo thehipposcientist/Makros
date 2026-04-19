@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, field_validator
 from sqlmodel import Session, select
 from datetime import datetime, timezone, date, timedelta
 
@@ -10,6 +11,32 @@ from app.models import (
     CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
 )
 from app.auth import get_current_user
+
+
+class NutritionScoreResponse(BaseModel):
+    date: str
+    score: float
+    adherence: float
+    quality: float
+    micro: float
+    confidence: str
+    tags: list[str]
+    wins: list[str]
+    improvements: list[str]
+    likely_gaps: list[str]
+    indicators: dict
+
+
+class UserStateBody(BaseModel):
+    state: dict
+
+    @field_validator('state')
+    @classmethod
+    def check_size(cls, v):
+        import json
+        if len(json.dumps(v)) > 5_000_000:  # 5MB limit
+            raise ValueError('State blob too large (max 5MB)')
+        return v
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -393,7 +420,7 @@ def get_coach_memory(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-@router.get("/nutrition-score")
+@router.get("/nutrition-score", response_model=NutritionScoreResponse)
 def get_nutrition_score(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
@@ -489,7 +516,7 @@ def get_user_state(
 
 @router.put("/state")
 def put_user_state(
-    body: dict,
+    body: UserStateBody,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
@@ -498,10 +525,10 @@ def put_user_state(
     ).first()
     now = datetime.now(timezone.utc)
     if row:
-        row.state_json = body
+        row.state_json = body.state
         row.updated_at = now
     else:
-        row = UserState(user_id=current_user.id, state_json=body, updated_at=now)
+        row = UserState(user_id=current_user.id, state_json=body.state, updated_at=now)
     session.add(row)
     session.commit()
     return {"ok": True, "updated_at": now.isoformat()}

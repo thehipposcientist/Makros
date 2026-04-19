@@ -1233,7 +1233,7 @@ export async function putUserState(token: string, state: Record<string, any>): P
   await request('/profile/state', {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify(state),
+    body: JSON.stringify({ state }),
   });
 }
 
@@ -1659,6 +1659,74 @@ export interface BodyScanResult {
   improvements: string[];
   assessment: string;
   disclaimer: string;
+}
+
+// ─── Meal history ────────────────────────────────────────────────────────────
+
+export interface MealHistoryItem {
+  food_name: string;
+  quantity: number;
+  unit: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+}
+
+export interface MealHistoryEntry {
+  id: number;
+  meal_date: string;
+  meal_type: string | null;
+  name: string;
+  source: string | null;
+  items: MealHistoryItem[];
+  totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+}
+
+export interface MealAverages {
+  window_days: number;
+  days_with_data: number;
+  avg_calories: number;
+  avg_protein_g: number;
+  avg_carbs_g: number;
+  avg_fat_g: number;
+  avg_meals_per_day: number;
+  total_meals_logged: number;
+}
+
+export async function logMealChecked(
+  token: string,
+  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string },
+): Promise<{ id: number }> {
+  return request('/meals/log-checked', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 10000, true);  // noRetry — fire and forget, don't block UI
+}
+
+export async function getMealHistory(token: string, days = 30): Promise<{ meals: MealHistoryEntry[] }> {
+  return request(`/meals/history?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getMealAverages(token: string, window = 7): Promise<MealAverages> {
+  return request(`/meals/averages?window=${window}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getMealInsights(token: string): Promise<{ insights: string[]; patterns: Record<string, any> }> {
+  return request('/meals/insights', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getCommonMeals(token: string): Promise<{ meals: Array<{ name: string; count: number; avg_calories: number; avg_protein_g: number; avg_carbs_g: number; avg_fat_g: number }> }> {
+  return request('/meals/common', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 
 export async function scanBody(

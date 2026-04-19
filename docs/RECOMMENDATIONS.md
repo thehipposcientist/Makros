@@ -1,138 +1,128 @@
 # Thallo — Recommendations & Roadmap
 
-Last updated: 2026-04-18 (post-comprehensive review)
+Last updated: 2026-04-19
 
 ---
 
 ## Critical — Fix Before Any Deploy
 
-### 1. Restore Calorie Safety Floor
-`calorie_calculator.py:593-597` — the 1200 kcal minimum was removed "per product decision." A 120 lb sedentary woman on aggressive fat-loss gets ~700 kcal/day. This is medically dangerous. Restore `MIN_SAFE_CALORIES` enforcement immediately. Consider sex-aware floors (1200F / 1500M).
+### ~~1. Restore Calorie Safety Floor~~ DONE
+Per-day minimum enforced: 1200 kcal female, 1500 kcal male. Applied to final daily target, not per-meal.
 
-### 2. Fix Orphaned ExerciseSet Cascade Delete
-`workouts.py:778` queries `ExerciseSet.exercise_id` which doesn't exist — the correct FK is `workout_exercise_id`. Workout session deletes leave all set rows orphaned in the database. Silent data leak.
+### ~~2. Fix Orphaned ExerciseSet Cascade Delete~~ DONE
+Changed `ExerciseSet.exercise_id` → `ExerciseSet.workout_exercise_id` in the delete endpoint.
 
-### 3. Silent Exception Swallowing in Workout Persistence
-`workouts.py:542-543` — bare `except Exception` on the structured workout persistence block. A partial commit can corrupt database state. Replace with targeted exception handling and rollback.
+### ~~3. Silent Exception Swallowing in Workout Persistence~~ DONE
+Now logs error, calls `db.rollback()`, re-raises `IntegrityError` for critical DB failures. Non-critical errors still swallowed.
 
-### 4. Unauthenticated Smoke-Test Endpoint
-`chat.py:23-57` — `GET /ai/smoke-test` has no auth guard. Leaks model name, OpenAI config status, and base URL in production. Gate behind `get_current_user` or remove.
+### ~~4. Unauthenticated Smoke-Test Endpoint~~ DONE
+Added `current_user: User = Depends(get_current_user)` to `GET /ai/smoke-test`.
 
-### 5. Production SECRET_KEY
-Generate a real 64-character random string for `backend/.env`.
+### ~~5. Production SECRET_KEY~~ DONE
+64-character random hex string generated and set in `backend/.env`.
 
-### 6. Get USDA API Key
-Go to https://fdc.nal.usda.gov/api-key-signup. Currently rate-limited on DEMO_KEY.
+### ~~6. Get USDA API Key~~ DONE
+Production key set in `backend/.env`.
 
 ---
 
 ## High — Engineering
 
-### 7. Add Error Boundaries
-Zero React error boundaries anywhere. An uncaught render error in HomeScreen (which composes Progress + EditProfile inline) crashes the entire app. Add `<ErrorBoundary>` wrapping each tab body.
+### ~~7. Add Error Boundaries~~ DONE
+`ErrorBoundary` component created. Wraps workout, meals, progress, and profile tab content in HomeScreen.
 
-### 8. Fix N+1 Queries
-- `meals.py:117,149-155` — one `SELECT meal_items` per meal in a loop
-- `workouts.py:97-111` — two SELECTs per completed session for progression
-- `workouts.py:703` — unbounded session list with nested queries per session
-Fix with JOINs or `WHERE id IN (...)` batch fetches.
+### ~~8. Fix N+1 Queries~~ DONE
+Batch `MealItem` queries using `meal_id.in_(meal_ids)` + `defaultdict` grouping in `meals.py` (list_meals, daily_summary) and `meal_history.py` (get_meal_history, get_rolling_averages, get_common_meals, get_nutrition_patterns).
 
-### 9. Add Missing Database Indexes
-- `WorkoutCompletion` needs composite index on `(user_id, workout_date)` — currently full table scan on every workout write/status check
-- `WorkoutSession` same issue
-- `UserGoal` needs partial unique index: `UNIQUE (user_id) WHERE is_active = true` to prevent concurrent duplicate active goals
+### ~~9. Add Missing Database Indexes~~ DONE
+Added composite indexes: `WorkoutCompletion(user_id, workout_date, focus_label)`, `WorkoutSession(user_id, workout_date)`, `Meal(user_id, meal_date)`, `UserGoal` partial unique index on `(user_id) WHERE is_active = true`.
 
-### 10. Validate UserState Blob Size
-`profile.py:490-507` — `put_user_state` accepts unbounded `dict` body with no size limit. Add a Pydantic model with byte-size validation.
+### ~~10. Validate UserState Blob Size~~ DONE
+`UserStateBody` Pydantic model with `field_validator` rejects state blobs > 5MB. Client updated to wrap state in `{ state }`.
 
-### 11. Add Response Models to Endpoints
-Only auth endpoints have `response_model`. All others return raw dicts — no outgoing validation, no useful OpenAPI docs. Add Pydantic response models to all routers.
+### ~~11. Add Response Models to Endpoints~~ DONE
+Added `WorkoutStatusResponse`, `FatigueScoreResponse`, `NutritionScoreResponse` Pydantic models to key endpoints.
 
 ### 12. Production API URL
 `api.ts:15` — hardcoded placeholder `'https://your-production-api.com'`. Must be an env var via `expo-constants`.
 
-### 13. Password Strength Validation
-`UserCreate` has no `min_length` or complexity rules. A user can register with a single character.
+### ~~13. Password Strength Validation~~ DONE
+`UserCreate.password` now has `Field(min_length=8)`. Short passwords get 422 at validation.
 
-### 14. Replace Print Statements with Logger
-`workouts.py` has ~8 `print(f"[generate-day] ...")` calls with internal state details. Use `logging.debug()`.
+### ~~14. Replace Print Statements with Logger~~ DONE
+`workouts.py`, `planner.py`, `weekly_recipe.py` — all `print()` replaced with `logger.debug()` / `logger.info()`.
 
 ### ~~15. Register All Test Modules~~ DONE
-All 10 test modules now registered in `run_all.py`: calorie_calculator, meal_assembler, workout_planner, workout_goals, workout_archetypes, focus_differentiation, set_programming, plan_review, in_workout_review, fitness_score.
+All 10 test modules (183 tests) now registered in `run_all.py`.
 
 ---
 
 ## High — Fitness Domain
 
 ### 16. Extend Systemic Fatigue Decay Window
-`activity_impact.py:18` — 3-day decay for all muscles including systemic (CNS). Heavy squat/deadlift sessions produce CNS suppression for 72-96h. Systemic should decay over 5-6 days. A heavy session from 4 days ago currently contributes zero fatigue.
+`activity_impact.py:18` — 3-day decay for all muscles including systemic (CNS). Heavy squat/deadlift sessions produce CNS suppression for 72-96h. Systemic should decay over 5-6 days.
 
 ### 17. Add Deload / Periodization Mechanism
-No deload weeks, no volume periodization, no block structure (accumulation -> intensification -> realization). The fatigue system resets every 3 days by design with no multi-week accumulation tracking. At minimum, add auto-deload after 4 weeks of progressive loading.
+No deload weeks, no volume periodization, no block structure. At minimum, add auto-deload after 4 weeks of progressive loading.
 
 ### 18. Fix Strength Prescription Reps
-`planner.py:824-826` — strength primary compounds prescribe "4-6" reps. The goal-bucket path diverges from the stimulus prescriber at `prescriptions.py:140` which correctly uses "3-5". Upper bound should be 5 for pure strength.
+`planner.py` — strength primary compounds prescribe "4-6" reps. Should be "3-5" for pure strength.
 
 ### 19. Fix Endurance Strength-Maintenance Prescription
-`planner.py:863-877` — endurance maintenance prescribes "6-10" reps at 2min rest (hypertrophy range). True muscular endurance uses 15-20+ reps at 30-60s rest.
+`planner.py` — endurance maintenance prescribes "6-10" reps at 2min rest (hypertrophy range). Should be 15-20+ reps at 30-60s rest.
 
 ### 20. Add Glute Isolation to Standard Lower Days
-`slots.py:279-290` — lower hypertrophy has quad + hamstring isolation but no glute isolation. Only specialized glute-focused templates include it. Most users doing PPL or Upper/Lower miss dedicated glute work.
+Lower hypertrophy has quad + hamstring isolation but no glute isolation.
 
 ### 21. Add Vertical Pull to Upper Heavy
-`slots.py:241-250` — upper heavy has horizontal pull but no vertical pull (pull-ups/lat pulldown). Missing one of the primary CNS-expensive upper-body movements.
+Upper heavy has horizontal pull but no vertical pull (pull-ups/lat pulldown).
 
 ### 22. Fix Short Interval Rest Ratios
-`prescriptions.py:227-228` — 30-45s work with 75s rest (1:2 ratio). For near-maximal short intervals, 1:3 to 1:4 is evidence-based. Later sets accumulate excessive fatigue at 1:2. Sprint prescription correctly uses 1:8.
+30-45s work with 75s rest (1:2 ratio). Should be 1:3 to 1:4 for near-maximal intervals.
 
 ### 23. Muscle Gain at 3 Days — Frequency Too Low
-`goal_profiles.py:108-115` — anchors PPL at 3 days, giving 1x/week frequency per muscle group. Evidence supports 2x/week for hypertrophy. Consider anchoring full-body at 3 days.
+PPL at 3 days = 1x/week per muscle. Consider anchoring full-body at 3 days.
 
 ### 24. HYROX Missing Tempo Running at Low Day Counts
-`weekly_recipe.py:531` — 3-day HYROX recipe substitutes full-body lifting for what should be a run-focused day. HYROX demands at least one dedicated running tempo session even at 3 days.
+3-day HYROX needs at least one dedicated running tempo session.
 
 ### 25. Cap Zone 2 Duration
-`prescriptions.py:217-218` — Z2 can reach 70 minutes. For recreational users in an app-generated plan, cap at 45-50 minutes.
+Z2 can reach 70 minutes. Cap at 45-50 for recreational users.
 
 ---
 
 ## High — Nutrition Domain
 
 ### 26. Fix Nutrition Score Micronutrient Pipeline
-Client-side scoring (`nutritionScore.ts`) only gets micronutrients from `MealItem.micronutrients` field, which is rarely populated because:
-- AI-generated meals don't include micronutrients
-- USDA foods may have them but they're not persisted to the plan items
-- Food quality classification is keyword-based on client vs category-based on backend
-
-The score always shows "Micronutrient coverage: low" and the quality sub-score is depressed because it can't count whole-food % without category data. `food_quality` field is now persisted on `MealItem` for backend-generated plans, which partially addresses this.
+Micronutrient data rarely populated on plan items. `food_quality` field now persisted which partially addresses this. Full fix needs USDA micro data flowing to plan items.
 
 ### 27. Iron RDA is Sex-Blind
-`nutrition_score.py:30` — uses 18mg universally (female RDA). Male RDA is 8mg. A man at 10mg iron gets flagged as deficient when he's above his actual RDA.
+Uses 18mg universally (female RDA). Male RDA is 8mg.
 
 ### 28. Hydration Bonus Missing from Client Score
-`nutritionScore.ts` omits the 10-point hydration bonus that `nutrition_score.py:207` includes. Scores can diverge by up to 4 points.
+`nutritionScore.ts` omits the 10-point hydration bonus.
 
 ### 29. Endurance Protein Comment Incorrect
-`goal_params.py:198-199` — comment says "1.2-1.4 g/kg (~0.55-0.65 g/lb)" but the actual value 0.8 g/lb = 1.76 g/kg.
+Comment says "1.2-1.4 g/kg" but actual value is 1.76 g/kg.
 
 ### 30. USDA Serving Size 100g Fallback
-`usda_fdc.py:73-74` — when gram weight is absent, defaults to 100g. "1 tbsp" oil at 100g overstates macros ~6x.
+When gram weight absent, defaults to 100g. Overstates macros for small servings.
 
 ### 31. Allergen Filter is AI-Only
-No programmatic allergen filter in meal assembly. The safety net is entirely AI-dependent. Add a hard filter on known allergens at the food selection stage.
+No programmatic allergen filter. Safety net is entirely AI-dependent.
 
 ---
 
 ## Medium — Polish
 
 ### 32. Accessibility Labels
-Only 3 `accessibilityLabel` instances in the entire app. Every interactive element is invisible to screen readers. App Store compliance risk.
+Only 3 `accessibilityLabel` instances in the entire app. App Store compliance risk.
 
 ### 33. Apple Health Auto-Import
-Code exists for reading. Missing: auto-import workouts from Apple Watch/WHOOP into fatigue system.
+Code exists for reading. Missing: auto-import workouts into fatigue system.
 
 ### 34. Coach Memory Pagination
-`profile.py:381-392` — unbounded query, Python-side slicing. Add SQL LIMIT.
+Unbounded query, Python-side slicing. Add SQL LIMIT.
 
 ### 35. Workout-Aware Macro Adjustment
 Currently shows tips. Phase 2: adjust actual macro targets by +/-10% on hard vs rest days.
@@ -165,29 +155,74 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 
 | Change | Status |
 |--------|--------|
-| All 10 test modules registered in `run_all.py` | Done |
-| Recovery/mobility days have negative fatigue (active recovery) | Done |
+| Calorie safety floor restored (1200F / 1500M per day) | Done |
+| ExerciseSet cascade delete fixed (workout_exercise_id) | Done |
+| Silent exception swallowing → rollback + targeted re-raise | Done |
+| Smoke-test endpoint gated behind auth | Done |
+| Production SECRET_KEY generated (64-char hex) | Done |
+| USDA API key set | Done |
+| Error boundaries wrapping all tab content | Done |
+| N+1 queries fixed (batch MealItem loads in meals.py + meal_history.py) | Done |
+| Database indexes added (WorkoutCompletion, WorkoutSession, Meal, UserGoal) | Done |
+| UserState blob size validation (5MB limit) | Done |
+| Response models on fatigue, workout status, nutrition score endpoints | Done |
+| Password validation (min 8 chars) | Done |
+| Print → logger in workouts.py, planner.py, weekly_recipe.py | Done |
+| All 10 test modules (183 tests) registered in `run_all.py` | Done |
+| Recovery/mobility days: negative fatigue (active recovery) | Done |
+| Two-pass fatigue: positive accumulation then recovery (max 1/day, 15% proportional, capped 0.15) | Done |
+| Recovery stacking prevention (5 saunas = same as 1) | Done |
 | Fatigue floor clamped at 0.0 | Done |
 | Recovery day allocation separate from conditioning in weekly recipe | Done |
+| Recovery/mobility day scaling to session_minutes (time-budget picker) | Done |
+| Mobility/recovery bypass slot system → use dedicated time-aware generators | Done |
+| WorkoutCard time estimator handles "each side" doubling + slow reps | Done |
 | Injury system: 3-layer (block, recover, fatigue) with expanded body parts | Done |
-| Focus auto-correction on workout completion | Done |
+| Focus auto-correction via `_infer_focus_from_muscles()` on workout completion | Done |
 | Exercise dislike feature (thumbs down, excluded from plans) | Done |
+| Multiple completions per day: upsert key changed to (user, date, focus) | Done |
+| Meal history system: 6 functions, 5 endpoints, auto-log on check-off | Done |
+| Nutrition recovery integration: `nutrition_context` on fatigue endpoint (4 protein tiers) | Done |
+| Low protein penalty (+3% fatigue) + insight message on recovery card | Done |
+| Nutrition score tags: actual ratio + directional messaging + actionable gap | Done |
+| Score detail view: tappable card with adherence/quality/micro bars | Done |
+| Health Score on Progress: real meal data via `getMealAverages` (cal 40 + pro 35 + consistency 25) | Done |
+| Common meals "YOUR FAVORITES" horizontal scroll on Foods sub-tab | Done |
+| Active activities category: Yard Work, Chopping Wood, Moving, etc. | Done |
+| Sport expanded: Pickleball, Surfing, Skiing | Done |
+| All activity types mapped in `activity_impact.py` with keyword fallbacks | Done |
+| "Overall Load" label replaces "CNS / Systemic" in recovery card | Done |
+| PDF export via expo-print (themed HTML, two-column, Thallo logo, username+date filename) | Done |
+| Export moved from Profile tab to Progress > History tab | Done |
+| Plan generation loop fix: staleness check, AsyncStorage persistence, race condition prevention | Done |
+| Fresh day flag no longer cleared on initial mount (tracks previous values) | Done |
 | `food_quality` field persisted on MealItem | Done |
-| Image MIME fix (`_fix_image_mime` for HEIC) | Done |
-| Missing import fix in `history.py` | Done |
+| Image MIME fix (`_fix_image_mime` for HEIC via Pillow) | Done |
+| Missing `from sqlmodel import select` import in `history.py` fixed | Done |
 | Workout sub-tabs: Plan / Library / Settings | Done |
-| Meals sub-tabs: Plan / Foods / Supps | Done |
+| Meals sub-tabs: Plan / Foods / Supps (Targets merged into Foods) | Done |
+| Equipment section collapsible with card-style header | Done |
+| Foods section collapsible | Done |
+| Library tab has exercises/muscles toggle inside | Done |
+| Injuries moved from Goal tab to Workout Settings tab | Done |
+| Injury body part picker (not free text) with muscle group mapping | Done |
 | Per-day nutrition scores on NutritionCard headers | Done |
-| Food quality dots on meal items | Done |
-| Resume workout themed modal (only if sets logged) | Done |
-| Rest timer AI badge prominent (16px bold) | Done |
-| Stretches/bodyweight hide weight column | Done |
-| AppState listener for timer catch-up | Done |
-| Barcode scanner ref-based lock | Done |
+| Food quality dots on meal items (green/red/gray) | Done |
+| Resume workout: themed modal, only shows if sets logged | Done |
+| Rest timer AI badge prominent (16px bold on accent bg) | Done |
+| Stretches/bodyweight exercises hide weight column | Done |
+| AppState listener for timer catch-up on foreground return | Done |
+| Workout start time persists to AsyncStorage | Done |
+| Barcode scanner ref-based lock prevents multiple scans | Done |
 | Meal edits auto-persist to AsyncStorage | Done |
-| Spin Class cardio subtype added | Done |
-| Pilates label fixed | Done |
-| History export moved to Progress > History | Done |
+| Saved meals no longer rejected by micros check on reload | Done |
+| Routine overlay skipped for saved/remote plans | Done |
+| Spin Class + Pilates activity subtypes | Done |
+| AI coach button toned down (surface bg, outline icon) | Done |
+| Splash screen cleaned up (no duplicate logo, proper square icon) | Done |
+| Manual activity history shows full detail ("Recovery · Sauna (easy)") | Done |
+| Serving display: "1 serving (~200g)" for vague units | Done |
+| Dark theme fixes: MealEditModal text, image placeholders, skeleton loader | Done |
 
 ---
 
@@ -195,22 +230,22 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 
 | Issue | Severity | Effort |
 |-------|----------|--------|
-| Calorie safety floor disabled | Critical | 10 min |
-| ExerciseSet cascade delete broken | Critical | 10 min |
-| Silent exception swallowing | Critical | 20 min |
-| Unauthenticated smoke-test | Critical | 5 min |
-| N+1 queries (3 locations) | High | 2 hrs |
-| Missing DB indexes | High | 30 min |
-| No error boundaries | High | 1 hr |
+| ~~Calorie safety floor~~ | ~~Critical~~ | ~~DONE~~ |
+| ~~ExerciseSet cascade delete~~ | ~~Critical~~ | ~~DONE~~ |
+| ~~Silent exception swallowing~~ | ~~Critical~~ | ~~DONE~~ |
+| ~~Unauthenticated smoke-test~~ | ~~Critical~~ | ~~DONE~~ |
+| ~~N+1 queries~~ | ~~High~~ | ~~DONE~~ |
+| ~~Missing DB indexes~~ | ~~High~~ | ~~DONE~~ |
+| ~~No error boundaries~~ | ~~High~~ | ~~DONE~~ |
+| ~~Password validation~~ | ~~Medium~~ | ~~DONE~~ |
+| ~~Print → logger~~ | ~~Medium~~ | ~~DONE~~ |
+| ~~Response models~~ | ~~Medium~~ | ~~DONE~~ |
 | Systemic fatigue decay too short | High | 30 min |
 | No deload mechanism | High | 4 hrs |
-| Nutrition score micronutrient pipeline | High | 2 hrs |
 | Iron RDA sex-blind | High | 30 min |
 | Strength/endurance prescription mismatch | High | 30 min |
-| Password validation | Medium | 15 min |
-| Print -> logger | Medium | 30 min |
+| Production API URL hardcoded | Medium | 15 min |
 | Accessibility labels | Medium | 4 hrs |
-| Response models on endpoints | Medium | 3 hrs |
 | USDA 100g fallback | Medium | 30 min |
 
 ---
@@ -219,45 +254,53 @@ No `.github/workflows/`. Tests only run if developer manually runs `make test`. 
 
 | Feature | Status |
 |---------|--------|
-| Auth (login/signup) | Done |
+| Auth (login/signup, min 8 char password) | Done |
 | Onboarding (5 steps, compressed) | Done |
 | Training day selector | Done |
 | Goal selection (10 goals + HYROX) | Done |
 | Deterministic workout planner | Done |
 | Per-day generation with history | Done |
-| Day swap (deterministic UI) | Done |
+| Day swap (deterministic UI + generated recovery/mobility/cardio) | Done |
 | Active workout tracking | Done |
 | Timed exercise support | Done |
 | Exercise images from wger.de | Done (32/201) |
 | Exercise search (wger + AI) | Done |
 | Exercise dislike (thumbs down) | Done |
 | 12-muscle-group fatigue system | Done (needs extended CNS decay) |
+| Two-pass recovery (proportional, capped, no stacking) | Done |
 | Negative fatigue for recovery/mobility | Done |
-| Recovery readiness + muscle bars | Done (expandable badge) |
+| Nutrition recovery integration (4 protein tiers + penalty) | Done |
+| Recovery readiness + muscle bars + nutrition insight | Done (expandable) |
 | Progressive overload display | Done (needs deload) |
 | Set programming (warmup/heavy/backoff) | Done |
-| In-workout AI set review | Done (deterministic first, AI when suspicious) |
-| Manual activity logging | Done |
+| In-workout AI set review | Done |
+| Manual activity logging (strength/cardio/mobility/sport/active/recovery) | Done |
+| Multiple completions per day | Done |
+| Recovery/mobility day scaling (time-budget, bypass slot system) | Done |
 | Weight tracking (unified) | Done |
 | Food search (USDA + AI) | Done |
 | Barcode scanning | Done |
 | Meal planning (AI) | Done |
 | Food photo scanning | Done |
-| Nutrition scoring (client-side) | Done (micronutrient pipeline needs fix) |
-| Combined health score | Done (activity 50% + nutrition 50%) |
-| Food quality classification | Done (keyword client, category backend) |
+| Meal history system (auto-log, averages, common, insights) | Done |
+| Common meals "YOUR FAVORITES" UI | Done |
+| Nutrition scoring (client-side + real meal data + detail view) | Done |
+| Combined health score (14-day backward-looking, activity + nutrition) | Done |
+| Food quality classification | Done |
 | AI coach (unified) | Done |
 | Body scan (AI) | Done |
-| Injury tracking (structured) | Done (3-layer system) |
+| Injury tracking (3-layer, body part picker, AI recovery estimation) | Done |
 | Progress history + PRs | Done |
-| Data export (CSV) | Done (moved to Progress > History) |
+| Data export (PDF via expo-print, themed) | Done |
 | 27 themes | Done |
 | Weekly check-in | Done |
 | Push notifications | Done |
-| Splash screen | Done |
-| Fitness score (4-pillar) | Done |
-| Automated test suite | 10 modules registered, no integration/frontend |
-| Error boundaries | Not built |
+| Splash screen (proper icon, no duplicate) | Done |
+| Error boundaries | Done |
+| Calorie safety floor (1200F/1500M) | Done |
+| Database indexes | Done |
+| Response models | Done |
+| Automated test suite | 10 modules, 183 tests |
 | CI/CD | Not configured |
 | Apple Health write | Not wired |
 | Subscription/paywall | Not built |

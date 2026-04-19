@@ -21,7 +21,7 @@ from .utils import (
 
 
 @router.get("/smoke-test")
-async def smoke_test(model: str = "gpt-5"):
+async def smoke_test(model: str = "gpt-5", current_user: User = Depends(get_current_user)):
     """
     Diagnostic endpoint — tests bare chat completions with no structured output.
     GET /ai/smoke-test?model=gpt-5

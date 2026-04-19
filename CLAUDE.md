@@ -20,11 +20,11 @@ User Profile -> GoalProfile -> WeeklyRecipe -> DayArchetype -> Slots -> Exercise
 - `weekly_recipe.py` — generates weekly archetype sequence with intensity spacing; separate recovery allocation from conditioning
 - `day_templates.py` — picks splits, maps archetypes to exercise slots
 - `slots.py` — slot definitions with density trimming
-- `planner.py` — core orchestrator: slot filling, scoring, exercise selection, injury pattern blocking, dislike filtering
+- `planner.py` — core orchestrator: slot filling, scoring, exercise selection, injury pattern blocking, dislike filtering; also houses `generate_recovery_day()` and `generate_mobility_day()` which scale exercises to `session_minutes`
 - `prescriptions.py` — sets/reps/rest per archetype and slot role; dispatches lifting/cardio/mobility/recovery/hybrid
 - `set_programming.py` — intra-workout set scheme (warmup/heavy_top/backoff/volume), load increments, next-set recommendations
 - `in_workout_review.py` — AI-reviewed next-set suggestions (deterministic first, AI only when suspicious)
-- `activity_impact.py` — 12-muscle-group fatigue model with decay, negative fatigue for recovery/mobility, derived readiness
+- `activity_impact.py` — 12-muscle-group fatigue model with decay, negative fatigue for recovery/mobility, derived readiness; includes Active activities (yard work, chopping wood, moving, gardening, cleaning, construction, shoveling, playing w/ kids, dancing) and expanded sports (pickleball, surfing, skiing)
 - `fitness_score.py` — 4-pillar composite fitness score (strength 30, cardio 30, consistency 25, recovery 15)
 - `cardio.py` — classifies exercises as intervals/steady/easy for conditioning days
 - `plan_review.py` — optional AI review of generated plans
@@ -37,10 +37,22 @@ chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, calves, core
 ```
 - Decay: day 0 = 1.0, day 1 = 0.50, day 2 = 0.25, day 3 = 0.10
 - Recovery/mobility days have NEGATIVE fatigue values (actively reduce fatigue)
+- Two-pass rolling fatigue: Pass 1 accumulates positive fatigue from workouts; Pass 2 applies recovery (max 1 session per day, 15% of current fatigue, capped at 0.15) — prevents recovery stacking
 - Recovery: -0.08 per muscle, -0.10 systemic; Mobility: -0.05 per muscle, -0.08 systemic
 - Fatigue floor clamped at 0.0
-- Focus auto-correction: backend infers correct focus from exercises performed on workout completion
+- Focus auto-correction: `_infer_focus_from_muscles()` derives correct focus from exercises performed on workout completion
 - Graduated planner response: >=60% proceed, 40-60% downgrade, 20-40% swap focus, <20% force recovery
+- Nutrition recovery integration: fatigue endpoint returns `nutrition_context` with protein status and coaching message (4 tiers: excellent 130g+/-5% bonus, good 100g+/-3% bonus, low 50-99g/+3% penalty, very low <50g/no change)
+
+### Multiple Completions Per Day
+- Workout completion upsert key changed from (user, date) to (user, date, focus)
+- Legs morning + sauna evening = 2 separate rows, both affect fatigue correctly
+- Prevents second activity from overwriting the first
+
+### Recovery/Mobility Day Scaling
+- `generate_recovery_day()` and `generate_mobility_day()` scale to `session_minutes`
+- Recovery: 20min core stretches only, 30min +pigeon/forward fold, 40min +easy walk, 50min +quad/shoulder/dead hang, 60min all
+- Mobility: 20min 7 drills, 35min +couch stretch/pull-aparts, 45min +straddle/wall slides/dead hang, 55min +butterfly/spinal twist/savasana
 
 ### Injury System (Three Layers)
 1. **Movement pattern blocking** — active injuries hard-block dangerous patterns (e.g., knee blocks squat/lunge)
@@ -58,14 +70,26 @@ Coverage: lower_back, knee, shoulder, hip, hamstring, ankle, achilles, elbow, te
 - Meal edits auto-persist to AsyncStorage (survive app kill)
 - Saved meals no longer rejected by micros check on reload
 
-### Nutrition Scoring (Client-Side)
-- One combined Health Score (activity 50% + nutrition 50%)
+### Meal History System (NEW)
+- `backend/app/services/nutrition/meal_history.py` — 6 functions: `log_meal_from_plan`, `get_meal_history`, `get_rolling_averages`, `get_common_meals`, `get_nutrition_patterns`, `get_meal_insights`
+- 5 API endpoints: `POST /meals/log-checked`, `GET /meals/history`, `GET /meals/averages`, `GET /meals/common`, `GET /meals/insights`
+- Client auto-logs meals when checked off (fire-and-forget to backend)
+- Uses existing `meals` + `meal_items` DB tables (no new tables needed)
+- Unlocks: rolling nutrition summaries, repeated meal detection, behavior patterns, coaching insights
+- Common meals shown as "YOUR FAVORITES" horizontal scroll on Foods sub-tab
+
+### Nutrition Scoring
+- One combined Health Score (activity 50% + nutrition 50%) on Progress screen
+- Health Score uses real meal data from `getMealAverages(authToken, 14)` when available (2+ days)
+- Nutrition sub-score: calorie adherence (40pts) + protein adherence (35pts) + logging consistency (25pts)
+- Falls back to `dietScore.total` when insufficient data
 - Backward-looking: requires 14 days of data for full confidence
 - Scoring pillars: adherence (cal/protein alignment), quality (whole food %, fiber, produce), micro coverage
-- Confidence-aware: low confidence scales total score down
-- Logging completeness affects confidence, not adherence directly
 - Per-day nutrition scores displayed on NutritionCard headers
-- Food quality dots: green = whole, red = processed, gray = unknown
+- Score detail view: tappable card on NutritionCard with adherence/quality/micro bars, cal/protein totals, wins/improvements, food quality legend
+- Tags use actual ratio for directional messaging: "Calories 20% under target — add 440 cal" instead of generic
+- Calorie: within +/-10% = "on target", otherwise shows % over/under with actionable gap
+- Protein: >=90% = "on target", otherwise shows exact gram gap
 
 ### AI Coach (Unified)
 - Single chat interface for workout + nutrition questions
@@ -83,7 +107,7 @@ src/
   components/          # 19+ components (WorkoutCard, NutritionCard, LogActivityModal, MealEditModal, etc.)
   utils/               # weightHistory, exerciseImages, mealTracker, workoutHistory, nutritionScore, exerciseGuide
   constants/           # goalConfig, muscleLibrary, muscleImages, theme (27 themes)
-  services/api.ts      # All backend API calls
+  services/api.ts      # All backend API calls (includes getMealAverages, getCommonMeals, logCheckedMeal)
   hooks/useMetaData.ts # Cached metadata (foods, equipment, goals, paces)
 backend/
   app/
@@ -91,9 +115,9 @@ backend/
     models.py          # SQLModel tables
     routers/           # auth, workouts, meals, meta, profile, ai/ (plans, chat, scanning, progression)
     services/workout/  # 26 files: planner, fatigue, recipes, prescriptions, goals, set programming, fitness score, etc.
-    services/nutrition/ # meal assembly, calorie calc, plan review, nutrition score
+    services/nutrition/ # 8 files: meal assembly, calorie calc, plan review, nutrition score, meal history
     services/usda_fdc.py # USDA FoodData Central client
-  tests/               # 10 test modules registered in run_all.py
+  tests/               # 10 test modules (183 tests) registered in run_all.py
 ```
 
 ## UI Layout
@@ -105,22 +129,25 @@ backend/
 
 ### Meals Tab Sub-tabs
 - **Plan** — daily meal plan with per-day nutrition scores
-- **Foods** — food search + targets (merged from separate Targets tab)
+- **Foods** — food search + targets + "YOUR FAVORITES" horizontal scroll of common meals
 - **Supps** — supplements
 
 ### Key UI Features
 - Exercise dislike (thumbs down on active workout, excludes from future plans)
-- Recovery badge expandable with per-muscle bars
+- Recovery badge expandable with per-muscle bars; "Overall Load" label (replaces "CNS / Systemic")
+- Nutrition insight shown in recovery card when expanded (colored message with icon from `nutrition_context`)
 - Resume workout: themed modal, only shows if sets were logged
 - Rest timer: AI recommendation badge (16px bold)
 - Stretches/bodyweight exercises hide weight column
 - AppState listener catches up timers on foreground return
-- Workout start time persists for accurate elapsed on resume
-- History export moved from Profile to Progress > History tab
+- Workout start time persists to AsyncStorage for accurate elapsed on resume
+- History export: PDF via expo-print with themed HTML (white bg, dark text, Thallo logo, two-column card layout); filename `{username}_{date}_history.pdf`; falls back to HTML file sharing, then RN Share for text; located in Progress > History tab
 - Barcode scanner: ref-based lock prevents multiple scans
 - Routine overlay skipped for saved/remote plans (preserves user edits)
 - Spin Class added as cardio subtype; Pilates label fixed
 - Manual activities show full detail in history (e.g., "Recovery - Sauna (easy)")
+- Active activities category in LogActivityModal: Yard Work, Chopping Wood, Moving/Lifting, Gardening, House Cleaning, Construction, Shoveling, Playing w/ Kids, Dancing
+- Sport expanded: Pickleball, Surfing, Skiing added
 
 ## Dev Commands
 ```bash
@@ -129,7 +156,7 @@ docker compose build backend && docker compose up -d backend  # Rebuild
 npx expo start --clear                        # Start frontend
 docker compose logs -f backend                # Backend logs
 docker exec thallo-pg psql -U thallo -d thallo  # DB shell
-make test                                     # Run all backend tests (10 modules)
+make test                                     # Run all backend tests (10 modules, 183 tests)
 ```
 
 ## Environment Variables (backend/.env)
@@ -148,12 +175,17 @@ NUTRITION_REVIEW_ENABLED=1
 - Workout planner is deterministic — no AI in exercise selection, split logic, or weekly recipe
 - AI is gated — used only for nutrition plans, coach chat, food scanning, in-workout set review (when suspicious)
 - Fatigue is muscle-group based — 12 dimensions, not pattern-based; recovery/mobility days have negative (restorative) fatigue
+- Two-pass fatigue prevents recovery stacking — max one recovery session per day, proportional to existing fatigue
+- Multiple completions per day supported — upsert key is (user, date, focus), not (user, date)
 - Injuries operate at three layers: pattern blocking, recovering mode (reduced volume), muscle group fatigue awareness
 - Day focus changes are UI buttons, not AI; focus auto-corrected from exercises on completion
 - Food data: USDA first, AI fallback. Exercise search: wger first, AI fallback
-- Nutrition scoring is client-side from planned meals; one combined Health Score (activity 50% + nutrition 50%)
+- Nutrition scoring uses real meal history when available (2+ days), falls back to planned meals
 - Recovery days are separate from conditioning — Zone 2 / intervals are training stress, not recovery
+- Recovery/mobility days scale to session_minutes (20-60 min progressive exercise additions)
 - Exercise dislikes persist and are excluded from future plan generation
+- Meal history auto-logged on check-off, powers rolling averages, common meals, and coaching insights
+- Plan generation loop: staleness check clears markers >5 min old; fresh day persisted to AsyncStorage
 
 ## Supported Goals
 fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, hyrox, toning, maintain, general_health

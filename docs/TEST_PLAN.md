@@ -4,24 +4,56 @@ Last updated: 2026-04-18
 
 ## Current State
 
-- **181 unit tests** across 10 files in `backend/tests/`
+- **183 unit tests** across 10 files in `backend/tests/`
 - All tests are pure unit tests (no DB, no HTTP, no Docker required at test time)
 - Custom test runner (`run_all.py`) — not pytest-compatible
-- 3 test modules (60 tests) not registered in `run_all.py` — silently skipped
+- All 10 test modules registered in `run_all.py`
 - **Zero frontend tests**
 - **Zero integration tests**
 - **No CI/CD pipeline**
 
+### Test Module Inventory
+
+| Module | Tests | Coverage Area |
+|--------|-------|---------------|
+| `test_calorie_calculator.py` | 11 | TDEE, macro calc, deficit/surplus |
+| `test_meal_assembler.py` | 12 | Meal assembly, food matching |
+| `test_workout_planner.py` | 41 | Core planner pipeline, slot filling, scoring |
+| `test_workout_goals.py` | 11 | Goal profile mapping, training mix |
+| `test_workout_archetypes.py` | 33 | Archetype generation, day templates |
+| `test_focus_differentiation.py` | 16 | Focus label normalization, family gating |
+| `test_set_programming.py` | 19 | Set schemes, load increments, set roles |
+| `test_plan_review.py` | 12 | AI plan review validation |
+| `test_in_workout_review.py` | 11 | Deterministic + AI set review |
+| `test_fitness_score.py` | 17 | 4-pillar composite scoring |
+| **Total** | **183** | |
+
 ## Priority 1: Fix What Exists
 
-### 1a. Register all test modules in `run_all.py`
-Add `test_workout_goals`, `test_focus_differentiation`, `test_workout_archetypes` to `_TEST_MODULES`. This immediately adds 60 tests to `make test`.
+### ~~1a. Register all test modules in `run_all.py`~~ DONE
+All 10 test modules registered: calorie_calculator, meal_assembler, workout_planner, workout_goals, workout_archetypes, focus_differentiation, set_programming, plan_review, in_workout_review, fitness_score.
 
 ### 1b. Add nutrition_score tests
 The nutrition scoring system has no tests despite being user-facing. Test file: `test_nutrition_score.py`.
 
 ### 1c. Add calorie_calculator safety tests
 Verify the safety floor is enforced. Regression test to prevent re-disabling.
+
+### 1d. Add meal_history tests (NEW)
+The meal history system (`meal_history.py`) has 6 functions with no test coverage:
+- `log_meal_from_plan` — meal persistence from plan check-off
+- `get_meal_history` — recent meal query with items
+- `get_rolling_averages` — nutrition averages over configurable window
+- `get_common_meals` — repeated meal detection
+- `get_nutrition_patterns` — skipped meals, protein deficits, weekday/weekend, food quality
+- `get_meal_insights` — coaching string generation from patterns
+
+### 1e. Add fatigue two-pass recovery tests (NEW)
+The two-pass fatigue system needs dedicated tests for:
+- Recovery stacking prevention (multiple recovery sessions same day)
+- Proportional recovery (15% of current fatigue)
+- Recovery cap (0.15 per session per muscle)
+- Fatigue floor (never below 0.0)
 
 ---
 
@@ -245,6 +277,29 @@ HIGH_FATIGUE_HISTORY = [
         "rpe_avg": 9.0,
     },
 ]
+
+# Multiple completions same day — tests the (user, date, focus) upsert
+MULTI_ACTIVITY_DAY = [
+    {
+        "date": "2026-04-18",
+        "focus": "legs",
+        "exercises": [
+            {"name": "Barbell Squat", "muscles": ["quads", "glutes", "hamstrings"], "sets": [
+                {"reps": 8, "weight_lbs": 185}, {"reps": 8, "weight_lbs": 185},
+            ]},
+        ],
+        "duration_minutes": 45,
+    },
+    {
+        "date": "2026-04-18",
+        "focus": "recovery",
+        "exercises": [],
+        "duration_minutes": 20,
+        "activity_category": "recovery",
+        "activity_subtype": "sauna",
+        "activity_intensity": "easy",
+    },
+]
 ```
 
 ### Meal Plan Data (for nutrition scoring tests)
@@ -347,6 +402,34 @@ EMPTY_PLAN = {
 | 13 | Single removed meal | Plan with removedMealIds | Removed meal excluded from totals |
 | 14 | Fiber target met | Plan with fiber >= 28g | "Fiber target hit" in wins |
 
+### Test: Meal History (`test_meal_history.py`) NEW
+
+| # | Test Case | Input | Expected |
+|---|-----------|-------|----------|
+| 1 | Log meal from plan check | Valid meal_data dict | Meal + MealItems created, id returned |
+| 2 | Log meal with no items | meal_data with empty items list | Synthetic single item from totals |
+| 3 | Meal type resolution | "meal_0", "meal_1", "meal_2" | Maps to breakfast, lunch, dinner |
+| 4 | Rolling averages | 7 days of meals | Correct avg calories, protein, carbs, fat |
+| 5 | Rolling averages empty | No meals | days_with_data = 0, all averages = 0 |
+| 6 | Common meals detection | Same meal name logged 3x | Appears in results with count=3 |
+| 7 | Common meals min_count | Meals with count < min_count | Excluded from results |
+| 8 | Nutrition patterns | 14 days with gaps | Correct skipped_days, meal_type_skip_counts |
+| 9 | Weekday vs weekend | Different cal on weekdays/weekends | Correct diff calculation |
+| 10 | Food quality classification | Mix of whole/processed foods | Correct whole_pct |
+| 11 | Meal insights — enough data | 7+ days of meals | 3-5 coaching strings |
+| 12 | Meal insights — insufficient data | 1 day of meals | "Log a few more days" message |
+
+### Test: Two-Pass Fatigue (`test_fatigue_two_pass.py`) NEW
+
+| # | Test Case | Input | Expected |
+|---|-----------|-------|----------|
+| 1 | Single recovery session | 1 workout + 1 recovery same day | Fatigue reduced by ~15% of current |
+| 2 | Multiple recoveries same day | 1 workout + 3 recoveries same day | Same result as single recovery |
+| 3 | Recovery on different days | Recovery on day 0 and day 1 | Both apply (different days allowed) |
+| 4 | Recovery with no prior fatigue | Only recovery, no workouts | All muscles stay at 0.0 |
+| 5 | Recovery cap | Very high fatigue + recovery | Reduction capped at 0.15 per muscle |
+| 6 | Proportional recovery | Muscle at 0.5 vs 0.1 fatigue | Higher fatigue gets larger absolute reduction |
+
 ### Test: Calorie Calculator Safety (`test_calorie_safety.py`)
 
 | # | Test Case | Input | Expected |
@@ -368,6 +451,8 @@ EMPTY_PLAN = {
 | 6 | Decay after 3 days | Session 3 days ago | All muscle fatigue * 0.10 (near zero) |
 | 7 | Derived focus readiness — push | Chest 0.5, shoulders 0.3, triceps 0.2 | push readiness reflects weighted average |
 | 8 | Blocked focuses | quads at 0.9 | legs focus blocked |
+| 9 | Multiple completions same day | MULTI_ACTIVITY_DAY | Both activities contribute to fatigue |
+| 10 | Active activity fatigue | Chopping wood completion | back, shoulders, core fatigued appropriately |
 
 ### Test: Weekly Recipe (`test_weekly_recipe.py`)
 
@@ -392,6 +477,18 @@ EMPTY_PLAN = {
 | 4 | RIR consistency | Same user, same slot, different paths | RIR values match between planner and prescriptions |
 | 5 | Short interval rest ratio | COND_INTERVALS_SHORT | Rest >= 90s for 30-45s work intervals |
 
+### Test: Recovery/Mobility Day Scaling (`test_recovery_scaling.py`) NEW
+
+| # | Test Case | Input | Expected |
+|---|-----------|-------|----------|
+| 1 | Recovery 20 min | generate_recovery_day(20) | Only core stretches (foam rolling + stretching) |
+| 2 | Recovery 40 min | generate_recovery_day(40) | Core + pigeon + forward fold + easy walk |
+| 3 | Recovery 60 min | generate_recovery_day(60) | All exercises included |
+| 4 | Mobility 20 min | generate_mobility_day(20) | 7 base drills |
+| 5 | Mobility 45 min | generate_mobility_day(45) | Base + couch stretch + straddle/wall slides/dead hang |
+| 6 | Mobility 55 min | generate_mobility_day(55) | All drills included |
+| 7 | Exercise count scaling | Various session_minutes | More exercises at higher durations |
+
 ### Test: Slot Coverage (`test_slot_coverage.py`)
 
 | # | Test Case | Input | Expected |
@@ -413,6 +510,11 @@ EMPTY_PLAN = {
 | 6 | GET /ai/smoke-test without auth | 401 (after fix) |
 | 7 | PUT /profile/state with 10MB body | 413 or 422 (after fix) |
 | 8 | GET /profile/nutrition-score with auth | 200 + valid shape |
+| 9 | POST /meals/log-checked with valid data | 201 + meal id |
+| 10 | GET /meals/history with auth | 200 + meals array |
+| 11 | GET /meals/averages with auth | 200 + rolling averages |
+| 12 | GET /meals/common with auth | 200 + meals array |
+| 13 | GET /meals/insights with auth | 200 + insights + patterns |
 
 ---
 
@@ -430,11 +532,14 @@ npx expo install jest-expo @testing-library/react-native @testing-library/jest-n
 | 1 | `nutritionScore.ts` | computeNutritionScore with BALANCED_MEAL_PLAN returns expected range |
 | 2 | `nutritionScore.ts` | computeNutritionScore with empty plan returns score=0 |
 | 3 | `nutritionScore.ts` | Score updates when meal is removed (removedMealIds) |
-| 4 | `mealTracker.ts` | computeDietConsistency with 3 meals/day |
-| 5 | `weightHistory.ts` | Save and load weight entries round-trips correctly |
-| 6 | `exerciseGuide.ts` | humanizeToken converts slugs to readable names |
-| 7 | `WorkoutCard` | Renders exercise list with correct set/rep display |
-| 8 | `MealEditModal` | Adding a food updates macros correctly |
+| 4 | `nutritionScore.ts` | Tags show actual ratio: "Calories 20% under target" |
+| 5 | `nutritionScore.ts` | Protein >=90% shows "on target", <90% shows gram gap |
+| 6 | `mealTracker.ts` | computeDietConsistency with 3 meals/day |
+| 7 | `weightHistory.ts` | Save and load weight entries round-trips correctly |
+| 8 | `exerciseGuide.ts` | humanizeToken converts slugs to readable names |
+| 9 | `WorkoutCard` | Renders exercise list with correct set/rep display |
+| 10 | `MealEditModal` | Adding a food updates macros correctly |
+| 11 | `NutritionCard` | Score detail view shows adherence/quality/micro bars |
 
 ---
 
@@ -445,8 +550,8 @@ npx expo install jest-expo @testing-library/react-native @testing-library/jest-n
 make test
 # or: docker exec makros-backend python -m tests.run_all
 
-# Backend with all modules registered (after fix)
-make test  # now includes goals, focus, archetypes
+# All 10 modules registered — 183 tests
+make test
 
 # Future: pytest migration
 docker exec makros-backend python -m pytest tests/ -v --tb=short

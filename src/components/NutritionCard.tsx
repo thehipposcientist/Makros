@@ -49,6 +49,7 @@ export default function NutritionCard({
   goal,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
+  const [scoreExpanded, setScoreExpanded] = useState(false);
   const dayScore = computeNutritionScore(nutritionPlan, goal ?? 'body_recomp');
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
@@ -133,34 +134,98 @@ export default function NutritionCard({
           <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
-        {/* Day score + food quality legend */}
-        {dayScore.score > 0 && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, marginTop: 2 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: (dayScore.score >= 70 ? '#22C55E' : dayScore.score >= 45 ? '#F59E0B' : '#EF4444') + '18', alignItems: 'center', justifyContent: 'center' }}>
-                <Text style={{ fontSize: 12, fontWeight: '900', color: dayScore.score >= 70 ? '#22C55E' : dayScore.score >= 45 ? '#F59E0B' : '#EF4444' }}>{dayScore.score}</Text>
+        {/* Day score — tap to expand breakdown */}
+        {dayScore.score > 0 && (() => {
+          const sc = dayScore;
+          const scoreColor = sc.score >= 70 ? '#22C55E' : sc.score >= 45 ? '#F59E0B' : '#EF4444';
+          return (
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setScoreExpanded(p => !p); }}
+              style={{ marginBottom: 6, marginTop: 2, backgroundColor: colors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: colors.border }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: scoreColor + '18', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ fontSize: 14, fontWeight: '900', color: scoreColor }}>{sc.score}</Text>
+                  </View>
+                  <View>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textPrimary }}>Nutrition Score</Text>
+                    <Text style={{ fontSize: 10, color: colors.textMuted }}>
+                      {sc.wins.length > 0 ? sc.wins[0] : sc.improvements.length > 0 ? sc.improvements[0] : 'Tap for details'}
+                    </Text>
+                  </View>
+                </View>
+                <Ionicons name={scoreExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textMuted} />
               </View>
-              <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>Score</Text>
-              {dayScore.confidence !== 'high' && (
-                <Text style={{ fontSize: 9, color: colors.textMuted }}>({dayScore.confidence})</Text>
+              {scoreExpanded && (
+                <View style={{ marginTop: 8, gap: 5 }}>
+                  {[
+                    { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? '#22C55E' : sc.adherence >= 45 ? '#F59E0B' : '#EF4444' },
+                    { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? '#22C55E' : sc.quality >= 45 ? '#F59E0B' : '#EF4444' },
+                    { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? '#22C55E' : sc.micro >= 45 ? '#F59E0B' : '#EF4444' },
+                  ].map(sub => (
+                    <View key={sub.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={{ fontSize: 10, fontWeight: '600', color: colors.textSecondary, width: 80 }}>{sub.label}</Text>
+                      <View style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: colors.border }}>
+                        <View style={{ width: `${Math.min(100, sub.value)}%` as any, height: 4, borderRadius: 2, backgroundColor: sub.color }} />
+                      </View>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: sub.color, width: 24, textAlign: 'right' }}>{sub.value}</Text>
+                    </View>
+                  ))}
+                  {sc.indicators && (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+                      {sc.indicators.total_calories > 0 && (
+                        <Text style={{ fontSize: 9, color: colors.textMuted }}>
+                          {Math.round(sc.indicators.total_calories)} / {Math.round(sc.indicators.target_calories)} cal
+                        </Text>
+                      )}
+                      {sc.indicators.total_protein > 0 && (
+                        <Text style={{ fontSize: 9, color: colors.textMuted }}>
+                          {Math.round(sc.indicators.total_protein)} / {Math.round(sc.indicators.target_protein)}g protein
+                        </Text>
+                      )}
+                      {sc.indicators.whole_food_pct > 0 && (
+                        <Text style={{ fontSize: 9, color: colors.textMuted }}>
+                          {sc.indicators.whole_food_pct}% whole foods
+                        </Text>
+                      )}
+                    </View>
+                  )}
+                  {(sc.wins.length > 0 || sc.improvements.length > 0) && (
+                    <View style={{ marginTop: 2, gap: 2 }}>
+                      {sc.wins.map(w => (
+                        <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="checkmark-circle" size={11} color="#22C55E" />
+                          <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
+                        </View>
+                      ))}
+                      {sc.improvements.map(imp => (
+                        <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="arrow-up-circle" size={11} color="#F59E0B" />
+                          <Text style={{ fontSize: 9, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: colors.border }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                      <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#22C55E' }} />
+                      <Text style={{ fontSize: 9, color: colors.textMuted }}>Whole</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                      <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#EF4444' }} />
+                      <Text style={{ fontSize: 9, color: colors.textMuted }}>Processed</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                      <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: colors.border }} />
+                      <Text style={{ fontSize: 9, color: colors.textMuted }}>Other</Text>
+                    </View>
+                  </View>
+                </View>
               )}
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#22C55E' }} />
-                <Text style={{ fontSize: 9, color: colors.textMuted }}>Whole</Text>
-              </View>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#EF4444' }} />
-                <Text style={{ fontSize: 9, color: colors.textMuted }}>Processed</Text>
-              </View>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: colors.border }} />
-                <Text style={{ fontSize: 9, color: colors.textMuted }}>Other</Text>
-              </View>
-            </View>
-          </View>
-        )}
+            </TouchableOpacity>
+          );
+        })()}
         {/* Nutrition details button + modal — always visible */}
         <TouchableOpacity
           style={styles.microBtn}

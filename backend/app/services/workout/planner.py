@@ -44,7 +44,10 @@ What stays AI in the plan pipeline:
 """
 from __future__ import annotations
 
+import logging
 import random
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -1042,7 +1045,7 @@ def _stamp_load_metadata(
             rec_confidence = rec.confidence
             rec_reason = rec.reason
         except Exception as exc:  # defensive — never crash the planner
-            print(f"[workout_planner] starting-weight recommendation failed for {exercise.get('slug')}: {exc}")
+            logger.debug(f"[workout_planner] starting-weight recommendation failed for {exercise.get('slug')}: {exc}")
 
     scheme = build_set_scheme(
         exercise,
@@ -1143,7 +1146,7 @@ def generate_workout_plan(
         priority_region=inputs.priority_region,
         muscle_fatigue=inputs.muscle_fatigue,
     )
-    print(
+    logger.debug(
         f"[workout_planner] mode={profile.planner_mode} "
         f"days={inputs.days_per_week} "
         f"split={lifting_split} (user_chose={_user_chose_split}) "
@@ -1155,20 +1158,38 @@ def generate_workout_plan(
     # picks a role→minutes cost map per day type so a 30-min zone2
     # session doesn't trim like a 30-min lifting session.
     templates = []
+    # Archetypes that bypass the slot system and use dedicated generators
+    _GENERATED_ARCHETYPES = {
+        DayArchetype.MOBILITY_FLOW, DayArchetype.RECOVERY_EASY,
+        DayArchetype.STRESS_RELIEF_EASY,
+    }
     for idx, archetype in enumerate(recipe):
         meta = ARCHETYPE_META[archetype]
+        if archetype in _GENERATED_ARCHETYPES:
+            # Use dedicated generator instead of slot→exercise pipeline.
+            # These generators produce time-aware sessions that fill the
+            # user's committed minutes properly.
+            if archetype == DayArchetype.MOBILITY_FLOW:
+                gen_day = generate_mobility_day(inputs.session_minutes)
+            elif archetype == DayArchetype.RECOVERY_EASY:
+                gen_day = generate_recovery_day(inputs.session_minutes)
+            else:
+                gen_day = generate_recovery_day(inputs.session_minutes)
+            name = gen_day.get("focus", meta.default_name)
+            templates.append((name, None, archetype, gen_day))
+            continue
         slots = archetype_to_slots(archetype, idx, inputs.days_per_week, focused_muscle=inputs.focused_muscle)
         name = archetype_display_name(archetype, idx, recipe)
         slots = density_adjust_slots(
             slots, inputs.session_minutes, category=meta.category,
         )
-        templates.append((name, slots, archetype))
+        templates.append((name, slots, archetype, None))
     targets = weekly_set_targets(inputs)
     # Injury-aware movement-pattern blocklist. Built once from the
     # user's injury tags and passed into every slot pick.
     blocked_patterns = _injury_blocked_patterns(inputs.injuries)
     if blocked_patterns:
-        print(f"[workout_planner] injury-blocked patterns: {sorted(blocked_patterns)}")
+        logger.debug(f"[workout_planner] injury-blocked patterns: {sorted(blocked_patterns)}")
     # Running tally of assigned working sets per primary muscle. The
     # scorer reads this every pick and nudges selection toward muscles
     # under target and away from muscles over target. Primary muscles
@@ -1204,16 +1225,22 @@ def generate_workout_plan(
     # session of that family so exercise selection varies.
     _focus_day_count: dict[str, int] = {}
 
-    for day_idx, (day_name, slots, archetype) in enumerate(templates):
+    for day_idx, (day_name, slots, archetype, gen_day) in enumerate(templates):
+        # Pre-generated days (mobility/recovery) bypass the slot pipeline entirely
+        if gen_day is not None:
+            days_out.append({
+                "day": f"Day {day_idx + 1}",
+                "focus": gen_day.get("focus", day_name),
+                "stimulus": gen_day.get("stimulus", "recovery"),
+                "exercises": gen_day.get("exercises", []),
+            })
+            continue
+
         meta = ARCHETYPE_META[archetype]
         focus = meta.default_name
         accepts_types = meta.accepts_types
         _day_focus_family = archetype_to_focus_family(archetype)
 
-        # Seed variety tracking from recent history by MUSCLE, not by
-        # focus family. If the user recently did back squats (quads),
-        # this day's quad slots will pick a different squat variant.
-        # Split-agnostic: works even when the user switches splits.
         _focus_day_count[_day_focus_family] = _focus_day_count.get(_day_focus_family, 0) + 1
         _temp_history_slugs: set[str] = set()
         if recent_muscle_exercises:
@@ -1247,7 +1274,7 @@ def generate_workout_plan(
                 day_focus_family=_day_focus_family,
             )
             if ex is None:
-                print(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
+                logger.debug(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
                 continue
             prescription = prescribe_for_slot(archetype, slot, ex, inputs)
             equipment_label = _equipment_label(ex)
@@ -1398,7 +1425,7 @@ def generate_workout_plan(
 
         if added > 0:
             exposure_days, direct_accs = _count_focus_exposure()
-            print(
+            logger.debug(
                 f"[planner] focus fulfillment: added {added} {fm} accessories, "
                 f"exposure_days={exposure_days}/{min_exposure}, "
                 f"direct_accessories={direct_accs}/{min_accessories}, "
@@ -1486,9 +1513,9 @@ def generate_workout_plan(
         core_count = sum(1 for d in days_out
             for ex in d.get("exercises", [])
             if ex.get("_primary_muscle") == "core" or ex.get("_role") == "core")
-        print(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
+        logger.debug(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
     except Exception as e:
-        print(f"[planner] core injection failed (non-fatal): {e}")
+        logger.debug(f"[planner] core injection failed (non-fatal): {e}")
 
     plan = {
         "trainerNote": "",
@@ -1534,7 +1561,7 @@ def validate_plan(
     for i, day in enumerate(days):
         exs = day.get("exercises", [])
         if not exs:
-            print(
+            logger.debug(
                 f"[validate_plan] WARNING: Day {i} ({day.get('day')}) "
                 f"has no exercises — archetype={day.get('archetype')}"
             )
@@ -1547,7 +1574,7 @@ def validate_plan(
         for ex in exs:
             slug = ex.get("_slug")
             if slug and slug in seen_slugs:
-                print(
+                logger.debug(
                     f"[validate_plan] REPAIR: dropping duplicate exercise "
                     f"'{ex.get('name')}' (slug={slug}) on Day {i}"
                 )
@@ -1597,14 +1624,14 @@ def validate_plan(
                         continue
                     # And day[i+1] won't conflict with original day[j] if j==i+1
                     days[i], days[j] = days[j], days[i]
-                    print(
+                    logger.debug(
                         f"[validate_plan] REPAIR: swapped Day {i} ↔ Day {j} "
                         f"to break adjacent {fam_a!r} streak"
                     )
                     swapped = True
                     break
             if not swapped:
-                print(
+                logger.debug(
                     f"[validate_plan] WARNING: adjacent same-family days "
                     f"{i - 1}↔{i} (both {fam_a!r}) — no swap available"
                 )
@@ -1627,7 +1654,7 @@ def validate_plan(
             if role in ("primary", "secondary"):
                 pm = ex.get("_primary_muscle", "")
                 if pm and pm not in allowed:
-                    print(
+                    logger.debug(
                         f"[validate_plan] REPAIR: dropping '{ex.get('name')}' "
                         f"(primary_muscle={pm}) from Day {i} "
                         f"(focus_family={fam}, allowed={sorted(allowed)})"
@@ -1654,7 +1681,7 @@ def validate_plan(
             expected = {"push", "pull", "legs"}
             missing = expected - recipe_families
             if missing:
-                print(
+                logger.debug(
                     f"[validate_plan] WARNING: user chose PPL but recipe "
                     f"is missing families: {sorted(missing)} "
                     f"(present: {sorted(recipe_families)})"
@@ -1700,17 +1727,17 @@ def validate_plan(
             }
 
             if days_with_focus < min_exp:
-                print(
+                logger.debug(
                     f"[validate_plan] FOCUS WARNING: {fm} exposure on "
                     f"{days_with_focus}/{len(days)} days, minimum is {min_exp}"
                 )
             if direct_accessories < min_accs:
-                print(
+                logger.debug(
                     f"[validate_plan] FOCUS WARNING: {fm} has "
                     f"{direct_accessories} direct accessories, minimum is {min_accs}"
                 )
             if days_with_focus >= min_exp and direct_accessories >= min_accs:
-                print(
+                logger.debug(
                     f"[validate_plan] focus OK: {fm} — "
                     f"exposure={days_with_focus}/{len(days)} days, "
                     f"accessories={direct_accessories}, "
@@ -1736,12 +1763,12 @@ def validate_plan(
         else:
             resistance_streak = 0
     if max_heavy_streak >= 3:
-        print(
+        logger.debug(
             f"[validate_plan] WARNING: {max_heavy_streak} consecutive heavy days "
             f"detected — stimuli={stimuli}. Consider rebalancing."
         )
     if max_resistance_streak >= 4:
-        print(
+        logger.debug(
             f"[validate_plan] WARNING: {max_resistance_streak} consecutive resistance "
             f"days without recovery — stimuli={stimuli}"
         )
@@ -1753,9 +1780,9 @@ def validate_plan(
         audit = validate_region_exposure(region, days)
         plan.get("workout_plan", {})["region_audit"] = audit
         if audit["ok"]:
-            print(f"[validate_plan] region OK: {region} — lower={audit['lower_days']} upper={audit['upper_days']}")
+            logger.debug(f"[validate_plan] region OK: {region} — lower={audit['lower_days']} upper={audit['upper_days']}")
         else:
-            print(f"[validate_plan] REGION WARNING: {audit['message']}")
+            logger.debug(f"[validate_plan] REGION WARNING: {audit['message']}")
 
     return plan
 
@@ -2095,43 +2122,95 @@ def _infer_bucket(equipment_label: str) -> str:
 
 # ─── On-demand day generators for focus overrides ────────────────────────────
 
+def _est_exercise_time(ex: dict) -> float:
+    """Rough estimate of minutes for one exercise based on sets, reps, rest."""
+    sets = ex.get("sets", 1)
+    rest = ex.get("rest_seconds", 0)
+    reps_str = str(ex.get("reps", ""))
+    # Time-based reps like "60s each side", "5 min", "30s hold"
+    if "min" in reps_str:
+        try:
+            mins = float(reps_str.split("min")[0].strip().split("-")[-1])
+            return mins * sets + (rest * max(0, sets - 1)) / 60
+        except ValueError:
+            pass
+    if "s" in reps_str and "set" not in reps_str:
+        try:
+            secs = float(reps_str.replace("s", "").split("-")[-1].split(" ")[0].strip())
+            per_set = secs * (2 if "each" in reps_str else 1)
+            return (per_set * sets + rest * max(0, sets - 1)) / 60
+        except ValueError:
+            pass
+    # Rep-based: ~3s per rep + rest
+    try:
+        rep_count = int(reps_str.split("-")[-1].split(" ")[0].strip())
+        per_set = rep_count * 3 * (2 if "each" in reps_str else 1)
+        return (per_set * sets + rest * max(0, sets - 1)) / 60
+    except ValueError:
+        return 2.0  # fallback
+
+
+def _pick_exercises_for_time(pool: list[dict], target_minutes: int) -> list[dict]:
+    """Pick exercises from pool until we fill the target time."""
+    result = []
+    total = 0.0
+    for ex in pool:
+        t = _est_exercise_time(ex)
+        if total + t > target_minutes + 2:
+            break
+        result.append(ex)
+        total += t
+    return result
+
+
 def generate_recovery_day(session_minutes: int = 45) -> dict:
-    """Generate an active recovery day with light movement."""
-    exercises = [
-        {"name": "Foam Rolling", "sets": 1, "reps": "5-8 min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core"]},
-        {"name": "Cat-Cow Stretch", "sets": 2, "reps": "10", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
-        {"name": "Hip 90/90 Stretch", "sets": 2, "reps": "8 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "World's Greatest Stretch", "sets": 2, "reps": "6 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
-        {"name": "Supine Spinal Twist", "sets": 2, "reps": "30s each side", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
-        {"name": "Child's Pose", "sets": 2, "reps": "45s hold", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["back", "shoulders"]},
+    """Generate an active recovery day that fits within session_minutes."""
+    sm = max(20, session_minutes)
+    pool = [
+        {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(8, max(4, sm // 8))} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core"]},
+        {"name": "Cat-Cow Stretch", "sets": 2, "reps": "10", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
+        {"name": "Hip 90/90 Stretch", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "World's Greatest Stretch", "sets": 2, "reps": "5 each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
+        {"name": "Supine Spinal Twist", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
+        {"name": "Child's Pose", "sets": 1, "reps": "45s hold", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["back", "shoulders"]},
+        {"name": "Pigeon Pose", "sets": 2, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "Seated Forward Fold", "sets": 2, "reps": "30s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["hamstrings", "back"]},
+        {"name": "Lying Quad Stretch", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["quads"]},
+        {"name": "Shoulder Cross-Body Stretch", "sets": 2, "reps": "20s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["shoulders"]},
     ]
-    if session_minutes >= 30:
-        exercises.append({"name": "Easy Walk", "sets": 1, "reps": f"{min(20, session_minutes - 15)} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["cardio"]})
-    return {
-        "day": "Recovery Day",
-        "focus": "Recovery",
-        "stimulus": "recovery",
-        "exercises": exercises,
-    }
+    # Reserve time for a walk if session is long enough
+    walk_time = max(0, sm - 25) if sm >= 35 else 0
+    stretch_budget = sm - walk_time
+    exercises = _pick_exercises_for_time(pool, stretch_budget)
+    if walk_time >= 5:
+        exercises.append({"name": "Easy Walk", "sets": 1, "reps": f"{walk_time} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["cardio"]})
+    return {"day": "Recovery Day", "focus": "Recovery", "stimulus": "recovery", "exercises": exercises}
 
 
 def generate_mobility_day(session_minutes: int = 45) -> dict:
-    """Generate a mobility/stretching day."""
-    exercises = [
-        {"name": "Foam Rolling", "sets": 1, "reps": "8-10 min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
-        {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "8", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
-        {"name": "Hip 90/90 Stretch", "sets": 3, "reps": "8 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "Thoracic Spine Rotation", "sets": 3, "reps": "10 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "core"]},
-        {"name": "World's Greatest Stretch", "sets": 3, "reps": "6 each side", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
-        {"name": "Pigeon Pose", "sets": 2, "reps": "45s each side", "rest_seconds": 20, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "Shoulder Dislocates", "sets": 2, "reps": "12", "rest_seconds": 30, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+    """Generate a mobility day that fits within session_minutes."""
+    sm = max(20, session_minutes)
+    # Use longer holds (60s+) and 3 sets to fill time properly.
+    # Each exercise is ~4-5 min, so 10 exercises = ~45 min.
+    pool = [
+        {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(10, max(5, sm // 6))} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
+        {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "60s each side", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
+        {"name": "Hip 90/90 Stretch", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "Thoracic Spine Rotation", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "core"]},
+        {"name": "World's Greatest Stretch", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
+        {"name": "Pigeon Pose", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
+        {"name": "Shoulder Dislocates", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+        {"name": "Couch Stretch", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["quads", "core"]},
+        {"name": "Dead Hang", "sets": 3, "reps": "30s hold", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "shoulders"]},
+        {"name": "Wall Slides", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+        {"name": "Seated Straddle Stretch", "sets": 3, "reps": "60s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["hamstrings", "glutes"]},
+        {"name": "Supine Spinal Twist", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
+        {"name": "Lying Butterfly Stretch", "sets": 2, "reps": "60s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "core"]},
+        {"name": "Cat-Cow Stretch", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
+        {"name": "Child's Pose", "sets": 2, "reps": "60s hold", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "shoulders"]},
     ]
-    return {
-        "day": "Mobility Day",
-        "focus": "Mobility",
-        "stimulus": "mobility",
-        "exercises": exercises,
-    }
+    exercises = _pick_exercises_for_time(pool, sm)
+    return {"day": "Mobility Day", "focus": "Mobility", "stimulus": "mobility", "exercises": exercises}
 
 
 def generate_cardio_day(session_minutes: int = 45, goal: str = "body_recomp") -> dict:

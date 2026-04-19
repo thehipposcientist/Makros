@@ -269,11 +269,26 @@ export function computeNutritionScore(
   const wins: string[] = [];
   const improvements: string[] = [];
 
-  if (calAlignment >= 0.75) { tags.push('Calories on track'); wins.push('Calories on track'); }
-  else if (totalCal > 0) improvements.push('Calories off target');
+  // Use actual ratio for directional messaging, not just alignment score
+  const calRatio = targets.calories > 0 ? totalCal / targets.calories : 1;
+  const proRatio2 = targets.protein > 0 ? totalPro / targets.protein : 1;
 
-  if (proAlignment >= 0.85) { tags.push('Protein on track'); wins.push('Protein on track'); }
-  else if (totalPro > 0) improvements.push('Protein below target');
+  if (calRatio >= 0.90 && calRatio <= 1.10) {
+    tags.push('Calories on target'); wins.push('Calories on target');
+  } else if (calRatio > 1.10) {
+    const over = Math.round((calRatio - 1) * 100);
+    improvements.push(`Calories ${over}% over target`);
+  } else if (totalCal > 0) {
+    const under = Math.round((1 - calRatio) * 100);
+    improvements.push(`Calories ${under}% under target — add ${Math.round(targets.calories - totalCal)} cal`);
+  }
+
+  if (proRatio2 >= 0.90) {
+    tags.push('Protein on target'); wins.push('Protein on target');
+  } else if (totalPro > 0) {
+    const gap = Math.round(targets.protein - totalPro);
+    improvements.push(`Protein ${gap}g below target — need more`);
+  }
 
   if (fiberAlignment >= 0.8) { tags.push('Fiber on track'); wins.push('Fiber on track'); }
   else if (effectiveFiber > 0 && effectiveFiber < RDA.fiber * 0.5) improvements.push('Fiber low');

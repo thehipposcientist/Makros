@@ -121,6 +121,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [weightInputValue, setWeightInputValue] = useState('');
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
+  const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -159,6 +160,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       getInsights(authToken).then(setInsights).catch(() => null);
       getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
       getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+      import('../services/api').then(({ getMealAverages }) =>
+        getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+      );
     }
     // Load body scan history
     AsyncStorage.getItem('bodyScanHistory').then(raw => {
@@ -1139,8 +1143,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const workoutAdherence = expectedWorkouts > 0 ? Math.min(1, completedWorkouts.length / expectedWorkouts) : 0;
             const activityScore = Math.round(workoutAdherence * 100);
 
-            // Nutrition: use diet consistency score as proxy for backward-looking nutrition
-            const nutScore = dietScore ? dietScore.total : 50;
+            // Nutrition: use real meal averages when available, fall back to diet consistency
+            let nutScore = dietScore ? dietScore.total : 50;
+            let nutDetail = dietScore ? `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals logged` : '';
+            if (mealAverages && mealAverages.days_with_data >= 2) {
+              const targetCal = nutritionPlan?.targets?.calories || 2200;
+              const targetPro = nutritionPlan?.targets?.protein || 150;
+              // Calorie adherence: 40 points — how close avg calories are to target
+              const calRatio = targetCal > 0 ? mealAverages.avg_calories / targetCal : 0;
+              const calAdherence = Math.round(Math.max(0, (1 - Math.abs(1 - calRatio)) * 40));
+              // Protein adherence: 35 points — avg protein vs target
+              const proRatio = targetPro > 0 ? Math.min(1, mealAverages.avg_protein_g / targetPro) : 0;
+              const proAdherence = Math.round(proRatio * 35);
+              // Logging consistency: 25 points — days_with_data / window_days
+              const logConsistency = Math.round((mealAverages.days_with_data / mealAverages.window_days) * 25);
+              nutScore = Math.min(100, calAdherence + proAdherence + logConsistency);
+              nutDetail = `${Math.round(mealAverages.avg_calories)} / ${targetCal} cal avg`;
+            }
             const combined = Math.round(activityScore * 0.5 + nutScore * 0.5);
             const scoreColor = combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444';
             const rating = combined >= 80 ? 'Excellent' : combined >= 65 ? 'Good' : combined >= 45 ? 'Fair' : 'Needs work';
@@ -1157,7 +1176,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
                 {[
                   { label: 'Activity', value: activityScore, color: tc.primary, detail: `${completedWorkouts.length}/${expectedWorkouts} workouts` },
-                  { label: 'Nutrition', value: nutScore, color: '#22C55E', detail: dietScore ? `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals logged` : '' },
+                  { label: 'Nutrition', value: nutScore, color: '#22C55E', detail: nutDetail },
                 ].map(s => (
                   <View key={s.label} style={{ marginBottom: 8 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>

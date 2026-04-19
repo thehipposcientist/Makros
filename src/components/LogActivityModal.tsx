@@ -22,6 +22,7 @@ const CATEGORIES: { key: ActivityCategory; label: string; icon: string; desc: st
   { key: 'cardio',   label: 'Cardio',    icon: 'bicycle-outline',    desc: 'Running, cycling, swim' },
   { key: 'mobility', label: 'Mobility',  icon: 'body-outline',       desc: 'Yoga, stretching' },
   { key: 'sport',    label: 'Sport',     icon: 'basketball-outline',  desc: 'Basketball, soccer, etc' },
+  { key: 'active',   label: 'Active',    icon: 'hammer-outline',      desc: 'Yard work, labor, play' },
   { key: 'recovery', label: 'Recovery',  icon: 'bed-outline',        desc: 'Sauna, ice bath, rest' },
 ];
 
@@ -59,11 +60,26 @@ const SUBTYPES: Record<ActivityCategory, SubtypeDef[]> = {
     { key: 'basketball',   label: 'Basketball',   icon: 'basketball-outline' },
     { key: 'soccer',       label: 'Soccer',       icon: 'football-outline' },
     { key: 'tennis',       label: 'Tennis',        icon: 'tennisball-outline' },
+    { key: 'pickleball',   label: 'Pickleball',   icon: 'tennisball-outline' },
     { key: 'golf',         label: 'Golf',          icon: 'golf-outline' },
     { key: 'climbing',     label: 'Climbing',      icon: 'trending-up-outline' },
     { key: 'boxing',       label: 'Boxing',        icon: 'hand-right-outline' },
     { key: 'kickboxing',   label: 'Kickboxing',    icon: 'hand-left-outline' },
     { key: 'martial_arts', label: 'Martial Arts',  icon: 'shield-outline' },
+    { key: 'surfing',      label: 'Surfing',       icon: 'water-outline' },
+    { key: 'skiing',       label: 'Skiing',        icon: 'snow-outline' },
+    { key: 'other',        label: 'Other',         icon: 'ellipsis-horizontal-outline' },
+  ],
+  active: [
+    { key: 'yard_work',    label: 'Yard Work',     icon: 'leaf-outline' },
+    { key: 'chopping_wood', label: 'Chopping Wood', icon: 'hammer-outline' },
+    { key: 'moving',       label: 'Moving / Lifting', icon: 'cube-outline' },
+    { key: 'gardening',    label: 'Gardening',     icon: 'flower-outline' },
+    { key: 'cleaning',     label: 'House Cleaning', icon: 'home-outline' },
+    { key: 'construction', label: 'Construction',  icon: 'construct-outline' },
+    { key: 'shoveling',    label: 'Shoveling',     icon: 'snow-outline' },
+    { key: 'playing',      label: 'Playing w/ Kids', icon: 'happy-outline' },
+    { key: 'dancing',      label: 'Dancing',       icon: 'musical-notes-outline' },
     { key: 'other',        label: 'Other',         icon: 'ellipsis-horizontal-outline' },
   ],
   recovery: [
@@ -95,7 +111,8 @@ const LEGACY_FOCUS: Record<string, Record<string, string>> = {
   strength: { push: 'Push', pull: 'Pull', legs: 'Legs', upper_body: 'Upper Body', lower_body: 'Lower Body', full_body: 'Full Body' },
   cardio:   { walk: 'Walking', run: 'Running', ride: 'Cycling', spin: 'Spin Class', hike: 'Hiking', swim: 'Swimming', row: 'Rowing', stair: 'Cardio', elliptical: 'Cardio', bootcamp: 'Cardio', other: 'Cardio' },
   mobility: { yoga: 'Yoga', stretching: 'Stretching', foam_roll: 'Foam Rolling', pilates: 'Pilates' },
-  sport:    { basketball: 'Cardio', soccer: 'Cardio', tennis: 'Cardio', golf: 'Cardio', climbing: 'Cardio', boxing: 'Cardio', kickboxing: 'Cardio', martial_arts: 'Cardio', other: 'Cardio' },
+  sport:    { basketball: 'Cardio', soccer: 'Cardio', tennis: 'Cardio', pickleball: 'Cardio', golf: 'Cardio', climbing: 'Cardio', boxing: 'Cardio', kickboxing: 'Cardio', martial_arts: 'Cardio', surfing: 'Cardio', skiing: 'Cardio', other: 'Cardio' },
+  active:   { yard_work: 'Full Body', chopping_wood: 'Full Body', moving: 'Full Body', gardening: 'Cardio', cleaning: 'Cardio', construction: 'Full Body', shoveling: 'Full Body', playing: 'Cardio', dancing: 'Cardio', other: 'Cardio' },
   recovery: { sauna: 'Recovery', ice_bath: 'Recovery', walk: 'Recovery', sleep: 'Recovery', meditation: 'Recovery', general: 'Recovery' },
 };
 

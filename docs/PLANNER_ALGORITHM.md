@@ -53,6 +53,20 @@ Prescription (prescriptions.py)
   - conditioning: interval count, tempo duration, zone 2 duration
   |
   v
+Recovery/Mobility Day Generation (planner.py)
+  - generate_recovery_day(session_minutes) — scales exercises to time budget
+    - 20min: core stretches only (foam rolling + stretching)
+    - 30min: +pigeon pose, forward fold
+    - 40min: +easy walk
+    - 50min: +quad stretch, shoulder stretch, dead hang
+    - 60min: all exercises included
+  - generate_mobility_day(session_minutes) — scales drills to time budget
+    - 20min: 7 base drills (foam rolling, flows, hip circles, etc.)
+    - 35min: +couch stretch, pull-aparts
+    - 45min: +straddle, wall slides, dead hang
+    - 55min: +butterfly, spinal twist, savasana
+  |
+  v
 SetProgramming (set_programming.py)
   - per-set intent: warmup / heavy_top / backoff / volume / technique
   - equipment-aware load increments
@@ -229,9 +243,21 @@ Equipment and exercise-type aware:
 On workout completion:
 1. Backend resolves per-exercise muscle fatigue
 2. Top worked muscles (excluding systemic, > 0.1 threshold) are extracted
-3. `_infer_focus_from_muscles()` maps them to a focus label
+3. `_infer_focus_from_muscles()` maps them to a focus label using rules:
+   - Lower-body muscles without upper = "Legs"
+   - Lower + upper = "Full Body"
+   - Chest/triceps without back/biceps = "Push"
+   - Back/biceps without chest/triceps = "Pull"
+   - Mixed upper = "Upper Body"
 4. If inferred focus differs from original label, it's corrected
 5. This prevents labels like "Recovery" persisting on what was actually a leg day
+
+## Multiple Completions Per Day
+
+Workout completion upsert key: `(user_id, workout_date, focus_label)` — not `(user_id, workout_date)`.
+- Legs morning + sauna evening = 2 separate WorkoutCompletion rows
+- Both feed into fatigue system correctly
+- WorkoutSession upsert also keyed by (user, date, focus) for consistency
 
 ## Where AI Is Used
 
@@ -242,8 +268,10 @@ On workout completion:
 | Weekly recipe | No | — | Goal profile + split rules |
 | Split recommendation | No | — | Matrix lookup |
 | Weight recommendations | No | — | Set programming rules |
-| Fatigue scoring | No | — | 12-muscle rolling decay |
+| Fatigue scoring | No | — | 12-muscle rolling decay (two-pass) |
 | Fitness score | No | — | 4-pillar composite |
+| Recovery/mobility day generation | No | — | Time-scaled exercise lists |
+| Focus auto-correction | No | — | Muscle-to-focus inference |
 | Nutrition plan generation | Yes | gpt-4o-mini | Structured JSON prompts |
 | AI coach chat | Yes | gpt-4o-mini | Unified workout + nutrition |
 | Food photo scan | Yes | gpt-4o-mini | HEIC-safe via _fix_image_mime |

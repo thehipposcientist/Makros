@@ -589,12 +589,15 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
     goal_adjustment, rate_summary = step_4_calculate_goal_adjustment(inputs, bucket, tdee)
     calories_raw = tdee + goal_adjustment
 
-    # Safety floor removed per product decision — we now trust the
-    # user's goal + pace math end-to-end. The `min_calories_enforced`
-    # flag is preserved as a no-op (always False) so downstream readers
-    # and tests don't break.
-    min_enforced = False
-    calories = max(0, calories_raw)
+    # Per-day calorie safety floor: prevent dangerously low targets.
+    gender = (inputs.gender or "").lower()
+    min_floor = 1500 if gender == "male" else 1200
+    if calories_raw < min_floor:
+        calories = min_floor
+        min_enforced = True
+    else:
+        calories = calories_raw
+        min_enforced = False
 
     # Step 5-7: protein → fat → carbs
     protein_g = step_5_calculate_protein_g(inputs.weight_lbs, bucket)

@@ -49,19 +49,30 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
     if (reps == null) return null;
     const s = String(reps).trim().toLowerCase();
     if (!s) return null;
-    // Explicit seconds: "30s", "45 sec", "30-45s"
-    const secMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)$/);
+    // Explicit seconds: "30s", "45 sec", "30-45s", "60s each side", "45s hold"
+    const secMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)\b/);
     if (secMatch) {
       const lo = parseInt(secMatch[1], 10);
       const hi = secMatch[2] ? parseInt(secMatch[2], 10) : lo;
-      return Math.round((lo + hi) / 2);
+      const base = Math.round((lo + hi) / 2);
+      return s.includes('each') ? base * 2 : base;
     }
     // Explicit minutes: "5 min", "30-45 min", "42-52 min"
-    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)$/);
+    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)\b/);
     if (minMatch) {
       const lo = parseInt(minMatch[1], 10);
       const hi = minMatch[2] ? parseInt(minMatch[2], 10) : lo;
       return Math.round(((lo + hi) / 2) * 60);
+    }
+    // Rep-based with "each side" — treat as ~10s per rep per side
+    if (s.includes('each')) {
+      const repMatch = s.match(/^(\d+)/);
+      if (repMatch) return parseInt(repMatch[1], 10) * 10 * 2;
+    }
+    // "X reps slow" — treat as ~5s per rep
+    if (s.includes('slow')) {
+      const repMatch = s.match(/^(\d+)/);
+      if (repMatch) return parseInt(repMatch[1], 10) * 5;
     }
     // Bare number heuristic: if the value is a plain number ≥ 20 AND
     // the exercise looks like cardio (name contains cardio keywords),
@@ -83,20 +94,22 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
 
   const estimatedSeconds = workout.exercises.reduce((total, ex) => {
     const sets = Number(ex.sets) || 3;
-    const rest = Number((ex as any).restSeconds) || 60;
+    const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
     const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
     if (timedWorkSec != null) {
-      // Timed exercise: use the actual working time per set. Rest
-      // between sets still counts (for interval work with rest
-      // between intervals). Add 60s setup per exercise.
-      return total + sets * (timedWorkSec + rest) + 60;
+      // Timed exercise: actual working time per set + rest between sets.
+      // Mobility/stretch exercises get minimal setup (10s); strength/cardio get 60s.
+      // No extra setup time — the work time + rest already accounts for
+      // transitions. The old +60s per exercise inflated mobility/recovery
+      // estimates by 10+ minutes.
+      return total + sets * timedWorkSec + Math.max(0, sets - 1) * rest;
     }
     // Classic strength set: ~45s of work + prescribed rest. The
     // backend's density budget already bakes ramp-up/warmup time
     // into its primary-slot cost (primary=12 min includes warmup),
     // so we do NOT add extra warmup seconds here — that would
     // double-count against the session_minutes budget.
-    return total + sets * (45 + rest) + 60;
+    return total + sets * 45 + Math.max(0, sets - 1) * rest;
   }, 0);
   const estimatedMinutes = Math.max(1, Math.round(estimatedSeconds / 60));
 

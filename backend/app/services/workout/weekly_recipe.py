@@ -35,7 +35,10 @@ All output is deterministic: same (profile, days) → same recipe.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family
 from .goal_profiles import GoalProfile
@@ -383,7 +386,7 @@ def _lifting_plus_cardio_recipe(
     # explicitly choose PPL. If they picked it, respect the choice and
     # let the duplicate-repair + intensity spacing handle any overlap.
     if lift_days == 4 and lifting_split == SPLIT_PPL and not user_chose_split:
-        print(
+        logger.debug(
             "[weekly_recipe] lift_days=4 on PPL (auto) → switching to upper_lower "
             "to avoid duplicate Push/Pull/Legs day"
         )
@@ -501,7 +504,7 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
                     break
         if swap_idx is not None:
             out[i], out[swap_idx] = out[swap_idx], out[i]
-            print(
+            logger.debug(
                 f"[weekly_recipe] adjacency-repair: swapped idx {i}↔{swap_idx} "
                 f"to break {_b(out[swap_idx])!r} streak"
             )
@@ -747,7 +750,7 @@ def _space_high_intensity_days(
         """Try to downgrade a heavy archetype to its volume counterpart."""
         vol = _HEAVY_TO_VOLUME.get(out[idx])
         if vol:
-            print(f"[intensity] downgrading day {idx} from {out[idx].value} to {vol.value}")
+            logger.debug(f"[intensity] downgrading day {idx} from {out[idx].value} to {vol.value}")
             out[idx] = vol
             return True
         return False
@@ -773,7 +776,7 @@ def _space_high_intensity_days(
                 mid = streak_start + streak_len // 2
                 swap_idx = _find_swap(set(range(streak_start, i + 1)))
                 if swap_idx is not None:
-                    print(
+                    logger.debug(
                         f"[intensity] heavy streak days {streak_start}-{i}: "
                         f"swapping day {mid} ({out[mid].value}) with "
                         f"day {swap_idx} ({out[swap_idx].value})"
@@ -796,14 +799,14 @@ def _space_high_intensity_days(
         worst_offset = costs[0][0]
         worst_idx = i + worst_offset
         if _downgrade(worst_idx):
-            print(
+            logger.debug(
                 f"[intensity] 3-day fatigue {total:.2f} > {fatigue_threshold} "
                 f"at days {i}-{i+2}, downgraded day {worst_idx}"
             )
         else:
             swap_idx = _find_swap({i, i + 1, i + 2})
             if swap_idx is not None:
-                print(
+                logger.debug(
                     f"[intensity] 3-day fatigue {total:.2f}: swapping "
                     f"day {worst_idx} ({out[worst_idx].value}) with "
                     f"day {swap_idx} ({out[swap_idx].value})"
@@ -820,7 +823,7 @@ def _space_high_intensity_days(
         if prev_fatigue < 0.9:
             continue
         if _downgrade(i):
-            print(f"[intensity] heavy legs at day {i} after fatigue {prev_fatigue:.2f}, downgraded")
+            logger.debug(f"[intensity] heavy legs at day {i} after fatigue {prev_fatigue:.2f}, downgraded")
 
     # ── Pass 4: Resistance streaks need recovery windows ─────────────
     for i in range(3, len(out)):
@@ -830,7 +833,7 @@ def _space_high_intensity_days(
             continue
         swap_idx = _find_swap({i - 3, i - 2, i - 1, i}, max_cost=2)
         if swap_idx is not None:
-            print(
+            logger.debug(
                 f"[intensity] 3 resistance days before day {i}: "
                 f"swapping day {i} ({out[i].value}) with "
                 f"day {swap_idx} ({out[swap_idx].value})"
@@ -844,7 +847,7 @@ def _space_high_intensity_days(
             continue
         swap_idx = _find_swap({i - 1, i})
         if swap_idx is not None:
-            print(
+            logger.debug(
                 f"[intensity] pairwise spacing: swapped day {i} "
                 f"({out[i].value}, cost={cb}) with day {swap_idx} "
                 f"({out[swap_idx].value}, cost={_cost(out[swap_idx])})"
@@ -973,7 +976,7 @@ def _rotate_recipe_to_avoid_recent(
     if tier1_candidates:
         tier1_candidates.sort(key=lambda x: (x[0], x[1]))
         dups, shift, chosen = tier1_candidates[0]
-        print(
+        logger.debug(
             f"[weekly_recipe] rotation tier-1: shift={shift} "
             f"avoiding {recent} → day0={_day_bucket(chosen[0])} "
             f"adj_dups={dups}"
@@ -991,7 +994,7 @@ def _rotate_recipe_to_avoid_recent(
     if tier2_candidates:
         tier2_candidates.sort(key=lambda x: (x[0], x[1]))
         dups, shift, chosen = tier2_candidates[0]
-        print(
+        logger.debug(
             f"[weekly_recipe] rotation tier-2: shift={shift} "
             f"avoiding most-recent {most_recent!r} → "
             f"day0={_day_bucket(chosen[0])} adj_dups={dups}"
@@ -1001,7 +1004,7 @@ def _rotate_recipe_to_avoid_recent(
     # Nothing helped — every day in the recipe is the same bucket as
     # the most recent session. Return the original and let downstream
     # logs + scoring figure it out.
-    print(
+    logger.debug(
         f"[weekly_recipe] rotation no-op: every day is {most_recent!r} — "
         f"recipe has no alternative day type (adj_dups={current_dups})"
     )
@@ -1040,7 +1043,7 @@ def _rotate_recipe_for_fatigue(
     if best_rotation != recipe:
         old_fam = archetype_to_focus_family(recipe[0])
         new_fam = archetype_to_focus_family(best_rotation[0])
-        print(f"[weekly_recipe] fatigue rotation: {old_fam} → {new_fam} (readiness {best_score:.0%})")
+        logger.debug(f"[weekly_recipe] fatigue rotation: {old_fam} → {new_fam} (readiness {best_score:.0%})")
 
     return best_rotation
 
@@ -1118,14 +1121,14 @@ def generate_weekly_recipe(
         recipe = _maintain_recipe(profile, days)
 
     pre_rotation = [a.value for a in recipe]
-    print(f"[weekly_recipe] mode={mode} days={days} recipe={pre_rotation}")
+    logger.debug(f"[weekly_recipe] mode={mode} days={days} recipe={pre_rotation}")
     # Use fine-grained focus families for rotation when available.
     # Families preserve split identity (push != pull) while coarse
     # buckets collapse both to "upper_body" -- which means the rotation
     # pass can't distinguish "user just did push" from "user just did
     # pull" and may fail to rotate away from the same split identity.
     rotation_recent = list(recent_focus_families) if recent_focus_families else list(recent_focus_buckets)
-    print(
+    logger.debug(
         f"[weekly_recipe] mode={mode} days={days} split={lifting_split} "
         f"recent_buckets={list(recent_focus_buckets)} "
         f"recent_families={list(recent_focus_families)} "
@@ -1144,7 +1147,7 @@ def generate_weekly_recipe(
         recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
     # Rotation can reintroduce adjacent same-bucket duplicates.
     recipe = _repair_adjacent_duplicates(recipe)
-    print(
+    logger.debug(
         f"[weekly_recipe] recipe_after_rotation={[a.value for a in recipe]}"
     )
 
@@ -1161,10 +1164,10 @@ def generate_weekly_recipe(
     has_mobility = DayArchetype.MOBILITY_FLOW in profile.allowed_archetypes
     while len(recipe) < days and has_mobility:
         recipe.append(DayArchetype.MOBILITY_FLOW)
-        print(f"[weekly_recipe] appended active recovery day at position {len(recipe) - 1}")
+        logger.debug(f"[weekly_recipe] appended active recovery day at position {len(recipe) - 1}")
     if days >= 7 and all_lift and has_mobility and len(recipe) == days:
         recipe[-1] = DayArchetype.MOBILITY_FLOW
-        print(f"[weekly_recipe] replaced day {days} with active recovery")
+        logger.debug(f"[weekly_recipe] replaced day {days} with active recovery")
 
     # Defensive: every archetype must be in the profile's allowed set.
     fallback = profile.anchor_archetypes[0] if profile.anchor_archetypes else DayArchetype.LIFT_FULL_BODY
@@ -1186,7 +1189,7 @@ def generate_weekly_recipe(
         cat = ARCHETYPE_META[a].category
         exposures[{"lift": "lift", "cond": "cardio", "mobility": "mobility",
                    "recovery": "recovery", "hybrid": "hybrid"}[cat]] += 1
-    print(
+    logger.debug(
         f"[weekly_recipe] recipe={[a.value for a in final]} "
         f"exposures={exposures}"
     )

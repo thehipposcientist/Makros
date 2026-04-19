@@ -10,6 +10,9 @@ from app.models import (
 )
 from app.auth import get_current_user
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def _infer_focus_from_muscles(top_muscles: list[str]) -> str | None:
     """Infer a focus label from the top worked muscle groups."""
@@ -68,6 +71,37 @@ class WorkoutCompleteRequest(BaseModel):
     activity_intensity: str | None = None
     activity_source: str | None = None
     cardio_style: str | None = None
+
+# ─── Response models ──────────────────────────────────────────────────────────
+
+class WorkoutStatusResponse(BaseModel):
+    done: bool
+
+
+class MuscleFatigueEntry(BaseModel):
+    muscle: str
+    value: float
+
+
+class NutritionContext(BaseModel):
+    protein_avg: float = 0
+    protein_status: str = "unknown"
+    message: str | None = None
+    recovery_bonus_applied: bool = False
+    calories_avg: float | None = None
+
+
+class FatigueScoreResponse(BaseModel):
+    readiness_score: int
+    readiness_label: str
+    muscle_fatigue: dict[str, float]
+    focus_readiness: dict[str, float]
+    top_fatigued: list[MuscleFatigueEntry]
+    blocked_focuses: list[str]
+    days_analyzed: int
+    activities: list[dict]
+    nutrition_context: NutritionContext
+
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
@@ -226,6 +260,7 @@ def generate_single_day(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    print(f"[generate-day] ENTRY: session_minutes={body.session_minutes} focus_override={body.focus_override!r} goal={body.goal}")
     """Generate exercises for ONE day using the full deterministic planner
     pipeline with the user's recent history. The recipe (split structure)
     is computed fresh each time so the day type matches the rotation, and
@@ -285,11 +320,11 @@ def generate_single_day(
                 fatigue_snapshot.focus_readiness = derive_all_readiness(fatigue_snapshot.muscle_fatigue)
                 avg_fatigue = sum(fatigue_snapshot.muscle_fatigue.get(m) for m in ("chest", "back", "shoulders", "quads", "hamstrings", "glutes", "core")) / 7
                 fatigue_snapshot.readiness_score = round(max(0, (1 - avg_fatigue) * 100))
-                print(f"[generate-day] injury fatigue boost applied: {injury_boosts}")
+                logger.debug(f"[generate-day] injury fatigue boost applied: {injury_boosts}")
             fatigue_readiness = fatigue_snapshot.readiness_score
-            print(f"[generate-day] fatigue: readiness={fatigue_readiness} focus_readiness={fatigue_snapshot.focus_readiness}")
+            logger.debug(f"[generate-day] fatigue: readiness={fatigue_readiness} focus_readiness={fatigue_snapshot.focus_readiness}")
     except Exception as e:
-        print(f"[generate-day] fatigue check failed: {e}")
+        logger.debug(f"[generate-day] fatigue check failed: {e}")
 
     # Build planner inputs
     inputs = PlannerInputs(
@@ -353,27 +388,29 @@ def generate_single_day(
 
         # Special focus types that need a generated day, not a recipe match
         if override_lower in ("recovery", "active recovery"):
-            from app.services.workout.planner import generate_recovery_day
+            from app.services.workout.planner import generate_recovery_day, _est_exercise_time
             day = generate_recovery_day(body.session_minutes or 45)
-            print(f"[generate-day] focus override → generated Recovery day")
+            est = sum(_est_exercise_time(ex) for ex in day.get("exercises", []))
+            print(f"[generate-day] Recovery: session_minutes={body.session_minutes} exercises={len(day.get('exercises',[]))} est_time={est:.0f}min")
         elif override_lower in ("mobility", "stretching"):
-            from app.services.workout.planner import generate_mobility_day
+            from app.services.workout.planner import generate_mobility_day, _est_exercise_time
             day = generate_mobility_day(body.session_minutes or 45)
-            print(f"[generate-day] focus override → generated Mobility day")
+            est = sum(_est_exercise_time(ex) for ex in day.get("exercises", []))
+            print(f"[generate-day] Mobility: session_minutes={body.session_minutes} exercises={len(day.get('exercises',[]))} est_time={est:.0f}min")
         elif override_lower == "cardio":
             from app.services.workout.planner import generate_cardio_day
             day = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
-            print(f"[generate-day] focus override → generated Cardio day")
+            logger.debug("[generate-day] focus override → generated Cardio day")
         else:
             for alt_idx, alt_day in enumerate(days):
                 if alt_day.get("focus", "").lower().strip() == override_lower:
                     day = alt_day
                     idx = alt_idx
-                    print(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
+                    logger.debug(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
                     break
             else:
                 day = {**day, "focus": body.focus_override}
-                print(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
+                logger.debug(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
 
     # Graduated fatigue response — 5 tiers from force-recovery to proceed
     if fatigue_snapshot and not body.focus_override:
@@ -391,7 +428,7 @@ def generate_single_day(
                 "exercises": [],
                 "_forced_recovery": True,
             }
-            print(f"[generate-day] FORCE RECOVERY: readiness={fatigue_snapshot.readiness_score}% systemic={systemic:.2f}")
+            logger.debug(f"[generate-day] FORCE RECOVERY: readiness={fatigue_snapshot.readiness_score}% systemic={systemic:.2f}")
 
         elif day_readiness < 0.2:
             # TIER 1: swap to most ready alternative
@@ -403,23 +440,23 @@ def generate_single_day(
                     best_readiness = alt_r
                     best_alt = (alt_idx, alt_day)
             if best_alt and best_readiness > day_readiness + 0.2:
-                print(f"[generate-day] fatigue swap: {day_family}({day_readiness:.0%}) → {normalize_focus_to_family(best_alt[1].get('focus',''))}({best_readiness:.0%})")
+                logger.debug(f"[generate-day] fatigue swap: {day_family}({day_readiness:.0%}) → {normalize_focus_to_family(best_alt[1].get('focus',''))}({best_readiness:.0%})")
                 idx, day = best_alt
 
         elif day_readiness < 0.4:
             # TIER 2: downgrade stimulus aggressively
             if day.get("stimulus") in ("strength", "power"):
                 day = {**day, "stimulus": "hypertrophy"}
-                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
+                logger.debug(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
             elif day.get("stimulus") == "hypertrophy":
                 day = {**day, "stimulus": "volume"}
-                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → volume")
+                logger.debug(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → volume")
 
         elif day_readiness < 0.6:
             # TIER 3: heavy → hypertrophy only
             if day.get("stimulus") in ("strength", "power"):
                 day = {**day, "stimulus": "hypertrophy"}
-                print(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
+                logger.debug(f"[generate-day] fatigue downgrade: {day_family} readiness={day_readiness:.0%} → hypertrophy")
 
         # TIER 4 (≥0.6): proceed as planned — no changes
 
@@ -586,7 +623,11 @@ def mark_workout_complete(
                     ))
             session_rows_created = 1
         except Exception as e:
-            print(f"[workouts/complete] structured persistence failed (non-fatal): {e}")
+            logger.info(f"[workouts/complete] structured persistence error: {type(e).__name__}: {e}")
+            db.rollback()
+            from sqlalchemy.exc import IntegrityError
+            if isinstance(e, IntegrityError):
+                raise
 
     # Resolve per-muscle fatigue and store on the completion row.
     # Uses per-exercise data when available, falls back to focus-label estimate.
@@ -634,14 +675,14 @@ def mark_workout_complete(
                 if top:
                     inferred = _infer_focus_from_muscles(top)
                     if inferred and inferred != completion_row.focus_label:
-                        print(f"[workouts/complete] focus corrected: {completion_row.focus_label!r} → {inferred!r} (from exercises)")
+                        logger.info(f"[workouts/complete] focus corrected: {completion_row.focus_label!r} → {inferred!r} (from exercises)")
                         completion_row.focus_label = inferred
             db.add(completion_row)
     except Exception as e:
-        print(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
+        logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
 
     db.commit()
-    print(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
+    logger.info(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
     # Verify the row exists
     verify = db.exec(
         select(WorkoutCompletion)
@@ -649,11 +690,11 @@ def mark_workout_complete(
         .where(WorkoutCompletion.workout_date == body.workout_date)
         .where(WorkoutCompletion.focus_label == body.focus_label)
     ).first()
-    print(f"[workouts/complete] VERIFY: row={'FOUND' if verify else 'MISSING'} resolved_fatigue={bool(verify.resolved_muscle_fatigue) if verify else 'N/A'}")
+    logger.info(f"[workouts/complete] VERIFY: row={'FOUND' if verify else 'MISSING'} resolved_fatigue={bool(verify.resolved_muscle_fatigue) if verify else 'N/A'}")
     return {"ok": True, "structured_persisted": bool(session_rows_created)}
 
 
-@router.get("/status")
+@router.get("/status", response_model=WorkoutStatusResponse)
 def get_workout_status(
     workout_date: date = Query(...),
     current_user: User = Depends(get_current_user),
@@ -668,7 +709,7 @@ def get_workout_status(
     return {"done": completion is not None}
 
 
-@router.get("/fatigue")
+@router.get("/fatigue", response_model=FatigueScoreResponse)
 def get_fatigue_score(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
@@ -678,9 +719,65 @@ def get_fatigue_score(
     from app.services.workout.activity_impact import compute_rolling_fatigue
 
     completions = get_recent_completions_for_fatigue(current_user.id, db)
-    print(f"[fatigue] user={current_user.id} completions={len(completions)} dates={[c.get('workout_date') for c in completions]}")
+    logger.debug(f"[fatigue] user={current_user.id} completions={len(completions)} dates={[c.get('workout_date') for c in completions]}")
     snapshot = compute_rolling_fatigue(completions)
-    print(f"[fatigue] readiness={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
+    logger.debug(f"[fatigue] readiness={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
+
+    # Nutrition recovery bonus: good protein intake accelerates recovery
+    nutrition_context = {"protein_avg": 0, "protein_status": "unknown", "message": None, "recovery_bonus_applied": False}
+    try:
+        from app.services.nutrition.meal_history import get_rolling_averages
+        avg = get_rolling_averages(current_user.id, window=3, db=db)
+        if avg and avg.get("days_with_data", 0) > 0:
+            protein = avg.get("avg_protein_g", 0)
+            calories = avg.get("avg_calories", 0)
+            nutrition_context["protein_avg"] = round(protein)
+            nutrition_context["calories_avg"] = round(calories)
+
+            if protein >= 130:
+                nutrition_context["protein_status"] = "excellent"
+                nutrition_context["message"] = f"Protein intake strong ({round(protein)}g avg) — accelerating recovery"
+            elif protein >= 100:
+                nutrition_context["protein_status"] = "good"
+                nutrition_context["message"] = f"Protein adequate ({round(protein)}g avg) — supporting recovery"
+            elif protein >= 50:
+                nutrition_context["protein_status"] = "low"
+                nutrition_context["message"] = f"Protein low ({round(protein)}g avg) — recovery is slower. Aim for 130g+"
+            elif protein > 0:
+                nutrition_context["protein_status"] = "very_low"
+                nutrition_context["message"] = f"Protein very low ({round(protein)}g avg) — significantly slowing recovery"
+            else:
+                nutrition_context["protein_status"] = "no_data"
+                nutrition_context["message"] = "Log meals to unlock nutrition-powered recovery insights"
+
+            if protein >= 100:
+                protein_factor = min(1.0, protein / 150)
+                recovery_bonus = 0.05 * protein_factor
+                for muscle in ("chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "core"):
+                    current = snapshot.muscle_fatigue.get(muscle)
+                    if current > 0:
+                        snapshot.muscle_fatigue.add(muscle, -current * recovery_bonus)
+                from app.services.workout.activity_impact import derive_all_readiness, FATIGUE_MUSCLES
+                snapshot.focus_readiness = derive_all_readiness(snapshot.muscle_fatigue)
+                muscle_avg = sum(snapshot.muscle_fatigue.get(m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
+                snapshot.readiness_score = int(round(max(0, (1 - (muscle_avg * 0.6 + snapshot.muscle_fatigue.systemic * 0.4)) * 100)))
+                nutrition_context["recovery_bonus_applied"] = True
+                logger.debug(f"[fatigue] nutrition bonus: protein={protein:.0f}g bonus={recovery_bonus:.3f} readiness={snapshot.readiness_score}%")
+            elif protein >= 50:
+                # Low protein: apply a small PENALTY (slower recovery)
+                penalty = 0.03
+                for muscle in ("chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "core"):
+                    current = snapshot.muscle_fatigue.get(muscle)
+                    if current > 0:
+                        snapshot.muscle_fatigue.add(muscle, current * penalty)
+                from app.services.workout.activity_impact import derive_all_readiness, FATIGUE_MUSCLES
+                snapshot.focus_readiness = derive_all_readiness(snapshot.muscle_fatigue)
+                muscle_avg = sum(snapshot.muscle_fatigue.get(m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
+                snapshot.readiness_score = int(round(max(0, (1 - (muscle_avg * 0.6 + snapshot.muscle_fatigue.systemic * 0.4)) * 100)))
+                logger.debug(f"[fatigue] low protein penalty: protein={protein:.0f}g readiness={snapshot.readiness_score}%")
+    except Exception as e:
+        logger.debug(f"[fatigue] nutrition recovery check failed (non-fatal): {e}")
+
     return {
         "readiness_score": snapshot.readiness_score,
         "readiness_label": snapshot.readiness_label,
@@ -690,6 +787,7 @@ def get_fatigue_score(
         "blocked_focuses": snapshot.blocked_focuses,
         "days_analyzed": snapshot.days_analyzed,
         "activities": snapshot.activities,
+        "nutrition_context": nutrition_context,
     }
 
 
@@ -845,7 +943,7 @@ def delete_workout(
         select(WorkoutExercise).where(WorkoutExercise.session_id == session_id)
     ).all()
     for ex in exercises:
-        for s in db.exec(select(ExerciseSet).where(ExerciseSet.exercise_id == ex.id)).all():
+        for s in db.exec(select(ExerciseSet).where(ExerciseSet.workout_exercise_id == ex.id)).all():
             db.delete(s)
         db.delete(ex)
     db.delete(session_row)
