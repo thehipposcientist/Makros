@@ -1,0 +1,7 @@
+{
+  "name": "thallo-live-activity",
+  "version": "1.0.0",
+  "description": "Local Expo module bridging ActivityKit to JS for the rest-timer Live Activity.",
+  "main": "index.ts",
+  "private": true
+}

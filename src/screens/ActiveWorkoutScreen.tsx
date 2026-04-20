@@ -31,6 +31,7 @@ import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities } from '../services/liveActivity';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -470,6 +471,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restDurationSeconds = useRef<number>(0);
   // Ref-based rest timer — avoids interval churn from re-running useEffect every second
   const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Active Live Activity ID so we can update/end it from timer callbacks.
+  const liveActivityIdRef = useRef<string | null>(null);
   const restStartAtRef = useRef<number>(0);
   const restTotalSecondsRef = useRef<number>(0);
   const restExerciseNameRef = useRef<string | null>(null);
@@ -864,9 +867,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Cleanup on unmount
   useEffect(() => {
+    // Nuke any orphaned Live Activities on mount — guards against app
+    // crashes leaving a dead timer card on the lock screen.
+    endAllActivities().catch(() => undefined);
     return () => {
       if (restTimerRef.current) clearInterval(restTimerRef.current);
       cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
+      if (liveActivityIdRef.current) {
+        endRestActivity(liveActivityIdRef.current).catch(() => undefined);
+        liveActivityIdRef.current = null;
+      }
     };
   }, []);
 
@@ -1128,6 +1138,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
         setRestCue(rec.tip);
         setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e));
+        // Push the updated next-set rec to the Live Activity on the lock screen.
+        if (liveActivityIdRef.current) {
+          updateRestActivity(liveActivityIdRef.current, {
+            setNumber: setsLogged,
+            totalSets: getTargetSetCount(ex.targetSets),
+            nextSetRecommendation: `${rec.weightLbs} lbs × ${rec.reps}`,
+            exerciseName: ex.name,
+            themeColorHex: theme.colors.primary,
+          }).catch(() => undefined);
+        }
       } catch {
         setAiErrorIdx(exIdx);
       } finally {
@@ -1316,6 +1336,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restTotalSecondsRef.current = seconds;
     restExerciseNameRef.current = exerciseName;
 
+    // Kick off a Live Activity on the lock screen. End any prior one first
+    // (switching exercises mid-rest shouldn't orphan the old card).
+    (async () => {
+      if (liveActivityIdRef.current) {
+        await endRestActivity(liveActivityIdRef.current);
+        liveActivityIdRef.current = null;
+      }
+      const id = await startRestActivity({
+        exerciseName,
+        setNumber: 0,  // Filled in by updateRestActivity once we know the real set count.
+        totalSets: 0,
+        endDateMs: Date.now() + seconds * 1000,
+        nextSetRecommendation: 'Computing…',
+        themeColorHex: theme.colors.primary,
+        workoutId: `w_${workout.focus}_${Date.now()}`,
+      });
+      liveActivityIdRef.current = id;
+    })().catch(() => undefined);
+
     restTimerRef.current = setInterval(() => {
       const elapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
       const remaining = Math.max(0, restTotalSecondsRef.current - elapsed);
@@ -1339,9 +1378,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           },
           trigger: null,
         }).catch(() => undefined);
+        // End the Live Activity on the lock screen.
+        if (liveActivityIdRef.current) {
+          endRestActivity(liveActivityIdRef.current).catch(() => undefined);
+          liveActivityIdRef.current = null;
+        }
       }
     }, 500); // 500ms tick for smooth countdown without drift
-  }, []);
+  }, [theme.colors.primary, workout.focus]);
 
   // Force-update timers when app returns from background
   useEffect(() => {
@@ -1376,6 +1420,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restDurationSeconds.current = 0;
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = null;
+    if (liveActivityIdRef.current) {
+      endRestActivity(liveActivityIdRef.current).catch(() => undefined);
+      liveActivityIdRef.current = null;
+    }
   }, []);
 
   const rescheduleRestNotifications = useCallback(async (params: {
