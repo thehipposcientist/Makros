@@ -53,7 +53,7 @@
       "typedRoutes": true
     },
     "extra": {
-      "apiBaseUrl": ""
+      "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com"
     }
   }
 }
