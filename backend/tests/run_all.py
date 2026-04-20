@@ -30,6 +30,9 @@ _TEST_MODULES = (
     "tests.test_plan_review",
     "tests.test_in_workout_review",
     "tests.test_fitness_score",
+    # End-to-end HTTP smoke — requires backend running at localhost:8000.
+    # Skipped automatically when the server isn't up; see test_api_smoke.py.
+    "tests.test_api_smoke",
 )
 
 

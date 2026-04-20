@@ -1479,13 +1479,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const timer = setInterval(() => {
       const nowKey = todayKey();
       if (nowKey !== currentDate) {
+        // Skip the rollover refresh while a plan is actively being
+        // generated — reading/writing `aiWorkoutPlan` mid-gen can race
+        // with the apply path and surface a half-merged plan.
+        if (isWorkoutUpdating || isNutritionUpdating) return;
         setCurrentDate(nowKey);
         loadDayStatus();
         if (userProfile) loadPlans(userProfile);
       }
     }, 60000);
     return () => clearInterval(timer);
-  }, [currentDate, userProfile, authToken]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentDate, userProfile, authToken, isWorkoutUpdating, isNutritionUpdating]);
 
   const loadDayStatus = async () => {
     const today = todayKey();

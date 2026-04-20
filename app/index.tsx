@@ -283,6 +283,14 @@ function stampGoalStart(profile: UserProfile, previous: UserProfile | null): Use
   return profile;
 }
 
+/** Guarded JSON.parse for AsyncStorage reads — returns fallback on any
+ *  malformed payload. Used by the user-log and profile hydration paths
+ *  so a single corrupted row never cascades into "can't sign in". */
+function safeParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try { return JSON.parse(raw) as T; } catch { return fallback; }
+}
+
 async function appendUserLog(entry: Omit<UserLogEntry, 'id' | 'date'>) {
   try {
     const raw = await AsyncStorage.getItem('userLog');
@@ -624,8 +632,13 @@ export default function Index() {
     let profile: UserProfile | null = null;
     const stored = await AsyncStorage.getItem('userProfile');
     if (stored) {
-      profile = JSON.parse(stored);
-    } else {
+      // Guard the parse — corrupted AsyncStorage blobs (rare but possible
+      // after a force-kill mid-write) must not brick every future sign-in.
+      // Fall through to the remote fetch and re-populate from there.
+      try { profile = JSON.parse(stored); }
+      catch { profile = null; await AsyncStorage.removeItem('userProfile').catch(() => {}); }
+    }
+    if (!profile) {
       const remote = await getMyProfile(token);
       if (remote) {
         await AsyncStorage.setItem('userProfile', JSON.stringify(remote));
@@ -943,7 +956,7 @@ export default function Index() {
         }
 
         const userLogRaw = await AsyncStorage.getItem('userLog');
-        const userLog: import('../src/types').UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+        const userLog: import('../src/types').UserLogEntry[] = safeParse<import('../src/types').UserLogEntry[]>(userLogRaw, []);
 
         // Build last 3 workout sessions as context
         const recentSessions = (await loadWorkoutHistory())
@@ -1164,7 +1177,7 @@ export default function Index() {
               ? 'Last 3 completed workouts:\n' + recentSessions.map(s => `  [${s.date.slice(0, 10)}] ${s.focus}`).join('\n')
               : '';
             const userLogRaw = await AsyncStorage.getItem('userLog');
-            const userLog: import('../src/types').UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+            const userLog: import('../src/types').UserLogEntry[] = safeParse<import('../src/types').UserLogEntry[]>(userLogRaw, []);
             const opts = { userLog, extraContext: sessionLines || undefined };
             const planCall = (needsWorkout && needsNutrition)
               ? getAIPlans(authToken, stamped, opts)
@@ -1206,7 +1219,7 @@ export default function Index() {
             : '';
 
           const userLogRaw = await AsyncStorage.getItem('userLog');
-          const userLog: UserLogEntry[] = userLogRaw ? JSON.parse(userLogRaw) : [];
+          const userLog: UserLogEntry[] = safeParse<UserLogEntry[]>(userLogRaw, []);
 
           // Clear pending profile changes since they're being sent to AI now
           await AsyncStorage.removeItem('pendingProfileChanges').catch(() => null);
