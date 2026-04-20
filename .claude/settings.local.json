@@ -145,7 +145,8 @@
       "Read(//opt/homebrew/lib/node_modules/npm/bin/**)",
       "Read(//Users/sawyerhannel/**)",
       "Bash(/opt/homebrew/bin/npx expo *)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(aws ecr *)"
     ]
   }
 }

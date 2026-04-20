@@ -34,11 +34,11 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes and take food photos for nutrition tracking.",
         "NSHealthShareUsageDescription": "Thallo reads your resting heart rate, steps, workouts, sleep, and active energy from Apple Health to calculate your fitness score and recovery status.",
-        "NSHealthUpdateUsageDescription": "Thallo saves your completed workouts to Apple Health so they appear in your health timeline."
+        "NSHealthUpdateUsageDescription": "Thallo saves your completed workouts to Apple Health so they appear in your health timeline.",
+        "ITSAppUsesNonExemptEncryption": false
       },
       "entitlements": {
-        "com.apple.developer.healthkit": true,
-        "com.apple.developer.healthkit.background-delivery": false
+        "com.apple.developer.healthkit": true
       }
     },
     "android": {
@@ -46,14 +46,21 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/thallo-icon.png",
         "backgroundColor": "#0D0F14"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "scheme": "thallo",
     "experiments": {
       "typedRoutes": true
     },
     "extra": {
-      "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com"
+      "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
+      "eas": {
+        "projectId": "89ef69c6-db5f-45ac-b7aa-64120d60f1b4"
+      }
     }
   }
 }

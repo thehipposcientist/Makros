@@ -215,31 +215,52 @@ Schema migrations are additive (SQLModel `create_all` + idempotent `ALTER TYPE �
 
 ---
 
-## Alternative: ECR + ECS Fargate (more knobs)
+## ECR push sequence (used by both alternatives below)
 
-Use this if App Runner's auto-build can't find your Dockerfile or you want more control over the task definition.
+The App Runner "auto-build from GitHub source" path above is easiest. If you want to build locally and push a tagged image instead, use ECR. This is the sequence referenced from both App Runner-from-ECR (Option A) and ECS Fargate (Option B).
 
-### Push image to ECR
+Prereqs: AWS CLI installed + `aws configure` done + Docker running.
+
 ```bash
+# One-time: create the repo
 aws ecr create-repository --repository-name thallo-backend --region us-east-1
 
-cd backend
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin <acct>.dkr.ecr.us-east-1.amazonaws.com
+# Set once per shell session
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+REPO=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/thallo-backend
 
+# 1. Log into ECR
+aws ecr get-login-password --region $REGION \
+  | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+
+# 2. Build for linux/amd64 (CRITICAL — App Runner and most ECS tasks are x86;
+#    an arm64 image built on Apple Silicon will crash-loop on deploy)
+cd backend
 docker build --platform linux/amd64 -t thallo-backend .
-docker tag thallo-backend:latest <acct>.dkr.ecr.us-east-1.amazonaws.com/thallo-backend:latest
-docker push <acct>.dkr.ecr.us-east-1.amazonaws.com/thallo-backend:latest
+
+# 3. Tag + push
+docker tag thallo-backend:latest $REPO:latest
+docker push $REPO:latest
 ```
 
-### Option A — ECR image via App Runner (recommended)
-Easiest. App Runner pulls the ECR image and runs it — same experience as the source-code path, just with your own build step.
-- Console → App Runner → Create service → **Container registry** → pick the ECR image.
-- Everything else (env vars, VPC connector, health check) is identical to section 3.
-- Every deploy becomes `docker push` → App Runner auto-deploys within a minute (enable auto-deploy on the service).
+Deploys are now `cd backend && docker build --platform linux/amd64 -t thallo-backend . && docker tag … && docker push $REPO:latest`. App Runner picks it up within a minute if you enabled auto-deploy.
 
-### Option B — ECS Fargate
-More involved (~30–60 min of clicking):
+## Alternative A: App Runner from ECR image
+
+Use this when you want to build locally (faster iteration than App Runner's auto-build from GitHub source).
+
+1. Run the ECR push sequence above.
+2. App Runner → Create service → **Container registry** → Amazon ECR → pick `thallo-backend:latest`.
+3. Everything else (env vars, VPC connector, health check) is identical to section 3 of this doc.
+4. Enable "Automatic" deployment trigger so future `docker push` cycles auto-roll.
+
+## Alternative B: ECS Fargate (more knobs)
+
+Use this if App Runner doesn't fit (need separate worker pool, canary deploys, >4 GB memory, etc.).
+
+(Full ECS Fargate walkthrough):
+
 1. Create an ECS cluster (Fargate, no EC2).
 2. Create a Task Definition referencing the ECR image. Set:
    - Port: 8000.
