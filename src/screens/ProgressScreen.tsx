@@ -19,7 +19,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
+import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -1172,9 +1172,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     'Apple Health is connected but no data came back. Open iPhone Settings → Privacy & Security → Health → Thallo and enable the categories you want to share.',
                   );
                 } else if (!granted) {
+                  const err = getLastHealthKitError();
                   Alert.alert(
                     'HealthKit not available',
-                    'iOS rejected the HealthKit request. This usually means the provisioning profile doesn\'t include HealthKit — regenerate it via `eas credentials` and rebuild.',
+                    `iOS error: ${err ?? 'unknown'}\n\nThis usually means the provisioning profile doesn't include HealthKit, or the entitlement is missing from the IPA.`,
                   );
                 }
               } catch (e: any) {

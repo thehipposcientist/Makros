@@ -37,7 +37,7 @@
         "NSHealthUpdateUsageDescription": "Thallo saves your completed workouts to Apple Health so they appear in your health timeline.",
         "ITSAppUsesNonExemptEncryption": false
       },
-      "buildNumber": "7"
+      "buildNumber": "9"
     },
     "android": {
       "package": "com.thallo.app",

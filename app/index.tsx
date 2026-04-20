@@ -63,6 +63,21 @@ const PLAN_GEN_MARKER_STALE_MS = 15 * 60 * 1000;
  *  simulators). Kept here instead of a separate util file because auth is
  *  the only consumer. */
 const AUTH_TOKEN_KEY = 'auth_token';
+// Sentinel that lives in AsyncStorage. AsyncStorage is wiped on app delete,
+// but iOS Keychain (used by SecureStore) is NOT — so a stale JWT can
+// auto-log the user in with an empty local profile after reinstall. This
+// marker lets us detect a fresh install and purge the Keychain token.
+const INSTALL_MARKER_KEY = 'install_marker_v1';
+async function ensureFreshInstall(): Promise<void> {
+  try {
+    const marker = await AsyncStorage.getItem(INSTALL_MARKER_KEY);
+    if (!marker) {
+      try { await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY); } catch {}
+      await AsyncStorage.setItem(INSTALL_MARKER_KEY, '1');
+    }
+  } catch {}
+}
+
 async function saveAuthToken(token: string): Promise<void> {
   try { await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token); return; } catch {}
   try { await AsyncStorage.setItem(AUTH_TOKEN_KEY, token); } catch {}
@@ -452,6 +467,11 @@ export default function Index() {
     // Closing the app should not cancel an in-flight plan generation — the
     // backend job queue holds state server-side, and the client picks it up
     // on next open via the polling loop.
+
+    // On a fresh install (AsyncStorage empty but Keychain still has a
+    // token from a prior install), clear the Keychain token so the user
+    // lands on the login screen instead of a ghost-profile auto-login.
+    await ensureFreshInstall();
 
     // Restore persisted auth token. If we have one, validate against the
     // backend so an expired/revoked token sends the user to the login screen

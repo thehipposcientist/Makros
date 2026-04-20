@@ -63,6 +63,14 @@ export function isHealthKitAvailable(): boolean {
   return !!hk;
 }
 
+// Last error from initHealthKit, exposed so UI can show the raw iOS
+// message — invaluable for debugging entitlement/profile issues on
+// TestFlight where console logs are invisible.
+let _lastHealthKitError: string | null = null;
+export function getLastHealthKitError(): string | null {
+  return _lastHealthKitError;
+}
+
 /**
  * Request HealthKit permissions. Returns true if the user saw the dialog
  * (iOS doesn't tell us whether they actually granted — only denies show up
@@ -72,12 +80,12 @@ export function requestHealthPermissions(): Promise<boolean> {
   return new Promise((resolve) => {
     const hk = getHealthKit();
     if (!hk) {
-      console.warn('[appleHealth] getHealthKit() returned null — native module missing');
+      _lastHealthKitError = 'Native module not loaded (getHealthKit returned null)';
       resolve(false);
       return;
     }
     if (typeof hk.initHealthKit !== 'function') {
-      console.warn('[appleHealth] initHealthKit is not a function — module keys:', Object.keys(hk).slice(0, 10));
+      _lastHealthKitError = `initHealthKit is not a function. Module keys: ${Object.keys(hk).slice(0, 10).join(', ')}`;
       resolve(false);
       return;
     }
@@ -85,20 +93,18 @@ export function requestHealthPermissions(): Promise<boolean> {
     try {
       hk.initHealthKit(HEALTH_PERMISSIONS, (err: any) => {
         if (err) {
-          // Surface the raw error so we can tell entitlement issues from
-          // user-denied from anything else. Common messages:
-          //   "Not available on this device"          → simulator or HK not supported
-          //   "Missing usage description"             → Info.plist problem
-          //   "Authorization could not be determined" → entitlement/profile mismatch
-          console.warn('[appleHealth] initHealthKit error:', JSON.stringify(err));
+          _lastHealthKitError = typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err));
+          console.warn('[appleHealth] initHealthKit error:', _lastHealthKitError);
           resolve(false);
           return;
         }
+        _lastHealthKitError = null;
         console.log('[appleHealth] initHealthKit ok');
         resolve(true);
       });
-    } catch (e) {
-      console.warn('[appleHealth] initHealthKit threw:', e);
+    } catch (e: any) {
+      _lastHealthKitError = `initHealthKit threw: ${e?.message ?? String(e)}`;
+      console.warn('[appleHealth]', _lastHealthKitError);
       resolve(false);
     }
   });

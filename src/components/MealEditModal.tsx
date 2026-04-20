@@ -682,8 +682,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
   // Persist current items to AsyncStorage immediately (survives app kill).
   // Called after scan/barcode adds items, without waiting for Save tap.
+  // For NEW meals (mealType = 'new_meal' / 'new_extra') we skip persistence
+  // entirely — the Save tap is the only way a new meal should land in the
+  // plan. Otherwise every debounced auto-persist would push a new duplicate.
   const persistNow = (updatedItems: MealItem[]) => {
     if (!dateKey) return;
+    if (!mealType.startsWith('meal_')) return;
     const resummed: Record<string, number> = {};
     for (const it of updatedItems) {
       if (!it.micronutrients) continue;
