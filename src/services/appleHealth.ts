@@ -25,7 +25,11 @@ function getHealthKit(): any {
   if (Platform.OS !== 'ios') return null;
   if (!AppleHealthKit) {
     try {
-      AppleHealthKit = require('react-native-health').default;
+      // react-native-health uses `module.exports = HealthKit`, so the module
+      // IS the kit — there's no `.default`. Fall through in case a future
+      // version adds a default export.
+      const mod = require('react-native-health');
+      AppleHealthKit = mod?.default ?? mod;
     } catch {
       console.warn('[appleHealth] react-native-health not available — custom dev build required');
       return null;
