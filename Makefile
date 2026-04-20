@@ -1,4 +1,11 @@
-.PHONY: start tunnel stop reset-db wait-backend test dev
+.PHONY: start tunnel stop reset-db wait-backend test dev \
+        deploy deploy-backend deploy-ios smoke-prod
+
+# ── AWS / deploy config ──────────────────────────────────────────────────────
+AWS_ACCOUNT_ID  := 225629394823
+AWS_REGION      := us-east-1
+ECR_REPO        := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/thallo-backend
+APP_RUNNER_URL  := https://q4q8mjjhmp.us-east-1.awsapprunner.com
 
 # Run recipes in a login zsh so ~/.zprofile (brew shellenv, etc.) is sourced
 # and tools like `npx` / `node` are on PATH.
@@ -111,3 +118,57 @@ test:
 	@echo "Running backend test suites..."
 	@echo ""
 	@docker exec thallo-backend python -m tests.run_all
+
+# ── Deploy: backend (ECR + App Runner auto-deploys) ──────────────────────────
+deploy-backend:
+	@echo ""
+	@echo "Deploying backend to AWS (ECR -> App Runner)..."
+	@echo ""
+	@echo "[1/4] Authenticating Docker to ECR..."
+	@aws ecr get-login-password --region $(AWS_REGION) \
+	  | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+	@echo "      Done."
+	@echo ""
+	@echo "[2/4] Building image (linux/amd64 for App Runner)..."
+	@cd backend && docker build --platform linux/amd64 -t thallo-backend .
+	@echo "      Done."
+	@echo ""
+	@echo "[3/4] Tagging + pushing to ECR..."
+	@docker tag thallo-backend:latest $(ECR_REPO):latest
+	@docker push $(ECR_REPO):latest
+	@echo "      Done."
+	@echo ""
+	@echo "[4/4] App Runner will auto-deploy within ~60 seconds."
+	@echo "      Monitor at https://console.aws.amazon.com/apprunner"
+	@echo ""
+	@echo "Done. Run 'make smoke-prod' in a minute to verify."
+
+# ── Deploy: iOS (EAS Build + TestFlight submit) ──────────────────────────────
+deploy-ios:
+	@echo ""
+	@echo "Building + submitting iOS to TestFlight..."
+	@echo "(~15-25 min for build, another ~5-15 min for Apple processing.)"
+	@echo ""
+	@eas build --platform ios --profile production --non-interactive
+	@echo ""
+	@echo "Build finished. Submitting latest to TestFlight..."
+	@eas submit --platform ios --latest --non-interactive
+	@echo ""
+	@echo "Done. Check App Store Connect -> TestFlight tab for processing status."
+
+# ── Deploy everything ────────────────────────────────────────────────────────
+deploy: deploy-backend deploy-ios
+	@echo ""
+	@echo "Full deploy kicked off. Backend is already live; iOS will appear"
+	@echo "in TestFlight once Apple finishes processing."
+
+# ── Smoke-test the prod backend ──────────────────────────────────────────────
+smoke-prod:
+	@echo ""
+	@echo "Smoke-testing $(APP_RUNNER_URL)..."
+	@echo ""
+	@curl -sS $(APP_RUNNER_URL)/health | python3 -m json.tool
+	@curl -sS $(APP_RUNNER_URL)/ready | python3 -m json.tool
+	@echo ""
+	@echo "Running full API smoke suite against prod..."
+	@SMOKE_BASE_URL=$(APP_RUNNER_URL) docker exec thallo-backend python -m tests.test_api_smoke

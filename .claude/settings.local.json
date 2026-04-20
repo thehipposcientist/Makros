@@ -146,7 +146,8 @@
       "Read(//Users/sawyerhannel/**)",
       "Bash(/opt/homebrew/bin/npx expo *)",
       "Bash(git log *)",
-      "Bash(aws ecr *)"
+      "Bash(aws ecr *)",
+      "Bash(make -n deploy-backend)"
     ]
   }
 }
