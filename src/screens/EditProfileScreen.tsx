@@ -267,11 +267,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     };
     return defaults[Math.min(7, Math.max(1, n))] ?? [1, 3, 5];
   };
-  const [daysPerWeek, setDaysPerWeekRaw] = useState(profile.daysPerWeek);
+  const [daysPerWeek, setDaysPerWeekRaw] = useState(profile.daysPerWeek ?? 3);
   const [trainingDays, setTrainingDays] = useState<number[]>(
-    profile.trainingDays?.length === profile.daysPerWeek
+    Array.isArray(profile.trainingDays) && profile.trainingDays.length === profile.daysPerWeek
       ? profile.trainingDays
-      : _defaultDays(profile.daysPerWeek)
+      : _defaultDays(profile.daysPerWeek ?? 3)
   );
   const setDaysPerWeek = (updater: number | ((d: number) => number)) => {
     setDaysPerWeekRaw(prev => {
