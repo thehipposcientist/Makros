@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
-  TextInput, Alert, Image,
+  TextInput, Alert, Image, Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,7 +19,8 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable } from '../services/appleHealth';
+import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
+import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
@@ -112,6 +113,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
+  const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
   // Diet score now always exists (mealTracker returns a zeroed
   // empty-state object instead of null). The card always renders so
@@ -178,6 +181,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       try {
         if (!isHealthKitAvailable()) return;
         const enabled = await isAppleHealthEnabled();
+        setHealthEnabled(enabled);
         if (!enabled) return;
         const fresh = await readHealthSummary();
         if (fresh) {
@@ -1128,54 +1132,127 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Apple Health — live vitals. Rendered only when we have data. */}
-          {healthSummary && (
-            <View style={styles.vitalsCard}>
-              <View style={styles.vitalsHeader}>
-                <Ionicons name="heart-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
-                <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Today's vitals</Text>
+          {/* Apple Health — three render states:
+               1. Not enabled → show Connect button
+               2. Enabled but HealthKit returned all null → show "Open iOS Settings"
+               3. Has data → show vitals grid */}
+          {isHealthKitAvailable() && (() => {
+            const hasAnyData =
+              healthSummary && (
+                healthSummary.restingHeartRate != null ||
+                healthSummary.avgSteps7d != null ||
+                healthSummary.lastNightSleepHours != null ||
+                healthSummary.avgSleepHours7d != null ||
+                healthSummary.workouts7d != null ||
+                healthSummary.activeEnergy7d != null
+              );
+
+            const handleConnect = async () => {
+              setHealthConnecting(true);
+              try {
+                const granted = await requestHealthPermissions();
+                // iOS lies about grant status. Attempt a read regardless; if
+                // data comes back we know at least one category is on.
+                await persistAppleHealthEnabled(true);
+                setHealthEnabled(true);
+                const fresh = await readHealthSummary();
+                if (fresh) {
+                  setHealthSummary(fresh);
+                  saveHealthSummary(fresh).catch(() => null);
+                }
+                if (!granted) {
+                  Alert.alert(
+                    'Check Settings',
+                    'If vitals stay blank, open iPhone Settings → Privacy & Security → Health → Thallo and turn on the categories you want to share.',
+                  );
+                }
+              } finally {
+                setHealthConnecting(false);
+              }
+            };
+
+            const handleOpenSettings = () => {
+              Linking.openURL('app-settings:').catch(() => {
+                Alert.alert('Unable to open Settings', 'Go to iPhone Settings → Privacy & Security → Health → Thallo manually.');
+              });
+            };
+
+            return (
+              <View style={styles.vitalsCard}>
+                <View style={styles.vitalsHeader}>
+                  <Ionicons name="heart-outline" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
+                  {healthEnabled && hasAnyData ? (
+                    <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Today's vitals</Text>
+                  ) : null}
+                </View>
+
+                {!healthEnabled ? (
+                  <>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
+                      Connect Apple Health to see your resting heart rate, sleep, steps, and workouts — and get a more accurate fitness score.
+                    </Text>
+                    <TouchableOpacity
+                      style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' }}
+                      onPress={handleConnect}
+                      disabled={healthConnecting}
+                    >
+                      {healthConnecting
+                        ? <ActivityIndicator color="#fff" />
+                        : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
+                    </TouchableOpacity>
+                  </>
+                ) : !hasAnyData ? (
+                  <>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
+                      Connected, but no data is coming through yet. Either your Watch hasn't synced, or permission categories are off in iOS Settings.
+                    </Text>
+                    <TouchableOpacity
+                      style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' }}
+                      onPress={handleOpenSettings}
+                    >
+                      <Text style={{ color: tc.textPrimary, fontWeight: '700', fontSize: 14 }}>Open iOS Settings</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <View style={styles.vitalsGrid}>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>{healthSummary!.restingHeartRate ?? '—'}</Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Resting HR</Text>
+                    </View>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                        {healthSummary!.lastNightSleepHours != null ? `${healthSummary!.lastNightSleepHours}h` : '—'}
+                      </Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Last night</Text>
+                    </View>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                        {healthSummary!.avgSteps7d != null ? healthSummary!.avgSteps7d.toLocaleString() : '—'}
+                      </Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Steps (7d avg)</Text>
+                    </View>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>{healthSummary!.workouts7d ?? '—'}</Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Workouts (7d)</Text>
+                    </View>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                        {healthSummary!.activeEnergy7d != null ? healthSummary!.activeEnergy7d.toLocaleString() : '—'}
+                      </Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Active cal (7d)</Text>
+                    </View>
+                    <View style={styles.vitalsCell}>
+                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                        {healthSummary!.avgSleepHours7d != null ? `${healthSummary!.avgSleepHours7d}h` : '—'}
+                      </Text>
+                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Sleep (7d avg)</Text>
+                    </View>
+                  </View>
+                )}
               </View>
-              <View style={styles.vitalsGrid}>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.restingHeartRate ?? '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Resting HR</Text>
-                </View>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.lastNightSleepHours != null ? `${healthSummary.lastNightSleepHours}h` : '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Last night</Text>
-                </View>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.avgSteps7d != null ? healthSummary.avgSteps7d.toLocaleString() : '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Steps (7d avg)</Text>
-                </View>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.workouts7d ?? '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Workouts (7d)</Text>
-                </View>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.activeEnergy7d != null ? healthSummary.activeEnergy7d.toLocaleString() : '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Active cal (7d)</Text>
-                </View>
-                <View style={styles.vitalsCell}>
-                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                    {healthSummary.avgSleepHours7d != null ? `${healthSummary.avgSleepHours7d}h` : '—'}
-                  </Text>
-                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Sleep (7d avg)</Text>
-                </View>
-              </View>
-            </View>
-          )}
+            );
+          })()}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
