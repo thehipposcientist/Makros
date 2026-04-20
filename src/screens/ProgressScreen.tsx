@@ -1149,23 +1149,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
             const handleConnect = async () => {
               setHealthConnecting(true);
+              // Flip enabled up-front so the UI leaves the "not connected"
+              // state even if iOS silently no-ops the permission prompt
+              // (common after a previous denial).
+              try { await persistAppleHealthEnabled(true); } catch {}
+              setHealthEnabled(true);
               try {
-                const granted = await requestHealthPermissions();
-                // iOS lies about grant status. Attempt a read regardless; if
-                // data comes back we know at least one category is on.
-                await persistAppleHealthEnabled(true);
-                setHealthEnabled(true);
+                await requestHealthPermissions();
                 const fresh = await readHealthSummary();
                 if (fresh) {
                   setHealthSummary(fresh);
                   saveHealthSummary(fresh).catch(() => null);
                 }
-                if (!granted) {
-                  Alert.alert(
-                    'Check Settings',
-                    'If vitals stay blank, open iPhone Settings → Privacy & Security → Health → Thallo and turn on the categories you want to share.',
-                  );
-                }
+              } catch (e) {
+                console.warn('[progress] Apple Health connect failed:', e);
               } finally {
                 setHealthConnecting(false);
               }
