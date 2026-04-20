@@ -31,7 +31,7 @@ import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
-import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities } from '../services/liveActivity';
+import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -473,6 +473,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Active Live Activity ID so we can update/end it from timer callbacks.
   const liveActivityIdRef = useRef<string | null>(null);
+  // One-time per-workout diagnostic flag so the alert only fires on first rest.
+  const liveActivityDiagShownRef = useRef<boolean>(false);
   const restStartAtRef = useRef<number>(0);
   const restTotalSecondsRef = useRef<number>(0);
   const restExerciseNameRef = useRef<string | null>(null);
@@ -1355,6 +1357,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           workoutId: `w_${workout.focus}_${Date.now()}`,
         });
         liveActivityIdRef.current = id;
+        // Diagnostic: on FIRST rest of the workout only, show an alert with
+        // the result so we can debug "why isn't the lock-screen card
+        // appearing". Suppresses itself on subsequent sets.
+        if (!liveActivityDiagShownRef.current) {
+          liveActivityDiagShownRef.current = true;
+          const diag = getLastStartDiagnostic();
+          Alert.alert('Live Activity diagnostic', diag ?? 'no diagnostic captured');
+        }
       } catch (e) {
         console.warn('[ActiveWorkout] Live Activity start failed (non-fatal):', e);
       }

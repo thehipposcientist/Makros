@@ -46,9 +46,29 @@ export function areActivitiesEnabled(): boolean {
   try { return !!n.areActivitiesEnabled(); } catch { return false; }
 }
 
+// Diagnostic: last outcome of a startRestActivity call. Surfaced to the UI
+// via getLastStartDiagnostic() so a user can see why nothing appeared on
+// their lock screen.
+let _lastStartDiagnostic: string | null = null;
+export function getLastStartDiagnostic(): string | null {
+  return _lastStartDiagnostic;
+}
+
 export async function startRestActivity(state: RestActivityState): Promise<string | null> {
   const n = getNative();
-  if (!n?.startActivity) return null;
+  if (!n) {
+    _lastStartDiagnostic = 'native module not loaded (require returned null)';
+    return null;
+  }
+  if (!n.startActivity) {
+    const keys = Object.keys(n).slice(0, 10).join(', ');
+    _lastStartDiagnostic = `startActivity missing from native module. Available keys: [${keys}]`;
+    return null;
+  }
+  if (n.areActivitiesEnabled && !n.areActivitiesEnabled()) {
+    _lastStartDiagnostic = 'areActivitiesEnabled returned false — user has Live Activities disabled in iPhone Settings, or iOS < 16.2';
+    return null;
+  }
   try {
     const id = await n.startActivity({
       workoutId: state.workoutId ?? `workout_${Date.now()}`,
@@ -59,8 +79,14 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
       nextSetRecommendation: state.nextSetRecommendation,
       themeColorHex: state.themeColorHex,
     });
-    return id ?? null;
-  } catch (e) {
+    if (!id) {
+      _lastStartDiagnostic = 'native startActivity returned null — Activity.request failed in Swift (check device logs for NSLog entries starting with [ThalloLiveActivity])';
+      return null;
+    }
+    _lastStartDiagnostic = `ok, id=${id}`;
+    return id;
+  } catch (e: any) {
+    _lastStartDiagnostic = `startActivity threw: ${e?.message ?? String(e)}`;
     console.warn('[liveActivity] startRestActivity failed:', e);
     return null;
   }
