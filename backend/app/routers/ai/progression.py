@@ -456,9 +456,13 @@ def fitness_composite_score(
     # Pull the last 14 days of lightweight completion rows for the
     # Cardio + Consistency pillars. Uses the same reliable source
     # the 36-hour continuity rotation already reads from.
-    cutoff_14d = datetime.utcnow() - timedelta(days=14)
-    cutoff_28d = datetime.utcnow() - timedelta(days=28)
-    cutoff_56d = datetime.utcnow() - timedelta(days=56)
+    # Naive UTC — matches TIMESTAMP WITHOUT TIME ZONE storage of
+    # WorkoutCompletion.completed_at. Replaces deprecated datetime.utcnow().
+    from datetime import timezone as _tz
+    _now_naive = datetime.now(_tz.utc).replace(tzinfo=None)
+    cutoff_14d = _now_naive - timedelta(days=14)
+    cutoff_28d = _now_naive - timedelta(days=28)
+    cutoff_56d = _now_naive - timedelta(days=56)
     try:
         rows = db.exec(
             select(WorkoutCompletion)

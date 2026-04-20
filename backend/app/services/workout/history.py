@@ -199,7 +199,11 @@ def most_recent_completed_focus(
     from app.models import WorkoutCompletion
     from .focus_normalize import normalize_focus_to_bucket, normalize_focus_to_family
 
-    now_naive = datetime.utcnow()
+    # Naive UTC "now" — matches the TIMESTAMP WITHOUT TIME ZONE storage
+    # (see docstring). `datetime.utcnow()` is deprecated in Python 3.12+;
+    # the replace-tzinfo form preserves identical naive semantics.
+    from datetime import timezone as _tz
+    now_naive = datetime.now(_tz.utc).replace(tzinfo=None)
     cutoff_dt = now_naive - timedelta(hours=hours)
     # Accept anything completed within the time window OR whose
     # workout_date is today or yesterday (date-level fallback).

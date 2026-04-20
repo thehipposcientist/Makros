@@ -136,10 +136,15 @@ def progression_insights(
     # Only completed sessions contribute to progression history. Before
     # this filter an abandoned workout would show up as a "point" with
     # zeroed sets and break the plateau detector.
+    # Cap to the last 90 days so this scales regardless of history length;
+    # plateau detection already only looks at the most recent 6 points.
+    from datetime import timedelta
+    cutoff = date.today() - timedelta(days=90)
     sessions = db.exec(
         select(WorkoutSession)
         .where(WorkoutSession.user_id == current_user.id)
         .where(WorkoutSession.completed_at.is_not(None))
+        .where(WorkoutSession.workout_date >= cutoff)
         .order_by(WorkoutSession.workout_date.desc())
     ).all()
 
@@ -844,18 +849,28 @@ def sync_in_progress_workout(
 
 @router.get("/completions")
 def list_completions(
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
+    skip: int = Query(default=0, ge=0),
+    since: date | None = Query(default=None),
+    before: date | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Return the user's recent workout completions. Used by the mobile app as
-    a fallback when local `workoutHistory` is missing (e.g. fresh install, or
-    state wipe). Completions carry date/focus/duration but NOT per-set detail —
+    """Paginated workout-completion list. Used by the mobile app as a
+    fallback when local `workoutHistory` is missing (fresh install, state
+    wipe). Completions carry date/focus/duration but NOT per-set detail —
     that only lives in `WorkoutSession` rows when the client sent exercises."""
-    rows = db.exec(
+    query = (
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
-        .order_by(WorkoutCompletion.workout_date.desc(), WorkoutCompletion.completed_at.desc())
+    )
+    if since:
+        query = query.where(WorkoutCompletion.workout_date >= since)
+    if before:
+        query = query.where(WorkoutCompletion.workout_date <= before)
+    rows = db.exec(
+        query.order_by(WorkoutCompletion.workout_date.desc(), WorkoutCompletion.completed_at.desc())
+        .offset(skip)
         .limit(limit)
     ).all()
     return [
@@ -1022,13 +1037,26 @@ def create_workout(
 @router.get("")
 def list_workouts(
     workout_date: date | None = Query(default=None),
+    since: date | None = Query(default=None, description="Inclusive lower-bound workout_date"),
+    before: date | None = Query(default=None, description="Inclusive upper-bound workout_date"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    """Paginated workout-session list. Default returns the 50 most recent.
+    `skip` + `limit` for cursor-less pagination; `since` / `before` to
+    narrow by date. `workout_date` still supported for single-day lookups."""
     query = select(WorkoutSession).where(WorkoutSession.user_id == current_user.id)
     if workout_date:
         query = query.where(WorkoutSession.workout_date == workout_date)
-    sessions = db.exec(query.order_by(WorkoutSession.workout_date.desc())).all()
+    if since:
+        query = query.where(WorkoutSession.workout_date >= since)
+    if before:
+        query = query.where(WorkoutSession.workout_date <= before)
+    sessions = db.exec(
+        query.order_by(WorkoutSession.workout_date.desc()).offset(skip).limit(limit)
+    ).all()
     return [_build_session_response(s, db) for s in sessions]
 
 

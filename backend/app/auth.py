@@ -16,6 +16,17 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 10080))
 
+# Fail fast on missing / weak key — a silent None would blow up every JWT
+# operation at runtime instead of at boot. Allow short keys only when
+# explicitly running in dev (no DATABASE_URL pointing at postgres).
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    _db = os.getenv("DATABASE_URL", "")
+    if _db.startswith("postgres"):
+        raise RuntimeError(
+            "SECRET_KEY must be set and >=32 chars in production. "
+            "Generate one with `openssl rand -hex 32` and inject via your secret store."
+        )
+
 bearer_scheme = HTTPBearer()
 
 

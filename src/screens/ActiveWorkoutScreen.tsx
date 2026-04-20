@@ -32,6 +32,18 @@ import FormVideoModal from '../components/FormVideoModal';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 
+/** Parse the top (ceiling) of a target rep string. Handles ranges like
+ *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
+ *  Returns null when we can't tell. */
+function parseTargetRepMax(raw: string | number | null | undefined): number | null {
+  if (raw == null) return null;
+  const s = String(raw);
+  const m = s.match(/(\d+)\s*[-–—]\s*(\d+)/);
+  if (m) return parseInt(m[2], 10);
+  const n = s.match(/(\d+)/);
+  return n ? parseInt(n[1], 10) : null;
+}
+
 /** Shared display helper for equipment strings. Splits on commas so
  *  multi-equipment values like "barbell, flat_bench" become
  *  "Barbell, Flat Bench" instead of the raw planner output. */
@@ -65,6 +77,62 @@ interface ExerciseLibraryItem {
   name: string;
   equipment?: string;
   primary_muscle?: string;
+  secondary_muscles?: string[];
+  is_compound?: boolean;
+  movement_pattern?: string | null;
+  description?: string;
+}
+
+// ─── Swap ranking ────────────────────────────────────────────────────────────
+// Groups equipment strings into broad classes so a "barbell row" ranks close
+// to a "t-bar row" but far from a "resistance band row".
+function _equipmentClass(raw?: string | null): string {
+  const s = (raw ?? '').toLowerCase();
+  if (!s) return 'other';
+  if (s.includes('barbell') || s.includes('smith')) return 'barbell';
+  if (s.includes('dumbbell') || s.includes('kettlebell')) return 'dumbbell';
+  if (s.includes('machine') || s.includes('cable') || s.includes('leg_press') || s.includes('leg press')) return 'machine';
+  if (s.includes('band') || s.includes('resistance')) return 'band';
+  if (s.includes('bodyweight') || s === 'none' || s === 'bw') return 'bodyweight';
+  return 'other';
+}
+
+/** Score how well `cand` substitutes for `base`. Higher = better match.
+ *  Scoring weights:
+ *    primary == primary: +12
+ *    primary matches base.secondary or vice versa: +6
+ *    any secondary overlap: +3
+ *    same compound-vs-isolation bucket: +5
+ *    same movement_pattern: +6
+ *    same equipment class: +4 (close class: +2)
+ *  Zero or negative means unsuitable; we drop those. */
+function _scoreSwapCandidate(base: ExerciseLibraryItem, cand: ExerciseLibraryItem): number {
+  let score = 0;
+  const bp = (base.primary_muscle ?? '').toLowerCase();
+  const cp = (cand.primary_muscle ?? '').toLowerCase();
+  const bs = (base.secondary_muscles ?? []).map(m => m.toLowerCase());
+  const cs = (cand.secondary_muscles ?? []).map(m => m.toLowerCase());
+  if (!bp || !cp) return -1;
+  if (bp === cp) score += 12;
+  else if (bs.includes(cp) || cs.includes(bp)) score += 6;
+  else if (bs.some(m => cs.includes(m))) score += 3;
+  else return -1; // no muscle overlap at all — not a swap
+  if (base.is_compound === cand.is_compound) score += 5;
+  const bpat = (base.movement_pattern ?? '').toLowerCase();
+  const cpat = (cand.movement_pattern ?? '').toLowerCase();
+  if (bpat && bpat === cpat) score += 6;
+  const be = _equipmentClass(base.equipment);
+  const ce = _equipmentClass(cand.equipment);
+  if (be === ce) score += 4;
+  else if (
+    (be === 'barbell' && ce === 'dumbbell') ||
+    (be === 'dumbbell' && ce === 'barbell') ||
+    (be === 'machine' && (ce === 'barbell' || ce === 'dumbbell')) ||
+    ((be === 'barbell' || be === 'dumbbell') && ce === 'machine')
+  ) {
+    score += 2;
+  }
+  return score;
 }
 
 interface ActiveWorkoutScreenProps {
@@ -446,7 +514,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             weight_lbs: s.weightLbs,
             duration_seconds: s.durationSeconds ?? null,
             feedback: s.feedback ?? null,
-            rir: null,
+            rir: s.rir ?? null,
           })),
         }));
       syncInProgressWorkout(authToken, dateKey(new Date()), workout.focus, payload)
@@ -492,6 +560,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
   const [formVideoExerciseName, setFormVideoExerciseName] = useState<string | null>(null);
+  // When the user hits or exceeds the top of the target rep range, prompt
+  // them for RIR (reps in reserve) so the progression engine knows how
+  // much more intensity to push next session. Only shown on over-target
+  // sets — under-target sets already tell us they hit failure.
+  const [pendingRir, setPendingRir] = useState<{ exIdx: number; setIdx: number } | null>(null);
+  // When the user taps "Swap" on an exercise card we reuse the add-exercise
+  // modal but have it REPLACE instead of append. Non-null means we're in
+  // swap mode for that exercise index.
+  const [swapTargetIdx, setSwapTargetIdx] = useState<number | null>(null);
 
   // Pre-set coach hints keyed by exercise index. Populated lazily when
   // an exercise becomes active with no sets logged yet. Each entry is
@@ -1115,14 +1192,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       aiRecommendation: undefined,
     };
     setExercises(prev => {
+      // Swap mode: replace the exercise at swapTargetIdx instead of appending.
+      // Preserves any already-logged sets so a mid-workout swap doesn't wipe
+      // work the user did on the old lift.
+      if (swapTargetIdx != null && swapTargetIdx >= 0 && swapTargetIdx < prev.length) {
+        const updated = prev.slice();
+        const carryOverSets = updated[swapTargetIdx].sets ?? [];
+        updated[swapTargetIdx] = {
+          ...nextExercise,
+          sets: carryOverSets,
+          targetSets: updated[swapTargetIdx].targetSets,
+          targetReps: updated[swapTargetIdx].targetReps,
+          targetRestSeconds: updated[swapTargetIdx].targetRestSeconds,
+        };
+        setActiveExIdx(swapTargetIdx);
+        return updated;
+      }
       const updated = [...prev, nextExercise];
       setActiveExIdx(updated.length - 1);
       return updated;
     });
     setAddExerciseModalVisible(false);
+    setSwapTargetIdx(null);
     setExerciseSearch('');
     setAiExerciseResults([]);
-  }, []);
+  }, [swapTargetIdx]);
 
   /** Run an AI exercise search using the currently-typed query. Respects the
    *  user's equipment + active injuries so the results are directly usable. */
@@ -1344,6 +1438,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setAiErrorIdx(null);
     console.log('[LOG_SET] Cleared AI error index');
 
+    // Over-target: prompt for RIR so progression has a real signal for
+    // "how hard was that really?" Under-target stays as-is — hitting
+    // failure is already a clear signal.
+    const targetMax = parseTargetRepMax(ex.targetReps);
+    if (targetMax != null && repsNum >= targetMax) {
+      setPendingRir({ exIdx, setIdx: updatedSets.length - 1 });
+    } else {
+      setPendingRir(null);
+    }
+
     // Start rest timer automatically if more sets remain for this exercise.
     if (updatedSets.length < targetSetCount) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
@@ -1478,18 +1582,47 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [refreshRecommendationForExercise]);
 
   const handleSubmitFeedback = async (skip = false) => {
-    setFeedbackSubmitting(true);
-    try {
-      // If the user is skipping outright, close immediately — no
-      // confirmation step needed.
-      if (skip) {
-        setSummaryVisible(false);
-        setSummaryStep('summary');
-        if (finishedSession) onFinish(finishedSession);
-        return;
-      }
+    // Close immediately — the user doesn't need a two-step confirmation
+    // screen. Feedback persistence + the AI-driven plan update happen in
+    // the background; if the plan changes, HomeScreen will pick it up on
+    // next mount / planRefreshKey bump. If skip is true, we just dismiss.
+    const captured = {
+      feeling: feedbackFeeling,
+      intensity: feedbackIntensity,
+      soreness: feedbackSoreness.slice(),
+      notes: feedbackNotes,
+      session: finishedSession,
+    };
+    setSummaryVisible(false);
+    setSummaryStep('summary');
+    if (finishedSession) onFinish(finishedSession);
+    if (skip) return;
 
-      if (authToken && (feedbackFeeling || feedbackIntensity)) {
+    // Fire-and-forget persistence + plan sync. Errors are logged but
+    // never surface — the user has already moved on.
+    (async () => {
+      try {
+        if (captured.session && captured.feeling && captured.intensity) {
+          await saveWorkoutSession({
+            ...captured.session,
+            feedback: {
+              feeling: captured.feeling as WorkoutFeeling,
+              intensity: captured.intensity as WorkoutIntensity,
+              sorenessAreas: captured.soreness,
+              notes: captured.notes,
+            },
+          });
+          await updateWorkoutSummary(captured.session.id, {
+            feedback: {
+              feeling: captured.feeling as WorkoutFeeling,
+              intensity: captured.intensity as WorkoutIntensity,
+              sorenessAreas: captured.soreness,
+              notes: captured.notes.trim() || undefined,
+            },
+          });
+        }
+        if (!authToken || (!captured.feeling && !captured.intensity)) return;
+
         const feelingLabels: Record<string, string> = {
           great: 'great — felt strong and energized',
           good: 'good — solid session',
@@ -1503,75 +1636,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           4: 'hard but manageable',
           5: 'too hard / overwhelming',
         };
-        const feelingText = feedbackFeeling ? feelingLabels[feedbackFeeling] : 'neutral';
-        const intensityText = feedbackIntensity ? intensityLabels[feedbackIntensity] : 'moderate';
-        const sorenessText = feedbackSoreness.length > 0 ? ` Soreness noted in: ${feedbackSoreness.join(', ')}.` : '';
-        const notesText = feedbackNotes.trim() ? ` User note: "${feedbackNotes.trim()}".` : '';
-
+        const feelingText = captured.feeling ? feelingLabels[captured.feeling] : 'neutral';
+        const intensityText = captured.intensity ? intensityLabels[captured.intensity] : 'moderate';
+        const sorenessText = captured.soreness.length > 0 ? ` Soreness noted in: ${captured.soreness.join(', ')}.` : '';
+        const notesText = captured.notes.trim() ? ` User note: "${captured.notes.trim()}".` : '';
         const question = `I just finished ${workout.focus}. Overall feeling: ${feelingText}. Perceived intensity: ${intensityText}.${sorenessText}${notesText} Based on this feedback, should my upcoming workouts be adjusted? If the intensity was wrong or I had soreness concerns, please update the plan.`;
 
-        try {
-          const resp = await askTrainerQuestion(authToken, {
-            question,
-            mode: 'trainer',
-            profile: { goal },
-            conversation: [],
-          });
-
-          if (resp.needs_plan_update && resp.updated_workout_plan) {
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
-            setFeedbackResult(resp.answer || 'Your upcoming workouts have been adjusted based on your feedback.');
-          } else if (resp.answer) {
-            setFeedbackResult(resp.answer);
-          } else {
-            setFeedbackResult('Feedback saved — your upcoming workouts will factor this in.');
-          }
-        } catch {
-          setFeedbackResult('Feedback saved locally. (Coach sync will retry next time you open the app.)');
+        const resp = await askTrainerQuestion(authToken, {
+          question,
+          mode: 'trainer',
+          profile: { goal },
+          conversation: [],
+        });
+        if (resp.needs_plan_update && resp.updated_workout_plan) {
+          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
         }
-      } else {
-        setFeedbackResult('Feedback saved.');
+      } catch (e) {
+        console.log('[handleSubmitFeedback] background sync failed (non-fatal):', (e as any)?.message ?? e);
       }
-
-      // Persist feedback onto the saved session (raw history)
-      if (finishedSession && feedbackFeeling && feedbackIntensity) {
-        await saveWorkoutSession({
-          ...finishedSession,
-          feedback: {
-            feeling: feedbackFeeling as WorkoutFeeling,
-            intensity: feedbackIntensity as WorkoutIntensity,
-            sorenessAreas: feedbackSoreness,
-            notes: feedbackNotes,
-          },
-        });
-      }
-
-      // Also patch the StoredWorkoutSummary so the feedback shows up
-      // on the Progress screen next to the AI summary + exercise
-      // detail. Idempotent via upsert-by-id.
-      if (finishedSession && feedbackFeeling && feedbackIntensity) {
-        await updateWorkoutSummary(finishedSession.id, {
-          feedback: {
-            feeling: feedbackFeeling as WorkoutFeeling,
-            intensity: feedbackIntensity as WorkoutIntensity,
-            sorenessAreas: feedbackSoreness,
-            notes: feedbackNotes.trim() || undefined,
-          },
-        });
-      }
-
-      // Move to confirmation step — modal stays open so the user can
-      // actually read what happened. They dismiss manually via the
-      // "Done" button on the confirmation view.
-      setSummaryStep('confirmation');
-    } catch {
-      // Non-fatal — still show a confirmation so the modal doesn't
-      // vanish out from under the user.
-      setFeedbackResult('Feedback saved.');
-      setSummaryStep('confirmation');
-    } finally {
-      setFeedbackSubmitting(false);
-    }
+    })();
   };
 
   /** Called by the confirmation step's Done button. Closes the modal
@@ -1870,14 +1953,47 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [activeExIdx, authToken, coachInput, exercises]);
 
-  const filteredExerciseLibrary = exerciseLibrary.filter(item => {
-    const q = exerciseSearch.trim().toLowerCase();
-    if (!q) return true;
-    return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
-      .join(' ')
-      .toLowerCase()
-      .includes(q);
-  });
+  const filteredExerciseLibrary = (() => {
+    // Swap mode: rank the library by similarity to the exercise we're
+    // replacing. Score factors in primary + secondary muscles, compound
+    // vs isolation, movement pattern, and equipment class — so a
+    // heavy barbell row suggests t-bar row / dumbbell row / chest-
+    // supported row BEFORE suggesting a band pull-apart.
+    if (swapTargetIdx != null) {
+      const targetName = exercises[swapTargetIdx]?.name;
+      const base = targetName ? exerciseLibrary.find(li => li.name === targetName) : undefined;
+      const q = exerciseSearch.trim().toLowerCase();
+      if (!base) {
+        // Fall through to plain text search if we can't find metadata.
+        return exerciseLibrary.filter(item => {
+          if (!q) return true;
+          return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
+            .join(' ')
+            .toLowerCase()
+            .includes(q);
+        });
+      }
+      const scored: Array<{ item: ExerciseLibraryItem; score: number }> = [];
+      for (const item of exerciseLibrary) {
+        if (item.name === targetName) continue;
+        if (q && ![item.name, item.primary_muscle ?? '', item.equipment ?? ''].join(' ').toLowerCase().includes(q)) continue;
+        const s = _scoreSwapCandidate(base, item);
+        if (s <= 0) continue;
+        scored.push({ item, score: s });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      // Cap to keep the list curated; everything below rank ~20 is noise.
+      return scored.slice(0, 20).map(s => s.item);
+    }
+    return exerciseLibrary.filter(item => {
+      const q = exerciseSearch.trim().toLowerCase();
+      if (!q) return true;
+      return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
+        .join(' ')
+        .toLowerCase()
+        .includes(q);
+    });
+  })();
 
   return (
     <View style={[styles.container, { backgroundColor: themeColors.background }] }>
@@ -1971,7 +2087,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <Text style={{ fontSize: 14, color: workoutPalette.strong, fontWeight: '900' }} numberOfLines={2}>{restNextTarget}</Text>
               </View>
             ) : null}
-            {restCue ? <Text style={{ fontSize: 12, color: workoutPalette.text, fontWeight: '600', lineHeight: 16 }} numberOfLines={2}>{restCue}</Text> : null}
+            {restCue ? <Text style={{ fontSize: 12, color: workoutPalette.text, fontWeight: '600', lineHeight: 16 }}>{restCue}</Text> : null}
           </View>
           {/* Right: adjust + skip */}
           <View style={styles.restBannerActions}>
@@ -2053,7 +2169,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 })()}
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
-                  <Text style={styles.exerciseMeta}>{targetSetCount} × {ex.targetReps}  ·  {restLabel}</Text>
+                  <Text style={styles.exerciseMeta}>
+                    {targetSetCount} × {ex.targetReps}  ·  {restLabel}
+                    {formatEquipmentLabel(ex.equipment) ? `  ·  ${formatEquipmentLabel(ex.equipment)}` : ''}
+                  </Text>
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
                     <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '600', marginTop: 1 }}>
                       Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
@@ -2065,6 +2184,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {`${ex.sets.length}/${totalSetCount}`}
                   </Text>
                 </View>
+                {/* Swap — replace with a similar exercise (same muscle) */}
+                {!isDone && (
+                  <TouchableOpacity
+                    style={{ padding: 6, marginLeft: 2 }}
+                    onPress={() => {
+                      setSwapTargetIdx(i);
+                      setExerciseSearch('');
+                      setAiExerciseResults([]);
+                      openAddExerciseModal();
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Swap ${ex.name} for a similar exercise`}>
+                    <Ionicons name="swap-horizontal" size={16} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                )}
                 {/* Dislike — exclude from future plans */}
                 {onDislikeExercise && !isDone && (
                   <TouchableOpacity
@@ -2129,6 +2264,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     activeOpacity={0.7}>
                     <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
                   </TouchableOpacity>
+
+                  {/* ── RIR prompt — shown after an over-target set ── */}
+                  {pendingRir && pendingRir.exIdx === i && (
+                    <View style={[styles.aiBubble, { backgroundColor: workoutPalette.strong + '15', borderColor: workoutPalette.strong + '55', borderWidth: 1, flexDirection: 'column', alignItems: 'stretch', gap: 6 }]}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: workoutPalette.text }}>
+                        Nice — how many more reps could you have done?
+                      </Text>
+                      <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                        {[0, 1, 2, 3, 4].map(rir => {
+                          const label = rir === 4 ? '4+' : String(rir);
+                          return (
+                            <TouchableOpacity
+                              key={rir}
+                              onPress={() => {
+                                const setIdx = pendingRir!.setIdx;
+                                setExercises(prev => prev.map((e, ei) => {
+                                  if (ei !== i) return e;
+                                  const sets = e.sets.slice();
+                                  if (sets[setIdx]) sets[setIdx] = { ...sets[setIdx], rir };
+                                  return { ...e, sets };
+                                }));
+                                setPendingRir(null);
+                              }}
+                              style={{ flex: 1, minWidth: 44, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: workoutPalette.strong }}>
+                              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '800' }}>{label}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      <TouchableOpacity onPress={() => setPendingRir(null)} style={{ alignSelf: 'flex-end', paddingVertical: 2 }}>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted, fontWeight: '700' }}>Skip</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
 
                   {/* ── AI tip — shown prominently above set rows ── */}
                   {isAiLoading && (
@@ -2868,8 +3037,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <Text style={styles.feedbackGroupLabel}>Overall feeling</Text>
                       <View style={styles.fbFormRow}>
                         {([
-                          { value: 'rough', label: '😓 Rough' },
-                          { value: 'okay',  label: '😐 Okay' },
+                          { value: 'rough', label: 'Rough' },
+                          { value: 'okay',  label: 'Okay' },
                           { value: 'good',  label: 'Good' },
                           { value: 'great', label: 'Great' },
                         ] as const).map(opt => (
@@ -3033,24 +3202,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               ))}
             </ScrollView>
 
-            <View style={styles.coachActionRow}>
-              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormPhoto('camera')} disabled={coachPhotoLoading}>
-                <Text style={styles.coachActionText}>{coachPhotoLoading ? 'Analyzing...' : 'Snap Form Photo'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormPhoto('library')} disabled={coachPhotoLoading}>
-                <Text style={styles.coachActionText}>Use Existing Photo</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.coachActionRow}>
-              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormVideo('camera')} disabled={coachPhotoLoading}>
-                <Text style={styles.coachActionText}>Record Form Video</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.coachActionBtn} onPress={() => handleAnalyzeFormVideo('library')} disabled={coachPhotoLoading}>
-                <Text style={styles.coachActionText}>Analyze Saved Video</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.coachSubHint}>Video checks use a representative frame from your clip for now.</Text>
-
             <ScrollView contentContainerStyle={styles.coachChatList} keyboardShouldPersistTaps="handled">
               {coachChat.length === 0 ? (
                 <Text style={styles.coachEmpty}>Example: "I feel this in my elbow not chest. What cues should I use?"</Text>
@@ -3121,15 +3272,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       </Modal>
 
-      <Modal visible={addExerciseModalVisible} transparent animationType="slide" onRequestClose={() => setAddExerciseModalVisible(false)}>
+      <Modal visible={addExerciseModalVisible} transparent animationType="slide" onRequestClose={() => { setAddExerciseModalVisible(false); setSwapTargetIdx(null); }}>
         <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.coachSheet}>
             <View style={styles.coachHeader}>
-              <Text style={styles.coachTitle}>Add an exercise</Text>
-              <TouchableOpacity onPress={() => setAddExerciseModalVisible(false)}>
+              <Text style={styles.coachTitle}>
+                {swapTargetIdx != null
+                  ? `Swap ${exercises[swapTargetIdx]?.name ?? 'exercise'}`
+                  : 'Add an exercise'}
+              </Text>
+              <TouchableOpacity onPress={() => { setAddExerciseModalVisible(false); setSwapTargetIdx(null); }}>
                 <Text style={styles.coachClose}>Close</Text>
               </TouchableOpacity>
             </View>
+            {swapTargetIdx != null && (
+              <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6 }}>
+                Ranked by match — same muscle, same movement, similar equipment, compound vs isolation. Logged sets carry over.
+              </Text>
+            )}
 
             <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
               <SearchInput
@@ -3221,9 +3381,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.addExerciseName}>{item.name}</Text>
-                      <Text style={styles.addExerciseMeta}>{humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}</Text>
+                      <Text style={styles.addExerciseMeta}>
+                        {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
+                        {item.is_compound != null ? (item.is_compound ? ' · Compound' : ' · Isolation') : ''}
+                      </Text>
                     </View>
-                    <Text style={styles.addExerciseUse}>Add</Text>
+                    <Text style={styles.addExerciseUse}>{swapTargetIdx != null ? 'Swap' : 'Add'}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>

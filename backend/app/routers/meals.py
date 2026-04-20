@@ -120,13 +120,30 @@ def create_meal(
 @router.get("")
 def list_meals(
     meal_date: date | None = Query(default=None),
+    since: date | None = Query(default=None, description="Inclusive lower-bound meal_date"),
+    before: date | None = Query(default=None, description="Inclusive upper-bound meal_date"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    """Paginated meal list. When no `meal_date` / `since` / `before` filter
+    is supplied we default to the last 30 days so the response is always
+    bounded. `skip` + `limit` for basic pagination."""
+    from datetime import timedelta
     query = select(Meal).where(Meal.user_id == current_user.id)
     if meal_date:
         query = query.where(Meal.meal_date == meal_date)
-    meals = db.exec(query.order_by(Meal.meal_date.desc(), Meal.created_at)).all()
+    else:
+        effective_since = since or (date.today() - timedelta(days=30))
+        query = query.where(Meal.meal_date >= effective_since)
+        if before:
+            query = query.where(Meal.meal_date <= before)
+    meals = db.exec(
+        query.order_by(Meal.meal_date.desc(), Meal.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    ).all()
 
     # Batch-load all items to avoid N+1 queries
     meal_ids = [m.id for m in meals]
@@ -173,13 +190,15 @@ def log_checked_meal(
 @router.get("/history")
 def meal_history(
     days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=50, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Return the user's recent meal history with items."""
+    """Return the user's recent meal history with items. Bounded by
+    `days` lookback and `limit` (default 50, max 100)."""
     from app.services.nutrition.meal_history import get_meal_history
 
-    return {"meals": get_meal_history(current_user.id, days=days, db=db)}
+    return {"meals": get_meal_history(current_user.id, days=days, limit=limit, db=db)}
 
 
 @router.get("/averages")
@@ -197,13 +216,22 @@ def meal_averages(
 @router.get("/common")
 def common_meals(
     min_count: int = Query(default=2, ge=1),
+    lookback_days: int = Query(default=90, ge=1, le=180),
+    limit: int = Query(default=20, ge=1, le=50),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Return the user's most commonly eaten meals."""
+    """Return the user's most commonly eaten meals. Bounded by
+    `lookback_days` (default 90, max 180) and `limit` (default 20, max 50)."""
     from app.services.nutrition.meal_history import get_common_meals
 
-    return {"meals": get_common_meals(current_user.id, min_count=min_count, db=db)}
+    return {"meals": get_common_meals(
+        current_user.id,
+        min_count=min_count,
+        lookback_days=lookback_days,
+        limit=limit,
+        db=db,
+    )}
 
 
 @router.get("/insights")

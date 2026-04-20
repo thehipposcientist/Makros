@@ -371,7 +371,21 @@ def ask_trainer_question(
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
         "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
-        "Return JSON only."
+        "\n\nNUTRITION DEPTH — LONGEVITY / MEAL TIMING / FASTING:\n"
+        "When the user asks about longevity, meal timing, intermittent fasting, protein pacing, "
+        "eating windows, pre- or post-workout nutrition, micronutrient density, fiber, hydration, "
+        "sleep-supporting nutrition, or supplement timing, answer concretely with practical guidance:\n"
+        "- Explain the current evidence base (what's well-supported vs. experimental).\n"
+        "- Give a concrete protocol they could try (e.g. 16:8 eating window from 11a-7p, 30-40g "
+        "protein per meal, front-load carbs around training, 25-35g fiber/day, 0.5-1g/lb protein).\n"
+        "- Tie the advice to THEIR goal, training volume, and weight — don't give generic tips.\n"
+        "- Flag honest tradeoffs (e.g. fasting may help with adherence for some but can hurt "
+        "recovery/strength performance when training intensity is high).\n"
+        "- If applying to the plan requires a meal schedule change, offer to update it (set "
+        "needs_plan_update=true and return an updated_nutrition_plan that reflects the new window).\n"
+        "- Don't medicalize — you're a coach, not a doctor. Recommend professional help for "
+        "diagnosable conditions (thyroid, GI disorders, diabetes, etc.)."
+        "\n\nReturn JSON only."
         + _capability_instructions
     )
 

@@ -4,15 +4,21 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const LOCAL_BACKEND_IP = '192.168.1.220'; // your dev machine's LAN IP
 
 function getBaseUrl(): string {
-  if (__DEV__) {
-    const hostUri = Constants.expoConfig?.hostUri ?? '';
-    // In tunnel mode (ngrok/exp.direct), hostUri is the ngrok domain — can't use it
-    // for the backend. Fall back to the machine's actual LAN IP instead.
-    const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct') || !hostUri;
-    const host = isTunnel ? LOCAL_BACKEND_IP : (hostUri.split(':')[0] ?? LOCAL_BACKEND_IP);
-    return `http://${host}:8000`;
+  // Production / TestFlight build: read from app config extras. Set this
+  // via `app.json` → `expo.extra.apiBaseUrl` (or via EAS build secrets).
+  // Fall back to the legacy placeholder so a misconfigured build is obvious
+  // rather than silently hitting a dev machine.
+  const configured = (Constants.expoConfig?.extra as { apiBaseUrl?: string } | undefined)?.apiBaseUrl;
+  if (!__DEV__) {
+    return configured || 'https://your-production-api.com';
   }
-  return 'https://your-production-api.com';
+  // Dev: honor an explicit override first (useful when testing a remote
+  // deployment from the Expo dev client), otherwise auto-detect LAN IP.
+  if (configured && configured.startsWith('http')) return configured;
+  const hostUri = Constants.expoConfig?.hostUri ?? '';
+  const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct') || !hostUri;
+  const host = isTunnel ? LOCAL_BACKEND_IP : (hostUri.split(':')[0] ?? LOCAL_BACKEND_IP);
+  return `http://${host}:8000`;
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);

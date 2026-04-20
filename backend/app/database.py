@@ -10,11 +10,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./workoutpal.db")
 # SQLite needs check_same_thread=False; PostgreSQL doesn't use it
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
+# Pool tuning — reasonable defaults for a small pilot on App Runner / RDS.
+# Overridable via env for headroom without a redeploy.
+_is_postgres = DATABASE_URL.startswith("postgres")
 engine = create_engine(
     DATABASE_URL,
     connect_args=connect_args,
     echo=False,
-    pool_pre_ping=True,  # reconnect stale connections (useful for PostgreSQL)
+    pool_pre_ping=True,  # detect + drop stale connections before handing them out
+    **(
+        {
+            "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+            "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+            "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECS", "3600")),
+            "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECS", "30")),
+        }
+        if _is_postgres else {}
+    ),
 )
 
 

@@ -554,7 +554,9 @@ class MealItem(SQLModel, table=True):
 class UserCreate(SQLModel):
     email: str
     username: str
-    password: str = Field(min_length=8)
+    # Pydantic-level floor. Router `_validate_password` enforces the full
+    # policy (must include a digit) on top of this check.
+    password: str = Field(min_length=10)
 
 class UserRead(SQLModel):
     id: int

@@ -312,6 +312,7 @@ def compute_rolling_fatigue(
     for wd, decay, resolved, c in parsed:
         days_ago = (today - wd).days
         has_positive = any(v > 0 for v in resolved.values())
+        has_negative = any(v < 0 for v in resolved.values())
         if has_positive:
             for muscle, value in resolved.items():
                 if muscle in FATIGUE_MUSCLES and value > 0:
@@ -320,11 +321,19 @@ def compute_rolling_fatigue(
                     if days_ago >= 4 and muscle != "systemic":
                         continue
                     mf.add(muscle, value * decay)
+        # Every parsed completion becomes an activity entry so the client
+        # can render BOTH "what fatigued me" and "what helped me recover".
+        # `kind` flags recovery vs training; `subtype` surfaces the specific
+        # modality ("sauna", "yoga", "walk", etc.) for display.
         activities.append({
             "date": wd.isoformat(),
-            "days_ago": (today - wd).days,
+            "days_ago": days_ago,
             "focus": c.get("focus_label", ""),
+            "category": c.get("activity_category") or "",
+            "subtype": c.get("activity_subtype") or "",
             "intensity": c.get("activity_intensity", ""),
+            "duration_minutes": max(1, (c.get("duration_seconds") or 0) // 60),
+            "kind": "recovery" if (has_negative and not has_positive) else "training",
             "muscles": {k: round(v * decay, 2) for k, v in resolved.items() if v > 0},
         })
 

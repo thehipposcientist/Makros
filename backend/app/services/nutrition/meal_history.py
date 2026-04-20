@@ -121,8 +121,15 @@ def log_meal_from_plan(
 
 # ─── Meal history query ──────────────────────────────────────────────────────
 
-def get_meal_history(user_id: int, days: int = 30, *, db: Session) -> list[dict]:
-    """Get recent meal history with items, ordered by date desc."""
+def get_meal_history(
+    user_id: int,
+    days: int = 30,
+    limit: int = 50,
+    *,
+    db: Session,
+) -> list[dict]:
+    """Get recent meal history with items, ordered by date desc. Bounded by
+    `days` lookback window and `limit` row count."""
     from app.models import Meal, MealItem
 
     cutoff = date.today() - timedelta(days=days)
@@ -130,7 +137,8 @@ def get_meal_history(user_id: int, days: int = 30, *, db: Session) -> list[dict]
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(col(Meal.meal_date) >= cutoff)
-        .order_by(col(Meal.meal_date).desc(), Meal.created_at)
+        .order_by(col(Meal.meal_date).desc(), col(Meal.created_at).desc())
+        .limit(limit)
     ).all()
 
     # Batch-load all items to avoid N+1
@@ -228,12 +236,23 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
 
 # ─── Common meals ────────────────────────────────────────────────────────────
 
-def get_common_meals(user_id: int, min_count: int = 2, *, db: Session) -> list[dict]:
-    """Find meals the user eats repeatedly (by name similarity). Top 10."""
+def get_common_meals(
+    user_id: int,
+    min_count: int = 2,
+    lookback_days: int = 90,
+    limit: int = 20,
+    *,
+    db: Session,
+) -> list[dict]:
+    """Find meals the user eats repeatedly (by name similarity). Bounded
+    by `lookback_days` (default 90) and `limit` (default 20)."""
     from app.models import Meal, MealItem
 
+    cutoff = date.today() - timedelta(days=lookback_days)
     meals = db.exec(
-        select(Meal).where(Meal.user_id == user_id)
+        select(Meal)
+        .where(Meal.user_id == user_id)
+        .where(col(Meal.meal_date) >= cutoff)
     ).all()
 
     # Group by lowercased meal name
@@ -283,7 +302,7 @@ def get_common_meals(user_id: int, min_count: int = 2, *, db: Session) -> list[d
         })
 
     results.sort(key=lambda r: -r["count"])
-    return results[:10]
+    return results[:limit]
 
 
 # ─── Nutrition patterns ──────────────────────────────────────────────────────

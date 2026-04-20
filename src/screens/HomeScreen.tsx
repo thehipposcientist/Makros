@@ -37,6 +37,7 @@ import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
+import RecoveryCard from '../components/RecoveryCard';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
@@ -1234,7 +1235,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
-  const [readinessScore, setReadinessScore] = useState<{ score: number; label: string; topFatigued?: Array<{ muscle: string; value: number }>; muscleFatigue?: Record<string, number>; activities?: Array<{ date: string; focus: string; muscles: Record<string, number> }>; nutritionContext?: { protein_avg: number; protein_status: string; message: string | null; recovery_bonus_applied: boolean } | null } | null>(null);
+  const [readinessScore, setReadinessScore] = useState<{
+    score: number;
+    label: string;
+    topFatigued?: Array<{ muscle: string; value: number }>;
+    muscleFatigue?: Record<string, number>;
+    activities?: Array<{
+      date: string;
+      days_ago?: number;
+      focus: string;
+      category?: string;
+      subtype?: string;
+      intensity?: string;
+      duration_minutes?: number;
+      kind?: 'training' | 'recovery';
+      muscles: Record<string, number>;
+    }>;
+    nutritionContext?: { protein_avg: number; protein_status: string; message: string | null; recovery_bonus_applied: boolean } | null;
+  } | null>(null);
   const [recoveryExpanded, setRecoveryExpanded] = useState(false);
   const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [username, setUsername] = useState('');
@@ -3495,92 +3513,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
-              <TouchableOpacity
-                activeOpacity={0.7}
-                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setRecoveryExpanded(p => !p); }}
-                style={{
-                  marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10,
-                  borderWidth: 1, borderColor: themeColors.border,
-                }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Ionicons
-                    name={readinessScore.score >= 65 ? 'battery-full' : readinessScore.score >= 40 ? 'battery-half' : 'battery-dead'}
-                    size={20}
-                    color={readinessScore.score >= 65 ? '#22C55E' : readinessScore.score >= 40 ? '#F59E0B' : '#EF4444'}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
-                      Recovery: {readinessScore.label} ({readinessScore.score}%)
-                    </Text>
-                    {!recoveryExpanded && readinessScore.topFatigued && readinessScore.topFatigued.length > 0 && (
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }} numberOfLines={1}>
-                        Most fatigued: {readinessScore.topFatigued.slice(0, 3).map(t => t.muscle.replace('_', ' ')).join(', ')}
-                      </Text>
-                    )}
-                    {!recoveryExpanded && (!readinessScore.topFatigued || readinessScore.topFatigued.length === 0) && (
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>All muscle groups fresh</Text>
-                    )}
-                  </View>
-                  <Ionicons name={recoveryExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
-                </View>
-                {recoveryExpanded && readinessScore.muscleFatigue && (
-                  <View style={{ marginTop: 10, gap: 4 }}>
-                    {Object.entries(readinessScore.muscleFatigue)
-                      .filter(([k]) => k !== 'cardio' && k !== 'systemic')
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([muscle, fatigue]) => {
-                        const pct = Math.round(fatigue * 100);
-                        const recovery = Math.max(0, 100 - pct);
-                        const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
-                        return (
-                          <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75, textTransform: 'capitalize' }}>
-                              {muscle.replace('_', ' ')}
-                            </Text>
-                            <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
-                              <View style={{ width: `${Math.min(100, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
-                            </View>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
-                          </View>
-                        );
-                      })}
-                    {readinessScore.muscleFatigue.systemic > 0 && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: themeColors.border }}>
-                        <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary, width: 75 }}>Overall Load</Text>
-                        <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: themeColors.border }}>
-                          <View style={{ width: `${Math.min(100, Math.max(0, 100 - Math.round(readinessScore.muscleFatigue.systemic * 100)))}%` as any, height: 5, borderRadius: 3, backgroundColor: readinessScore.muscleFatigue.systemic > 0.5 ? '#EF4444' : '#F59E0B' }} />
-                        </View>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: readinessScore.muscleFatigue.systemic > 0.5 ? '#EF4444' : '#F59E0B', width: 32, textAlign: 'right' }}>{Math.max(0, 100 - Math.round(readinessScore.muscleFatigue.systemic * 100))}%</Text>
-                      </View>
-                    )}
-                    {readinessScore.activities && readinessScore.activities.length > 0 && (
-                      <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: themeColors.border }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, marginBottom: 4 }}>RECENT ACTIVITY</Text>
-                        {readinessScore.activities.map((a, i) => (
-                          <Text key={i} style={{ fontSize: 10, color: themeColors.textSecondary }}>
-                            {a.date} · {a.focus} · {Object.keys(a.muscles).length} muscles
-                          </Text>
-                        ))}
-                      </View>
-                    )}
-                    {readinessScore.nutritionContext?.message && (
-                      <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: themeColors.border, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Ionicons
-                          name={readinessScore.nutritionContext.protein_status === 'excellent' ? 'nutrition' : readinessScore.nutritionContext.protein_status === 'good' ? 'nutrition-outline' : 'alert-circle-outline'}
-                          size={14}
-                          color={readinessScore.nutritionContext.protein_status === 'excellent' || readinessScore.nutritionContext.protein_status === 'good' ? '#22C55E' : readinessScore.nutritionContext.protein_status === 'low' ? '#F59E0B' : readinessScore.nutritionContext.protein_status === 'very_low' ? '#EF4444' : themeColors.textMuted}
-                        />
-                        <Text style={{
-                          fontSize: 10, fontWeight: '600', flex: 1,
-                          color: readinessScore.nutritionContext.protein_status === 'excellent' || readinessScore.nutritionContext.protein_status === 'good' ? '#22C55E' : readinessScore.nutritionContext.protein_status === 'low' ? '#F59E0B' : readinessScore.nutritionContext.protein_status === 'very_low' ? '#EF4444' : themeColors.textMuted,
-                        }}>
-                          {readinessScore.nutritionContext.message}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-              </TouchableOpacity>
+              <RecoveryCard data={readinessScore} themeName={userProfile.themePreference} compact />
             )}
 
             {/* Plan actions row — Why + Log + Edit */}
@@ -6315,24 +6248,30 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   )}
                 </View>
               )}
-              <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000}>
-                <PressableScale
-                  style={{ marginBottom: 14 }}
-                  onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Start workout">
-                  <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
-                    <Ionicons name="play-circle" size={22} color="#fff" />
-                    <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
-                  </View>
-                </PressableScale>
-              </PulseView>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000} style={{ flex: 2 }}>
+                  <PressableScale
+                    onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Start workout">
+                    <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
+                      <Ionicons name="play-circle" size={22} color="#fff" />
+                      <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
+                    </View>
+                  </PressableScale>
+                </PulseView>
+                {isToday && (
+                  <TouchableOpacity
+                    style={[styles.skipSecondaryBtn, { borderColor: tc.border, backgroundColor: tc.surface }]}
+                    onPress={() => onSkip(item.workout!.focus)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Skip today's workout">
+                    <Ionicons name="close-circle-outline" size={18} color={tc.textSecondary} />
+                    <Text style={[styles.skipSecondaryBtnText, { color: tc.textSecondary }]}>Skip</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               <WorkoutCard workout={item.workout!} themeName={themeName} />
-              {isToday && (
-                <TouchableOpacity style={styles.skipLink} onPress={() => onSkip(item.workout!.focus)}>
-                  <Text style={[styles.skipLinkText, { color: tc.textMuted }]}>Skip today's workout</Text>
-                </TouchableOpacity>
-              )}
             </>
           )}
         </View>
@@ -6766,6 +6705,12 @@ const styles = StyleSheet.create({
   actionRow:       { flexDirection: 'row', gap: 10, marginTop: 12 },
   skipLink:        { alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 4 },
   skipLinkText:    { fontSize: 12, fontWeight: '400', textDecorationLine: 'underline' },
+  skipSecondaryBtn: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    borderRadius: radius.lg, paddingVertical: 18, borderWidth: 1,
+  },
+  skipSecondaryBtnText: { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
   unskipBtn:       { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.primary, flex: 1 },
   unskipBtnText:   { color: colors.primary, fontSize: 13, fontWeight: '700' },
   startWorkoutBtn: { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },

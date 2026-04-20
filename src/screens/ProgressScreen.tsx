@@ -20,6 +20,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
+import RecoveryCard from '../components/RecoveryCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore } from '../utils/mealTracker';
 import { getGoalEstimate } from '../utils/goalEstimate';
@@ -1192,8 +1193,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {/* Muscle Recovery */}
+          {/* Muscle Recovery — shared component matches the Workout tab header */}
           {muscleFatigue && (
+            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
+          )}
+          {/* Legacy block kept as unreachable fallback while we verify the
+              shared component covers every placement. Gated off. */}
+          {false && muscleFatigue && (
             <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                 <Ionicons
@@ -1205,7 +1211,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   Recovery: {muscleFatigue.label} ({muscleFatigue.score}%)
                 </Text>
               </View>
-              {/* Per-muscle fatigue bars */}
               {(() => {
                 const muscles = Object.entries(muscleFatigue.muscleFatigue || {})
                   .filter(([k]) => k !== 'cardio' && k !== 'systemic')
@@ -1228,7 +1233,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         </View>
                       );
                     })}
-                    {/* Cardio + systemic */}
                     {(muscleFatigue.muscleFatigue?.cardio ?? 0) >= 0.05 && (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
                         <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 70 }}>cardio</Text>

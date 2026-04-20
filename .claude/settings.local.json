@@ -144,7 +144,8 @@
       "Bash(NGROK_AUTHTOKEN=3Cab1cZ9BMThL0WeUhMWjJexi4y_2YvfaHC3pujd4Yn3DqvB5 npx expo start --tunnel --clear)",
       "Read(//opt/homebrew/lib/node_modules/npm/bin/**)",
       "Read(//Users/sawyerhannel/**)",
-      "Bash(/opt/homebrew/bin/npx expo *)"
+      "Bash(/opt/homebrew/bin/npx expo *)",
+      "Bash(git log *)"
     ]
   }
 }

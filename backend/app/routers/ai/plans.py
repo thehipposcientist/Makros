@@ -509,7 +509,7 @@ def _build_deterministic_workout(
                 WorkoutExercise as _WorkoutExercise,
                 WorkoutSession as _WorkoutSession,
             )
-            cutoff_date = (datetime.utcnow() - timedelta(hours=72)).date()
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(hours=72)).date()
 
             # Query BOTH tables and merge by date. The lightweight
             # WorkoutCompletion row is the presence marker (every
@@ -655,10 +655,10 @@ def _build_deterministic_workout(
     skipped_days: list[dict] = []
     if db is not None and user_id is not None:
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone as _tz
             from sqlmodel import select
             from app.models import UserDayState as _UDS
-            cutoff = (datetime.utcnow() - timedelta(days=7)).date()
+            cutoff = (datetime.now(_tz.utc) - timedelta(days=7)).date()
             skip_rows = db.exec(
                 select(_UDS).where(
                     _UDS.user_id == user_id,
