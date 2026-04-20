@@ -18,8 +18,8 @@
   "submit": {
     "production": {
       "ios": {
-        "ascAppId": "REPLACE_WITH_NUMERIC_APP_ID",
-        "appleTeamId": "REPLACE_WITH_TEAM_ID"
+        "ascAppId": "6762629195",
+        "appleTeamId": "2K37DX38H2"
       }
     }
   }
