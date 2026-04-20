@@ -71,16 +71,36 @@ export function isHealthKitAvailable(): boolean {
 export function requestHealthPermissions(): Promise<boolean> {
   return new Promise((resolve) => {
     const hk = getHealthKit();
-    if (!hk) { resolve(false); return; }
+    if (!hk) {
+      console.warn('[appleHealth] getHealthKit() returned null — native module missing');
+      resolve(false);
+      return;
+    }
+    if (typeof hk.initHealthKit !== 'function') {
+      console.warn('[appleHealth] initHealthKit is not a function — module keys:', Object.keys(hk).slice(0, 10));
+      resolve(false);
+      return;
+    }
 
-    hk.initHealthKit(HEALTH_PERMISSIONS, (err: any) => {
-      if (err) {
-        console.warn('[appleHealth] permission request failed:', err);
-        resolve(false);
-        return;
-      }
-      resolve(true);
-    });
+    try {
+      hk.initHealthKit(HEALTH_PERMISSIONS, (err: any) => {
+        if (err) {
+          // Surface the raw error so we can tell entitlement issues from
+          // user-denied from anything else. Common messages:
+          //   "Not available on this device"          → simulator or HK not supported
+          //   "Missing usage description"             → Info.plist problem
+          //   "Authorization could not be determined" → entitlement/profile mismatch
+          console.warn('[appleHealth] initHealthKit error:', JSON.stringify(err));
+          resolve(false);
+          return;
+        }
+        console.log('[appleHealth] initHealthKit ok');
+        resolve(true);
+      });
+    } catch (e) {
+      console.warn('[appleHealth] initHealthKit threw:', e);
+      resolve(false);
+    }
   });
 }
 

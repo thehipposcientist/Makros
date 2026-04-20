@@ -1149,20 +1149,36 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
             const handleConnect = async () => {
               setHealthConnecting(true);
-              // Flip enabled up-front so the UI leaves the "not connected"
-              // state even if iOS silently no-ops the permission prompt
-              // (common after a previous denial).
               try { await persistAppleHealthEnabled(true); } catch {}
               setHealthEnabled(true);
               try {
-                await requestHealthPermissions();
+                const granted = await requestHealthPermissions();
                 const fresh = await readHealthSummary();
                 if (fresh) {
                   setHealthSummary(fresh);
                   saveHealthSummary(fresh).catch(() => null);
                 }
-              } catch (e) {
-                console.warn('[progress] Apple Health connect failed:', e);
+                const hasAny = fresh && (
+                  fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
+                  fresh.lastNightSleepHours != null || fresh.avgSleepHours7d != null ||
+                  fresh.workouts7d != null || fresh.activeEnergy7d != null
+                );
+                // If init succeeded but no data came back, prompt user to
+                // check Settings (iOS's permission sheet may have been
+                // bypassed because they already answered it once).
+                if (granted && !hasAny) {
+                  Alert.alert(
+                    'No data yet',
+                    'Apple Health is connected but no data came back. Open iPhone Settings → Privacy & Security → Health → Thallo and enable the categories you want to share.',
+                  );
+                } else if (!granted) {
+                  Alert.alert(
+                    'HealthKit not available',
+                    'iOS rejected the HealthKit request. This usually means the provisioning profile doesn\'t include HealthKit — regenerate it via `eas credentials` and rebuild.',
+                  );
+                }
+              } catch (e: any) {
+                Alert.alert('Apple Health error', String(e?.message ?? e));
               } finally {
                 setHealthConnecting(false);
               }
