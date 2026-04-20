@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
+import FormVideoModal from '../components/FormVideoModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
@@ -440,6 +441,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [exerciseMuscleFilter, setExerciseMuscleFilter] = useState<string>('all');
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [videoExerciseName, setVideoExerciseName] = useState<string | null>(null);
   const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
   const [exerciseSubTab, setExerciseSubTab] = useState<'exercises' | 'muscles'>('exercises');
   const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
@@ -1775,9 +1777,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                         </View>
                         <TouchableOpacity
                           style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.md, alignSelf: 'flex-start', marginTop: 4 }}
-                          onPress={() => {
-                            Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${selectedExercise.name} proper form`)}`);
-                          }}
+                          onPress={() => setVideoExerciseName(selectedExercise.name)}
                           activeOpacity={0.8}>
                           <Text style={{ fontSize: 14, color: '#fff', fontWeight: '700' }}>▶  Watch Form Video</Text>
                         </TouchableOpacity>
@@ -3085,6 +3085,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         visible={barcodeScanVisible}
         onClose={() => setBarcodeScanVisible(false)}
         onScan={handleBarcodeScan}
+      />
+      <FormVideoModal
+        visible={!!videoExerciseName}
+        exerciseName={videoExerciseName ?? ''}
+        authToken={authToken}
+        themeName={profile?.themePreference}
+        onClose={() => setVideoExerciseName(null)}
       />
     </View>
   );

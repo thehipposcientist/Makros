@@ -28,6 +28,7 @@ import { getExerciseImage } from '../utils/exerciseImages';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
+import FormVideoModal from '../components/FormVideoModal';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 
@@ -490,6 +491,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, []);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
+  const [formVideoExerciseName, setFormVideoExerciseName] = useState<string | null>(null);
 
   // Pre-set coach hints keyed by exercise index. Populated lazily when
   // an exercise becomes active with no sets logged yet. Each entry is
@@ -2123,7 +2125,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {/* ── Form video link ── */}
                   <TouchableOpacity
                     style={styles.formVideoLink}
-                    onPress={() => Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${ex.name} proper form`)}`)}
+                    onPress={() => setFormVideoExerciseName(ex.name)}
                     activeOpacity={0.7}>
                     <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
                   </TouchableOpacity>
@@ -3229,6 +3231,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      <FormVideoModal
+        visible={!!formVideoExerciseName}
+        exerciseName={formVideoExerciseName ?? ''}
+        authToken={authToken}
+        themeName={themeName}
+        onClose={() => setFormVideoExerciseName(null)}
+      />
     </View>
   );
 }
@@ -3239,7 +3249,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderRadius: radius.lg,
     padding: 18,
     margin: 18,
-    marginBottom: 0,
+    marginBottom: 10,
     gap: 10,
     alignItems: 'flex-start',
   },
@@ -3252,7 +3262,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     paddingHorizontal: 14,
     marginHorizontal: 18,
     marginTop: 10,
-    marginBottom: 0,
+    marginBottom: 10,
   },
   warmupCollapsedHeader: {
     flexDirection: 'row',

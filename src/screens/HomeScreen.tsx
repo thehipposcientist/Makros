@@ -36,6 +36,7 @@ import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
+import FormVideoModal from '../components/FormVideoModal';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
@@ -1061,7 +1062,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Sub-tab inside each main tab.
   // Workouts: plan | exercises | muscles | equipment
   // Meals:    plan | foods     | supplements | macros
-  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment'>('plan');
+  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment' | 'history'>('plan');
+  const [workoutHistoryList, setWorkoutHistoryList] = useState<WorkoutSession[]>([]);
+  const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
+  const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
@@ -1362,6 +1366,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     authToken,
     planRefreshKey,
   ]);
+
+  // Keep the Workout > History sub-tab in sync with workoutHistory writes.
+  // Loads on mount and on each planRefreshKey bump (which fires after
+  // finish + save). Also pulls workout summaries so session cards can
+  // show motivation / achievements / feedback like the old Progress tab.
+  useEffect(() => {
+    Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()])
+      .then(([h, s]) => { setWorkoutHistoryList(h); setWorkoutHistorySummaries(s); })
+      .catch(() => {});
+  }, [planRefreshKey]);
 
   // Next-day unlogged-meals prompt. Fires once per calendar day when
   // yesterday had a plan with unchecked meals and the user hasn't dismissed
@@ -2964,12 +2978,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     await persistDayState(date, { skipped_focus: null });
   }, [persistDayState]);
 
-  const openExerciseVideo = useCallback(async (exerciseName: string) => {
-    try {
-      await Linking.openURL(getExerciseVideoUrl(exerciseName));
-    } catch {
-      Alert.alert('Could not open video', 'There was a problem opening the exercise video link.');
-    }
+  const [videoModalName, setVideoModalName] = useState<string | null>(null);
+  const openExerciseVideo = useCallback((exerciseName: string) => {
+    setVideoModalName(exerciseName);
   }, []);
 
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
@@ -3114,6 +3125,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
             <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
+            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }} />
           </View>
         </View>
       )}
@@ -3123,9 +3135,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
-            <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
             <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
             <SubTabBtn label="Supps"   active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
           </View>
         </View>
       )}
@@ -3184,6 +3196,258 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             )}
+
+            {/* Workout history — ports the full Progress view (month
+                calendar, weekly strip + streak, Share/Log Activity,
+                session cards with per-set detail + summary card). */}
+            {workoutSubTab === 'history' && (() => {
+              const history = workoutHistoryList;
+              const summaries = workoutHistorySummaries;
+              const todayDate = new Date();
+              const year = todayDate.getFullYear();
+              const month = todayDate.getMonth();
+              const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+              const daysInMonth = new Date(year, month + 1, 0).getDate();
+              const firstDow = new Date(year, month, 1).getDay();
+              const toDateKey = (d: string) => {
+                if (!d) return '';
+                const p = new Date(d);
+                if (isNaN(p.getTime())) return d.slice(0, 10);
+                return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
+              };
+              const completedDates = new Set([
+                ...history.filter(s => s.date && !s.skipped).map(s => toDateKey(s.date)),
+                ...summaries.filter(s => s.date).map(s => toDateKey(s.date)),
+              ]);
+              const skippedDates = new Set(history.filter(s => s.skipped && s.date).map(s => toDateKey(s.date)));
+              const cells: Array<{ day: number; key: string; status: 'done' | 'skipped' | 'rest' | 'future' | 'empty' }> = [];
+              for (let i = 0; i < firstDow; i++) cells.push({ day: 0, key: `pad-${i}`, status: 'empty' });
+              for (let d = 1; d <= daysInMonth; d++) {
+                const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                const isFuture = d > todayDate.getDate();
+                const status = isFuture ? 'future' : completedDates.has(key) ? 'done' : skippedDates.has(key) ? 'skipped' : 'rest';
+                cells.push({ day: d, key, status });
+              }
+              while (cells.length % 7 !== 0) cells.push({ day: 0, key: `pad-end-${cells.length}`, status: 'empty' });
+              const rows: typeof cells[] = [];
+              for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7));
+              const doneCount = [...completedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
+              const skippedCount = [...skippedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
+
+              // Weekly summary + streak
+              const now = new Date();
+              const dow = now.getDay();
+              const mondayOffset = dow === 0 ? -6 : 1 - dow;
+              const monday = new Date(now);
+              monday.setDate(now.getDate() + mondayOffset);
+              monday.setHours(0, 0, 0, 0);
+              const thisWeek = history.filter(s => {
+                if (!s.date || s.skipped) return false;
+                return new Date(s.date) >= monday;
+              });
+              const totalMin = Math.round(thisWeek.reduce((a, w) => a + (w.durationSeconds || 0), 0) / 60);
+              const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
+              const allDoneSet = new Set(history.filter(s => s.date && !s.skipped).map(s => toDateKey(s.date)));
+              let streak = 0;
+              const checkDate = new Date();
+              const todayStr = toDateKey(checkDate.toISOString());
+              if (!allDoneSet.has(todayStr)) checkDate.setDate(checkDate.getDate() - 1);
+              for (let j = 0; j < 90; j++) {
+                const ck = toDateKey(checkDate.toISOString());
+                if (allDoneSet.has(ck)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
+                else break;
+              }
+
+              return (
+                <View style={{ gap: 10, marginBottom: 80 }}>
+                  {/* Month calendar */}
+                  <View style={{ backgroundColor: themeColors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: themeColors.border }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>{monthNames[month]} {year}</Text>
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        {doneCount > 0 && <Text style={{ fontSize: 12, color: themeColors.primary, fontWeight: '600' }}>{doneCount} done</Text>}
+                        {skippedCount > 0 && <Text style={{ fontSize: 12, color: '#F59E0B', fontWeight: '600' }}>{skippedCount} skipped</Text>}
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: 'row', marginBottom: 6 }}>
+                      {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => (
+                        <Text key={d} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: '600', color: themeColors.textMuted }}>{d}</Text>
+                      ))}
+                    </View>
+                    {rows.map((row, ri) => (
+                      <View key={ri} style={{ flexDirection: 'row', marginBottom: 4 }}>
+                        {row.map(cell => {
+                          const isToday = cell.day === todayDate.getDate() && cell.status !== 'empty';
+                          return (
+                            <View key={cell.key} style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                              {cell.status === 'empty' ? (
+                                <View style={{ width: 32, height: 32 }} />
+                              ) : (
+                                <View style={{
+                                  width: 32, height: 32, borderRadius: 16,
+                                  alignItems: 'center', justifyContent: 'center',
+                                  backgroundColor:
+                                    cell.status === 'done' ? themeColors.primary :
+                                    cell.status === 'skipped' ? '#F59E0B33' :
+                                    'transparent',
+                                  borderWidth: isToday ? 2 : 0,
+                                  borderColor: isToday ? themeColors.primary : 'transparent',
+                                }}>
+                                  <Text style={{
+                                    fontSize: 13, fontWeight: isToday ? '800' : cell.status === 'done' ? '700' : '400',
+                                    color: cell.status === 'done' ? '#fff'
+                                      : cell.status === 'skipped' ? '#F59E0B'
+                                      : cell.status === 'future' ? themeColors.textMuted + '55'
+                                      : themeColors.textSecondary,
+                                  }}>{cell.day}</Text>
+                                </View>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ))}
+                  </View>
+
+                  {history.length === 0 ? (
+                    <View style={{ padding: 24, alignItems: 'center', backgroundColor: themeColors.surface, borderRadius: 12, borderWidth: 1, borderColor: themeColors.border }}>
+                      <Ionicons name="barbell-outline" size={36} color={themeColors.textMuted} />
+                      <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary, marginTop: 8 }}>No workouts yet</Text>
+                      <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 4, textAlign: 'center' }}>
+                        Finish a workout and it'll show up here.
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+                      {/* Weekly strip */}
+                      <View style={{ backgroundColor: themeColors.primary + '12', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: themeColors.primary + '22' }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.primary, flexShrink: 1 }}>
+                            This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
+                          </Text>
+                          {streak > 0 && <StreakCounter count={streak} color={themeColors.primary} />}
+                        </View>
+                      </View>
+
+                      {/* Actions row */}
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5 }}>
+                          {history.length} WORKOUT{history.length !== 1 ? 'S' : ''}{history.length > 30 ? ' · MOST RECENT 30' : ''}
+                        </Text>
+                        <View style={{ flexDirection: 'row', gap: 6 }}>
+                          <TouchableOpacity
+                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }}
+                            onPress={async () => {
+                              try {
+                                const { exportWorkoutHistory } = await import('../utils/dataExport');
+                                const uname = await AsyncStorage.getItem('user_username').catch(() => null);
+                                await exportWorkoutHistory(uname || undefined);
+                              } catch (e: any) { Alert.alert('Export failed', e?.message ?? 'Could not export'); }
+                            }}>
+                            <Ionicons name="share-outline" size={14} color={themeColors.textSecondary} />
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary }}>Share</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: themeColors.primary + '15' }}
+                            onPress={() => setShowLogActivity(true)}>
+                            <Ionicons name="add-circle-outline" size={16} color={themeColors.primary} />
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.primary }}>Log Activity</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      {/* Session cards */}
+                      {history.slice(0, 30).map((session, i) => {
+                        const totalSets = (session.exercises ?? []).reduce((n, ex) => n + (ex.sets?.length ?? 0), 0);
+                        const isExpanded = expandedWorkoutHistoryId === (session.id ?? `s${i}`);
+                        const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
+                        const dateObj = new Date(session.date);
+                        const dateLabel = dateObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+                        const duration = session.durationSeconds ? `${Math.round(session.durationSeconds / 60)}m` : '–';
+                        const focusLabel = session.manualActivity
+                          ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ` (${session.manualActivity.intensity})` : ''}`
+                          : session.focus;
+                        return (
+                          <TouchableOpacity
+                            key={session.id ?? i}
+                            activeOpacity={0.85}
+                            onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedWorkoutHistoryId(isExpanded ? null : (session.id ?? `s${i}`)); }}
+                            style={{ backgroundColor: themeColors.surface, borderRadius: 12, borderWidth: 1, borderColor: themeColors.border, padding: 14 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <View style={{ flex: 1 }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{focusLabel}</Text>
+                                  {summary?.totalSets != null && summary.totalSets > 0 && (
+                                    <View style={{ backgroundColor: themeColors.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                                      <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.primary }}>
+                                        {summary.totalSets > 25 ? 'VOLUME' : summary.totalSets < 15 ? 'STRENGTH' : 'HYPERTROPHY'}
+                                      </Text>
+                                    </View>
+                                  )}
+                                </View>
+                                <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>{dateLabel}</Text>
+                              </View>
+                              <View style={{ backgroundColor: themeColors.surfaceRaised, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textSecondary }}>{duration}</Text>
+                              </View>
+                              <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} style={{ marginLeft: 6 }} />
+                            </View>
+                            <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{(session.exercises ?? []).length} exercises</Text>
+                              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
+                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{totalSets} sets</Text>
+                              {summary && (
+                                <>
+                                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
+                                  <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>~{summary.caloriesBurned} kcal</Text>
+                                </>
+                              )}
+                            </View>
+
+                            {isExpanded && (
+                              <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                                {(session.exercises ?? []).filter(ex => (ex.sets?.length ?? 0) > 0).map((ex, ei) => {
+                                  const best = ex.sets.reduce((b, ss) => ss.weightLbs > b.weightLbs ? ss : b, ex.sets[0]);
+                                  return (
+                                    <View key={ei} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
+                                      <Text style={{ fontSize: 12, color: themeColors.textPrimary, flex: 1 }} numberOfLines={1}>{ex.name}</Text>
+                                      <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{best.weightLbs} lbs × {best.reps}</Text>
+                                    </View>
+                                  );
+                                })}
+                                {(session.exercises ?? []).every(ex => (ex.sets?.length ?? 0) === 0) && (
+                                  <Text style={{ fontSize: 11, color: themeColors.textMuted, fontStyle: 'italic' }}>No per-set detail logged.</Text>
+                                )}
+                                {summary && (
+                                  <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                                    {summary.motivationMessage ? (
+                                      <Text style={{ fontSize: 13, color: themeColors.textSecondary, lineHeight: 19, marginBottom: 6 }}>{summary.motivationMessage}</Text>
+                                    ) : null}
+                                    {summary.achievements?.length > 0 && (
+                                      <View style={{ gap: 2, marginBottom: 6 }}>
+                                        {summary.achievements.map((a: string, ai: number) => (
+                                          <Text key={ai} style={{ fontSize: 12, color: themeColors.primary }}>★ {a}</Text>
+                                        ))}
+                                      </View>
+                                    )}
+                                    {summary.feedback && (
+                                      <Text style={{ fontSize: 12, color: themeColors.textMuted }}>
+                                        Felt {summary.feedback.feeling} · intensity {summary.feedback.intensity}/5
+                                        {summary.feedback.sorenessAreas?.length ? ` · sore: ${summary.feedback.sorenessAreas.join(', ')}` : ''}
+                                      </Text>
+                                    )}
+                                  </View>
+                                )}
+                              </View>
+                            )}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </>
+                  )}
+                </View>
+              );
+            })()}
 
             {/* Weekly check-in countdown */}
             {workoutSubTab === 'plan' && daysUntilCheckin != null && (
@@ -3599,8 +3863,91 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                 );
               }
+              // Build a 14-day calendar strip (7 per row, oldest → newest).
+              // Each cell is colored by that day's nutrition score.
+              const calendarDays: Array<{ date: string; score: number | null }> = [];
+              for (let i = 13; i >= 0; i--) {
+                const dt = new Date(Date.now() - i * 86400000);
+                const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+                const p = nutritionPlansByDate[key];
+                let sc: number | null = null;
+                if (p && p.meals && p.meals.length > 0) {
+                  try {
+                    const ds = computeNutritionScore(p, userProfile?.goal ?? 'body_recomp');
+                    sc = ds && ds.score > 0 ? ds.score : null;
+                  } catch { sc = null; }
+                }
+                calendarDays.push({ date: key, score: sc });
+              }
+              const scoreColor = (s: number | null): string => {
+                if (s == null) return themeColors.border;
+                if (s >= 70) return '#22C55E';
+                if (s >= 45) return '#F59E0B';
+                return '#EF4444';
+              };
               return (
-                <View style={{ gap: 10 }}>
+                <View style={{ gap: 10, marginBottom: 80 }}>
+                  {/* Score calendar — 14 days, 7 per row */}
+                  <View style={{ backgroundColor: themeColors.surface, borderRadius: 14, borderWidth: 1, borderColor: themeColors.border, padding: 12 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>
+                      NUTRITION SCORE · LAST 14 DAYS
+                    </Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                      {calendarDays.map(c => {
+                        const dt = new Date(c.date + 'T12:00:00');
+                        const dateLabel = `${dt.getMonth() + 1}/${dt.getDate()}`;
+                        const isToday = c.date === todayStr;
+                        const isSelected = expandedHistoryDate === c.date;
+                        const color = scoreColor(c.score);
+                        const hasScore = c.score != null;
+                        return (
+                          <TouchableOpacity
+                            key={c.date}
+                            activeOpacity={0.7}
+                            onPress={() => {
+                              if (isToday) return;
+                              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                              setExpandedHistoryDate(isSelected ? null : c.date);
+                            }}
+                            style={{
+                              width: `${100 / 7 - 2}%`,
+                              paddingVertical: 8,
+                              paddingHorizontal: 2,
+                              borderRadius: 10,
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 4,
+                              backgroundColor: themeColors.surfaceRaised,
+                              borderWidth: isSelected ? 2 : 1,
+                              borderColor: isSelected ? themeColors.primary : themeColors.border,
+                            }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: isToday ? themeColors.primary : themeColors.textSecondary }}>
+                              {dateLabel}
+                            </Text>
+                            <View style={{
+                              width: 28, height: 28, borderRadius: 14,
+                              alignItems: 'center', justifyContent: 'center',
+                              backgroundColor: hasScore ? color : 'transparent',
+                              borderWidth: hasScore ? 0 : 1,
+                              borderColor: hasScore ? 'transparent' : themeColors.border,
+                            }}>
+                              <Text style={{ fontSize: 11, fontWeight: '900', color: hasScore ? '#fff' : themeColors.textMuted }}>
+                                {hasScore ? c.score : '—'}
+                              </Text>
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 14, marginTop: 10 }}>
+                      {[{ c: '#22C55E', l: '70+' }, { c: '#F59E0B', l: '45-69' }, { c: '#EF4444', l: '<45' }, { c: themeColors.border, l: 'No data' }].map(item => (
+                        <View key={item.l} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: item.c }} />
+                          <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{item.l}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
                   {sorted.map(d => {
                     const plan = nutritionPlansByDate[d];
                     const meals = plan?.meals ?? [];
@@ -4192,6 +4539,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }}
         />
       )}
+
+      {/* Embedded form-video modal */}
+      <FormVideoModal
+        visible={!!videoModalName}
+        exerciseName={videoModalName ?? ''}
+        authToken={authToken}
+        themeName={userProfile.themePreference}
+        onClose={() => setVideoModalName(null)}
+      />
 
       {/* Recipe modal — on-demand prep instructions + variations */}
       <RecipeModal

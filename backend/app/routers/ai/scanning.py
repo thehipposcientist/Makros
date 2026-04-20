@@ -183,6 +183,123 @@ class BarcodeLookupRequest(_PydanticBaseModel):
     barcode: str
 
 
+# ─── Exercise form video lookup ──────────────────────────────────────────────
+
+import re as _re
+import urllib.parse as _urlparse
+import urllib.request as _urlreq
+
+_VIDEO_CACHE: dict[str, str] = {}  # exercise_name → video_id
+
+
+class ExerciseVideoRequest(_PydanticBaseModel):
+    exercise_name: str
+
+
+@router.post("/exercise-video")
+def exercise_video_lookup(
+    body: ExerciseVideoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Resolve an exercise name to a YouTube video ID for the top form
+    tutorial result. Results are cached in-process so repeat lookups
+    don't hit YouTube. Returns `{ video_id, search_url }`. Client can
+    embed via `https://www.youtube.com/embed/<video_id>` and offer the
+    search_url for "Search more" links."""
+    name = body.exercise_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Exercise name required")
+
+    query = f"{name} proper form tutorial"
+    search_url = f"https://www.youtube.com/results?search_query={_urlparse.quote(query)}"
+
+    # 1. Curated mapping wins — if we've manually vetted a video ID for
+    # this exercise, return it immediately. YouTube's oEmbed API is not a
+    # reliable embeddability check; manual curation is the only durable fix.
+    try:
+        from app.data.exercise_videos import lookup_curated
+        curated = lookup_curated(name)
+    except Exception:
+        curated = None
+    if curated:
+        return {"video_id": curated, "candidates": [curated], "search_url": search_url, "cached": False, "curated": True}
+
+    cache_key = name.lower()
+    if cache_key in _VIDEO_CACHE:
+        return {"video_id": _VIDEO_CACHE[cache_key], "candidates": [_VIDEO_CACHE[cache_key]], "search_url": search_url, "cached": True}
+
+    try:
+        req = _urlreq.Request(
+            search_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with _urlreq.urlopen(req, timeout=8) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"YouTube fetch failed: {type(e).__name__}")
+
+    # Extract candidate IDs from the search HTML. Prefer full videoRenderer
+    # results (horizontal feed) over anything else — these are the top search
+    # hits and also tend to be embeddable long-form tutorials rather than
+    # shorts/compilations.
+    ids: list[str] = _re.findall(r'"videoRenderer":\{"videoId":"([a-zA-Z0-9_-]{11})"', html)
+    if not ids:
+        ids = _re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+    if not ids:
+        raise HTTPException(status_code=404, detail="No video found")
+    # Dedupe while preserving order.
+    seen_ids: set[str] = set()
+    unique_ids: list[str] = []
+    for i in ids:
+        if i not in seen_ids:
+            seen_ids.add(i)
+            unique_ids.append(i)
+
+    def _is_embeddable(vid: str) -> bool:
+        """YouTube oEmbed returns 200 for embeddable videos and 401/403 for
+        ones with embedding disabled. Cheap HEAD probe to filter out duds."""
+        try:
+            oembed = f"https://www.youtube.com/oembed?url=https%3A//www.youtube.com/watch%3Fv%3D{vid}&format=json"
+            oreq = _urlreq.Request(oembed, headers={"User-Agent": "Mozilla/5.0"})
+            with _urlreq.urlopen(oreq, timeout=4) as r:
+                return r.status == 200
+        except Exception:
+            return False
+
+    # Try up to 5 candidates and pick the first that's embeddable. Everything
+    # unexplored falls through to the client as a fallback list.
+    candidates = unique_ids[:5]
+    chosen: str | None = None
+    for vid in candidates:
+        if _is_embeddable(vid):
+            chosen = vid
+            break
+
+    if not chosen:
+        # None embeddable — surface the first ID anyway so the client can
+        # offer an "Open on YouTube" fallback, plus the candidate list.
+        chosen = candidates[0]
+        print(f"[exercise-video] no embeddable video for '{name}' — using first candidate as non-embeddable fallback")
+
+    _VIDEO_CACHE[cache_key] = chosen
+    if len(_VIDEO_CACHE) > 500:
+        for k in list(_VIDEO_CACHE.keys())[:100]:
+            _VIDEO_CACHE.pop(k, None)
+
+    # `candidates` gives the client extra IDs to try if the primary still
+    # errors out client-side (some videos pass oEmbed but still trip 152/153
+    # in specific WebView contexts).
+    return {
+        "video_id": chosen,
+        "candidates": candidates,
+        "search_url": search_url,
+        "cached": False,
+    }
+
+
 @router.post("/barcode-lookup")
 def barcode_lookup(
     body: BarcodeLookupRequest,

@@ -84,7 +84,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'history' | 'charts' | 'body'>('history');
+  const [tab, setTab] = useState<'prs' | 'charts' | 'body'>('body');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const fitnessScoreRef = useRef<ViewShot>(null);
@@ -334,10 +334,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       <View style={styles.tabs}>
         {([
-          ['history', 'History'],
+          ['body', 'Body Check'],
           ['prs', 'PRs'],
           ['charts', 'Charts'],
-          ['body', 'Body Check'],
         ] as const).map(([key, label]) => (
           <TouchableOpacity
             key={key}
@@ -615,7 +614,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
         </ScrollView>
-      ) : tab === 'history' ? (
+      ) : (tab as string) === 'history' ? (
         <ScrollView contentContainerStyle={styles.content}>
           {/* Month calendar — standard Sun-Sat grid for current month */}
           {(() => {

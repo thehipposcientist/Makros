@@ -1152,6 +1152,21 @@ export type AIExerciseResult = {
   source?: string;
 };
 
+/** Resolve an exercise name to a YouTube video ID for the top form
+ *  tutorial. Cached server-side. Returns the primary `video_id` plus a
+ *  `candidates` list so the client can fall back to the next video when
+ *  a player-level error fires (152/153/etc) inside the iframe. */
+export async function getExerciseVideo(
+  token: string,
+  exerciseName: string,
+): Promise<{ video_id: string; candidates?: string[]; search_url: string; cached?: boolean }> {
+  return request('/ai/exercise-video', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ exercise_name: exerciseName }),
+  }, 12000);
+}
+
 export async function searchExerciseAI(
   token: string,
   body: {

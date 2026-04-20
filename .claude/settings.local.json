@@ -141,7 +141,10 @@
       "Bash(cp ~/.ngrok2/ngrok.yml ~/.config/ngrok/ngrok.yml)",
       "Bash(/opt/homebrew/lib/node_modules/@expo/ngrok/node_modules/@expo/ngrok-bin-darwin-arm64/ngrok authtoken *)",
       "Bash(npm ls *)",
-      "Bash(NGROK_AUTHTOKEN=3Cab1cZ9BMThL0WeUhMWjJexi4y_2YvfaHC3pujd4Yn3DqvB5 npx expo start --tunnel --clear)"
+      "Bash(NGROK_AUTHTOKEN=3Cab1cZ9BMThL0WeUhMWjJexi4y_2YvfaHC3pujd4Yn3DqvB5 npx expo start --tunnel --clear)",
+      "Read(//opt/homebrew/lib/node_modules/npm/bin/**)",
+      "Read(//Users/sawyerhannel/**)",
+      "Bash(/opt/homebrew/bin/npx expo *)"
     ]
   }
 }
