@@ -12,9 +12,10 @@ function getBaseUrl(): string {
   if (!__DEV__) {
     return configured || 'https://your-production-api.com';
   }
-  // Dev: honor an explicit override first (useful when testing a remote
-  // deployment from the Expo dev client), otherwise auto-detect LAN IP.
-  if (configured && configured.startsWith('http')) return configured;
+  // Dev: ignore the prod URL baked into app.json — that's for release builds.
+  // To point the dev client at a remote backend, set EXPO_PUBLIC_API_URL.
+  const devOverride = process.env.EXPO_PUBLIC_API_URL;
+  if (devOverride && devOverride.startsWith('http')) return devOverride;
   const hostUri = Constants.expoConfig?.hostUri ?? '';
   const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct') || !hostUri;
   const host = isTunnel ? LOCAL_BACKEND_IP : (hostUri.split(':')[0] ?? LOCAL_BACKEND_IP);

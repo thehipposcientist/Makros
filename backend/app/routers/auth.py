@@ -25,11 +25,9 @@ def _client_ip(request: Request) -> str:
 
 
 def _validate_password(pwd: str) -> None:
-    """Password policy: >=10 chars AND contains at least one digit.
-    Lifts both the legacy 8-char registration rule and the 6-char reset
-    rule up to a single enforced policy."""
-    if len(pwd) < 10:
-        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+    """Password policy: >=8 chars AND contains at least one digit."""
+    if len(pwd) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     if not re.search(r"\d", pwd):
         raise HTTPException(status_code=422, detail="Password must include at least one number")
 

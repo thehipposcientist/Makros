@@ -556,7 +556,7 @@ class UserCreate(SQLModel):
     username: str
     # Pydantic-level floor. Router `_validate_password` enforces the full
     # policy (must include a digit) on top of this check.
-    password: str = Field(min_length=10)
+    password: str = Field(min_length=8)
 
 class UserRead(SQLModel):
     id: int
