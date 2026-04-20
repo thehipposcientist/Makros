@@ -1062,7 +1062,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Workouts: plan | exercises | muscles | equipment
   // Meals:    plan | foods     | supplements | macros
   const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment'>('plan');
-  const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros'>('plan');
+  const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
+  const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
@@ -1265,6 +1266,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+
+  // Next-day unlogged-meals prompt. Populated once per day when yesterday
+  // had a plan with unchecked meals and the dismissal flag isn't set.
+  const [unloggedPrompt, setUnloggedPrompt] = useState<{
+    date: string;
+    items: Array<{ mealType: string; meal: MealSuggestion }>;
+    chosen: Record<string, boolean>;
+  } | null>(null);
+  const unloggedPromptCheckedRef = useRef(false);
   // Days until the next weekly AI check-in. Computed from `weekStartDate`
   // on mount + whenever the plan refreshes. Negative means overdue. Null
   // means the user hasn't generated a plan yet (nothing to check in on).
@@ -1352,6 +1362,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     authToken,
     planRefreshKey,
   ]);
+
+  // Next-day unlogged-meals prompt. Fires once per calendar day when
+  // yesterday had a plan with unchecked meals and the user hasn't dismissed
+  // the prompt. Captures otherwise-lost data for rolling nutrition averages.
+  useEffect(() => {
+    if (unloggedPromptCheckedRef.current) return;
+    if (!userProfile || !authToken) return;
+    const yesterdayDate = new Date(Date.now() - 86400000);
+    const yesterdayStr = `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getDate()).padStart(2, '0')}`;
+    const plan = nutritionPlansByDate[yesterdayStr];
+    if (!plan || !plan.meals?.length) return;
+    const checks = checkedMealsByDate[yesterdayStr] ?? {};
+    const unchecked = plan.meals
+      .map((meal, idx) => ({ mealType: `meal_${idx}`, meal }))
+      .filter(it => !checks[it.mealType]);
+    if (unchecked.length === 0) {
+      unloggedPromptCheckedRef.current = true;
+      return;
+    }
+    // Mark as checked synchronously so a rapid re-render (before the
+    // AsyncStorage read finishes) can't double-fire this branch.
+    unloggedPromptCheckedRef.current = true;
+    (async () => {
+      const flagKey = `unloggedMealsPromptShown_${yesterdayStr}`;
+      const seen = await AsyncStorage.getItem(flagKey).catch(() => null);
+      if (seen) return;
+      // Default each meal to "Ate" (pre-selected as checked) — user can
+      // toggle any to Skip before confirming.
+      const chosen: Record<string, boolean> = {};
+      for (const it of unchecked) chosen[it.mealType] = true;
+      setUnloggedPrompt({ date: yesterdayStr, items: unchecked, chosen });
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userProfile, authToken, nutritionPlansByDate, checkedMealsByDate]);
 
   // Clear fresh-day flag only when workout-specific settings actually change
   // (not on initial mount). Uses a ref to track previous values.
@@ -1500,18 +1544,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     loadPlansInFlightRef.current = true;
     try {
     // Check for an AI-generated plan saved after user saves plan settings.
-    // We no longer silently fall back to a local client-side generator — that
-    // used to mask "plan missing" as "plan changed to a different split"
-    // because `generateWorkoutPlan` produces differently-named days ("Upper A
-    // — Strength", etc.) than the backend planner. If the user has no plan,
-    // HomeScreen renders its empty state and they can regenerate explicitly.
+    // Falls back to a local client-side generator if nothing is cached — not
+    // ideal (different-looking split names) but better than a blank screen.
+    // The "plan swaps to a different split on re-login" bug is addressed via
+    // (a) syncing aiWorkoutPlan across sign-out/sign-in, and (b) passing
+    // focus_override to the fresh-day generator below so a PPL plan can't
+    // get a foreign day spliced in.
     const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
     if (!aiWorkoutRaw) {
-      console.log('[loadPlans] no saved workout plan — skipping until user regenerates');
-      setWorkoutPlan(null as any);
-      return;
+      console.warn('[loadPlans] no saved aiWorkoutPlan — using local fallback');
     }
-    let baseWorkout = JSON.parse(aiWorkoutRaw);
+    let baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
 
     // Enrich all exercises with image URLs from the backend library.
     // This covers cached plans that were generated before image enrichment.
@@ -2646,6 +2689,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         };
         const nextRoutines = routines.map(r => r.id === routineId ? refreshed : r);
         await saveMealRoutines(nextRoutines);
+        // Propagate the edit to every loaded day's plan so other dates'
+        // cards refresh without waiting for the next loadPlans cycle.
+        setNutritionPlansByDate(prev => applyRoutinesToAll(prev, nextRoutines));
       }
     }
   }, [persistDayState]);
@@ -2733,6 +2779,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (nextPlan) {
       await saveNutritionPlan(date, nextPlan);
       await persistDayState(date, { nutrition_plan: nextPlan });
+    }
+  }, [persistDayState]);
+
+  const handleRenameMeal = useCallback(async (date: string, mealType: string, newName: string) => {
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    if (idx < 0) return;
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    let nextPlan: DailyNutritionPlan | null = null;
+    let routineId: string | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      const meals = (current.meals ?? []).slice();
+      const target = meals[idx];
+      if (!target || target.meal === trimmed) return prev;
+      routineId = (target as any)._routineId ?? null;
+      meals[idx] = { ...target, meal: trimmed };
+      nextPlan = { ...current, meals };
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) {
+      await saveNutritionPlan(date, nextPlan);
+      await persistDayState(date, { nutrition_plan: nextPlan });
+    }
+    // Routine-backed rename: update the routine name and re-apply to every
+    // loaded day so all instances of this routine show the new name.
+    if (routineId) {
+      const routines = await loadMealRoutines();
+      const existing = routines.find(r => r.id === routineId);
+      if (existing && existing.name !== trimmed) {
+        const nextRoutines = routines.map(r => r.id === routineId ? { ...r, name: trimmed } : r);
+        await saveMealRoutines(nextRoutines);
+        setNutritionPlansByDate(prev => applyRoutinesToAll(prev, nextRoutines));
+      }
     }
   }, [persistDayState]);
 
@@ -2920,7 +3001,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   });
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow'].includes(userProfile.themePreference ?? 'midnight');  // blossom is now dark
+  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow', 'steel', 'sand', 'linen', 'mint'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -3041,9 +3122,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <SubTabBtn label="Plan"   active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
-            <SubTabBtn label="Foods"  active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            <SubTabBtn label="Supps"  active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
+            <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
+            <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
+            <SubTabBtn label="Supps"   active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
           </View>
         </View>
       )}
@@ -3455,11 +3537,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <>
             {/* Sub-tab bar moved to a fixed position above — see top of file. */}
 
-            {/* Non-Plan sub-tabs render EditProfileScreen mealplan inline.
-                The wrapper sets a solid background so the remount
+            {/* Non-Plan sub-tabs (Foods / Supps / Macros) render
+                EditProfileScreen inline. History has its own dedicated view
+                below. The wrapper sets a solid background so the remount
                 frame (triggered by the `key` prop below) doesn't
                 flash-through to the previous tab's content. */}
-            {mealsSubTab !== 'plan' && (
+            {(mealsSubTab !== 'plan' && mealsSubTab !== 'history') && (
               <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
                 {mealsSubTab === 'foods' && commonMeals.length > 0 && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
@@ -3479,7 +3562,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   authToken={authToken}
                   profile={userProfile}
                   mode="mealplan"
-                  initialMealTab={mealsSubTab}
+                  initialMealTab={mealsSubTab as 'foods' | 'supplements' | 'macros'}
                   noHeader
                   onSave={(updated) => { onSaveProfile?.(updated, 'mealplan'); setMealsSubTab('plan'); }}
                   onCancel={() => setMealsSubTab('plan')}
@@ -3487,6 +3570,120 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             )}
+
+            {/* History — past 14 days of meal plans. Each day card expands
+                to show its meals; tapping a meal opens MealEditModal
+                pointed at that historical date. Edits persist via the same
+                handleMealSave path as the Plan tab. */}
+            {mealsSubTab === 'history' && (() => {
+              // Build a date-ordered list of days that have either plan data
+              // or meal-check data. Limited to the last 14 days.
+              const days: string[] = [];
+              const seen = new Set<string>();
+              for (const k of Object.keys(nutritionPlansByDate).concat(Object.keys(checkedMealsByDate))) {
+                if (!seen.has(k)) { seen.add(k); days.push(k); }
+              }
+              const todayStr = todayKey();
+              const sorted = days
+                .filter(d => d !== todayStr)
+                .sort((a, b) => b.localeCompare(a))
+                .slice(0, 14);
+              if (sorted.length === 0) {
+                return (
+                  <View style={{ padding: 24, alignItems: 'center' }}>
+                    <Ionicons name="time-outline" size={36} color={themeColors.textMuted} />
+                    <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary, marginTop: 8 }}>No meal history yet</Text>
+                    <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 4, textAlign: 'center' }}>
+                      Your past days will show up here once you've logged meals.
+                    </Text>
+                  </View>
+                );
+              }
+              return (
+                <View style={{ gap: 10 }}>
+                  {sorted.map(d => {
+                    const plan = nutritionPlansByDate[d];
+                    const meals = plan?.meals ?? [];
+                    const checks = checkedMealsByDate[d] ?? {};
+                    const checkedCount = meals.reduce((n, _m, i) => n + (checks[`meal_${i}`] ? 1 : 0), 0);
+                    const totals = meals.reduce((acc, m, i) => {
+                      if (!checks[`meal_${i}`]) return acc;
+                      return {
+                        cal: acc.cal + (m.calories ?? 0),
+                        pro: acc.pro + (m.protein ?? 0),
+                        carb: acc.carb + (m.carbs ?? 0),
+                        fat: acc.fat + (m.fat ?? 0),
+                      };
+                    }, { cal: 0, pro: 0, carb: 0, fat: 0 });
+                    const targets = plan?.targets;
+                    const isExpanded = expandedHistoryDate === d;
+                    const dateObj = new Date(d + 'T12:00:00');
+                    const label = dateObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+                    return (
+                      <View key={d} style={{ backgroundColor: themeColors.surface, borderRadius: 14, borderWidth: 1, borderColor: themeColors.border }}>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedHistoryDate(isExpanded ? null : d); }}
+                          style={{ padding: 14 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{label}</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                                {checkedCount}/{meals.length || '–'} logged
+                              </Text>
+                              <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} />
+                            </View>
+                          </View>
+                          {meals.length > 0 && (
+                            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 4 }}>
+                              {Math.round(totals.cal)} cal · {Math.round(totals.pro)}g P · {Math.round(totals.carb)}g C · {Math.round(totals.fat)}g F
+                              {targets?.calories ? ` · target ${Math.round(targets.calories)} cal` : ''}
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+                        {isExpanded && meals.length > 0 && (
+                          <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 12, gap: 8 }}>
+                            {meals.map((m, i) => {
+                              const mealType = `meal_${i}`;
+                              const ate = !!checks[mealType];
+                              return (
+                                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                  <TouchableOpacity
+                                    onPress={() => handleToggleMeal(d, mealType)}
+                                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                    style={{
+                                      width: 22, height: 22, borderRadius: 11,
+                                      alignItems: 'center', justifyContent: 'center',
+                                      borderWidth: 2,
+                                      borderColor: ate ? themeColors.primary : themeColors.border,
+                                      backgroundColor: ate ? themeColors.primary : 'transparent',
+                                    }}>
+                                    {ate && <Ionicons name="checkmark" size={12} color="#fff" />}
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    style={{ flex: 1 }}
+                                    onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}>
+                                    <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary }} numberOfLines={1}>{m.meal}</Text>
+                                    <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 1 }}>
+                                      {Math.round(m.calories ?? 0)} cal · {Math.round(m.protein ?? 0)}g P
+                                    </Text>
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}
+                                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                    <Ionicons name="create-outline" size={18} color={mealPalette.strong} />
+                                  </TouchableOpacity>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            })()}
 
             {/* Daily target banner — shows the user's computed calorie +
                 macro targets at the top of the Plan view so they can see
@@ -3680,6 +3877,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                       onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
                       onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
+                      onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
                     />
                   )}
@@ -3738,35 +3936,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
         type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
         const allThemes: ThemeEntry[] = [
-          // Dark themes
+          // Dark themes (bg is dark, most ink is light)
           { key: 'midnight', label: 'Midnight', swatch: '#15C7B8', mode: 'dark' },
           { key: 'ocean',    label: 'Ocean',    swatch: '#00CCE8', mode: 'dark' },
           { key: 'amethyst', label: 'Amethyst', swatch: '#A060FF', mode: 'dark' },
           { key: 'ember',    label: 'Ember',    swatch: '#FF6018', mode: 'dark' },
           { key: 'forest',   label: 'Forest',   swatch: '#3AA860', mode: 'dark' },
           { key: 'wine',     label: 'Wine',     swatch: '#C82848', mode: 'dark' },
-          { key: 'arctic',   label: 'Arctic',   swatch: '#5BA3D9', mode: 'dark' },
-          { key: 'sunrise',  label: 'Sunrise',  swatch: '#F08020', mode: 'dark' },
           { key: 'obsidian', label: 'Obsidian', swatch: '#888888', mode: 'dark' },
           { key: 'neon',     label: 'Neon',     swatch: '#00FF88', mode: 'dark' },
           { key: 'flamingo', label: 'Flamingo', swatch: '#FF69B4', mode: 'dark' },
           { key: 'citrus',   label: 'Citrus',   swatch: '#FFD700', mode: 'dark' },
           { key: 'scarlet',  label: 'Scarlet',  swatch: '#DC143C', mode: 'dark' },
           { key: 'cocoa',    label: 'Cocoa',    swatch: '#8B4513', mode: 'dark' },
+          { key: 'slate',    label: 'Slate',    swatch: '#F07848', mode: 'dark' },
+          { key: 'blossom',  label: 'Blossom',  swatch: '#FF1890', mode: 'dark' },
           { key: 'void',     label: 'Void',     swatch: '#6A0DAD', mode: 'dark' },
           { key: 'dusk',     label: 'Dusk',     swatch: '#FF6F61', mode: 'dark' },
           { key: 'lavender', label: 'Lavender', swatch: '#B57EDC', mode: 'dark' },
           { key: 'aurora',   label: 'Aurora',   swatch: '#00CED1', mode: 'dark' },
           { key: 'copper',   label: 'Copper',   swatch: '#B87333', mode: 'dark' },
           { key: 'storm',    label: 'Storm',    swatch: '#4F5D75', mode: 'dark' },
-          // Light themes
-          { key: 'parchment', label: 'Parchment', swatch: '#D4A76A', mode: 'light' },
-          { key: 'blossom',  label: 'Blossom',  swatch: '#FFB7C5', mode: 'light' },
-          { key: 'meadow',   label: 'Meadow',   swatch: '#4CAF50', mode: 'light' },
-          { key: 'rose',     label: 'Rose',     swatch: '#FF8FAB', mode: 'light' },
-          { key: 'steel',    label: 'Steel',    swatch: '#4682B4', mode: 'light' },
-          { key: 'sand',     label: 'Sand',     swatch: '#C2B280', mode: 'light' },
-          { key: 'slate',    label: 'Slate',    swatch: '#708090', mode: 'light' },
+          // Light themes (bg is light, most ink is dark)
+          { key: 'arctic',    label: 'Arctic',    swatch: '#2474C8', mode: 'light' },
+          { key: 'sunrise',   label: 'Sunrise',   swatch: '#F28C28', mode: 'light' },
+          { key: 'parchment', label: 'Parchment', swatch: '#7C4F2A', mode: 'light' },
+          { key: 'meadow',    label: 'Meadow',    swatch: '#2A8048', mode: 'light' },
+          { key: 'rose',      label: 'Rose',      swatch: '#A83860', mode: 'light' },
+          { key: 'steel',     label: 'Steel',     swatch: '#3A5BC8', mode: 'light' },
+          { key: 'sand',      label: 'Sand',      swatch: '#C06030', mode: 'light' },
+          { key: 'linen',     label: 'Linen',     swatch: '#6A8030', mode: 'light' },
+          { key: 'mint',      label: 'Mint',      swatch: '#0E8078', mode: 'light' },
         ];
         const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
         const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
@@ -4779,6 +4979,125 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             </View>
           </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* Next-day unlogged-meals prompt */}
+      <Modal
+        visible={!!unloggedPrompt}
+        transparent
+        animationType="slide"
+        onRequestClose={async () => {
+          if (unloggedPrompt) {
+            await AsyncStorage.setItem(`unloggedMealsPromptShown_${unloggedPrompt.date}`, '1').catch(() => {});
+          }
+          setUnloggedPrompt(null);
+        }}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+          {unloggedPrompt && (
+            <View style={{ backgroundColor: themeColors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: themeColors.border, maxHeight: '85%' }}>
+              <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 34 }} showsVerticalScrollIndicator={false}>
+                <Text style={{ fontSize: 20, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 4 }}>Yesterday's meals</Text>
+                <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginBottom: 16 }}>
+                  You had {unloggedPrompt.items.length} unlogged meal{unloggedPrompt.items.length === 1 ? '' : 's'}. Mark what you ate — we'll skip the rest.
+                </Text>
+
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                  <TouchableOpacity
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }}
+                    onPress={() => {
+                      if (!unloggedPrompt) return;
+                      const chosen: Record<string, boolean> = {};
+                      for (const it of unloggedPrompt.items) chosen[it.mealType] = true;
+                      setUnloggedPrompt({ ...unloggedPrompt, chosen });
+                    }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary }}>Mark all eaten</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }}
+                    onPress={() => {
+                      if (!unloggedPrompt) return;
+                      const chosen: Record<string, boolean> = {};
+                      for (const it of unloggedPrompt.items) chosen[it.mealType] = false;
+                      setUnloggedPrompt({ ...unloggedPrompt, chosen });
+                    }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary }}>Skip all</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {unloggedPrompt.items.map(it => {
+                  const ate = !!unloggedPrompt.chosen[it.mealType];
+                  return (
+                    <TouchableOpacity
+                      key={it.mealType}
+                      activeOpacity={0.8}
+                      onPress={() => {
+                        setUnloggedPrompt(prev => prev ? {
+                          ...prev,
+                          chosen: { ...prev.chosen, [it.mealType]: !ate },
+                        } : prev);
+                      }}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 10,
+                        padding: 12, marginBottom: 8,
+                        backgroundColor: themeColors.surfaceRaised, borderRadius: 12,
+                        borderWidth: 1, borderColor: ate ? themeColors.primary + '77' : themeColors.border,
+                      }}>
+                      <View style={{
+                        width: 24, height: 24, borderRadius: 12,
+                        alignItems: 'center', justifyContent: 'center',
+                        borderWidth: 2,
+                        borderColor: ate ? themeColors.primary : themeColors.border,
+                        backgroundColor: ate ? themeColors.primary : 'transparent',
+                      }}>
+                        {ate && <Ionicons name="checkmark" size={14} color="#fff" />}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary }}>{it.meal.meal}</Text>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                          {Math.round(it.meal.calories ?? 0)} cal · {Math.round(it.meal.protein ?? 0)}g P
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: ate ? themeColors.primary : themeColors.textMuted }}>
+                        {ate ? 'ATE' : 'SKIP'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                  <TouchableOpacity
+                    style={{ flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: 'center', backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }}
+                    onPress={async () => {
+                      if (unloggedPrompt) {
+                        await AsyncStorage.setItem(`unloggedMealsPromptShown_${unloggedPrompt.date}`, '1').catch(() => {});
+                      }
+                      setUnloggedPrompt(null);
+                    }}>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textSecondary }}>Not now</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flex: 2, paddingVertical: 13, borderRadius: 12, alignItems: 'center', backgroundColor: themeColors.primary }}
+                    onPress={async () => {
+                      const snapshot = unloggedPrompt;
+                      if (!snapshot) return;
+                      // Mark chosen meals as eaten — reuses handleToggleMeal
+                      // which also auto-logs to backend history + snapshots
+                      // the meal for survival across plan regen.
+                      for (const it of snapshot.items) {
+                        if (snapshot.chosen[it.mealType]) {
+                          await handleToggleMeal(snapshot.date, it.mealType);
+                        }
+                      }
+                      await AsyncStorage.setItem(`unloggedMealsPromptShown_${snapshot.date}`, '1').catch(() => {});
+                      setUnloggedPrompt(null);
+                    }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>Save</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </View>
+          )}
         </View>
       </Modal>
 

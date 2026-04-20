@@ -12,7 +12,8 @@ export type AppThemeName =
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
   | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
-  | 'aurora'   | 'copper'  | 'storm';
+  | 'aurora'   | 'copper'  | 'storm'
+  | 'linen'    | 'mint';
 
 export interface GoalOption {
   value: string;

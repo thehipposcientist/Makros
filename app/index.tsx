@@ -151,7 +151,9 @@ const SYNCED_STATE_KEYS = [
   'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
   'trainerNote', 'nutritionistNote', 'supplementStack',
   'weekStartDate', 'mealEdits', 'mealChecks',
-  // workoutHistory excluded — synced via logWorkoutDone
+  // workoutHistory synced — individual completions reach the backend via
+  // logWorkoutDone, but without the local blob a wipe loses per-set detail.
+  'workoutHistory',
   'userLog', 'skippedWorkouts',
   'mealRoutines', 'planChangeHistory', 'goalHistory',
   // workoutSummaries excluded — local-only derivative of workoutHistory
@@ -183,21 +185,76 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
     const { state } = await getUserState(token);
     if (!state || Object.keys(state).length === 0) {
       console.log('[user-state] pull: empty remote state');
-      return;
+    } else {
+      const pairs: [string, string][] = [];
+      for (const [k, v] of Object.entries(state)) {
+        if (v == null) continue;
+        pairs.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+      }
+      if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
+      console.log(`[user-state] pulled ${pairs.length} keys`);
     }
-    const pairs: [string, string][] = [];
-    for (const [k, v] of Object.entries(state)) {
-      if (v == null) continue;
-      pairs.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
-    }
-    if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
-    console.log(`[user-state] pulled ${pairs.length} keys`);
   } catch (e: any) {
     console.warn('[user-state] pull failed:', e?.message ?? e);
   }
+
+  // Workout-history fallback: if local is empty (wipe / fresh install on a
+  // user whose pre-sync state blob didn't include workoutHistory), rebuild
+  // a skeleton from the backend completion markers. No per-set detail, but
+  // dates/focuses/durations all come back.
+  try {
+    const existing = await AsyncStorage.getItem('workoutHistory');
+    const localArr: any[] = existing ? JSON.parse(existing) : [];
+    // Separate real locally-logged sessions from prior server-hydrated
+    // skeletons. Skeletons are always safe to overwrite — the authoritative
+    // source for them is the backend. Real local sessions (with ex detail
+    // or non-server ids) we preserve.
+    const realLocal = localArr.filter(s => typeof s?.id === 'string' && !s.id.startsWith('server-'));
+    const completions = await listWorkoutCompletions(token, 100);
+    if (completions.length > 0) {
+      // Only treat non-strength categories as "manual activity" for display —
+      // a real lifting workout (e.g. Legs) may have activity_category="strength"
+      // tagged on the completion, but should render with its focus label, not
+      // the humanized category.
+      const MANUAL_CATEGORIES = new Set(['cardio', 'mobility', 'sport', 'active', 'recovery']);
+      const skeleton = completions.map((c) => {
+        const isManual = !!c.activity_category && MANUAL_CATEGORIES.has(c.activity_category);
+        return {
+          id: `server-${c.id}`,
+          date: c.completed_at ?? `${c.workout_date}T12:00:00.000Z`,
+          focus: c.focus_label,
+          durationSeconds: c.duration_seconds,
+          exercises: [],
+          completed: true,
+          ...(isManual ? {
+            manualActivity: {
+              category: c.activity_category as any,
+              subtype: c.activity_subtype ?? '',
+              intensity: c.activity_intensity as any,
+            },
+          } : {}),
+        };
+      });
+      // Merge: skeletons from backend + any real local-logged sessions the
+      // server doesn't know about. Dedupe same-date-same-focus (prefer real
+      // local over skeleton since it has exercise detail).
+      const merged = [...realLocal];
+      for (const sk of skeleton) {
+        const skDate = sk.date.slice(0, 10);
+        const dupe = merged.some(m => m.date?.slice(0, 10) === skDate && m.focus === sk.focus);
+        if (!dupe) merged.push(sk);
+      }
+      // Sort newest-first by date
+      merged.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+      await AsyncStorage.setItem('workoutHistory', JSON.stringify(merged));
+      console.log(`[user-state] hydrated ${skeleton.length} from backend; ${realLocal.length} real local kept; total=${merged.length}`);
+    }
+  } catch (e: any) {
+    console.warn('[user-state] completion hydration failed:', e?.message ?? e);
+  }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions } from '../src/services/api';
 import { clearAllSavedNutritionPlans } from '../src/utils/mealTracker';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
@@ -405,6 +462,10 @@ export default function Index() {
           await AsyncStorage.setItem('user_username', (meData as any).username);
         }
         await loadProfile(persistedToken);
+        // Cold-start hydration: if local history / synced state are empty
+        // (e.g. user wiped app data), restore from backend. pullUserState
+        // handles the blob + has an explicit workoutHistory fallback.
+        pullUserStateFromBackend(persistedToken).catch(() => null);
         setAuthToken(persistedToken);
       } catch (err: any) {
         if (isAuthFailureError(err)) {

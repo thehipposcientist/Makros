@@ -71,7 +71,12 @@ def ask_trainer_question(
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     q = body.question.strip()
-    if len(q) < 6:
+    # Short replies like "Yes" / "No" / "Sure" are valid mid-conversation but
+    # spammy as an opener. Require 6+ chars only when this is the first turn.
+    has_conversation = bool(body.conversation)
+    if not q:
+        raise HTTPException(status_code=400, detail="Question is too short")
+    if not has_conversation and len(q) < 6:
         raise HTTPException(status_code=400, detail="Question is too short")
 
     is_nutritionist = body.mode == "nutritionist"
@@ -356,12 +361,13 @@ def ask_trainer_question(
         "   - What movements would be avoided (e.g., 'hinge movements like deadlifts')\n"
         "   - Estimated recovery timeline\n"
         "   - What to watch for (warning signs to see a doctor)\n"
-        "3. Then ASK the user: 'Would you like me to add this to your injuries and regenerate your workout plan?'\n"
-        "   Do NOT set updated_injuries yet — wait for the user to confirm.\n"
-        "4. Only when the user confirms (says yes, sure, do it, add it, etc.), THEN set updated_injuries with the structured data.\n"
-        "   The app will automatically save the injury and regenerate the plan.\n"
-        "5. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries.\n"
-        "6. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
+        "3. IMMEDIATELY populate updated_injuries with the structured data in the SAME response. "
+        "Do NOT ask the user to type 'yes' — the app renders an 'Add & Update Plan' confirm button "
+        "when updated_injuries is present, and the user will tap that button to confirm. Your answer "
+        "text should explain the assessment, not ask for text confirmation.\n"
+        "4. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries — "
+        "the app regenerates the plan automatically after the user taps the confirm button.\n"
+        "5. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
         "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "

@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { useState, useMemo, useEffect } from 'react';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -27,6 +27,9 @@ interface NutritionCardProps {
   onHardDeleteMeal?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
+  /** Rename a meal inline from the card. Long-press the name to enter
+   *  edit mode; the input commits on blur or submit. */
+  onRenameMeal?: (mealType: string, newName: string) => void;
   /** Reorder the day's meals[]. `direction` is -1 (move up) or +1 (move down). */
   onMoveMeal?: (mealType: string, direction: -1 | 1) => void;
   goal?: string;
@@ -45,6 +48,7 @@ export default function NutritionCard({
   onHardDeleteMeal,
   onToggleRoutine,
   onShowRecipe,
+  onRenameMeal,
   onMoveMeal,
   goal,
 }: NutritionCardProps) {
@@ -485,6 +489,7 @@ export default function NutritionCard({
               onShowRecipe={onShowRecipe}
               onMoveUp={i > 0 && onMoveMeal ? () => onMoveMeal(key, -1) : undefined}
               onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
+              onRenameMeal={onRenameMeal}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -552,7 +557,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onMoveUp, onMoveDown, colors, styles, mealAccent }: {
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, colors, styles, mealAccent }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -563,6 +568,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   onHardDelete?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
+  onRenameMeal?: (mealType: string, newName: string) => void;
   onMoveUp?: () => void;
   onMoveDown?: () => void;
   colors: ReturnType<typeof getTheme>['colors'];
@@ -570,6 +576,18 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
 }) {
   const [itemsExpanded, setItemsExpanded] = useState(true);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(meal.meal);
+  useEffect(() => { if (!editingName) setNameDraft(meal.meal); }, [meal.meal, editingName]);
+  const commitRename = () => {
+    const trimmed = nameDraft.trim();
+    setEditingName(false);
+    if (trimmed && trimmed !== meal.meal && onRenameMeal) {
+      onRenameMeal(mealType, trimmed);
+    } else {
+      setNameDraft(meal.meal);
+    }
+  };
   const withItems = ensureItems(meal);
   const itemRows = withItems.items && withItems.items.length > 0
     ? withItems.items.map((it, i) => ({
@@ -607,12 +625,55 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         </TouchableOpacity>
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <Text
-              style={[styles.mealName, checked && styles.mealNameDone, { flexShrink: 1 }]}
-              numberOfLines={2}
-              ellipsizeMode="tail">
-              {meal.meal}
-            </Text>
+            {editingName && onRenameMeal ? (
+              <TextInput
+                value={nameDraft}
+                onChangeText={setNameDraft}
+                onBlur={commitRename}
+                onSubmitEditing={commitRename}
+                autoFocus
+                returnKeyType="done"
+                blurOnSubmit
+                maxLength={80}
+                style={[
+                  styles.mealName,
+                  {
+                    flexShrink: 1,
+                    minWidth: 120,
+                    paddingVertical: 2,
+                    paddingHorizontal: 4,
+                    borderBottomWidth: 1,
+                    borderBottomColor: mealAccent.strong,
+                    color: colors.textPrimary,
+                  },
+                ]}
+                accessibilityLabel="Rename meal"
+              />
+            ) : (
+              <>
+                <TouchableOpacity
+                  onPress={() => { if (onRenameMeal) setEditingName(true); }}
+                  activeOpacity={0.7}
+                  style={{ flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 4 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Meal: ${meal.meal}. Tap to rename.`}>
+                  <Text
+                    style={[styles.mealName, checked && styles.mealNameDone]}
+                    numberOfLines={2}
+                    ellipsizeMode="tail">
+                    {meal.meal}
+                  </Text>
+                  {onRenameMeal && (
+                    <Ionicons
+                      name="pencil"
+                      size={11}
+                      color={colors.textMuted}
+                      style={{ opacity: 0.6 }}
+                    />
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
             {/* Inline routine badge — small, beside the title, taps to
                 toggle. No more dedicated row. */}
             {onToggleRoutine && (

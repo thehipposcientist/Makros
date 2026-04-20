@@ -5,7 +5,8 @@ export type AppThemeName =
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
   | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
-  | 'aurora'   | 'copper'  | 'storm';
+  | 'aurora'   | 'copper'  | 'storm'
+  | 'linen'    | 'mint';
 
 export interface ThemeColors {
   background: string;
@@ -888,6 +889,66 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#181020', strong: '#9880D8', text: '#C0A8F0' },   // ELECTRIC PURPLE
       planner: { soft: '#101418', strong: '#6890C0', text: '#98B8E0' },   // SLATE BLUE
       account: { soft: '#181418', strong: '#A888C0', text: '#C8B0D8' },
+    },
+  },
+
+  // ── LIGHT / NEW ──────────────────────────────────────────────────────────────
+
+  linen: {
+    name: 'linen',
+    label: 'Linen & Olive',
+    description: 'Soft cream background with earthy olive primary and muted clay — minimal, grown-up, serene.',
+    colors: {
+      background:    '#F8F4EC',
+      surface:       '#FFFDF6',
+      surfaceRaised: '#EFE8D8',
+      border:        '#D4CAB4',
+      primary:       '#6A8030',  // olive
+      primaryDark:   '#4A5A1A',
+      primaryLight:  '#9CB058',
+      accent:        '#B85830',  // clay
+      textPrimary:   '#1E2410',
+      textSecondary: '#4C5A34',
+      textMuted:     '#8A9468',
+      error:         '#B8342C',
+      warning:       '#B07020',
+      success:       '#3A7A48',
+    },
+    sections: {
+      workout: { soft: '#E8F0D4', strong: '#6A8030', text: '#2A4010' },   // OLIVE
+      meals:   { soft: '#F5E4D4', strong: '#B85830', text: '#5A2010' },   // CLAY
+      ai:      { soft: '#E4E8F0', strong: '#4868A8', text: '#18306E' },   // BLUESTONE
+      planner: { soft: '#F4ECD4', strong: '#A88434', text: '#5E4414' },
+      account: { soft: '#EDE4F4', strong: '#6A508C', text: '#30205E' },
+    },
+  },
+
+  mint: {
+    name: 'mint',
+    label: 'Mint Fresh',
+    description: 'Pale mint background with deep teal primary and coral accent — clean, cool, refreshing.',
+    colors: {
+      background:    '#EDF8F2',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#DCEFE4',
+      border:        '#B4D8C4',
+      primary:       '#0E8078',  // deep teal
+      primaryDark:   '#065850',
+      primaryLight:  '#48B8A8',
+      accent:        '#E06848',  // coral
+      textPrimary:   '#082418',
+      textSecondary: '#2C5244',
+      textMuted:     '#5A7868',
+      error:         '#CC2E3C',
+      warning:       '#B87800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#C8ECE0', strong: '#0E8078', text: '#033630' },   // TEAL
+      meals:   { soft: '#FFE4D8', strong: '#E06848', text: '#6A1C08' },   // CORAL
+      ai:      { soft: '#E4E4F8', strong: '#5848CC', text: '#1C0C6A' },   // INDIGO
+      planner: { soft: '#FFF0C8', strong: '#B87800', text: '#5A3C00' },
+      account: { soft: '#F8E0EC', strong: '#C0347C', text: '#5A0838' },
     },
   },
 

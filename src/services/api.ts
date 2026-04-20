@@ -949,6 +949,45 @@ export async function logWorkoutDone(
   });
 }
 
+/** Mid-workout sync: saves per-set detail to the backend WITHOUT flipping
+ *  the "completed" marker. Used to back up logged sets as they happen so a
+ *  force-quit or wiped AsyncStorage doesn't lose them. */
+export async function syncInProgressWorkout(
+  token: string,
+  workout_date: string,
+  focus_label: string,
+  exercises: LoggedExercisePayload[],
+): Promise<{ ok: boolean; session_id: number | null; exercises: number; sets: number }> {
+  return request('/workouts/sync', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ workout_date, focus_label, exercises }),
+  }, 10000);
+}
+
+export interface WorkoutCompletionRecord {
+  id: number;
+  workout_date: string;
+  focus_label: string;
+  duration_seconds: number;
+  stimulus?: string | null;
+  completed_at?: string | null;
+  activity_category?: string | null;
+  activity_subtype?: string | null;
+  activity_intensity?: string | null;
+}
+
+/** Fetch the user's recent completion markers. Skeleton data only — no set
+ *  detail. Used to rehydrate local workoutHistory after a wipe. */
+export async function listWorkoutCompletions(
+  token: string,
+  limit: number = 100,
+): Promise<WorkoutCompletionRecord[]> {
+  return request(`/workouts/completions?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export interface FatigueScore {
   readiness_score: number;
   readiness_label: string;

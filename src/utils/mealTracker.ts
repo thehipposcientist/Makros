@@ -164,11 +164,35 @@ export async function saveNutritionPlan(date: string, plan: DailyNutritionPlan):
     const raw = await AsyncStorage.getItem(EDITS_KEY);
     const all: Record<string, DailyNutritionPlan> = raw ? JSON.parse(raw) : {};
     all[date] = plan;
-    const keys = Object.keys(all).sort().reverse().slice(0, 7);
+    // Keep the last 14 days — matches the mealChecks window so the
+    // history view has consistent data for every day it lists.
+    const keys = Object.keys(all).sort().reverse().slice(0, 14);
     const pruned: Record<string, DailyNutritionPlan> = {};
     keys.forEach(k => { pruned[k] = all[k]; });
     await AsyncStorage.setItem(EDITS_KEY, JSON.stringify(pruned));
   } catch {}
+}
+
+/** Return all per-day nutrition plans the client has cached locally. Used
+ *  by the history view to list the last 14 days of meals even if the user
+ *  hasn't tapped through each day's card. */
+export async function getAllSavedNutritionPlans(): Promise<Record<string, DailyNutritionPlan>> {
+  try {
+    const raw = await AsyncStorage.getItem(EDITS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Return every date that has at least one meal check logged. */
+export async function getAllMealChecks(): Promise<Record<string, MealChecks>> {
+  try {
+    const raw = await AsyncStorage.getItem(CHECKS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
 }
 
 /** Wipe every per-day nutrition save. Called after a successful plan

@@ -544,7 +544,26 @@ def mark_workout_complete(
     session_rows_created = 0
     if body.exercises:
         try:
-            from app.models import Exercise as _Exercise, WorkoutSource
+            from app.models import Exercise as _Exercise, WorkoutSource, EquipmentType
+
+            def _coerce_equipment(raw: str | None) -> EquipmentType:
+                if not raw:
+                    return EquipmentType.OTHER
+                r = raw.strip().lower()
+                if r in ('barbell', 'machine', 'cable', 'gym', 'smith', 'leg_press', 'leg press'):
+                    return EquipmentType.GYM
+                if r in ('dumbbell', 'dumbbells', 'kettlebell', 'kb'):
+                    return EquipmentType.DUMBBELLS
+                if r in ('bodyweight', 'bw', 'none', ''):
+                    return EquipmentType.BODYWEIGHT
+                if r in ('home', 'band', 'bands', 'resistance_band'):
+                    return EquipmentType.HOME
+                if r in ('cardio', 'treadmill', 'bike', 'rower', 'elliptical'):
+                    return EquipmentType.CARDIO
+                try:
+                    return EquipmentType[raw.upper()]
+                except Exception:
+                    return EquipmentType.OTHER
             # Upsert WorkoutSession by (user, date, focus). If the same
             # (date, focus) pair already has a session, overwrite its
             # exercises so re-submitting a completion replaces rather
@@ -600,7 +619,7 @@ def mark_workout_complete(
                     exercise_id=resolved_exercise_id,
                     name=ex_payload.name,
                     order_index=ex_payload.order_index or idx,
-                    equipment=ex_payload.equipment,
+                    equipment=_coerce_equipment(ex_payload.equipment),
                     target_reps_text=ex_payload.target_reps,
                     rest_seconds=None,
                 )
@@ -619,7 +638,11 @@ def mark_workout_complete(
                     ))
             session_rows_created = 1
         except Exception as e:
-            logger.info(f"[workouts/complete] structured persistence error: {type(e).__name__}: {e}")
+            logger.warning(
+                f"[workouts/complete] structured persistence FAILED "
+                f"user={current_user.id} date={body.workout_date} focus={body.focus_label} "
+                f"exercises={len(body.exercises)}: {type(e).__name__}: {e}"
+            )
             db.rollback()
             from sqlalchemy.exc import IntegrityError
             if isinstance(e, IntegrityError):
@@ -703,6 +726,152 @@ def get_workout_status(
         .where(WorkoutCompletion.workout_date == workout_date)
     ).first()
     return {"done": completion is not None}
+
+
+class WorkoutSyncRequest(BaseModel):
+    """Partial / in-progress workout snapshot. Written to WorkoutSession +
+    WorkoutExercise + ExerciseSet so per-set detail survives app kills and
+    cross-device use. Does NOT write WorkoutCompletion — the workout isn't
+    done yet. /workouts/complete remains the "I'm finished" signal."""
+    workout_date: date
+    focus_label: str
+    exercises: list[CompletedExercisePayload]
+
+
+@router.post("/sync")
+def sync_in_progress_workout(
+    body: WorkoutSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Save a mid-workout snapshot of logged exercises/sets. Called after
+    every set so we don't rely solely on client local storage."""
+    if not body.exercises:
+        return {"ok": True, "session_id": None, "exercises": 0, "sets": 0}
+    try:
+        from app.models import Exercise as _Exercise, WorkoutSource, EquipmentType
+
+        def _coerce_equipment(raw: str | None) -> EquipmentType:
+            """Client sends free-text equipment ('barbell', 'dumbbells', etc.).
+            Map to the EquipmentType enum or fall back to OTHER so the insert
+            never fails on an enum mismatch."""
+            if not raw:
+                return EquipmentType.OTHER
+            r = raw.strip().lower()
+            if r in ('barbell', 'machine', 'cable', 'gym', 'smith', 'leg_press', 'leg press'):
+                return EquipmentType.GYM
+            if r in ('dumbbell', 'dumbbells', 'kettlebell', 'kb'):
+                return EquipmentType.DUMBBELLS
+            if r in ('bodyweight', 'bw', 'none', ''):
+                return EquipmentType.BODYWEIGHT
+            if r in ('home', 'band', 'bands', 'resistance_band'):
+                return EquipmentType.HOME
+            if r in ('cardio', 'treadmill', 'bike', 'rower', 'elliptical'):
+                return EquipmentType.CARDIO
+            try:
+                return EquipmentType[raw.upper()]
+            except Exception:
+                return EquipmentType.OTHER
+
+        existing_session = db.exec(
+            select(WorkoutSession)
+            .where(WorkoutSession.user_id == current_user.id)
+            .where(WorkoutSession.workout_date == body.workout_date)
+            .where(WorkoutSession.focus == body.focus_label)
+        ).first()
+        if existing_session:
+            old_exs = db.exec(
+                select(WorkoutExercise).where(WorkoutExercise.session_id == existing_session.id)
+            ).all()
+            for ox in old_exs:
+                old_sets = db.exec(
+                    select(ExerciseSet).where(ExerciseSet.workout_exercise_id == ox.id)
+                ).all()
+                for os in old_sets:
+                    db.delete(os)
+                db.delete(ox)
+            session_row = existing_session
+        else:
+            session_row = WorkoutSession(
+                user_id=current_user.id,
+                name=body.focus_label or "Workout",
+                focus=body.focus_label or "",
+                workout_date=body.workout_date,
+                source=WorkoutSource.GENERATED,
+            )
+            db.add(session_row)
+        db.flush()
+
+        total_sets = 0
+        for idx, ex_payload in enumerate(body.exercises):
+            resolved_exercise_id = None
+            if ex_payload.name:
+                seed = db.exec(
+                    select(_Exercise).where(_Exercise.name.ilike(ex_payload.name))
+                ).first()
+                if seed is not None:
+                    resolved_exercise_id = seed.id
+            exercise = WorkoutExercise(
+                session_id=session_row.id,
+                exercise_id=resolved_exercise_id,
+                name=ex_payload.name,
+                order_index=ex_payload.order_index or idx,
+                equipment=_coerce_equipment(ex_payload.equipment),
+                target_reps_text=ex_payload.target_reps,
+                rest_seconds=None,
+            )
+            db.add(exercise)
+            db.flush()
+            for set_payload in ex_payload.sets:
+                db.add(ExerciseSet(
+                    workout_exercise_id=exercise.id,
+                    set_number=set_payload.set_number,
+                    actual_reps=set_payload.reps,
+                    actual_weight_lbs=set_payload.weight_lbs,
+                    rir_target=set_payload.rir,
+                    completed=True,
+                    completed_at=datetime.now(timezone.utc),
+                ))
+                total_sets += 1
+        db.commit()
+        logger.info(f"[workouts/sync] user={current_user.id} date={body.workout_date} focus={body.focus_label} exercises={len(body.exercises)} sets={total_sets}")
+        return {"ok": True, "session_id": session_row.id, "exercises": len(body.exercises), "sets": total_sets}
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"[workouts/sync] FAILED user={current_user.id} date={body.workout_date} focus={body.focus_label}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {type(e).__name__}")
+
+
+@router.get("/completions")
+def list_completions(
+    limit: int = Query(default=100, le=500),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return the user's recent workout completions. Used by the mobile app as
+    a fallback when local `workoutHistory` is missing (e.g. fresh install, or
+    state wipe). Completions carry date/focus/duration but NOT per-set detail —
+    that only lives in `WorkoutSession` rows when the client sent exercises."""
+    rows = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .order_by(WorkoutCompletion.workout_date.desc(), WorkoutCompletion.completed_at.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "workout_date": r.workout_date.isoformat(),
+            "focus_label": r.focus_label,
+            "duration_seconds": r.duration_seconds,
+            "stimulus": r.stimulus,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "activity_category": r.activity_category,
+            "activity_subtype": r.activity_subtype,
+            "activity_intensity": r.activity_intensity,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/fatigue", response_model=FatigueScoreResponse)

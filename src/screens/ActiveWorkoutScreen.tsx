@@ -22,7 +22,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { getTheme, radius } from '../constants/theme';
@@ -420,6 +420,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       image_url: (ex as any).image_url,
     }));
   });
+  // Debounced backend sync of the in-progress workout. Fires 1.5s after the
+  // last set-update to avoid spamming the server mid-rapid-logging. Writes
+  // to WorkoutSession + per-exercise tables so per-set detail survives a
+  // force-quit or an AsyncStorage wipe.
+  const syncDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncPartialToBackend = useCallback((sessionExercises: SessionExercise[]) => {
+    if (!authToken) return;
+    const hasLoggedSet = sessionExercises.some(ex => ex.sets.length > 0);
+    if (!hasLoggedSet) return;
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    syncDebounceRef.current = setTimeout(() => {
+      const payload = sessionExercises
+        .filter(ex => ex.sets.length > 0)
+        .map((ex, i) => ({
+          name: ex.name,
+          target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : undefined,
+          target_reps: ex.targetReps,
+          equipment: ex.equipment,
+          order_index: i,
+          sets: ex.sets.map(s => ({
+            set_number: s.setNumber,
+            reps: s.reps,
+            weight_lbs: s.weightLbs,
+            duration_seconds: s.durationSeconds ?? null,
+            feedback: s.feedback ?? null,
+            rir: null,
+          })),
+        }));
+      syncInProgressWorkout(authToken, dateKey(new Date()), workout.focus, payload)
+        .then(r => console.log(`[workout sync] ${r.exercises} ex / ${r.sets} sets → backend`))
+        .catch(e => console.warn('[workout sync] failed (non-fatal):', e?.message ?? e));
+    }, 1500);
+  }, [authToken, workout.focus]);
+
   const setExercises = useCallback((updater: SessionExercise[] | ((prev: SessionExercise[]) => SessionExercise[])) => {
     setExercisesRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -427,8 +461,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       AsyncStorage.setItem('activeWorkoutSets', JSON.stringify(
         next.map(ex => ({ name: ex.name, sets: ex.sets }))
       )).catch(() => {});
+      // Also debounce-sync to the backend so per-set detail isn't local-only.
+      syncPartialToBackend(next);
       return next;
     });
+  }, [syncPartialToBackend]);
+
+  useEffect(() => {
+    return () => { if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current); };
   }, []);
 
   // Restore logged sets from a previous interrupted session.
