@@ -263,6 +263,7 @@ import EditProfileScreen from '../src/screens/EditProfileScreen';
 import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
+import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
@@ -335,6 +336,7 @@ export default function Index() {
   const [trainerNote, setTrainerNote]     = useState<string | null>(null);
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
+  const [needsRecoveryQuestion, setNeedsRecoveryQuestion] = useState(false);
   // Ref so AppState listener can call the latest version of the resume
   // handler without restarting the subscription on every render.
   const resumePlanGenRef = useRef<() => Promise<void>>(async () => {});

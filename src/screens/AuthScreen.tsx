@@ -4,7 +4,7 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image, Dimensions, Alert,
 } from 'react-native';
-import { login, register, resetPassword } from '../services/api';
+import { login, register, resetPassword, getRecoveryQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -15,11 +15,14 @@ interface AuthScreenProps {
 }
 
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
-  const [mode, setMode] = useState<'login' | 'signup' | 'reset'>('login');
+  // Reset flow is two-step: 'reset_email' (enter email + fetch question) → 'reset_answer' (answer + new password)
+  const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>('login');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [recoveryQuestion, setRecoveryQuestion] = useState('');
+  const [recoveryAnswer, setRecoveryAnswer] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -28,45 +31,71 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const usernameRef        = useRef<TextInput>(null);
   const passwordRef        = useRef<TextInput>(null);
   const confirmPasswordRef = useRef<TextInput>(null);
+  const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
 
-  const switchMode = (next: 'login' | 'signup' | 'reset') => {
+  const switchMode = (next: 'login' | 'signup' | 'reset_email' | 'reset_answer') => {
     setMode(next);
     setError('');
     setPassword('');
     setConfirmPassword('');
+    setRecoveryAnswer('');
+    if (next !== 'reset_answer') setRecoveryQuestion('');
     setShowPassword(false);
     setShowConfirmPassword(false);
   };
 
   const handleSubmit = async () => {
     setError('');
+    // Reset step 1: look up question
+    if (mode === 'reset_email') {
+      if (!email.trim()) { setError('Enter your email'); return; }
+      setLoading(true);
+      try {
+        const { question } = await getRecoveryQuestion(email.trim());
+        setRecoveryQuestion(question);
+        setMode('reset_answer');
+      } catch (e: any) {
+        // Surface the backend's generic message — matches failed-answer case.
+        setError(e?.message ?? 'No recovery question available for that email');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Reset step 2: submit answer + new password
+    if (mode === 'reset_answer') {
+      if (!recoveryAnswer.trim()) { setError('Enter your answer'); return; }
+      if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
+      if (password !== confirmPassword) { setError('Passwords do not match'); return; }
+      setLoading(true);
+      try {
+        const { access_token } = await resetPassword(email.trim(), recoveryAnswer.trim(), password);
+        onAuthenticated(access_token, false);
+      } catch (e: any) {
+        setError(e?.message ?? 'Unable to reset password');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Login / signup
     if (!email.trim() || !password.trim()) {
       setError('Email and password are required');
       return;
     }
-    if (mode === 'signup' || mode === 'reset') {
-      if (mode === 'signup' && !username.trim()) {
-        setError('Username is required');
-        return;
-      }
-      if (password !== confirmPassword) {
-        setError('Passwords do not match');
-        return;
-      }
-      if (password.length < 6) {
-        setError('Password must be at least 6 characters');
-        return;
-      }
+    if (mode === 'signup') {
+      if (!username.trim()) { setError('Username is required'); return; }
+      if (password !== confirmPassword) { setError('Passwords do not match'); return; }
+      if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
     }
     setLoading(true);
     try {
       const isNewUser = mode === 'signup';
       if (isNewUser) await register(email.trim(), username.trim(), password);
-      const { access_token } = mode === 'reset'
-        ? await resetPassword(email.trim(), password)
-        : await login(email.trim(), password);
-
+      const { access_token } = await login(email.trim(), password);
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
@@ -120,20 +149,26 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {/* Email */}
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor={colors.textMuted}
-            value={email}
-            onChangeText={setEmail}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="next"
-            onSubmitEditing={() => mode === 'signup' ? usernameRef.current?.focus() : passwordRef.current?.focus()}
-            blurOnSubmit={false}
-          />
+          {/* Email — hidden in reset_answer since the question is shown instead */}
+          {mode !== 'reset_answer' && (
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor={colors.textMuted}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType={mode === 'reset_email' ? 'go' : 'next'}
+              onSubmitEditing={() => {
+                if (mode === 'reset_email') handleSubmit();
+                else if (mode === 'signup') usernameRef.current?.focus();
+                else passwordRef.current?.focus();
+              }}
+              blurOnSubmit={false}
+            />
+          )}
 
           {/* Username (signup only) */}
           {mode === 'signup' && (
@@ -152,32 +187,57 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             />
           )}
 
-          {/* Password */}
-          <View style={styles.passwordRow}>
-            <TextInput
-              ref={passwordRef}
-              style={[styles.input, styles.passwordInput]}
-              placeholder={mode === 'reset' ? 'New password' : 'Password'}
-              placeholderTextColor={colors.textMuted}
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry={!showPassword}
-              returnKeyType={mode === 'login' ? 'go' : 'next'}
-              onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
-              blurOnSubmit={false}
-            />
-            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
-              <Text style={styles.eyeText}>{showPassword ? 'Hide' : 'Show'}</Text>
-            </TouchableOpacity>
-          </View>
+          {/* Recovery question + answer (reset_answer only) */}
+          {mode === 'reset_answer' && (
+            <>
+              <View style={styles.questionBox}>
+                <Text style={styles.questionLabel}>Recovery question</Text>
+                <Text style={styles.questionText}>{recoveryQuestion}</Text>
+              </View>
+              <TextInput
+                ref={answerRef}
+                style={styles.input}
+                placeholder="Your answer"
+                placeholderTextColor={colors.textMuted}
+                value={recoveryAnswer}
+                onChangeText={setRecoveryAnswer}
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="next"
+                onSubmitEditing={() => passwordRef.current?.focus()}
+                blurOnSubmit={false}
+              />
+            </>
+          )}
 
-          {/* Confirm password (signup + reset) */}
-          {(mode === 'signup' || mode === 'reset') && (
+          {/* Password — hidden on reset_email step */}
+          {mode !== 'reset_email' && (
+            <View style={styles.passwordRow}>
+              <TextInput
+                ref={passwordRef}
+                style={[styles.input, styles.passwordInput]}
+                placeholder={mode === 'reset_answer' ? 'New password' : 'Password'}
+                placeholderTextColor={colors.textMuted}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+                returnKeyType={mode === 'login' ? 'go' : 'next'}
+                onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
+                blurOnSubmit={false}
+              />
+              <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
+                <Text style={styles.eyeText}>{showPassword ? 'Hide' : 'Show'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Confirm password (signup + reset_answer) */}
+          {(mode === 'signup' || mode === 'reset_answer') && (
             <View style={styles.passwordRow}>
               <TextInput
                 ref={confirmPasswordRef}
                 style={[styles.input, styles.passwordInput]}
-                placeholder={mode === 'reset' ? 'Confirm new password' : 'Confirm password'}
+                placeholder={mode === 'reset_answer' ? 'Confirm new password' : 'Confirm password'}
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
@@ -200,17 +260,23 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             {loading
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
-                  {mode === 'login' ? 'Log In' : mode === 'reset' ? 'Reset Password' : 'Get Started'}
+                  {mode === 'login'
+                    ? 'Log In'
+                    : mode === 'reset_email'
+                      ? 'Next'
+                      : mode === 'reset_answer'
+                        ? 'Reset Password'
+                        : 'Get Started'}
                 </Text>
             }
           </TouchableOpacity>
 
           {mode === 'login' && (
-            <TouchableOpacity onPress={() => switchMode('reset')} style={styles.forgotBtn}>
+            <TouchableOpacity onPress={() => switchMode('reset_email')} style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Forgot password?</Text>
             </TouchableOpacity>
           )}
-          {mode === 'reset' && (
+          {(mode === 'reset_email' || mode === 'reset_answer') && (
             <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Back to log in</Text>
             </TouchableOpacity>
@@ -281,4 +347,11 @@ const styles = StyleSheet.create({
 
   forgotBtn: { alignSelf: 'center', paddingVertical: 8, marginTop: 2 },
   forgotText: { fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
+
+  questionBox: {
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    padding: 14, backgroundColor: colors.surfaceRaised,
+  },
+  questionLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.8, marginBottom: 4, textTransform: 'uppercase' },
+  questionText: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
 });

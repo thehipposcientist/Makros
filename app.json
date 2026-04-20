@@ -39,7 +39,8 @@
       },
       "entitlements": {
         "com.apple.developer.healthkit": true
-      }
+      },
+      "buildNumber": "2"
     },
     "android": {
       "package": "com.thallo.app",

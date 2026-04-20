@@ -18,6 +18,10 @@ class User(SQLModel, table=True):
     hashed_password: str
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Recovery question pair. Nullable so existing rows migrate cleanly and
+    # so fresh signups can defer the prompt until after first login.
+    recovery_question: str | None = Field(default=None)
+    recovery_answer_hash: str | None = Field(default=None)
 
 
 # ─── User profile / stats ─────────────────────────────────────────────────────
@@ -564,6 +568,7 @@ class UserRead(SQLModel):
     username: str
     is_active: bool
     created_at: datetime
+    has_recovery_question: bool = False
 
 class LoginRequest(SQLModel):
     email: str

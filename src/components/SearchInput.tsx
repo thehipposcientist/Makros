@@ -4,11 +4,11 @@ import {
   TextInput,
   TextInputProps,
   TouchableOpacity,
-  Text,
   StyleSheet,
   StyleProp,
   ViewStyle,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../constants/theme';
 
 /**
@@ -54,7 +54,7 @@ const SearchInput = forwardRef<TextInput, Props>(function SearchInput(
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           accessibilityRole="button"
           accessibilityLabel="Clear search">
-          <Text style={styles.clearBtnText}>Clear</Text>
+          <Ionicons name="close-circle" size={20} color={colors.textMuted} />
         </TouchableOpacity>
       )}
     </View>
@@ -74,32 +74,15 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
   },
   inputWithClear: {
-    // Reserve room for the pill so text doesn't collide with it.
-    paddingRight: 72,
+    // Reserve room for the clear icon so text doesn't collide with it.
+    paddingRight: 36,
   },
   clearBtn: {
-    // Full-height pill that matches the search input's height exactly.
-    // top/bottom:0 stretches the button to fill the input regardless of
-    // the input's concrete height (which varies by screen since we reuse
-    // this component with different styles).
     position: 'absolute',
-    right: 6,
-    top: 4,
-    bottom: 4,
-    paddingHorizontal: 14,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+    right: 10,
+    top: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  clearBtnText: {
-    fontSize: 12,
-    lineHeight: 14,
-    color: colors.textPrimary,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
   },
 });

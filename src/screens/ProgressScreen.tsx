@@ -18,7 +18,8 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey } from '../utils/workoutHistory';
+import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
+import { readHealthSummary, isHealthKitAvailable } from '../services/appleHealth';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
@@ -169,9 +170,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     AsyncStorage.getItem('bodyScanHistory').then(raw => {
       if (raw) try { setBodyScanHistory(JSON.parse(raw)); } catch {}
     });
-    // Load Apple Health data
+    // Load Apple Health data — cached value first, then refresh from HealthKit
+    // so the vitals row reflects live data without requiring a workout finish.
     loadHealthSummary().then(setHealthSummary);
     loadHealthScore().then(setHealthScore);
+    (async () => {
+      try {
+        if (!isHealthKitAvailable()) return;
+        const enabled = await isAppleHealthEnabled();
+        if (!enabled) return;
+        const fresh = await readHealthSummary();
+        if (fresh) {
+          setHealthSummary(fresh);
+          saveHealthSummary(fresh).catch(() => null);
+        }
+      } catch {}
+    })();
     computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
   }, [userProfile.mealsPerDay]);
 
@@ -1114,6 +1128,55 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Scan Tab ─────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Apple Health — live vitals. Rendered only when we have data. */}
+          {healthSummary && (
+            <View style={styles.vitalsCard}>
+              <View style={styles.vitalsHeader}>
+                <Ionicons name="heart-outline" size={16} color={tc.primary} />
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
+                <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Today's vitals</Text>
+              </View>
+              <View style={styles.vitalsGrid}>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.restingHeartRate ?? '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Resting HR</Text>
+                </View>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.lastNightSleepHours != null ? `${healthSummary.lastNightSleepHours}h` : '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Last night</Text>
+                </View>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.avgSteps7d != null ? healthSummary.avgSteps7d.toLocaleString() : '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Steps (7d avg)</Text>
+                </View>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.workouts7d ?? '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Workouts (7d)</Text>
+                </View>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.activeEnergy7d != null ? healthSummary.activeEnergy7d.toLocaleString() : '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Active cal (7d)</Text>
+                </View>
+                <View style={styles.vitalsCell}>
+                  <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
+                    {healthSummary.avgSleepHours7d != null ? `${healthSummary.avgSleepHours7d}h` : '—'}
+                  </Text>
+                  <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Sleep (7d avg)</Text>
+                </View>
+              </View>
+            </View>
+          )}
+
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
             const completedWorkouts = history.filter(s => s.completed);
@@ -1835,6 +1898,23 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     fontWeight: '700',
     color: colors.primary,
   },
+
+  // ── Apple Health vitals card (Body Check tab) ──
+  vitalsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  vitalsHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
+  vitalsTitle: { fontSize: 14, fontWeight: '700' },
+  vitalsSubtitle: { fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginLeft: 'auto' },
+  vitalsGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  vitalsCell: { width: '33.333%', paddingVertical: 8, alignItems: 'center' },
+  vitalsValue: { fontSize: 18, fontWeight: '700' },
+  vitalsLabel: { fontSize: 10, fontWeight: '600', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5 },
 
   // ── Recovery / Apple Health ──
   recoverySection: {

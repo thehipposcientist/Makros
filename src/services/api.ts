@@ -92,10 +92,22 @@ export async function login(email: string, password: string): Promise<{ access_t
   });
 }
 
-export async function resetPassword(email: string, newPassword: string): Promise<{ access_token: string }> {
+export async function resetPassword(email: string, answer: string, newPassword: string): Promise<{ access_token: string }> {
   return request('/auth/reset-password', {
     method: 'POST',
-    body: JSON.stringify({ email, new_password: newPassword }),
+    body: JSON.stringify({ email, answer, new_password: newPassword }),
+  });
+}
+
+export async function getRecoveryQuestion(email: string): Promise<{ question: string }> {
+  return request(`/auth/recovery-question?email=${encodeURIComponent(email)}`, {}, 15000, true);
+}
+
+export async function setRecoveryQuestion(token: string, question: string, answer: string) {
+  return request('/auth/set-recovery-question', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ question, answer }),
   });
 }
 
@@ -1357,7 +1369,7 @@ export async function searchFoodNutrition(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ query, force_ai: opts?.forceAi ?? false }),
-  }, 15000);
+  }, 45000);
 }
 
 /** Enrich food items with micronutrients. Used for routine/custom foods
