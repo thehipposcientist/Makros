@@ -867,16 +867,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Cleanup on unmount
   useEffect(() => {
-    // Nuke any orphaned Live Activities on mount — guards against app
-    // crashes leaving a dead timer card on the lock screen.
-    endAllActivities().catch(() => undefined);
     return () => {
       if (restTimerRef.current) clearInterval(restTimerRef.current);
       cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
-      if (liveActivityIdRef.current) {
-        endRestActivity(liveActivityIdRef.current).catch(() => undefined);
-        liveActivityIdRef.current = null;
-      }
+      // Swallow any error here — we're unmounting, crashes are unrecoverable.
+      try {
+        if (liveActivityIdRef.current) {
+          endRestActivity(liveActivityIdRef.current).catch(() => undefined);
+          liveActivityIdRef.current = null;
+        }
+      } catch {}
     };
   }, []);
 
@@ -1337,22 +1337,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restExerciseNameRef.current = exerciseName;
 
     // Kick off a Live Activity on the lock screen. End any prior one first
-    // (switching exercises mid-rest shouldn't orphan the old card).
+    // (switching exercises mid-rest shouldn't orphan the old card). Wrapped
+    // so any failure in the native bridge can't take down the workout.
     (async () => {
-      if (liveActivityIdRef.current) {
-        await endRestActivity(liveActivityIdRef.current);
-        liveActivityIdRef.current = null;
+      try {
+        if (liveActivityIdRef.current) {
+          await endRestActivity(liveActivityIdRef.current);
+          liveActivityIdRef.current = null;
+        }
+        const id = await startRestActivity({
+          exerciseName,
+          setNumber: 0,
+          totalSets: 0,
+          endDateMs: Date.now() + seconds * 1000,
+          nextSetRecommendation: 'Computing…',
+          themeColorHex: theme.colors.primary,
+          workoutId: `w_${workout.focus}_${Date.now()}`,
+        });
+        liveActivityIdRef.current = id;
+      } catch (e) {
+        console.warn('[ActiveWorkout] Live Activity start failed (non-fatal):', e);
       }
-      const id = await startRestActivity({
-        exerciseName,
-        setNumber: 0,  // Filled in by updateRestActivity once we know the real set count.
-        totalSets: 0,
-        endDateMs: Date.now() + seconds * 1000,
-        nextSetRecommendation: 'Computing…',
-        themeColorHex: theme.colors.primary,
-        workoutId: `w_${workout.focus}_${Date.now()}`,
-      });
-      liveActivityIdRef.current = id;
     })().catch(() => undefined);
 
     restTimerRef.current = setInterval(() => {

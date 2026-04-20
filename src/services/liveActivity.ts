@@ -19,14 +19,20 @@ export interface RestActivityState {
 }
 
 // Lazy-load the native module so non-iOS platforms never touch it.
+// Also guards against the native module being missing from the JS bundle
+// (e.g. running against an older TestFlight IPA that doesn't yet have the
+// ThalloLiveActivityModule compiled in). Any failure in this chain is
+// recoverable — callers degrade to a silent no-op.
 let nativeModule: any = null;
+let loadAttempted = false;
 function getNative(): any {
   if (Platform.OS !== 'ios') return null;
   if (nativeModule) return nativeModule;
+  if (loadAttempted) return null;
+  loadAttempted = true;
   try {
-    // Require lazily so the JS bundle doesn't fail on platforms without
-    // the native module compiled in.
-    nativeModule = require('../../modules/thallo-live-activity').default;
+    const mod = require('../../modules/thallo-live-activity');
+    nativeModule = mod?.default ?? mod ?? null;
     return nativeModule;
   } catch (e) {
     console.warn('[liveActivity] native module not available:', e);

@@ -1,6 +1,110 @@
 # Thallo — Recommendations & Roadmap
 
-Last updated: 2026-04-20
+Last updated: 2026-04-20 (post-first-pilot session)
+
+---
+
+## In Flight / Unstable (as of 2026-04-20 EOD)
+
+Tracking the half-built things so the next session doesn't forget them.
+
+### HealthKit on TestFlight — still broken
+iOS rejects the HealthKit entitlement at runtime despite:
+- App ID has HealthKit capability (verified in Developer Portal)
+- Provisioning profile regenerated fresh (`5SBAWC7KFJ`, synced with no capability drift)
+- Local `npx expo prebuild` produces a clean `.entitlements` with `com.apple.developer.healthkit: true`
+- EAS build log shows `RCTAppleHealthKit` compiling into the IPA
+- iPhone Settings → Thallo shows no Health row (diagnostic: `initHealthKit` has never run successfully)
+
+**Next diagnostic step**: build 11 surfaces the raw iOS error via `Alert` (added `getLastHealthKitError()` in `src/services/appleHealth.ts`). That text is the missing puzzle piece. If still opaque, download the signed IPA from EAS and inspect with `codesign -d --entitlements :- Payload/*.app`.
+
+### Live Activities — scaffolded, not yet built
+All code in place: widget extension target (`targets/resttimer-widget/`), local Expo module (`modules/thallo-live-activity/`), JS service (`src/services/liveActivity.ts`), wiring in `ActiveWorkoutScreen`. Expected 2–4 EAS build iterations before Apple/Xcode accept the widget signing. First build blocked on needing an interactive `eas build` run to register the widget's bundle ID (`com.thallo.app.widget`).
+
+### Recovery Question flow — backend done, client half-wired
+- Backend: `User.recovery_question` + `recovery_answer_hash` columns + `/auth/recovery-question`, `/auth/set-recovery-question`, rewritten `/auth/reset-password` — shipped.
+- Frontend: API client methods + new two-step reset UI in `AuthScreen` — shipped.
+- Frontend: `RecoveryQuestionModal` component exists but **not yet rendered** from `app/index.tsx`. Post-login check for `has_recovery_question` needs to render the modal over the Home screen as a blocking prompt for pre-existing users.
+
+### Notifications v1 — not started
+`expo-notifications` plugin ships and auto-requests permission. No scheduling code yet. V1 scope: workout reminder (daily, training days only) + meal-log nudge (8pm if nothing checked). ~45 min of work.
+
+---
+
+## Performance & Scalability
+
+Ordered roughly by cost-to-fix × impact. Items here are *not blockers* — the app works today — but each pays dividends as users grow past pilot.
+
+### Client
+
+#### Debounced `userState` pushes (HIGH impact, LOW effort)
+Every small change triggers a full `putUserState` call. On a workout with 20 set logs, that's 20 full-blob writes to the backend. Batch via a 2–3s debounce in `pushUserStateToBackend` and the AppState background hook. One write per meaningful pause instead of per-keystroke.
+
+#### Image lazy-loading on exercise library (MEDIUM)
+`Library` tab renders all 201 exercise images up-front. Most users scroll ~20 before bouncing. Use `react-native-reanimated` + an `IntersectionObserver`-like hook (or just `initialNumToRender={15}` on `FlatList` if it's a list) so only visible images load.
+
+#### AsyncStorage write coalescing (MEDIUM)
+Multiple paths write to the same AsyncStorage key within a single render pass (e.g., meal edits → `nutritionPlansByDate` → `mealChecks` → `mealEdits`). Each `setItem` is a disk write. Batch via `multiSet` when more than one key changes in the same tick.
+
+#### JS bundle size audit (LOW, but worth measuring)
+Haven't profiled `npx expo export --platform ios`. Likely candidates for bloat: `react-native-svg` usage for simple shapes, duplicated theme color definitions, dead code from removed features (workout regeneration fallback, legacy topic-picker chat). Run a tree-map analysis (Metro bundle visualizer) and see what's actually loading.
+
+#### Metro-Ready timings
+Cold start time on a fresh install is dominated by:
+1. Metro bundle download (dev) / IPA launch (prod)
+2. Initial `getMe` + `loadProfile` + `pullUserStateFromBackend` all blocking the auth-to-home transition.
+Consider parallelizing item 2 more aggressively — only `getMe` needs to succeed before we render; the profile + state can stream in after.
+
+### Backend
+
+#### App Runner cold start penalty (HIGH impact, MEDIUM effort)
+App Runner scales to 0 during idle. First request after idle takes 5–15s to warm the container. For a pilot where users might open the app hourly at most, every open is a cold start. Two options:
+- **Min instances = 1** (AWS Console → App Runner → Configuration → Instance → Minimum size). ~$15–25/month addition. Eliminates cold starts.
+- **Warm pinger**: CloudWatch Events rule hitting `/health` every 5 min. Free, but slightly hacky. Makes the bill grow via App Runner concurrency if sustained.
+
+#### `progression_insights` N+1 (MEDIUM)
+Noted in existing recs. Batch the per-exercise queries into a single `IN (...)` SQL or eager-load via `selectinload()`.
+
+#### AI response caching (HIGH impact, MEDIUM effort)
+Already noted: `ai_search_cache` table keyed by `(type, normalized_query)`. Expand scope:
+- Cache exercise searches (wger + AI): reuse across ALL users
+- Cache food searches: reuse across ALL users
+- Cache recipe generation: per-user only (ingredients vary)
+Target ~60% cache hit rate after pilot ramp-up. Each hit saves ~2s + ~$0.0002 of OpenAI.
+
+#### `plan_jobs` table unbounded growth (LOW — already pruned)
+Existing 7-day prune runs on startup. If App Runner rarely restarts, prune could lag. Consider a daily-scheduled worker hook (`apscheduler` in-process or an external cron).
+
+#### Query cache for exercise library (LOW)
+The `/exercises` endpoint returns ~200 rows unchanged per user per day. Client caches for an hour via `useMetaData`. Backend could return an `ETag` so subsequent fetches are `304 Not Modified` and skip serialization entirely.
+
+#### RDS pgbouncer / RDS Proxy (LATER)
+Pool_size=20 works now. Past ~50 concurrent users, consider RDS Proxy in front so connection-heavy retries don't DOS the DB.
+
+#### Deferred heavy computations to background tasks (LATER)
+`progression_insights`, `fitness_score`, `health_score` are all computed on-demand synchronously. Under load, move to a nightly worker that materializes per-user rollups, served from a `user_rollups` cache table.
+
+### Network / Infra
+
+#### NAT Gateway reconsideration (architectural)
+Currently App Runner outbound is Public → RDS also Public with `0.0.0.0/0:5432` SG. Fine for pilot. Before opening external testing, switch to Custom VPC + NAT gateway (~$32/mo) so RDS goes private again. Treat as pre-launch hardening.
+
+#### CloudFront in front of `/exercises/image/*` if we ever self-host images
+Today exercise images come from wger.de. If we move to self-hosted (seeded custom images covering the 50 most common lifts), CDN them. Not worth doing until self-hosting happens.
+
+#### App Runner concurrency tuning (LOW)
+Default concurrency per instance is 100. Fine at pilot scale. Revisit when signups pass ~50 users.
+
+### Database
+
+#### EXPLAIN ANALYZE audit post-pilot (HIGH after 1 week of real data)
+Seed 1k rows/user, run each paginated endpoint, confirm index use. Already in the Storage doc; bumping priority.
+
+#### Partial indexes for active entities (MEDIUM)
+`UserGoal(user_id) WHERE is_active=true` exists. Likely other paths benefit: `WorkoutCompletion(user_id) WHERE workout_date >= CURRENT_DATE - 30` for "recent" queries. Measure first.
+
+#### Auto-VACUUM tuning (LATER)
+RDS defaults are fine for <1M rows. Revisit before crossing 10M.
 
 ---
 
@@ -253,10 +357,52 @@ Code exists for reading. Missing: auto-import workouts into fatigue system so st
 #### Workout-Aware Macro Adjustment
 Currently shows tips. Phase 2: adjust actual macro targets by ±10% on hard vs rest days.
 
+### Features — New (2026-04-20 review)
+
+#### Allergens (profile field + AI plan hardening)
+Structured list + freeform "other". Top 8 categories (peanuts, tree nuts, milk, eggs, shellfish, fish, wheat, soy). Plan-gen prompt hardens to avoid the list; UI warns on meal items that contain flagged ingredients. **Defer until any pilot user surfaces an allergy** — premature otherwise, and the liability tradeoff is real.
+
+#### Own Sleep Score (0–100)
+Derive from HealthKit `SleepAnalysis` samples:
+- Duration (7–9h = full) → 50% weight
+- Consistency (7d std-dev of nightly hours, lower = better) → 25% weight
+- Stage quality (% Deep+REM vs total) → 25% weight
+Gated behind ≥4 of last 7 nights having samples so the score doesn't whipsaw. Surface as its own card on Progress > Body Check above fitness score. Pre-req: HealthKit working.
+
+#### Sleep-driven engagement nudge
+One-line tag on Home when sleep is meaningfully off 7d avg:
+- `<6h last night` → "Light day? Deload the top sets."
+- `>8h + low RHR` → "Primed. Go heavy."
+Only fires when delta is ≥1h or recovery marker flips. Requires HealthKit working + sleep score built.
+
+#### Apple Watch workout auto-detect (v1, foreground)
+On app foreground, fetch `workouts7d` from HealthKit, diff against in-app completions; if Apple has one we don't, prompt *"Log this Apple Watch workout? 34 min Strength, 287 cal"* with one-tap confirm. No background delivery entitlement needed. Type-matching is lossy (HK "Traditional Strength Training" is vague about muscle groups) — fallback is to ask the user for focus.
+
+#### Live Activities — rest timer on lock screen
+Already scaffolded (see In Flight section). Ships the rest timer + next-set rec on the iOS lock screen & Dynamic Island, matching the user's theme color. Iteration risk: widget extension signing + provisioning regens. Once stable, foundation for other Live Activities (workout-in-progress view, meal-log nudge card).
+
+#### Notifications v1 (local, no push infra)
+Two notification types:
+- **Workout reminder** — daily at user-picked time, only on training days.
+- **Meal log nudge** — at 8pm, if <50% of today's meals are checked.
+Both togglable in Edit Profile. Local only (no APNs / server-driven pushes). Foundation for more ambitious coaching nudges later.
+
+#### Draft meal persistence (defer)
+After the dedupe fix (2026-04-20), new-meal drafts are lost on app kill before the Save tap. Acceptable default. If users report losing in-progress meals, add a separate `mealDraft` AsyncStorage key decoupled from the plan itself — hydrate on modal open, clear on Save/Cancel.
+
+#### Recovery question blocking modal (finish the half-wired feature)
+Backend + AuthScreen reset flow ship. Missing: render `RecoveryQuestionModal` over Home when `has_recovery_question === false` after login. ~20 min to wire.
+
+#### Social / accountability (future)
+Pair-mode: two users' progress visible to each other. "Your wife just beat her deadlift PR." Requires: backend opt-in social graph, notification infra, privacy UI. Weeks of work. Post-pilot consideration.
+
 ### Polish / Feature
 
-#### Meal Name Editable at Card Level (New)
-Shipped 2026-04-20 — see completed list. Leaving this here for the pattern: other inline-edit opportunities (exercise name on an active workout, workout focus label) could follow the same pattern.
+#### Meal Name Editable at Card Level
+Shipped 2026-04-20. Leaving here for the pattern: other inline-edit opportunities (exercise name on an active workout, workout focus label) could follow the same pattern.
+
+#### Today's Vitals row on Progress (shipped)
+Live RHR + sleep + steps + workouts + active cal from HealthKit, rendered on Body Check sub-tab. **Blocked on HealthKit entitlement working.**
 
 #### Social Sharing
 `react-native-view-shot` + `expo-sharing` installed. Let users share PRs, body scans, workout summaries.
@@ -281,6 +427,23 @@ If the AI search cache sees consistent re-hit traffic on user-added exercises, l
 ---
 
 ## Completed
+
+### 2026-04-20 session (post-TestFlight-1 triage)
+- Password rule: 10 → 8 chars (+ digit) — pilot-friendly, still meets modern floor
+- `getBaseUrl` in `api.ts` ignores `app.json`'s `apiBaseUrl` in dev so local dev client hits `localhost:8000`, not prod (root cause of "my local login is broken")
+- Food-search client timeout 15s → 45s (App Runner cold start + OpenAI can eat 20–30s)
+- Clear button in `SearchInput` swapped from "CLEAR" pill → `close-circle` icon (matches MealEditModal)
+- Apple Health vitals card on Progress > Body Check — RHR, last night sleep, 7d steps / workouts / active cal / avg sleep. Reads fresh `HealthSummary` on mount.
+- Apple Health "Connect" button flow on Progress — 3 states (not connected → Connect button, connected+empty → "Open iOS Settings" deep link, has-data → grid)
+- Raw iOS error surfacing via `getLastHealthKitError()` so TestFlight users can see the actual entitlement rejection text
+- Recovery-question auth flow — backend: schema, `/auth/recovery-question`, `/auth/set-recovery-question`, rewritten `/auth/reset-password` (no more DEV gate, answer is the auth factor). Frontend: API client methods, two-step reset UI in AuthScreen. Modal component built, not yet rendered.
+- `UserRead` response includes `has_recovery_question` flag
+- `ensureFreshInstall()` on app boot clears SecureStore JWT if AsyncStorage is empty — fixes "auto-login into ghost profile after reinstall" (iOS Keychain persists across app delete)
+- Live Activities scaffolding: widget extension target (`targets/resttimer-widget/`), SwiftUI UI with theme-colored progress ring + Dynamic Island layouts, local Expo module with ActivityKit bridge, JS service, ActiveWorkoutScreen integration (start/update/end tied to rest timer lifecycle)
+- `NSSupportsLiveActivities` + frequent-updates flag in app.json
+- `@bacons/apple-targets` plugin added
+- MealEditModal duplicate-meal bug fix: `persistNow` no longer auto-pushes for new meals; Save is single source of truth
+- `api.ts` `resetPassword` signature updated to accept answer param
 
 ### Critical
 - Calorie safety floor restored (1200F / 1500M per day)
