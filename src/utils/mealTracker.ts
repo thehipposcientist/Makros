@@ -204,6 +204,33 @@ export async function clearAllSavedNutritionPlans(): Promise<void> {
   } catch {}
 }
 
+/** Wipe every preserved (checked-off snapshot) meal across all dates.
+ *  Called after a successful plan regeneration — without this, a meal
+ *  the user checked on the OLD plan overlays onto the same date of the
+ *  NEW plan, causing "my day 5/6 meals got changed randomly" — they
+ *  weren't changed, they're old preserved snapshots surfacing. */
+export async function clearAllPreservedMeals(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(PRESERVED_KEY);
+  } catch {}
+}
+
+/** Wipe every per-date meal check. Called after a plan regeneration
+ *  so `meal_<idx>` keys from the old plan don't inadvertently mark
+ *  freshly-generated meals at the same index as already-checked.
+ *  Today's checks are PRESERVED — the user shouldn't re-check meals
+ *  they already ate today just because they regenerated. */
+export async function clearAllMealChecksExceptToday(todayKey: string): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(CHECKS_KEY);
+    if (!raw) return;
+    const map: Record<string, Record<string, boolean>> = JSON.parse(raw);
+    const preserved: Record<string, Record<string, boolean>> = {};
+    if (map[todayKey]) preserved[todayKey] = map[todayKey];
+    await AsyncStorage.setItem(CHECKS_KEY, JSON.stringify(preserved));
+  } catch {}
+}
+
 // ── Preserved meals (survive plan regeneration) ───────────────────────────────
 // When the user checks a meal as eaten, we snapshot its exact content here.
 // On the next loadPlans, the snapshot is merged into the day's meals[] list

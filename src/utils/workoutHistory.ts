@@ -385,47 +385,69 @@ export function applyRoutines(
   const existingMeals = (incoming.meals ?? []).slice();
 
   const activeRoutines = routines.filter(r => r && r.id);
-  const activeRoutineIds = new Set(activeRoutines.map(r => r.id));
-  const activeRoutineSignatures = new Set(
-    activeRoutines.map(r => `${r.name}__${Math.round(r.calories ?? 0)}`),
+  const routinesById = new Map(activeRoutines.map(r => [r.id, r]));
+  const activeRoutineSignatures = new Map(
+    activeRoutines.map(r => [`${r.name}__${Math.round(r.calories ?? 0)}`, r]),
   );
 
-  // Walk current meals and decide what to keep:
-  //   (1) routine-backed (has _routineId) and routine still active → drop;
-  //       we'll rebuild fresh below so edits propagate.
-  //   (2) routine-backed but routine removed → demote to one-off (strip id).
-  //   (3) untagged meal whose name+cals matches an active routine → drop;
-  //       the rebuild below will replace it (avoids duplicating the same
-  //       meal once a routine is freshly pinned).
-  //   (4) any other meal → keep.
-  const kept: MealSuggestion[] = [];
-  const carriedSignatures = new Set<string>();
+  // Walk current meals and UPDATE IN PLACE so array index positions are
+  // preserved. Drop-and-reappend (the old behavior) shifted indices,
+  // which broke check-state keyed by `meal_<idx>` — a user who checked
+  // Meal 3 on Thursday saw Meal 5 appear pre-checked after a routine
+  // edit.
+  //
+  // Rules (now in-place):
+  //   (1) routine-backed meal whose routine is still active → refresh
+  //       macros/foods from the latest routine snapshot, keep position.
+  //   (2) routine-backed meal whose routine was removed → demote to
+  //       one-off (strip _routineId), keep position.
+  //   (3) untagged meal matching an active routine by name+cals →
+  //       upgrade in-place (add _routineId), keep position. Marks the
+  //       routine as "placed" so we don't re-append it later.
+  //   (4) any other meal → keep as-is.
+  const placedRoutineIds = new Set<string>();
+  const inplace: MealSuggestion[] = [];
   for (const m of existingMeals) {
     if (!m || typeof m !== 'object') continue;
     const rid = (m as any)._routineId as string | undefined;
     const sig = `${m.meal}__${Math.round(m.calories ?? 0)}`;
-    if (rid) {
-      if (activeRoutineIds.has(rid)) continue; // case (1)
-      if (carriedSignatures.has(sig)) continue;
-      const { _routineId: _drop, ...rest } = m as any;
-      kept.push({ ...rest, isRoutine: false } as MealSuggestion); // case (2)
-      carriedSignatures.add(sig);
+
+    if (rid && routinesById.has(rid)) {
+      // case (1): refresh macros + foods from the live routine snapshot.
+      const routine = routinesById.get(rid)!;
+      const refreshed = mealFromRoutine(routine);
+      inplace.push({ ...refreshed, _routineId: rid } as MealSuggestion);
+      placedRoutineIds.add(rid);
       continue;
     }
-    if (activeRoutineSignatures.has(sig)) continue; // case (3)
-    if (carriedSignatures.has(sig)) continue;
-    kept.push({ ...m, isRoutine: false });
-    carriedSignatures.add(sig);
+    if (rid) {
+      // case (2): routine was removed; demote.
+      const { _routineId: _drop, ...rest } = m as any;
+      inplace.push({ ...rest, isRoutine: false } as MealSuggestion);
+      continue;
+    }
+
+    const matchingRoutine = activeRoutineSignatures.get(sig);
+    if (matchingRoutine && !placedRoutineIds.has(matchingRoutine.id)) {
+      // case (3): upgrade the untagged meal to a routine-backed one
+      // without moving its position.
+      const refreshed = mealFromRoutine(matchingRoutine);
+      inplace.push({ ...refreshed, _routineId: matchingRoutine.id } as MealSuggestion);
+      placedRoutineIds.add(matchingRoutine.id);
+      continue;
+    }
+
+    inplace.push({ ...m, isRoutine: false });
   }
 
-  const fromRoutines: MealSuggestion[] = activeRoutines.map(r => ({
-    ...mealFromRoutine(r),
-    _routineId: r.id,
-  }) as MealSuggestion);
+  // Append any routines that weren't already in the plan (newly pinned).
+  const appended: MealSuggestion[] = activeRoutines
+    .filter(r => !placedRoutineIds.has(r.id))
+    .map(r => ({ ...mealFromRoutine(r), _routineId: r.id }) as MealSuggestion);
 
   return {
     ...incoming,
-    meals: [...kept, ...fromRoutines],
+    meals: [...inplace, ...appended],
   };
 }
 

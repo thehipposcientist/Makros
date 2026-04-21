@@ -270,7 +270,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions } from '../src/services/api';
-import { clearAllSavedNutritionPlans } from '../src/utils/mealTracker';
+import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -538,10 +538,20 @@ export default function Index() {
       ? aiPlans.nutrition_plans
       : [aiPlans?.nutrition_plan_a, aiPlans?.nutrition_plan_b, aiPlans?.nutrition_plan_c].filter(Boolean);
     if (plansList.length > 0) {
-      // Wipe per-day nutrition saves first. Otherwise stale day-specific
-      // edits from a previous regen shadow the new templates and the user
-      // sees yesterday's plan on every day (variety=1 looked like variety=N).
+      // Wipe per-day nutrition saves, preserved check-off snapshots, and
+      // future-date meal checks. Without wiping preserved + checks, old
+      // plan remnants bleed onto the fresh plan: checked-off meals from
+      // last week's plan overlay onto the new week at the same date, AND
+      // check-state keyed by `meal_<idx>` marks the NEW meals at the same
+      // array position as already-eaten. Today's checks are preserved
+      // (user already ate those meals today — regen shouldn't un-check).
       await clearAllSavedNutritionPlans();
+      await clearAllPreservedMeals();
+      try {
+        const today = new Date();
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        await clearAllMealChecksExceptToday(todayStr);
+      } catch {}
       // Stamp every template with a fresh version. HomeScreen rejects
       // any per-day save / remote day-state whose stamp doesn't match,
       // so stale data from a previous regen can't shadow these.
