@@ -24,7 +24,10 @@ import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/wor
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
-import { computeDietConsistency, DietConsistencyScore } from '../utils/mealTracker';
+import { computeDietConsistency, DietConsistencyScore, getMealChecks } from '../utils/mealTracker';
+import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
+import { getMealCheckTimestamps, computeEatingWindow, weeklyAverageWindow, windowInsightFor } from '../utils/eatingWindow';
+import { proteinTimingInsights, lateEatingInsight } from '../utils/nutritionInsights';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -127,6 +130,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
+  // Gut / longevity signals. All computed client-side from existing plan + check data.
+  const [gutInsights, setGutInsights] = useState<{
+    plantCount: number;
+    plantTier: 'on_track' | 'building' | 'low';
+    plantMessage: string;
+    fiberToday: { grams: number; target: number; pct: number; message: string };
+    eatingWindowToday: { hours: number | null; target: number; message: string };
+    weeklyWindow: { avgHours: number | null; days: number };
+    proteinFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
+    lateEatingFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
+  } | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -173,6 +187,59 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     AsyncStorage.getItem('bodyScanHistory').then(raw => {
       if (raw) try { setBodyScanHistory(JSON.parse(raw)); } catch {}
     });
+
+    // ── Gut / longevity insights — compute from existing meal data ──
+    (async () => {
+      try {
+        const today = new Date();
+        const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        // Rebuild a 7-day window of plans + checks by date for the diversity counter.
+        const plansByDate: Record<string, import('../types').DailyNutritionPlan> = {};
+        const checksByDate: Record<string, Record<string, boolean>> = {};
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(today.getTime() - i * 86400000);
+          const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          const raw = await AsyncStorage.getItem(`mealPlan_${k}`);
+          if (raw) { try { plansByDate[k] = JSON.parse(raw); } catch {} }
+          checksByDate[k] = await getMealChecks(k).catch(() => ({}));
+        }
+        // Fall back to today's passed-in nutritionPlan if AsyncStorage didn't have it.
+        if (!plansByDate[todayKey] && nutritionPlan) plansByDate[todayKey] = nutritionPlan;
+
+        const diversity = computePlantDiversity(plansByDate, checksByDate, 7);
+        const fiberTarget = recommendedFiberTarget(
+          userProfile.physicalStats?.gender,
+          userProfile.physicalStats?.age,
+          userProfile.goal,
+        );
+        const fiber = computeFiberToday(plansByDate[todayKey] ?? null, checksByDate[todayKey] ?? null, fiberTarget);
+
+        const tsMap = await getMealCheckTimestamps();
+        const todayWindow = computeEatingWindow(tsMap, todayKey);
+        const weeklyWindow = weeklyAverageWindow(tsMap, todayKey, 7);
+        // Longevity-goal users default to 12h eating window; everyone else 14h.
+        const windowTarget = (userProfile.goal || '').toLowerCase() === 'longevity' ? 12 : 14;
+        const winInsight = windowInsightFor(todayWindow, windowTarget);
+
+        const proteinInsights = proteinTimingInsights(plansByDate[todayKey] ?? null);
+        const proteinFlag = proteinInsights[0] ? { tier: proteinInsights[0].tier, detail: proteinInsights[0].detail } : null;
+        const lateInsight = lateEatingInsight(todayWindow.lastMealTime);
+        const lateFlag = lateInsight ? { tier: lateInsight.tier, detail: lateInsight.detail } : null;
+
+        setGutInsights({
+          plantCount: diversity.distinctCount,
+          plantTier: diversity.tier,
+          plantMessage: diversity.message,
+          fiberToday: { grams: fiber.grams, target: fiber.target, pct: fiber.pct, message: fiber.message },
+          eatingWindowToday: { hours: todayWindow.windowHours, target: windowTarget, message: winInsight.message },
+          weeklyWindow: { avgHours: weeklyWindow.avgHours, days: weeklyWindow.daysWithData },
+          proteinFlag,
+          lateEatingFlag: lateFlag,
+        });
+      } catch (e) {
+        console.warn('[Progress] gut insights failed:', e);
+      }
+    })();
     // Load Apple Health data — cached value first, then refresh from HealthKit
     // so the vitals row reflects live data without requiring a workout finish.
     loadHealthSummary().then(setHealthSummary);
@@ -1267,6 +1334,87 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
+
+          {/* Longevity & Gut Health — derived from meal logs + check timestamps.
+              Quiet-UX: every row is optional. Only renders rows we have data for. */}
+          {gutInsights && (
+            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View style={styles.vitalsHeader}>
+                <Ionicons name="leaf-outline" size={16} color={tc.primary} />
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Longevity & Gut Health</Text>
+              </View>
+              {/* Plant diversity */}
+              <View style={{ marginBottom: 10 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Plant diversity (7d)</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444' }}>
+                    {gutInsights.plantCount} / 30
+                  </Text>
+                </View>
+                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                  <View style={{
+                    width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
+                    height: 5, borderRadius: 3,
+                    backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
+                  }} />
+                </View>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
+              </View>
+              {/* Fiber today */}
+              <View style={{ marginBottom: 10 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Fiber today</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B' }}>
+                    {gutInsights.fiberToday.grams}g / {gutInsights.fiberToday.target}g
+                  </Text>
+                </View>
+                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                  <View style={{
+                    width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
+                    height: 5, borderRadius: 3,
+                    backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
+                  }} />
+                </View>
+              </View>
+              {/* Eating window */}
+              {gutInsights.eatingWindowToday.hours != null && (
+                <View style={{ marginBottom: 10 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Eating window today</Text>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.eatingWindowToday.hours <= gutInsights.eatingWindowToday.target ? '#22C55E' : '#F59E0B' }}>
+                      {gutInsights.eatingWindowToday.hours}h / ≤{gutInsights.eatingWindowToday.target}h
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                    {gutInsights.weeklyWindow.avgHours != null
+                      ? `7-day avg: ${gutInsights.weeklyWindow.avgHours}h`
+                      : 'Building weekly trend…'}
+                  </Text>
+                </View>
+              )}
+              {/* Late-eating + protein timing flags */}
+              {gutInsights.proteinFlag && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                  <Ionicons
+                    name={gutInsights.proteinFlag.tier === 'good' ? 'checkmark-circle' : 'alert-circle-outline'}
+                    size={14}
+                    color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
+                  />
+                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
+                </View>
+              )}
+              {gutInsights.lateEatingFlag && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                  <Ionicons
+                    name={gutInsights.lateEatingFlag.tier === 'good' ? 'checkmark-circle' : gutInsights.lateEatingFlag.tier === 'watch' ? 'alert-circle-outline' : 'warning-outline'}
+                    size={14}
+                    color={gutInsights.lateEatingFlag.tier === 'good' ? '#22C55E' : gutInsights.lateEatingFlag.tier === 'watch' ? '#F59E0B' : '#EF4444'}
+                  />
+                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.lateEatingFlag.detail}</Text>
+                </View>
+              )}
+            </View>
+          )}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {

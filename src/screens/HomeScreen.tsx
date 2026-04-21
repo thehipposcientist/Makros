@@ -2627,6 +2627,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setCheckedMealsByDate(prev => ({ ...prev, [date]: next }));
     await saveMealChecks(date, next);
     await persistDayState(date, { meal_checks: next });
+    // Record wall-clock time when the user checks a meal — feeds the
+    // eating-window tracker. Only on check (not un-check).
+    if (!wasChecked) {
+      import('../utils/eatingWindow').then(({ recordMealCheckTime }) =>
+        recordMealCheckTime(date, mealType).catch(() => undefined),
+      ).catch(() => undefined);
+    }
     // Snapshot the meal on check, clear on uncheck. Preserved meals survive
     // plan regeneration — loadPlans overlays them after picking a template.
     const plan = nutritionPlansByDate[date];

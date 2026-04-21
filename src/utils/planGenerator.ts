@@ -404,6 +404,9 @@ export function generateDailyNutritionForDate(
 }
 
 const HIGH_PROTEIN_GOALS = new Set(['muscle_gain', 'body_recomp', 'strength', 'toning']);
+// Longevity sits between baseline and high-protein — moderate emphasis
+// to preserve muscle through aging without pushing hard toward hypertrophy.
+const MID_PROTEIN_GOALS = new Set(['longevity']);
 
 // Calorie adjustment per day based on goal + pace
 const CALORIE_ADJUSTMENT: Partial<Record<string, Record<string, number>>> = {
@@ -414,6 +417,9 @@ const CALORIE_ADJUSTMENT: Partial<Record<string, Record<string, number>>> = {
   strength:             { conservative: 200,  moderate: 350,  aggressive: 500  },
   endurance:            { conservative: 100,  moderate: 200,  aggressive: 300  },
   athletic_performance: { conservative: 150,  moderate: 250,  aggressive: 400  },
+  // Longevity aims at maintenance — no surplus, no chronic deficit (chronic
+  // deficits hurt thyroid + muscle over time).
+  longevity:            { conservative: -100, moderate: 0,    aggressive: 100  },
 };
 
 function calculateBMR(profile: UserProfile): number {
@@ -442,9 +448,16 @@ function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
 
   // Age-adjusted protein: older users need more protein per lb to prevent
   // sarcopenia and offset anabolic resistance. 50-65 bumps +15%, 65+ +25%.
-  // Under 50: unchanged (0.75–1.0 g/lb per goal).
+  // Under 50: unchanged.
+  // Protein tiers by goal: high (1.0 g/lb) for hypertrophy goals;
+  // mid (0.85) for longevity — enough to preserve muscle without chasing
+  // growth; baseline (0.75) for general health / maintenance.
   const age = profile.physicalStats.age ?? 30;
-  let proteinPerLb = HIGH_PROTEIN_GOALS.has(profile.goal) ? 1.0 : 0.75;
+  let proteinPerLb = HIGH_PROTEIN_GOALS.has(profile.goal)
+    ? 1.0
+    : MID_PROTEIN_GOALS.has(profile.goal)
+      ? 0.85
+      : 0.75;
   if (age >= 65) proteinPerLb *= 1.25;
   else if (age >= 50) proteinPerLb *= 1.15;
   const protein = Math.round(profile.physicalStats.weightLbs * proteinPerLb);
