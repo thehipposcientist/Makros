@@ -2823,13 +2823,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [persistDayState]);
 
   const handleShuffleMeal = useCallback(async (date: string, mealType: string, meal: MealSuggestion) => {
-    // Regenerate a single meal with a fresh random seed, preserving its
-    // calorie + macro envelope. Uses the client-side template library
-    // (instant, free). If the user wants AI variety later, we can add a
-    // long-press option to call the backend /meals/swap endpoint.
+    // Regenerate a single meal, TARGETING the day's macro envelope (not
+    // just calories). Computes how much cal/protein this meal should hit
+    // based on the day's total target minus what's already claimed by
+    // the OTHER meals. Then generates N candidates with different seeds
+    // and picks the one closest to (cal, protein) target.
     const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
-    if (idx < 0 || !userProfile) return;
-    const calorieTarget = Math.max(100, Math.round(meal.calories || 500));
+    console.log(`[shuffle] START date=${date} mealType=${mealType} idx=${idx} mealName=${meal.meal}`);
+    if (idx < 0 || !userProfile) {
+      console.log(`[shuffle] ABORT idx=${idx} hasProfile=${!!userProfile}`);
+      return;
+    }
 
     const { generateMealSuggestion } = await import('../utils/planGenerator');
     const foodList = meta.foods ?? [];
@@ -2837,14 +2841,112 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     for (const f of foodList) foodMap[f.name.toLowerCase()] = f;
     for (const f of (userProfile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as any;
 
-    const seed = `shuffle:${date}:${idx}:${Date.now()}:${Math.random()}`;
-    const shuffled = generateMealSuggestion(
-      meal.meal || 'Meal',
-      calorieTarget,
-      userProfile.foodsAvailable,
-      foodMap,
-      seed,
-    );
+    // Build a WIDE candidate list. `userProfile.foodsAvailable` is the
+    // user's narrow onboarding preference set (often <15 items) — if we
+    // only use that, per-role pools shrink to 2–3 items and the shuffle
+    // keeps picking the same foods. We layer in the full catalog so the
+    // generator has variety. User preferences + custom foods appear
+    // FIRST in the list, so the seededIndex biases toward them when
+    // pool sizes differ.
+    const prefNames = userProfile.foodsAvailable ?? [];
+    const customNames = (userProfile.customFoods ?? []).map(f => f.name);
+    const catalogNames = Object.keys(foodMap)
+      .filter(n => foodMap[n]) // skip any nulls
+      .map(n => foodMap[n].name);
+    // Dedup (case-insensitive) while preserving preference-first order.
+    const seen = new Set<string>();
+    const wideCandidates: string[] = [];
+    for (const n of [...prefNames, ...customNames, ...catalogNames]) {
+      const key = n.toLowerCase();
+      if (!seen.has(key) && foodMap[key]) {
+        seen.add(key);
+        wideCandidates.push(n);
+      }
+    }
+    console.log(`[shuffle] foodMap=${Object.keys(foodMap).length} prefs=${prefNames.length} custom=${customNames.length} wideCandidates=${wideCandidates.length}`);
+
+    // Compute this meal's share of the day's macro envelope. Start from
+    // the day's targets, subtract every OTHER meal's contribution. What's
+    // left is how much this meal should carry. If day targets are missing
+    // (unusual but possible), fall back to using this meal's existing
+    // macros as the envelope so we at least preserve its current shape.
+    const currentDayPlan = nutritionPlansByDate[date];
+    const hasValidTargets = !!(currentDayPlan?.targets?.calories && currentDayPlan.targets.calories > 0);
+    const dayTargets = hasValidTargets
+      ? currentDayPlan!.targets!
+      : { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    const otherMeals = (currentDayPlan?.meals ?? []).filter((_, i) => i !== idx);
+    const otherCal  = otherMeals.reduce((s, m) => s + (m.calories || 0), 0);
+    const otherPro  = otherMeals.reduce((s, m) => s + (m.protein  || 0), 0);
+    const otherCarb = otherMeals.reduce((s, m) => s + (m.carbs    || 0), 0);
+    const otherFat  = otherMeals.reduce((s, m) => s + (m.fat      || 0), 0);
+
+    // Target for this meal = day_target - others. If no valid day targets,
+    // fall back to the current meal's own macros so the shuffle at least
+    // preserves the meal's existing shape.
+    const mealCalTarget = hasValidTargets
+      ? Math.max(200, Math.round((dayTargets.calories || 0) - otherCal))
+      : Math.max(200, Math.round(meal.calories || 500));
+    const mealProTarget = hasValidTargets
+      ? Math.max(10, Math.round((dayTargets.protein || 0) - otherPro))
+      : Math.max(10, Math.round(meal.protein || 30));
+    const mealCarbTarget = hasValidTargets
+      ? Math.max(10, Math.round((dayTargets.carbs || 0) - otherCarb))
+      : Math.max(10, Math.round(meal.carbs || 40));
+    const mealFatTarget = hasValidTargets
+      ? Math.max(5, Math.round((dayTargets.fat || 0) - otherFat))
+      : Math.max(5, Math.round(meal.fat || 15));
+    console.log(`[shuffle] targets cal=${mealCalTarget} pro=${mealProTarget} carb=${mealCarbTarget} fat=${mealFatTarget} (day_has_targets=${hasValidTargets})`);
+
+    // Generate N candidates with different seeds; score each by how well
+    // it hits (cal, protein, carbs, fat) with protein shortfall treated
+    // as a hard penalty and whole-food candidates favored.
+    const { classifyFood: classifyFoodQuality } = await import('../utils/nutritionScore');
+    const CANDIDATES = 12;
+    let best: { meal: MealSuggestion; score: number } | null = null;
+    for (let i = 0; i < CANDIDATES; i++) {
+      const seed = `shuffle:${date}:${idx}:${Date.now()}:${i}:${Math.random()}`;
+      const candidate = generateMealSuggestion(
+        meal.meal || 'Meal',
+        mealCalTarget,
+        wideCandidates,
+        foodMap,
+        seed,
+      );
+      if (i === 0) {
+        console.log(`[shuffle] first candidate: foods=${candidate.foods.join(',')} cal=${candidate.calories} pro=${candidate.protein}`);
+      }
+
+      const dCal  = Math.abs(candidate.calories - mealCalTarget) / Math.max(1, mealCalTarget);
+      const dCarb = Math.abs((candidate.carbs || 0) - mealCarbTarget) / Math.max(1, mealCarbTarget);
+      const dFat  = Math.abs((candidate.fat || 0) - mealFatTarget) / Math.max(1, mealFatTarget);
+
+      // Protein: asymmetric penalty. Going UNDER target is a real problem
+      // (users undereat protein all the time); going OVER is fine — it
+      // just displaces carbs/fat which are less precious. Shortfall is
+      // heavily penalized; overage gets a small nudge so we don't chase
+      // 500g protein meals either.
+      const proShortfall = Math.max(0, mealProTarget - (candidate.protein || 0)) / Math.max(1, mealProTarget);
+      const proOverage   = Math.max(0, (candidate.protein || 0) - mealProTarget) / Math.max(1, mealProTarget);
+      const dPro = proShortfall * 3.5 + proOverage * 0.3;
+
+      // Whole-food bonus: count whole vs processed items in the picked
+      // foods. Each whole food subtracts from the score (bonus); each
+      // processed food adds (penalty). "unknown" is neutral.
+      let wholeBonus = 0;
+      for (const name of candidate.foods) {
+        const q = classifyFoodQuality(name);
+        if (q === 'whole') wholeBonus -= 0.20;
+        else if (q === 'processed') wholeBonus += 0.35;
+      }
+
+      // All four macros matter; protein-shortfall leads. Whole-food
+      // preference layered on as a score modifier.
+      const score = dPro + dCal * 1.5 + dCarb * 1.0 + dFat * 1.0 + wholeBonus;
+      if (!best || score < best.score) best = { meal: candidate, score };
+    }
+    const shuffled = best?.meal;
+    if (!shuffled) return;
 
     let nextPlan: DailyNutritionPlan | null = null;
     setNutritionPlansByDate(prev => {
@@ -2868,7 +2970,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       await saveNutritionPlan(date, nextPlan);
       await persistDayState(date, { nutrition_plan: nextPlan });
     }
-  }, [userProfile, persistDayState, meta.foods]);
+  }, [userProfile, persistDayState, meta.foods, nutritionPlansByDate]);
 
   const handleRenameMeal = useCallback(async (date: string, mealType: string, newName: string) => {
     const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
