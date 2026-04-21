@@ -749,12 +749,11 @@ export default function Index() {
     // don't leak through. Same user returning? Keep the cache — sign-out
     // should be non-destructive.
     let incomingUserId: string | number | null = null;
+    let incomingUsername: string | null = null;
     try {
       const me = await getMe(token);
       incomingUserId = (me as any)?.id ?? (me as any)?.user_id ?? null;
-      if ((me as any)?.username) {
-        await AsyncStorage.setItem('user_username', (me as any).username);
-      }
+      incomingUsername = (me as any)?.username ?? null;
     } catch {
       incomingUserId = null;
     }
@@ -762,8 +761,14 @@ export default function Index() {
     const userSwitched = incomingUserId != null
       && previousUserId != null
       && String(incomingUserId) !== String(previousUserId);
-    if (incomingUserId != null) {
-      await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
+    // For NEW users we hold off writing user-scoped storage until
+    // onboarding completes — keeps signup ACID. For existing users
+    // we persist now so username/last-user are available immediately.
+    if (!isNewUser) {
+      if (incomingUsername) await AsyncStorage.setItem('user_username', incomingUsername);
+      if (incomingUserId != null) {
+        await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
+      }
     }
 
     // IMPORTANT: we hydrate profile state BEFORE setting authToken. If we
@@ -812,6 +817,16 @@ export default function Index() {
     // signed in across app restarts. Held off until this point so a
     // half-finished signup doesn't leave a stale token on disk.
     await saveAuthToken(authToken);
+    // Also commit the identity keys we held back during sign-up. These
+    // pair with the profile save above so a crash before this line leaves
+    // NO user-scoped trace on disk — fresh signup fully re-runs.
+    try {
+      const me = await getMe(authToken);
+      const uid = (me as any)?.id ?? (me as any)?.user_id ?? null;
+      const uname = (me as any)?.username ?? null;
+      if (uname) await AsyncStorage.setItem('user_username', uname);
+      if (uid != null) await AsyncStorage.setItem(LAST_USER_ID_KEY, String(uid));
+    } catch {}
     syncOnboarding(authToken, stamped).catch(() => null);
 
     // Show loading screen while generating the initial plan.

@@ -785,8 +785,59 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           })}
         </View>
 
-        {/* Advanced goals section removed — only the 8 launch goals are
-            exposed during onboarding. */}
+        {/* Pace — shown inline on the goal step itself whenever the user
+            picks a pace-aware goal (fat loss / bulk / body-recomp / tone).
+            Powers the ETA calc on the Progress screen and the backend
+            calorie delta. Falls back to a hardcoded 3-rung ladder if
+            meta.paces hasn't loaded yet. */}
+        {(() => {
+          const paceAwareGoals = new Set([
+            'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
+            'build_muscle', 'lean_bulk', 'gain_weight',
+            'improve_aesthetics', 'build_glutes', 'build_upper_body', 'build_lower_body',
+            'build_arms', 'build_shoulders',
+            'body_recomp', 'tone', 'get_toned',
+          ]);
+          if (!paceAwareGoals.has(selectedGoal)) return null;
+          const backend = pacesForGoal(selectedGoal, meta.paces);
+          const opts = backend.length > 0
+            ? backend.map(o => ({ value: o.value as string, label: o.label, rate: o.rate }))
+            : [
+                { value: 'conservative', label: 'Steady',     rate: 'Slower, sustainable' },
+                { value: 'moderate',     label: 'Moderate',   rate: 'Balanced' },
+                { value: 'aggressive',   label: 'Aggressive', rate: 'Faster, tighter' },
+              ];
+          return (
+            <View style={{ marginTop: 16 }}>
+              <Text style={styles.fieldLabel}>How fast?</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {opts.map(opt => {
+                  const active = pace === opt.value;
+                  return (
+                    <TouchableOpacity
+                      key={opt.value}
+                      style={{
+                        flex: 1, minWidth: '30%',
+                        paddingVertical: 12, paddingHorizontal: 10, borderRadius: 10,
+                        backgroundColor: active ? colors.primary : colors.surface,
+                        borderWidth: 1, borderColor: active ? colors.primary : colors.border,
+                        alignItems: 'center',
+                      }}
+                      onPress={() => setPace(opt.value as GoalPace)}>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: active ? '#fff' : colors.textPrimary }}>{opt.label}</Text>
+                      {opt.rate ? (
+                        <Text style={{ fontSize: 10, color: active ? '#fff' : colors.textMuted, marginTop: 2, textAlign: 'center' }}>{opt.rate}</Text>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
+                Sets your weekly target rate. Used to estimate when you'll hit your goal.
+              </Text>
+            </View>
+          );
+        })()}
       </View>
     );
   };
@@ -1106,76 +1157,92 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         </Text>
       </View>
 
-      {/* Pace picker — only shown for goals that have a pace dial (fat
-          loss / bulk / toning / body-recomp). Feeds the goal-completion
-          ETA on the Progress screen once the user lands. */}
+      {/* Split preference — only shown for goals where a lifting split
+          matters. Cardio-only / longevity / mobility goals skip this
+          because the planner builds their week around cardio archetypes,
+          not a Push/Pull/Legs rotation. Auto mirrors backend scoring. */}
       {(() => {
-        const paceOpts = pacesForGoal(selectedGoal, meta.paces);
-        if (paceOpts.length === 0) return null;
+        const g = selectedGoal;
+        // Skip entirely for cardio / endurance / mobility / stress goals —
+        // there's no lifting split to choose. The backend plans these via
+        // cardio archetypes directly, so asking the user to pick a split
+        // would be confusing + could over-constrain the planner.
+        const isCardioOnly = /cardio|vo2|aerobic|stamina|running|train_5k|train_10k|train_half|train_marathon|sprint|conditioning/i.test(g);
+        const isMobilityOnly = /mobility|stretch|recovery|stress|sleep|longevity|healthy_aging/i.test(g);
+        if (isCardioOnly || isMobilityOnly) return null;
+
+        const dpw = Math.max(1, Math.min(7, parseInt(daysPerWeek) || 3));
+        // Mirror the backend's deterministic scoring rules so the user
+        // sees WHICH split we'd auto-pick + WHY. Keep this tight.
+        const autoPick = (): { split: string; label: string; reason: string } => {
+          const bulkFamily = /muscle|glute|aesthetic|bulk|gain|arm|shoulder|upper_body|lower_body/i.test(g);
+          const fatFamily  = /fat|lean|cut|tone/i.test(g);
+          const strFamily  = /strength|power|squat|bench|deadlift|ohp|pull/i.test(g);
+          if (dpw <= 2) return { split: 'full_body', label: 'Full Body', reason: 'At 1-2 days, full-body hits every muscle each session for the best frequency.' };
+          if (dpw === 3) return { split: 'full_body', label: 'Full Body', reason: '3 full-body sessions give each muscle 3x/week — higher frequency than a split at this volume.' };
+          if (bulkFamily && dpw >= 5) return { split: 'ppl', label: 'PPL', reason: `Push/Pull/Legs at ${dpw} days hits each muscle 2x/week — the hypertrophy sweet spot.` };
+          if (fatFamily) return { split: 'upper_lower', label: 'Upper/Lower', reason: `Upper/Lower leaves room for cardio days while still hitting every muscle 2x/week.` };
+          if (strFamily) return { split: 'upper_lower', label: 'Upper/Lower', reason: 'Upper/Lower spaces heavy compounds with enough recovery between sessions.' };
+          if (dpw === 4) return { split: 'upper_lower', label: 'Upper/Lower', reason: '4 days splits cleanly into 2 Upper + 2 Lower — balanced and recoverable.' };
+          return { split: 'upper_lower', label: 'Upper/Lower', reason: 'Upper/Lower is the default balance of frequency and recovery for most goals.' };
+        };
+        const hint = autoPick();
+
+        // One-line descriptions shown with every option so the user
+        // knows what each split actually is without having to google.
+        const SPLIT_DESCRIPTIONS: Record<string, string> = {
+          auto:        'Let the planner pick based on your goal and days/week.',
+          ppl:         'Push / Pull / Legs. Rotate 3-day blocks — best for 5-6 days at muscle growth.',
+          upper_lower: 'Alternate upper-body and lower-body days. Great for 4 days + built-in recovery.',
+          full_body:   'Every session hits everything. Highest frequency — fits 2-3 day weeks well.',
+          bro:         'One muscle group per day (Chest / Back / Shoulders / Arms / Legs). Classic 5-day bodybuilding.',
+        };
         return (
           <View style={styles.fieldGroup}>
-            <Text style={styles.fieldLabel}>How fast?</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {paceOpts.map(opt => {
-                const active = pace === opt.value;
+            <Text style={styles.fieldLabel}>Split preference</Text>
+            <View style={{ flexDirection: 'column', gap: 6 }}>
+              {([
+                { value: 'auto',        label: 'Auto' },
+                { value: 'ppl',         label: 'PPL' },
+                { value: 'upper_lower', label: 'Upper / Lower' },
+                { value: 'full_body',   label: 'Full Body' },
+                { value: 'bro',         label: 'Bro Split' },
+              ] as const).map(opt => {
+                const active = preferredSplit === opt.value;
                 return (
                   <TouchableOpacity
                     key={opt.value}
                     style={{
-                      flex: 1, minWidth: '30%',
-                      paddingVertical: 12, paddingHorizontal: 10, borderRadius: 10,
-                      backgroundColor: active ? colors.primary : colors.surface,
-                      borderWidth: 1, borderColor: active ? colors.primary : colors.border,
-                      alignItems: 'center',
+                      paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10,
+                      backgroundColor: active ? colors.primary + '14' : colors.surface,
+                      borderWidth: 1.5, borderColor: active ? colors.primary : colors.border,
                     }}
-                    onPress={() => setPace(opt.value as GoalPace)}>
-                    <Text style={{ fontSize: 13, fontWeight: '800', color: active ? '#fff' : colors.textPrimary }}>{opt.label}</Text>
-                    {opt.rate ? (
-                      <Text style={{ fontSize: 10, color: active ? '#fff' : colors.textMuted, marginTop: 2 }}>{opt.rate}</Text>
-                    ) : null}
+                    onPress={() => setPreferredSplit(opt.value)}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: active ? colors.primary : colors.textPrimary }}>{opt.label}</Text>
+                      {active && <Ionicons name="checkmark-circle" size={16} color={colors.primary} />}
+                    </View>
+                    <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 3, lineHeight: 15 }}>
+                      {SPLIT_DESCRIPTIONS[opt.value]}
+                    </Text>
                   </TouchableOpacity>
                 );
               })}
             </View>
-            <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
-              Sets your weekly target rate. Used to estimate when you'll hit your goal.
-            </Text>
+            {preferredSplit === 'auto' && (
+              <View style={{ marginTop: 10, padding: 10, borderRadius: 10, backgroundColor: colors.primary + '10', borderWidth: 1, borderColor: colors.primary + '44' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <Ionicons name="sparkles-outline" size={12} color={colors.primary} />
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Auto → {hint.label}
+                  </Text>
+                </View>
+                <Text style={{ fontSize: 12, color: colors.textSecondary, lineHeight: 16 }}>{hint.reason}</Text>
+              </View>
+            )}
           </View>
         );
       })()}
-
-      {/* Split preference — auto lets the planner choose based on goal +
-          days/week. Explicit picks override so users who know what they
-          want (PPL fans etc.) don't get forced into full body. */}
-      <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Split preference</Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-          {([
-            { value: 'auto',        label: 'Auto' },
-            { value: 'ppl',         label: 'PPL' },
-            { value: 'upper_lower', label: 'Upper/Lower' },
-            { value: 'full_body',   label: 'Full Body' },
-            { value: 'bro',         label: 'Bro Split' },
-          ] as const).map(opt => {
-            const active = preferredSplit === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={{
-                  paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10,
-                  backgroundColor: active ? colors.primary : colors.surface,
-                  borderWidth: 1, borderColor: active ? colors.primary : colors.border,
-                }}
-                onPress={() => setPreferredSplit(opt.value)}>
-                <Text style={{ fontSize: 13, fontWeight: '700', color: active ? '#fff' : colors.textSecondary }}>{opt.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
-          Auto picks the best split for your goal and schedule. You can change this later.
-        </Text>
-      </View>
     </View>
   );
 

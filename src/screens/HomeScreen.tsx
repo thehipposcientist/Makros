@@ -3851,8 +3851,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
-                    const dayIdx = workoutPlan.days.indexOf(item.workout);
-                    if (dayIdx < 0) return;
+                    // Primary: ref equality. Fallback: match by focus label
+                    // (plans can have stale refs after a re-render cycle).
+                    // Last resort: clamp to `i` if it's a valid plan index.
+                    let dayIdx = workoutPlan.days.indexOf(item.workout);
+                    if (dayIdx < 0) {
+                      dayIdx = workoutPlan.days.findIndex(d => d?.focus === item.workout?.focus);
+                    }
+                    if (dayIdx < 0 && i < workoutPlan.days.length) dayIdx = i;
+                    if (dayIdx < 0) {
+                      console.log('[onChangeFocus] could not resolve dayIdx — aborting', { focus: item.workout?.focus, i });
+                      return;
+                    }
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -6451,7 +6461,11 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                                 ? `Low readiness (${w.readiness}%) — muscles still recovering`
                                 : null;
                           const handlePick = () => {
-                            const apply = () => { if (onToggleSwitch) onToggleSwitch(); onChangeFocus(focus); };
+                            // onChangeFocus itself closes the picker
+                            // (setSwitchDayIdx(-1) at the top), so don't
+                            // toggle here — double-toggling caused the
+                            // panel to re-open or state to race.
+                            const apply = () => { onChangeFocus(focus); };
                             if (warned && warnMsg) {
                               Alert.alert(
                                 `Switch to ${focus}?`,
