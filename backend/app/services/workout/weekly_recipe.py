@@ -1151,6 +1151,7 @@ def generate_weekly_recipe(
     recent_focus_families: tuple[str, ...] | list[str] = (),
     priority_region: str = "balanced",
     muscle_fatigue: dict[str, float] | None = None,
+    user_age: int | None = None,
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -1313,8 +1314,33 @@ def generate_weekly_recipe(
     # Strength-dominant goals (mix.strength >= 0.5) get slightly more
     # allowance for consecutive heavy days; all others bias toward
     # alternating heavy/volume for better recovery.
+    # Age override: 50+ users always get alternating-heavy rules regardless
+    # of goal, because slower recovery makes consecutive heavy days a
+    # disproportionate injury/overtraining risk.
     goal_allows_heavy = profile.mix.strength >= 0.5 or profile.planner_mode == "lifting"
+    if user_age is not None and user_age >= 50:
+        goal_allows_heavy = False
+        logger.info(
+            f"[weekly_recipe] age={user_age}: forcing non-streak heavy-day spacing"
+        )
     final = _space_high_intensity_days(final, goal_allows_heavy_streaks=goal_allows_heavy)
+
+    # Extra-recovery injection for older lifters. Masters athletes (50+)
+    # benefit from an additional mobility/recovery day per week when the
+    # plan is lift-dense. Triggers when: age >= 55, recipe has >=4 lift
+    # days, and there's room to swap in a MOBILITY_FLOW for the last lift.
+    if user_age is not None and user_age >= 55:
+        lift_count = sum(1 for a in final if ARCHETYPE_META[a].category == "lift")
+        mobility_count = sum(1 for a in final if a == DayArchetype.MOBILITY_FLOW)
+        if lift_count >= 4 and mobility_count == 0 and DayArchetype.MOBILITY_FLOW in profile.allowed_archetypes:
+            # Replace the last lift day with mobility.
+            for i in range(len(final) - 1, -1, -1):
+                if ARCHETYPE_META[final[i]].category == "lift":
+                    final[i] = DayArchetype.MOBILITY_FLOW
+                    logger.info(
+                        f"[weekly_recipe] age={user_age}: replaced lift day {i} with MOBILITY_FLOW for age-adjusted recovery"
+                    )
+                    break
     # Intensity spacing can reintroduce focus-family adjacency (e.g.
     # swapping Legs with PushVolume to space intensity puts Push next
     # to PushVolume). One more adjacency sweep to catch this.

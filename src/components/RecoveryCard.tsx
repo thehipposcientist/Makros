@@ -55,8 +55,10 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
   if (!data) return null;
 
   const scoreColor = data.score >= 65 ? '#22C55E' : data.score >= 40 ? '#F59E0B' : '#EF4444';
+  // Fitness-themed iconography instead of battery. Flash = energized,
+  // pulse = steady, hourglass = depleted (needs time).
   const iconName: any =
-    data.score >= 65 ? 'battery-full' : data.score >= 40 ? 'battery-half' : 'battery-dead';
+    data.score >= 65 ? 'flash' : data.score >= 40 ? 'pulse' : 'hourglass-outline';
 
   const iconSize = compact ? 20 : 22;
   const pad = compact ? 10 : 16;

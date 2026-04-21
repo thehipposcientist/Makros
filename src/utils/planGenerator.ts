@@ -440,7 +440,13 @@ function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
   const adjustment = CALORIE_ADJUSTMENT[profile.goal]?.[profile.goalDetails.pace] ?? 0;
   const calories = Math.max(1200, tdee + adjustment);
 
-  const proteinPerLb = HIGH_PROTEIN_GOALS.has(profile.goal) ? 1.0 : 0.75;
+  // Age-adjusted protein: older users need more protein per lb to prevent
+  // sarcopenia and offset anabolic resistance. 50-65 bumps +15%, 65+ +25%.
+  // Under 50: unchanged (0.75–1.0 g/lb per goal).
+  const age = profile.physicalStats.age ?? 30;
+  let proteinPerLb = HIGH_PROTEIN_GOALS.has(profile.goal) ? 1.0 : 0.75;
+  if (age >= 65) proteinPerLb *= 1.25;
+  else if (age >= 50) proteinPerLb *= 1.15;
   const protein = Math.round(profile.physicalStats.weightLbs * proteinPerLb);
 
   return {

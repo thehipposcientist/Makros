@@ -606,6 +606,17 @@ def fitness_composite_score(
     except Exception as e:
         print(f"[fitness-score] strength sub-component query failed (non-fatal): {e}")
 
+    # Look up user's age so the fitness score baselines can be age-banded.
+    user_age: int | None = None
+    try:
+        from app.models import UserProfile as UserProfileModel
+        profile_row = db.exec(
+            select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
+        ).first()
+        user_age = profile_row.age if profile_row else None
+    except Exception:
+        user_age = None
+
     score = compute_fitness_score(
         profiles=profiles,
         bodyweight_lbs=bodyweight_lbs,
@@ -618,6 +629,7 @@ def fitness_composite_score(
         volume_load_lbs=volume_load_lbs,
         distinct_exercises=len(distinct_exercise_names),
         progression_ratio=progression_ratio,
+        user_age=user_age,
     )
     return score.to_dict()
 

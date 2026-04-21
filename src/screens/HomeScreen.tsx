@@ -947,7 +947,7 @@ function inferGroup(text: string): string {
 function buildAvailability(
   workoutPlan: WorkoutPlan,
   history: Awaited<ReturnType<typeof loadWorkoutHistory>>,
-): { items: AvailabilityItem[]; cardioProfile: string | null } {
+): { items: AvailabilityItem[] } {
   const counts: Record<string, number> = {
     Chest: 0,
     Back: 0,
@@ -976,15 +976,7 @@ function buildAvailability(
       pct: Math.max(10, Math.round((value / maxCount) * 100 / 5) * 5),
     }));
 
-  const cyclingHits = history.filter((s) => /cycle|cycling|bike|spin/i.test(`${s.focus} ${(s.exercises ?? []).map(e => e.name).join(' ')}`)).length;
-  const runningHits = history.filter((s) => /run|running|jog|treadmill/i.test(`${s.focus} ${(s.exercises ?? []).map(e => e.name).join(' ')}`)).length;
-  const cardioProfile = cyclingHits > 0
-    ? `Cyclist profile (${cyclingHits} sessions)`
-    : runningHits > 0
-      ? `Runner profile (${runningHits} sessions)`
-      : null;
-
-  return { items, cardioProfile };
+  return { items };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1274,7 +1266,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [currentDate, setCurrentDate] = useState(todayKey());
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
-  const [cardioProfile, setCardioProfile] = useState<string | null>(null);
 
   // Supplement stack (from props — managed by Index so it survives remounts)
   const supplementStack = supplementStackProp;
@@ -1455,7 +1446,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const insight = buildAvailability(workoutPlan, history);
       if (!mounted) return;
       setAvailabilityItems(insight.items);
-      setCardioProfile(insight.cardioProfile);
     })();
     return () => { mounted = false; };
   }, [todayDone, workoutPlan]);
@@ -3709,10 +3699,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            {workoutSubTab === 'plan' && (availabilityItems.length > 0 || cardioProfile) && (
+            {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
               <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
                 <Text style={[styles.insightTitle, { color: themeColors.textPrimary }]}>Muscle Focus</Text>
-                {cardioProfile ? <Text style={[styles.insightSubtitle, { color: themeColors.textSecondary }]}>{cardioProfile}</Text> : null}
                 <View style={styles.insightChips}>
                   {availabilityItems.map(item => (
                     <View key={item.label} style={[styles.insightChip, { borderColor: plannerPalette.strong + '55', backgroundColor: themeColors.surfaceRaised }]}>
@@ -3763,26 +3752,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     if (!workoutPlan || !item.workout) return;
                     const dayIdx = workoutPlan.days.indexOf(item.workout);
                     if (dayIdx < 0) return;
-                    const days = workoutPlan.days;
-
-                    // Warn if adjacent day has the same focus
-                    const prevFocus = dayIdx > 0 ? days[dayIdx - 1]?.focus : null;
-                    const nextFocus = dayIdx < days.length - 1 ? days[dayIdx + 1]?.focus : null;
-                    if (prevFocus === newFocus || nextFocus === newFocus) {
-                      const adjDay = prevFocus === newFocus ? 'yesterday' : 'the next day';
-                      const proceed = await new Promise<boolean>(resolve => {
-                        Alert.alert(
-                          'Same focus back-to-back',
-                          `${adjDay === 'yesterday' ? 'The previous day' : 'The next day'} is already ${newFocus}. ` +
-                          `Training the same muscles two days in a row limits recovery. Continue anyway?`,
-                          [
-                            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-                            { text: 'Do it anyway', onPress: () => resolve(true) },
-                          ],
-                        );
-                      });
-                      if (!proceed) return;
-                    }
+                    // Adjacency is handled by the post-switch rebalance below —
+                    // no need to warn the user pre-swap. The sweep reshuffles
+                    // any conflicting days automatically.
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -3810,31 +3782,112 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           const updatedDays = [...workoutPlan.days];
                           updatedDays[dayIdx] = newDay;
 
-                          // Rebalance: if the swap created a duplicate adjacent
-                          // focus, swap the conflicting neighbor with the old focus
+                          // Rebalance the REMAINDER of the week so the split
+                          // rotation is preserved. After switching day N to
+                          // newFocus, we walk days N+1..end and swap any day
+                          // whose focus collides with the previous day. This
+                          // keeps the overall distribution (same total Push/
+                          // Pull/Legs count) while fixing adjacency.
                           const oldFocus = item.workout.focus;
-                          if (nextFocus === newFocus && dayIdx + 1 < updatedDays.length) {
-                            updatedDays[dayIdx + 1] = { ...updatedDays[dayIdx + 1], focus: oldFocus };
-                            // Regenerate that day too
-                            try {
-                              const rebalanced = await generateWorkoutDay(authToken, {
-                                goal: userProfile.goal,
-                                day_index: dayIdx + 1,
-                                days_per_week: userProfile.daysPerWeek,
-                                session_minutes: userProfile.workoutDurationMinutes ?? 60,
-                                experience: userProfile.experienceLevel ?? 'intermediate',
-                                equipment: userProfile.equipment ?? [],
-                                preferred_split: userProfile.preferredSplit,
-                                priority_region: userProfile.priorityRegion ?? 'balanced',
-                                injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
-                                disliked_exercises: userProfile.dislikedExercises ?? [],
-                                focus_override: oldFocus,
-                              });
-                              if (rebalanced?.day) {
-                                updatedDays[dayIdx + 1] = { ...rebalanced.day, focus: oldFocus };
+
+                          // Build a focus-family normalizer that matches the
+                          // backend's bucketing (push/pull/legs/cardio/etc).
+                          // Recovery and mobility collapse to the SAME family
+                          // ("easy") so the adjacency sweep treats them as
+                          // equivalent — two easy days back-to-back defeats
+                          // the purpose of a rest-like day.
+                          const normFamily = (f?: string): string => {
+                            const s = (f ?? '').toLowerCase();
+                            if (/legs?|quad|glute|hamstring|lower|squat|hinge/.test(s)) return 'legs';
+                            if (/push|chest|tricep|press/.test(s)) return 'push';
+                            if (/pull|back|bicep|lats/.test(s)) return 'pull';
+                            if (/upper/.test(s)) return 'upper';
+                            if (/full.?body|total/.test(s)) return 'full';
+                            if (/cardio|zone.?2|interval|run|bike/.test(s)) return 'cardio';
+                            if (/recover|rest|mobil|stretch|yoga|flow/.test(s)) return 'easy';
+                            return s || 'unknown';
+                          };
+
+                          // Walk forward from day 1 and fix every adjacent
+                          // family duplicate by swapping with a later day
+                          // whose focus differs from BOTH its target and
+                          // the target's new neighbors. The switched day
+                          // (dayIdx) is immutable — we never touch it as
+                          // a swap target OR source, because the user
+                          // explicitly chose that focus.
+                          // Run the pass up to MAX_PASSES times so a swap
+                          // that fixes one adjacency but creates a new one
+                          // downstream gets cleaned up on the next sweep.
+                          const daysToRegen = new Set<number>();
+                          const MAX_PASSES = 4;
+                          for (let pass = 0; pass < MAX_PASSES; pass++) {
+                            let anySwap = false;
+                            for (let i = 1; i < updatedDays.length; i++) {
+                              if (i === dayIdx) continue;  // skip the switched day itself
+                              const prev = normFamily(updatedDays[i - 1]?.focus);
+                              const curr = normFamily(updatedDays[i]?.focus);
+                              if (prev !== curr) continue;
+
+                              // Find ANY other day (past or future, excluding
+                              // dayIdx) whose focus differs from prev, whose
+                              // own neighbors won't conflict after the swap.
+                              let swapAt = -1;
+                              for (let j = 0; j < updatedDays.length; j++) {
+                                if (j === i || j === dayIdx) continue;
+                                const candidate = normFamily(updatedDays[j]?.focus);
+                                if (candidate === prev) continue;
+                                // Check the swap won't create new conflicts at j's position
+                                const prevOfJ = j > 0 ? normFamily(updatedDays[j - 1]?.focus) : '';
+                                const nextOfJ = j < updatedDays.length - 1 ? normFamily(updatedDays[j + 1]?.focus) : '';
+                                // After swap, position j will hold what was at i (= prev).
+                                // That means prev must differ from j's new neighbors.
+                                if (prev === prevOfJ || prev === nextOfJ) continue;
+                                swapAt = j;
+                                break;
                               }
-                            } catch {}
+                              if (swapAt < 0) continue;
+
+                              const tempFocus = updatedDays[i].focus;
+                              updatedDays[i] = { ...updatedDays[i], focus: updatedDays[swapAt].focus };
+                              updatedDays[swapAt] = { ...updatedDays[swapAt], focus: tempFocus };
+                              daysToRegen.add(i);
+                              daysToRegen.add(swapAt);
+                              anySwap = true;
+                            }
+                            if (!anySwap) break;
                           }
+
+                          // Regenerate exercises for each day whose focus label
+                          // changed. Done in parallel; failures fall through
+                          // to just-swap-label as a graceful degradation.
+                          const regenList = Array.from(daysToRegen);
+                          if (regenList.length > 0) {
+                            await Promise.all(
+                              regenList.map(async (di) => {
+                                try {
+                                  const rebalanced = await generateWorkoutDay(authToken, {
+                                    goal: userProfile.goal,
+                                    day_index: di,
+                                    days_per_week: userProfile.daysPerWeek,
+                                    session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                                    experience: userProfile.experienceLevel ?? 'intermediate',
+                                    equipment: userProfile.equipment ?? [],
+                                    preferred_split: userProfile.preferredSplit,
+                                    priority_region: userProfile.priorityRegion ?? 'balanced',
+                                    injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
+                                    disliked_exercises: userProfile.dislikedExercises ?? [],
+                                    focus_override: updatedDays[di].focus,
+                                  });
+                                  if (rebalanced?.day) {
+                                    updatedDays[di] = { ...rebalanced.day, focus: updatedDays[di].focus };
+                                  }
+                                } catch {
+                                  // Keep the focus-label swap even if exercise regen fails.
+                                }
+                              })
+                            );
+                          }
+                          void oldFocus;
 
                           const updatedPlan = { ...workoutPlan, days: updatedDays };
                           setWorkoutPlan(updatedPlan);

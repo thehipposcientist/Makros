@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
-_DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10, 4: 0.05, 5: 0.02}
+_DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10}
 
 # The 12 fatigue dimensions. Matches MuscleGroup enum minus the
 # ultra-granular ones (traps→back, forearms→biceps, adductors→quads).
@@ -55,7 +55,12 @@ class MuscleFatigue:
     def to_dict(self) -> dict[str, float]:
         return {m: round(getattr(self, m, 0.0), 3) for m in FATIGUE_MUSCLES}
 
-    def top_fatigued(self, n: int = 4, threshold: float = 0.3) -> list[tuple[str, float]]:
+    def top_fatigued(self, n: int = 4, threshold: float = 0.12) -> list[tuple[str, float]]:
+        # Threshold lowered from 0.3 → 0.12 when we moved to volume-load-
+        # based fatigue (Apr 2026). The new formula intentionally produces
+        # lower per-muscle values for heavy work (3-5 reps × 0.80 muscular
+        # multiplier), which is physiologically correct but was pushing
+        # real working muscles below the old 0.3 display floor.
         pairs = [(m, getattr(self, m, 0.0)) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")]
         return sorted([(m, v) for m, v in pairs if v >= threshold], key=lambda x: -x[1])[:n]
 
@@ -130,6 +135,32 @@ _MUSCLE_ROLLUP: dict[str, str] = {
 }
 
 
+def _age_fatigue_multiplier(age: int | None) -> float:
+    """Older lifters accumulate fatigue faster and recover slower from the
+    same work. Research on masters athletes shows ~30–50% slower recovery
+    from heavy eccentric work at 50+. We scale fatigue OUTPUT (not input)
+    so the user's next-day readiness reflects their biology.
+
+    Bands:
+      <35     → 1.00× (baseline)
+      35–49   → 1.10×
+      50–59   → 1.20×
+      60–69   → 1.30×
+      70+     → 1.40×
+
+    Missing age defaults to baseline so anonymous/legacy calls don't skew.
+    """
+    if age is None or age < 35:
+        return 1.00
+    if age < 50:
+        return 1.10
+    if age < 60:
+        return 1.20
+    if age < 70:
+        return 1.30
+    return 1.40
+
+
 def _set_stimulus_multipliers(avg_reps: float, avg_rir: float | None) -> tuple[float, float]:
     """Given average reps-per-set (and optional RIR), return (systemic_mult,
     muscular_mult) that reflect how heavy vs volume work differ in their
@@ -169,6 +200,7 @@ def resolve_exercise_fatigue(
     exercises: list[dict],
     intensity: str = "moderate",
     duration_minutes: int = 60,
+    user_age: int | None = None,
 ) -> dict[str, float]:
     """Resolve a list of completed exercises into per-muscle fatigue scores.
 
@@ -190,9 +222,12 @@ def resolve_exercise_fatigue(
     intensity_mult = {"easy": 0.5, "moderate": 1.0, "hard": 1.4}.get(intensity, 1.0)
     fatigue: dict[str, float] = {}
 
-    # Baseline: ~0.08 per set for a "typical" 10-rep working set. Convert
-    # to a per-rep coefficient so total-rep count drives fatigue.
-    base_per_rep = 0.008 * intensity_mult
+    # Baseline: ~0.10 per set for a "typical" 10-rep working set. Convert
+    # to a per-rep coefficient so total-rep count drives fatigue. Slightly
+    # higher than the old 0.08/set anchor (now 0.010/rep) so heavy work
+    # — which gets multiplied by a 0.80 muscular-stimulus mult — still
+    # lands above the display threshold.
+    base_per_rep = 0.010 * intensity_mult
 
     for ex in exercises:
         primary = _MUSCLE_ROLLUP.get(ex.get("primary_muscle", ""), "")
@@ -230,11 +265,18 @@ def resolve_exercise_fatigue(
         sys_base = 0.4 if is_compound else 0.15
         fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult
 
+    # Apply age multiplier to ALL accumulated fatigue (muscular + systemic).
+    # Older athletes recover slower, so a 10-set session fatigues them more
+    # in forward-looking calculations.
+    age_mult = _age_fatigue_multiplier(user_age)
+    if age_mult != 1.0:
+        fatigue = {k: v * age_mult for k, v in fatigue.items()}
+
     # Cap individual muscles at 1.0
     return {k: round(min(1.0, v), 3) for k, v in fatigue.items()}
 
 
-def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duration_minutes: int = 60) -> dict[str, float]:
+def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duration_minutes: int = 60, user_age: int | None = None) -> dict[str, float]:
     """Estimate muscle fatigue from a focus label when no per-exercise data exists."""
     intensity_mult = {"easy": 0.5, "moderate": 1.0, "hard": 1.4}.get(intensity, 1.0)
     dur_mult = max(0.5, min(1.5, duration_minutes / 60.0))
@@ -307,7 +349,13 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
 
     # Don't scale recovery bonuses (negative values) by intensity/duration —
     # a recovery session helps the same whether it's "easy" or 30 vs 60 min.
-    return {k: round(v if v < 0 else min(1.0, v * scale), 3) for k, v in base.items()}
+    # Apply age multiplier to POSITIVE values only — recovery work helps
+    # at the same rate regardless of age.
+    age_mult = _age_fatigue_multiplier(user_age)
+    return {
+        k: round(v if v < 0 else min(1.0, v * scale * age_mult), 3)
+        for k, v in base.items()
+    }
 
 
 # ─── Rolling fatigue / recovery score ─────────��──────────────────────────────
@@ -360,7 +408,7 @@ def compute_rolling_fatigue(
         if not isinstance(wd, date):
             continue
         days_ago = (today - wd).days
-        if days_ago < 0 or days_ago > 5:
+        if days_ago < 0 or days_ago > 3:
             continue
         decay = _DECAY.get(days_ago, 0.0)
         resolved = c.get("resolved_muscle_fatigue")
@@ -381,10 +429,6 @@ def compute_rolling_fatigue(
         if has_positive:
             for muscle, value in resolved.items():
                 if muscle in FATIGUE_MUSCLES and value > 0:
-                    # Days 4-5: only systemic fatigue lingers; local
-                    # muscle fatigue has fully recovered by then.
-                    if days_ago >= 4 and muscle != "systemic":
-                        continue
                     mf.add(muscle, value * decay)
         # Every parsed completion becomes an activity entry so the client
         # can render BOTH "what fatigued me" and "what helped me recover".

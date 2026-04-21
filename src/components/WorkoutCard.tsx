@@ -94,25 +94,36 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
   };
 
   const { estimatedSeconds, estimatedMinutes } = useMemo(() => {
-    const secs = workout.exercises.reduce((total, ex) => {
+    // Per-exercise estimate accounts for THREE things the old formula missed:
+    //   1. Working time per set is ~55s on a real strength set (rack/unrack
+    //      + slower tempo on heavy lifts + form check). Was 45s.
+    //   2. Rest fudge factor of 1.10× — users rarely start the next set the
+    //      second the timer hits 0 (checking phone, breathing, etc).
+    //   3. Transition time between exercises (~45s for strength, ~15s for
+    //      mobility/stretch). Set up new equipment, walk to next station.
+    // Warmup is still NOT added here — the warmup exercise already exists
+    // as a line item in workout.exercises with its own timing.
+    const REST_FUDGE = 1.10;
+    const TRANSITION_STRENGTH_SEC = 45;
+    const TRANSITION_MOBILITY_SEC = 15;
+    const WORK_STRENGTH_SEC = 55;
+    const nonWarmupCount = workout.exercises.filter(e => (e as any)._role !== 'warmup').length;
+    const secs = workout.exercises.reduce((total, ex, idx) => {
       const sets = Number(ex.sets) || 3;
       const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
       const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
+      const restTotal = Math.max(0, sets - 1) * rest * REST_FUDGE;
+      // Transition between exercises (only between, not after last)
+      const isLast = idx === workout.exercises.length - 1;
+      const isMobility = /mobility|stretch|warm.?up|flow|pose|dog|cat|hip|shoulder.dis|dead hang/i.test(ex.name) || (ex as any)._role === 'warmup';
+      const transition = isLast ? 0 : (isMobility ? TRANSITION_MOBILITY_SEC : TRANSITION_STRENGTH_SEC);
+
       if (timedWorkSec != null) {
-        // Timed exercise: actual working time per set + rest between sets.
-        // Mobility/stretch exercises get minimal setup (10s); strength/cardio get 60s.
-        // No extra setup time — the work time + rest already accounts for
-        // transitions. The old +60s per exercise inflated mobility/recovery
-        // estimates by 10+ minutes.
-        return total + sets * timedWorkSec + Math.max(0, sets - 1) * rest;
+        return total + sets * timedWorkSec + restTotal + transition;
       }
-      // Classic strength set: ~45s of work + prescribed rest. The
-      // backend's density budget already bakes ramp-up/warmup time
-      // into its primary-slot cost (primary=12 min includes warmup),
-      // so we do NOT add extra warmup seconds here — that would
-      // double-count against the session_minutes budget.
-      return total + sets * 45 + Math.max(0, sets - 1) * rest;
+      return total + sets * WORK_STRENGTH_SEC + restTotal + transition;
     }, 0);
+    void nonWarmupCount;
     return { estimatedSeconds: secs, estimatedMinutes: Math.max(1, Math.round(secs / 60)) };
   }, [workout.exercises]);
 
@@ -129,7 +140,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
         <StatItem icon="barbell-outline" value={`${workout.exercises.length} exercises`} color={s.strong} />
       </View>
       <Text style={styles.warmupHint}>
-        Includes ~5 min warm-up time at the start of the session.
+        Estimate includes warm-up, set rests, and transitions between exercises.
       </Text>
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}

@@ -383,6 +383,15 @@ def _build_deterministic_workout(
     print(
         f"[plan-gen workout] region={priority_region} focused={focused!r}"
     )
+    # User age — used for age-adjusted recovery, protein targets, fitness
+    # score baselines, heavy-day spacing, warmup scaling.
+    user_age: int | None = None
+    try:
+        if req.physicalStats and getattr(req.physicalStats, "age", None):
+            user_age = int(req.physicalStats.age)
+    except Exception:
+        user_age = None
+
     inputs = PlannerInputs(
         goal=req.goal,
         days_per_week=max(1, min(7, req.daysPerWeek)),
@@ -398,6 +407,7 @@ def _build_deterministic_workout(
         rng_seed=int(user_id or 0),
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
+        user_age=user_age,
     )
 
     history_familiarity: dict[str, int] = {}

@@ -100,6 +100,9 @@ class PlannerInputs:
     # recent_focus_buckets by history.most_recent_completed_focus.
     recent_focus_families: tuple[str, ...] = ()
     muscle_fatigue: dict | None = None  # MuscleFatigue.to_dict() for weekly rotation
+    # User's age — threaded through so the recipe can inject extra rest days
+    # for 50+ users (slower recovery) and the warmup can auto-scale.
+    user_age: int | None = None
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -1105,6 +1108,7 @@ def generate_workout_plan(
         recent_focus_families=inputs.recent_focus_families,
         priority_region=inputs.priority_region,
         muscle_fatigue=inputs.muscle_fatigue,
+        user_age=inputs.user_age,
     )
     logger.debug(
         f"[workout_planner] mode={profile.planner_mode} "
@@ -1373,6 +1377,27 @@ def generate_workout_plan(
         logger.debug(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
     except Exception as e:
         logger.debug(f"[planner] core injection failed (non-fatal): {e}")
+
+    # Age-adjusted warm-up: for 50+ users, prepend an extra joint-prep
+    # warmup to every lift day. Older joints benefit from more prep work,
+    # and the cost (~3-5 min) is a worthwhile trade for injury reduction.
+    if inputs.user_age is not None and inputs.user_age >= 50:
+        _EXTRA_WARMUP = {
+            "name": "Extended Joint Prep",
+            "sets": 1,
+            "reps": "90s flow — mobility + activation",
+            "rest_seconds": 0,
+            "equipment": "bodyweight",
+            "target_weight_lbs": None,
+            "_role": "warmup",
+            "_primary_muscle": "full_body",
+            "notes": "Age-adjusted: extra prep for joint readiness",
+        }
+        for day in days_out:
+            category = day.get("category", "")
+            if category == "lift" and day.get("exercises"):
+                # Prepend so it sits before the regular warmup slot.
+                day["exercises"] = [_EXTRA_WARMUP] + day["exercises"]
 
     plan = {
         "trainerNote": "",

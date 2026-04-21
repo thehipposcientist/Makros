@@ -328,6 +328,17 @@ def generate_single_day(
     except Exception as e:
         logger.debug(f"[generate-day] fatigue check failed: {e}")
 
+    # Look up user's age from profile for age-adjusted planning.
+    user_age: int | None = None
+    try:
+        from app.models import UserProfile as UserProfileModel
+        prof_row = db.exec(
+            select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
+        ).first()
+        user_age = prof_row.age if prof_row else None
+    except Exception:
+        user_age = None
+
     # Build planner inputs
     inputs = PlannerInputs(
         goal=body.goal,
@@ -343,6 +354,7 @@ def generate_single_day(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
+        user_age=user_age,
     )
 
     # Generate full plan (fast — deterministic, no AI)
@@ -664,6 +676,18 @@ def mark_workout_complete(
             .where(WorkoutCompletion.focus_label == body.focus_label)
         ).first()
         if completion_row:
+            # Lookup user's age so fatigue scales correctly with biology.
+            # Missing age defaults to baseline (no scaling) inside the resolver.
+            from app.models import UserProfile as UserProfileModel
+            user_age: int | None = None
+            try:
+                profile_row = db.exec(
+                    select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
+                ).first()
+                user_age = profile_row.age if profile_row else None
+            except Exception:
+                user_age = None
+
             if body.exercises:
                 from app.seed_exercises_data import SEED_EXERCISES
                 seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
@@ -690,12 +714,14 @@ def mark_workout_complete(
                     ex_list,
                     intensity=body.activity_intensity or "moderate",
                     duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
+                    user_age=user_age,
                 )
             else:
                 resolved = resolve_focus_fatigue(
                     body.focus_label,
                     intensity=body.activity_intensity or "moderate",
                     duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
+                    user_age=user_age,
                 )
             completion_row.resolved_muscle_fatigue = resolved
             # If exercises were provided, infer the correct focus from the

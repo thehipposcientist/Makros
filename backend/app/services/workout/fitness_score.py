@@ -434,6 +434,34 @@ def _rating_for(total: float) -> str:
     return "Starting"
 
 
+def _age_strength_threshold_multiplier(age: int | None) -> float:
+    """Scale the strength thresholds down for older users so the same
+    absolute 1RM scores higher. Masters-athlete tables show ~8-12% per
+    decade drop after 40 is normal, so a 60yo squatting 1.3x BW is as
+    impressive as a 30yo squatting 1.5x BW. Multipliers applied to the
+    `_STRENGTH_THRESHOLDS` values (lower multiplier = easier to clear)."""
+    if age is None or age < 35:
+        return 1.00
+    if age < 50:
+        return 0.95
+    if age < 60:
+        return 0.88
+    if age < 70:
+        return 0.78
+    return 0.68
+
+
+def _age_cardio_target_multiplier(age: int | None) -> float:
+    """Relax the 150-min/week cardio target at older ages — maintaining
+    any moderate aerobic volume after 65 is clinically meaningful and
+    the score should reflect that. <50 unchanged."""
+    if age is None or age < 50:
+        return 1.00
+    if age < 65:
+        return 0.87
+    return 0.73
+
+
 def compute_fitness_score(
     *,
     profiles: dict,  # {slug: ExercisePerformance}
@@ -450,20 +478,55 @@ def compute_fitness_score(
     volume_load_lbs: float = 0.0,
     distinct_exercises: int = 0,
     progression_ratio: float = 0.0,
+    user_age: Optional[int] = None,
 ) -> CompositeFitnessScore:
     """Compose the four pillar subscores into a single 0-100 number
     using the fixed pillar weights at the top of the module.
     Caller-side is in `routers/ai/progression.py::fitness_composite_score`.
+
+    Age adjustment: strength thresholds and cardio-volume target are
+    scaled down at older ages so a well-conditioned 65yo can still
+    score in the top band without comparing against 25yo benchmarks.
     """
-    strength = _score_strength(
-        profiles,
-        bodyweight_lbs,
-        patterns_hit=patterns_hit,
-        volume_load_lbs=volume_load_lbs,
-        distinct_exercises=distinct_exercises,
-        progression_ratio=progression_ratio,
-    )
-    cardio = _score_cardio(recent_completions)
+    # Age-adjust the STRENGTH thresholds in place (mutable global copy).
+    # Dropping into a local snapshot avoids stepping on the shared dict
+    # and keeps the function re-entrant for concurrent users.
+    age_mult = _age_strength_threshold_multiplier(user_age)
+    if age_mult != 1.0:
+        # Temporarily patch the threshold lookup by building a scaled
+        # dict and swapping via globals for the nested call. Simpler
+        # than threading another parameter through every strength helper.
+        global _STRENGTH_THRESHOLDS
+        original = _STRENGTH_THRESHOLDS
+        _STRENGTH_THRESHOLDS = {k: v * age_mult for k, v in original.items()}
+    try:
+        strength = _score_strength(
+            profiles,
+            bodyweight_lbs,
+            patterns_hit=patterns_hit,
+            volume_load_lbs=volume_load_lbs,
+            distinct_exercises=distinct_exercises,
+            progression_ratio=progression_ratio,
+        )
+    finally:
+        if age_mult != 1.0:
+            _STRENGTH_THRESHOLDS = original  # noqa: F811
+
+    # Age-adjust cardio target the same way.
+    cardio_mult = _age_cardio_target_multiplier(user_age)
+    if cardio_mult != 1.0:
+        global _CARDIO_Z2_TARGET_MIN_PER_WEEK, _CARDIO_INTERVAL_TARGET_PER_WEEK
+        orig_z2 = _CARDIO_Z2_TARGET_MIN_PER_WEEK
+        orig_int = _CARDIO_INTERVAL_TARGET_PER_WEEK
+        _CARDIO_Z2_TARGET_MIN_PER_WEEK = int(orig_z2 * cardio_mult)
+        _CARDIO_INTERVAL_TARGET_PER_WEEK = max(1, int(orig_int * cardio_mult))
+    try:
+        cardio = _score_cardio(recent_completions)
+    finally:
+        if cardio_mult != 1.0:
+            _CARDIO_Z2_TARGET_MIN_PER_WEEK = orig_z2  # noqa: F811
+            _CARDIO_INTERVAL_TARGET_PER_WEEK = orig_int  # noqa: F811
+
     consistency = _score_consistency(session_count_14d, days_per_week)
     recovery = _score_recovery(recent_sleep_hours, avg_session_rpe)
 

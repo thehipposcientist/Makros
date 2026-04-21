@@ -293,7 +293,7 @@ def get_recent_completions_for_fatigue(
     user_id: int,
     db_session,
     *,
-    days: int = 4,
+    days: int = 3,
 ) -> list[dict]:
     """Fetch recent workout completions as dicts for fatigue scoring.
 
