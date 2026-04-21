@@ -1591,6 +1591,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{remaining.toFixed(1)}</Text>
                         </View>
                       )}
+                      {estimate && (
+                        <View style={{ alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, color: tc.textMuted }}>ETA</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{estimate.label}</Text>
+                          <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }}>
+                            {estimate.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </Text>
+                        </View>
+                      )}
                     </View>
                   );
                 })()}

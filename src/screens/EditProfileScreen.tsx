@@ -241,6 +241,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Goal (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
+  // When a user taps a goal card we now open a preview modal that shows
+  // the full description, rather than selecting on tap. Nothing changes
+  // until they hit Confirm, which guards against accidental macro/target
+  // resets caused by a single stray tap on the grid.
+  const [goalPreviewId, setGoalPreviewId] = useState<string | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<string>(profile.priorityRegion ?? 'balanced');
   // Advanced-goal UI removed — only the 8 launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
@@ -1048,22 +1053,31 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       );
       return;
     }
-    // Theme-only / cosmetic saves go straight through — the user isn't
-    // asking for a plan regen so the confirmation dialog is noise.
-    if (!hasPlanRelevantChanges()) {
-      doHandleSave();
-      return;
+    // Validate target weight direction matches goal intent. A fat-loss
+    // goal with a target HIGHER than current weight (or vice versa) is
+    // almost certainly a typo — block it before regen burns 30-60s on
+    // an inconsistent plan.
+    const cutGoals  = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting']);
+    const bulkGoals = new Set(['build_muscle', 'lean_bulk', 'gain_weight']);
+    if (targetWeight) {
+      const tw = parseFloat(targetWeight);
+      const cw = currentWeight ? parseFloat(currentWeight) : profile.physicalStats?.weightLbs;
+      if (tw > 0 && cw && cw > 0) {
+        if (cutGoals.has(selectedGoal) && tw >= cw) {
+          Alert.alert('Target weight check', `Your goal is fat loss but the target weight (${tw} lb) isn't lower than your current weight (${cw} lb). Lower the target or change the goal.`);
+          return;
+        }
+        if (bulkGoals.has(selectedGoal) && tw <= cw) {
+          Alert.alert('Target weight check', `Your goal is to gain weight but the target weight (${tw} lb) isn't higher than your current weight (${cw} lb). Raise the target or change the goal.`);
+          return;
+        }
+      }
     }
-    // Plan-relevant change — confirm before persisting because the save
-    // triggers a 30-60s plan regeneration.
-    Alert.alert(
-      'Save changes?',
-      'This will update your plan and regenerate it from your new settings. Existing plans for upcoming days will be replaced.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Save', style: 'default', onPress: () => doHandleSave() },
-      ],
-    );
+    // Single confirmation lives at the parent (`handleSaveProfile` in
+    // app/index.tsx) — it shows a themed "Update Plan?" modal that's
+    // more informative than this Alert was, and it KNOWS whether the
+    // change actually triggers a regen. We just hand off here.
+    doHandleSave();
   };
 
   const doHandleSave = async () => {
@@ -1244,15 +1258,62 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 <TouchableOpacity
                   key={g.id}
                   style={[styles.goalCard, active && styles.goalCardActive]}
-                  onPress={() => { setSelectedGoal(g.id); setSelectedModifiers([]); setPace('moderate'); }}
+                  onPress={() => setGoalPreviewId(g.id)}
                   activeOpacity={0.75}>
                   <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={24} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 4 }} />
                   <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>Tap for details</Text>
                 </TouchableOpacity>
               );
             })}
           </View>
         </View>
+
+        {/* Goal preview modal. Opens on any card tap; shows the full
+            description and two buttons. Selection only commits on
+            Confirm so a stray tap doesn't silently blow away the
+            user's pace / target-weight / modifier state. */}
+        <Modal
+          visible={goalPreviewId != null}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setGoalPreviewId(null)}>
+          <View style={{ flex: 1, backgroundColor: '#00000099', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+            {(() => {
+              const g = LAUNCH_GOALS.find(x => x.id === goalPreviewId);
+              if (!g) return null;
+              const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
+              return (
+                <View style={{ backgroundColor: tc.surface, borderRadius: 16, padding: 20, width: '100%', maxWidth: 420, borderWidth: 1, borderColor: tc.border }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={28} color={tc.primary} />
+                    <Text style={{ fontSize: 20, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>{g.label}</Text>
+                  </View>
+                  <Text style={{ fontSize: 14, color: tc.textSecondary, lineHeight: 20, marginBottom: 20 }}>
+                    {g.description}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}
+                      onPress={() => setGoalPreviewId(null)}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center', backgroundColor: tc.primary }}
+                      onPress={() => {
+                        setSelectedGoal(g.id);
+                        setSelectedModifiers([]);
+                        setPace('moderate');
+                        setGoalPreviewId(null);
+                      }}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Select this goal</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            })()}
+          </View>
+        </Modal>
 
         {/* Advanced goals section removed — only the 8 launch goals are
             exposed to users now. The full PRIMARY_GOALS list is still

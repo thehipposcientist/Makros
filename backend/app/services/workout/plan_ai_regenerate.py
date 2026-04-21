@@ -334,6 +334,21 @@ def regenerate_plan_with_ai(
     # Build a name → seed-row index so we can stamp the canonical
     # name (and catch AI hallucinations).
     by_name = {ex.get("name", "").lower(): ex for ex in all_exercises}
+
+    # Route every emitted exercise through the canonical planner helper
+    # so AI-regenerated dicts share the same schema as deterministic
+    # plans (setScheme, targetWeightLbs, weightRecommendation* fields,
+    # full internal metadata). perf_profiles=None here — the caller
+    # in `routers/ai/plans.py` re-runs `_stamp_load_metadata` with
+    # real profiles after accepting the regen, so load fields end up
+    # populated just like the deterministic pipeline.
+    try:
+        from .planner import build_planner_exercise
+        from .prescriptions import Prescription
+    except Exception as exc:
+        print(f"[plan_ai_regenerate] helper import failed: {exc}")
+        return None
+
     valid_days: list[dict] = []
     dropped = 0
     used_names: list[str] = []
@@ -356,20 +371,42 @@ def regenerate_plan_with_ai(
             if seed is None:
                 dropped += 1
                 continue
-            exs_out.append({
-                "name": name,
-                "sets": int(e.get("sets") or 3),
-                "reps": str(e.get("reps") or "8-12"),
-                "restSeconds": int(e.get("rest_seconds") or 90),
-                "equipment": str(e.get("equipment") or ""),
-                # Internal metadata so downstream load-stamping works.
-                "_slug": seed.get("slug"),
-                "_role": "primary" if ei == 0 else ("secondary" if ei < 3 else "isolation"),
-                "_primary_muscle": seed.get("primary_muscle"),
-                "_secondary_muscles": list(seed.get("secondary_muscles") or []),
-                "_rir_target": 2.0,
-                "_ai_regenerated": True,
-            })
+            # Role heuristic preserved: index 0 → primary, 1-2 → secondary,
+            # 3+ → isolation. Passed through as `role` so build_planner_exercise
+            # stamps it on `_role`.
+            role = "primary" if ei == 0 else ("secondary" if ei < 3 else "isolation")
+            pres = Prescription(
+                sets=int(e.get("sets") or 3),
+                reps=str(e.get("reps") or "8-12"),
+                rest_seconds=int(e.get("rest_seconds") or 90),
+                rir_target=2.0,
+            )
+            # Use the canonical seed row (not the AI-echoed name) so all
+            # muscle/equipment/image fields match our seed exactly.
+            seed_with_name = dict(seed)
+            seed_with_name["name"] = name
+            out_ex = build_planner_exercise(
+                seed_with_name,
+                prescription=pres,
+                slot_label=None,
+                role=role,
+                archetype_value=None,
+                training_type=(seed.get("training_type") or None),
+                goal_bucket=goal,
+                experience=experience,
+                perf_profiles=None,
+                all_exercises_by_slug=None,
+            )
+            # Preserve the AI-provided equipment label if set and non-empty;
+            # build_planner_exercise computes one from the seed row, but
+            # the prompt asked the AI to echo the catalog's equipment
+            # string, so prefer that when present.
+            ai_equipment = str(e.get("equipment") or "").strip()
+            if ai_equipment:
+                out_ex["equipment"] = ai_equipment
+            # Mark this exercise as AI-regenerated for downstream debug.
+            out_ex["_ai_regenerated"] = True
+            exs_out.append(out_ex)
             used_names.append(name)
         if exs_out:
             valid_days.append({

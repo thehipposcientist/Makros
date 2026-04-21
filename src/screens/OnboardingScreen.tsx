@@ -369,6 +369,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // Step 4 — Training days
   const [daysPerWeek, setDaysPerWeekRaw] = useState('3');
+  // Preferred split (auto lets the planner pick based on goal + daysPerWeek).
+  // Stored in the profile only when user explicitly overrides.
+  const [preferredSplit, setPreferredSplit] = useState<string>('auto');
   const _defaultDaysOnboarding = (n: number): number[] => {
     const defaults: Record<number, number[]> = {
       1: [1], 2: [1, 4], 3: [1, 3, 5], 4: [1, 2, 4, 5],
@@ -423,6 +426,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const selectGoal = (goalId: string) => {
     if (goalId !== selectedGoal) {
+      // Smooth grow animation when a card takes over full width and
+      // expands its description. 280ms feels snappy without being rushed.
+      LayoutAnimation.configureNext({
+        duration: 280,
+        create: { type: 'easeInEaseOut', property: 'opacity' },
+        update: { type: 'easeInEaseOut' },
+        delete: { type: 'easeInEaseOut', property: 'opacity' },
+      });
       setSelectedGoal(goalId);
       setSelectedModifiers([]); // reset modifiers when goal changes
       setSelectedRegion('balanced');
@@ -443,12 +454,21 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const validate = (): string | null => {
     switch (currentStepKey) {
-      case 'goalRefine':
+      case 'goalRefine': {
         if (targetWeight) {
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
+          // Direction sanity check vs current weight if entered.
+          const cw = parseFloat(weightLbs);
+          if (!isNaN(cw) && cw > 0) {
+            const cutGoals  = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting']);
+            const bulkGoals = new Set(['build_muscle', 'lean_bulk', 'gain_weight']);
+            if (cutGoals.has(selectedGoal) && tw >= cw) return `For fat-loss goals, target weight must be less than current (${cw} lb)`;
+            if (bulkGoals.has(selectedGoal) && tw <= cw) return `For weight-gain goals, target weight must be greater than current (${cw} lb)`;
+          }
         }
         return null;
+      }
       case 'physicalStats': {
         const w = parseFloat(weightLbs);
         const hf = parseInt(heightFeet);
@@ -533,6 +553,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       physicalStats,
       daysPerWeek:            parseInt(daysPerWeek),
       trainingDays:           selectedTrainingDays.length === parseInt(daysPerWeek) ? selectedTrainingDays : undefined,
+      preferredSplit:         preferredSplit === 'auto' ? undefined : preferredSplit,
       workoutDurationMinutes: workoutDuration,
       equipment:              selectedEquipment,
       foodsAvailable,
@@ -662,73 +683,76 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <Text style={styles.stepTitle}>What's Your Goal?</Text>
         <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style. You can change this anytime.</Text>
 
-        {/* Live description of the currently-selected goal. Kept near the
-            top so users see what they're committing to without scrolling. */}
-        {selectedDef && (
-          <View style={{ marginBottom: 16, backgroundColor: colors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.primary + '44' }}>
-            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.primary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Selected goal</Text>
-            <Text style={{ fontSize: 15, fontWeight: '700', color: colors.textPrimary }}>{selectedDef.label}</Text>
-            <Text style={{ fontSize: 13, color: colors.textSecondary, marginTop: 4, lineHeight: 18 }}>{selectedDef.description}</Text>
+        {/* AI goal matcher — bigger, multiline so the user can see what they're typing.
+            Auto-expands as they write more. */}
+        <View style={{
+          marginBottom: 20,
+          backgroundColor: colors.primary + '10',
+          borderRadius: 14,
+          borderWidth: 1.5,
+          borderColor: colors.primary + '55',
+          padding: 14,
+        }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <Ionicons name="sparkles-outline" size={16} color={colors.primary} />
+            <Text style={{ fontSize: 12, fontWeight: '800', color: colors.primary, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+              Describe your goal
+            </Text>
           </View>
-        )}
-
-        {/* AI goal matcher — describe what you want in plain English */}
-        <View style={{ marginBottom: 16 }}>
-          <Text style={{ fontSize: 13, color: colors.textSecondary, marginBottom: 6 }}>Or describe what you want:</Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TextInput
-              style={{
-                flex: 1, backgroundColor: colors.surface, borderRadius: 10,
-                paddingHorizontal: 12, paddingVertical: 10, fontSize: 14,
-                color: colors.textPrimary, borderWidth: 1, borderColor: colors.border,
-              }}
-              placeholder="e.g. I want to lose my belly but keep muscle"
-              placeholderTextColor={colors.textMuted}
-              value={goalQuery}
-              onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); }}
-              returnKeyType="send"
-              onSubmitEditing={async () => {
-                if (!goalQuery.trim() || goalMatchLoading) return;
-                setGoalMatchLoading(true);
-                try {
-                  const res = await matchGoal(goalQuery.trim());
-                  selectGoal(res.goal_id);
-                  setGoalMatchReason(res.reason);
-                } catch {}
-                setGoalMatchLoading(false);
-              }}
-            />
-            <TouchableOpacity
-              style={{
-                backgroundColor: colors.primary, borderRadius: 10,
-                paddingHorizontal: 16, justifyContent: 'center',
-                opacity: goalMatchLoading || !goalQuery.trim() ? 0.5 : 1,
-              }}
-              disabled={goalMatchLoading || !goalQuery.trim()}
-              onPress={async () => {
-                if (!goalQuery.trim()) return;
-                setGoalMatchLoading(true);
-                try {
-                  const res = await matchGoal(goalQuery.trim());
-                  selectGoal(res.goal_id);
-                  setGoalMatchReason(res.reason);
-                } catch {}
-                setGoalMatchLoading(false);
-              }}>
-              {goalMatchLoading
-                ? <ActivityIndicator size="small" color="#fff" />
-                : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find</Text>
-              }
-            </TouchableOpacity>
-          </View>
+          <Text style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 10, lineHeight: 16 }}>
+            Tell Thallo what you want in your own words. The AI picks the best-fit goal for you.
+          </Text>
+          <TextInput
+            style={{
+              backgroundColor: colors.surface, borderRadius: 10,
+              paddingHorizontal: 14, paddingVertical: 14, fontSize: 15,
+              color: colors.textPrimary, borderWidth: 1.5, borderColor: colors.primary + '88',
+              minHeight: 90, textAlignVertical: 'top',
+              marginBottom: 10,
+            }}
+            placeholder="e.g. I want to lose my belly but keep muscle, train 4 days a week, and feel athletic for pickup basketball"
+            placeholderTextColor={colors.textMuted}
+            value={goalQuery}
+            onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); }}
+            multiline
+            scrollEnabled
+          />
+          <TouchableOpacity
+            style={{
+              backgroundColor: colors.primary, borderRadius: 10,
+              paddingVertical: 12, alignItems: 'center', justifyContent: 'center',
+              flexDirection: 'row', gap: 6,
+              opacity: goalMatchLoading || !goalQuery.trim() ? 0.5 : 1,
+            }}
+            disabled={goalMatchLoading || !goalQuery.trim()}
+            onPress={async () => {
+              if (!goalQuery.trim()) return;
+              setGoalMatchLoading(true);
+              try {
+                const res = await matchGoal(goalQuery.trim());
+                selectGoal(res.goal_id);
+                setGoalMatchReason(res.reason);
+              } catch {}
+              setGoalMatchLoading(false);
+            }}>
+            {goalMatchLoading
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <>
+                  <Ionicons name="sparkles" size={14} color="#fff" />
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find my goal</Text>
+                </>
+            }
+          </TouchableOpacity>
           {goalMatchReason && (
-            <Text style={{ fontSize: 12, color: colors.primary, marginTop: 6, fontStyle: 'italic' }}>
+            <Text style={{ fontSize: 12, color: colors.primary, marginTop: 8, fontStyle: 'italic' }}>
               {goalMatchReason}
             </Text>
           )}
         </View>
 
-        {/* Launch goals — the 8 most common */}
+        {/* Launch goals — the 8 most common. Each card shows a short
+            description so users can compare without tapping. Selected
+            card expands to full width for the full text. */}
         <Text style={styles.sectionHeading}>Most popular</Text>
         <View style={styles.goalGrid}>
           {LAUNCH_GOALS.map(g => {
@@ -737,12 +761,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             return (
               <TouchableOpacity
                 key={g.id}
-                style={[styles.goalCard, active && styles.goalCardActive]}
+                style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
                 onPress={() => selectGoal(g.id)}
                 activeOpacity={0.75}
               >
                 <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? colors.primary : colors.textMuted} style={{ marginBottom: 6 }} />
                 <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    color: active ? colors.textSecondary : colors.textMuted,
+                    marginTop: 6,
+                    lineHeight: 15,
+                    textAlign: active ? 'left' : 'center',
+                    width: '100%',
+                  }}
+                  numberOfLines={active ? undefined : 3}
+                >
+                  {g.description}
+                </Text>
               </TouchableOpacity>
             );
           })}
@@ -1069,32 +1106,74 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         </Text>
       </View>
 
-      {/* Recent workout quick-ask */}
+      {/* Pace picker — only shown for goals that have a pace dial (fat
+          loss / bulk / toning / body-recomp). Feeds the goal-completion
+          ETA on the Progress screen once the user lands. */}
+      {(() => {
+        const paceOpts = pacesForGoal(selectedGoal, meta.paces);
+        if (paceOpts.length === 0) return null;
+        return (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>How fast?</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {paceOpts.map(opt => {
+                const active = pace === opt.value;
+                return (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={{
+                      flex: 1, minWidth: '30%',
+                      paddingVertical: 12, paddingHorizontal: 10, borderRadius: 10,
+                      backgroundColor: active ? colors.primary : colors.surface,
+                      borderWidth: 1, borderColor: active ? colors.primary : colors.border,
+                      alignItems: 'center',
+                    }}
+                    onPress={() => setPace(opt.value as GoalPace)}>
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: active ? '#fff' : colors.textPrimary }}>{opt.label}</Text>
+                    {opt.rate ? (
+                      <Text style={{ fontSize: 10, color: active ? '#fff' : colors.textMuted, marginTop: 2 }}>{opt.rate}</Text>
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
+              Sets your weekly target rate. Used to estimate when you'll hit your goal.
+            </Text>
+          </View>
+        );
+      })()}
+
+      {/* Split preference — auto lets the planner choose based on goal +
+          days/week. Explicit picks override so users who know what they
+          want (PPL fans etc.) don't get forced into full body. */}
       <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Did you work out recently?</Text>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          {[
-            { label: 'Today', value: 'today' },
-            { label: 'Yesterday', value: 'yesterday' },
-            { label: 'Not recently', value: '' },
-          ].map(opt => {
-            const active = lastWorkoutContext === opt.value;
+        <Text style={styles.fieldLabel}>Split preference</Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          {([
+            { value: 'auto',        label: 'Auto' },
+            { value: 'ppl',         label: 'PPL' },
+            { value: 'upper_lower', label: 'Upper/Lower' },
+            { value: 'full_body',   label: 'Full Body' },
+            { value: 'bro',         label: 'Bro Split' },
+          ] as const).map(opt => {
+            const active = preferredSplit === opt.value;
             return (
               <TouchableOpacity
                 key={opt.value}
                 style={{
-                  flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center',
+                  paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10,
                   backgroundColor: active ? colors.primary : colors.surface,
                   borderWidth: 1, borderColor: active ? colors.primary : colors.border,
                 }}
-                onPress={() => setLastWorkoutContext(opt.value)}>
+                onPress={() => setPreferredSplit(opt.value)}>
                 <Text style={{ fontSize: 13, fontWeight: '700', color: active ? '#fff' : colors.textSecondary }}>{opt.label}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
         <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
-          This helps us plan your first week. You can always recalibrate your plan later from settings.
+          Auto picks the best split for your goal and schedule. You can change this later.
         </Text>
       </View>
     </View>
@@ -1656,7 +1735,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               );
             }}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <Ionicons name="close" size={20} color={colors.textSecondary} />
+            <Ionicons name="close" size={18} color={colors.textPrimary} />
+            <Text style={styles.exitButtonLabel}>Exit</Text>
           </TouchableOpacity>
         )}
         <View style={styles.header}>
@@ -1719,10 +1799,13 @@ const styles = StyleSheet.create({
   content: { padding: 24, paddingBottom: 200 },
   header: { marginTop: 20, marginBottom: 20 },
   exitButton: {
-    position: 'absolute', top: 16, right: 16, zIndex: 10,
-    width: 36, height: 36, borderRadius: 18,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    position: 'absolute', top: 14, right: 14, zIndex: 10,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
+    backgroundColor: colors.surfaceRaised, borderWidth: 1.5, borderColor: colors.border,
+  },
+  exitButtonLabel: {
+    fontSize: 13, fontWeight: '700', color: colors.textPrimary,
   },
   logo: { width: 360, height: 160 },
   stepCounter: { fontSize: 13, color: colors.textSecondary, marginTop: 8 },

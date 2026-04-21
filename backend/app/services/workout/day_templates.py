@@ -106,14 +106,18 @@ _SPLIT_MIN_DAYS = {
 # ─── Split selector (lifting subsystem) ─────────────────────────────
 
 
-def pick_split(inputs) -> str:
+def pick_split(inputs, *, focused_muscle: Optional[str] = None) -> str:
     """Choose a training split from (days_per_week, goal_bucket,
-    experience, priority_region).
+    experience, priority_region, focused_muscle).
 
     Region-aware: when priority_region is lower_body or upper_body,
     the split selection biases toward structures with higher frequency
     for that region. Used by both the planner's auto-pick AND the
     split-options UI's is_recommended flag.
+
+    Focus-aware: when `focused_muscle` resolves to a FocusProfile, the
+    profile's `split_bias` nudges auto-selection. Explicit user
+    split choice still wins.
 
     Deterministic — same inputs always return the same split."""
     if inputs.preferred_split and inputs.preferred_split != "auto":
@@ -129,6 +133,12 @@ def pick_split(inputs) -> str:
     region = normalize_region(
         getattr(inputs, "priority_region", None)
     )
+
+    # Resolve focus profile. Explicit kwarg takes precedence over the
+    # focused_muscle stored on the inputs dataclass.
+    from .focus_profiles import get_focus_profile
+    focus_id = focused_muscle if focused_muscle is not None else getattr(inputs, "focused_muscle", None)
+    focus_profile = get_focus_profile(focus_id)
 
     if bucket == "endurance":
         return SPLIT_ENDURANCE
@@ -151,6 +161,8 @@ def pick_split(inputs) -> str:
             continue
         score = _base_split_score(split_id, bucket, days, experience)
         score += split_region_bias(region, split_id)
+        if focus_profile is not None:
+            score += focus_profile.split_bias.get(split_id, 0)
         candidates.append((score, split_id))
 
     if not candidates:
@@ -372,21 +384,47 @@ def archetype_to_slots(
     archetype,
     day_index: int,
     days_per_week: int,
+    *,
+    focused_muscle: Optional[str] = None,
 ) -> list[Slot]:
-    """Turn a `DayArchetype` into a concrete slot list."""
+    """Turn a `DayArchetype` into a concrete slot list.
+
+    When `focused_muscle` resolves to a FocusProfile with a slot variant,
+    lower-body archetypes route to the glute-biased variants (and upper
+    archetypes route to chest/back/shoulder-biased variants). Focus
+    arguments that don't have a matching variant fall back to the
+    generic slot builder — callers never need to feature-flag.
+    """
     from .archetypes import DayArchetype as _DA
+    from .focus_profiles import get_focus_profile
+
+    fp = get_focus_profile(focused_muscle)
+    variant = fp.slot_variant if fp is not None else "default"
 
     if archetype == _DA.LIFT_FULL_BODY:
+        if variant == "glute":
+            return _full_body_glute_slots(day_index)
         return _full_body_slots(day_index)
     if archetype == _DA.LIFT_UPPER:
-        return _upper_slots(day_index // 2)
+        ci = day_index // 2
+        if variant == "chest":
+            return _upper_chest_focus_slots(ci)
+        if variant == "back":
+            return _upper_back_focus_slots(ci)
+        if variant == "shoulders":
+            return _upper_shoulders_focus_slots(ci)
+        return _upper_slots(ci)
     if archetype == _DA.LIFT_LOWER:
+        if variant == "glute":
+            return _lower_hypertrophy_glute_slots()
         return _lower_slots(day_index // 2)
     if archetype == _DA.LIFT_PUSH:
         return _push_slots()
     if archetype == _DA.LIFT_PULL:
         return _pull_slots()
     if archetype == _DA.LIFT_LEGS:
+        if variant == "glute":
+            return _legs_glute_slots()
         return _legs_slots()
     if archetype == _DA.LIFT_BRO_CHEST:
         return _BRO_SLOT_SEQUENCE[0]
@@ -397,6 +435,8 @@ def archetype_to_slots(
     if archetype == _DA.LIFT_BRO_ARMS:
         return _BRO_SLOT_SEQUENCE[3]
     if archetype == _DA.LIFT_BRO_LEGS:
+        if variant == "glute":
+            return _legs_heavy_glute_slots()
         return _BRO_SLOT_SEQUENCE[4]
     if archetype == _DA.LIFT_STRENGTH_MAINTENANCE:
         return _strength_maintenance_slots()
@@ -405,22 +445,36 @@ def archetype_to_slots(
     if archetype == _DA.LIFT_UPPER_HEAVY:
         return _upper_heavy_slots()
     if archetype == _DA.LIFT_UPPER_HYPERTROPHY:
+        if variant == "chest":
+            return _upper_chest_focus_slots(0)
+        if variant == "back":
+            return _upper_back_focus_slots(0)
+        if variant == "shoulders":
+            return _upper_shoulders_focus_slots(0)
         return _upper_hypertrophy_slots()
     if archetype == _DA.LIFT_LOWER_HEAVY:
+        if variant == "glute":
+            return _lower_heavy_glute_slots()
         return _lower_heavy_slots()
     if archetype == _DA.LIFT_LOWER_HYPERTROPHY:
+        if variant == "glute":
+            return _lower_hypertrophy_glute_slots()
         return _lower_hypertrophy_slots()
     if archetype == _DA.LIFT_PUSH_HEAVY:
         return _push_heavy_slots()
     if archetype == _DA.LIFT_PULL_HEAVY:
         return _pull_heavy_slots()
     if archetype == _DA.LIFT_LEGS_HEAVY:
+        if variant == "glute":
+            return _legs_heavy_glute_slots()
         return _legs_heavy_slots()
     if archetype == _DA.LIFT_PUSH_VOLUME:
         return _push_volume_slots()
     if archetype == _DA.LIFT_PULL_VOLUME:
         return _pull_volume_slots()
     if archetype == _DA.LIFT_LEGS_VOLUME:
+        if variant == "glute":
+            return _legs_volume_glute_slots()
         return _legs_volume_slots()
     if archetype == _DA.LIFT_FULL_BODY_STRENGTH:
         return _full_body_strength_slots()

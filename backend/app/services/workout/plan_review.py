@@ -136,11 +136,20 @@ def build_plan_brief(
     focused_muscle: Optional[str] = None,
     secondary_goal: Optional[str] = None,
     goal_details: Optional[dict] = None,
+    user_preferred_split: Optional[str] = None,
+    skipped_days_7d: Optional[list] = None,
 ) -> dict:
     """Compact JSON brief the AI reviewer will read.
 
-    Contents:
+    Contents (every key is always present — missing data is represented
+    by None / empty list so the reviewer prompt has stable field
+    lookups):
       - user context: goal, experience, days/week, focused muscle, injuries
+      - `user_preferred_split`: the user's chosen split id ("ppl", etc.)
+        or None. Reviewer must not propose change_focus patches that
+        break this split identity.
+      - `skipped_days_7d`: list of focus strings the user has skipped
+        in the last 7 days, or None when the caller didn't pass any.
       - `recent_completed`: the user's last ~3 days of finished workouts
         (focus, workout_date, days_ago, duration) so the reviewer can
         reason about time gaps numerically — e.g. "legs 1 day ago" vs
@@ -148,12 +157,15 @@ def build_plan_brief(
       - `plan_days`: every day of the proposed plan, with up to
         `BRIEF_MAX_EXERCISES_PER_DAY` exercises per day, each stamped
         with `days_from_today` assuming day_index 0 = tomorrow
-      - `completed_day_focuses`: set of focus strings the user has
-        ALREADY done today. Plan days matching any of these focuses
-        on day_index 0 (tomorrow) are back-to-back risks.
+      - `completed_today_focuses` / `completed_yesterday_focuses`:
+        focuses the user completed today / yesterday. Plan days
+        matching any "today" focus on day_index 0 are back-to-back
+        risks (the reviewer is told not to patch them).
 
     The brief is a pure function of the plan dict + caller-provided
-    context — this module never touches the DB.
+    context — this module never touches the DB. Callers (e.g. the
+    /plans route) may supplement the returned dict with additional
+    transient keys before sending to the reviewer.
     """
     from datetime import date as _date
 
@@ -272,6 +284,10 @@ def build_plan_brief(
         "experience": experience,
         "focused_muscle": focused_muscle,
         "injuries": list(injuries or ()),
+        # The reviewer prompt references these two fields; always emit
+        # them (None when absent) so the prompt's field lookups are safe.
+        "user_preferred_split": user_preferred_split,
+        "skipped_days_7d": list(skipped_days_7d) if skipped_days_7d else None,
         "recent_completed": recent_brief,
         # Focuses the user has already finished TODAY. Plan days whose
         # focus overlaps with any of these should NEVER be patched —
@@ -583,6 +599,49 @@ def apply_patches(
     return plan, applied
 
 
+def _rehydrate_derived_fields(ex_out: dict) -> None:
+    """Rebuild derived planner fields (setScheme) on an existing
+    planner-output exercise dict that a patch just mutated. Keeps
+    role/slot/muscle metadata from the original untouched.
+
+    Uses `build_set_scheme` directly — we don't have the raw seed row
+    here, just the synthesized exercise dict — so starting weights from
+    the user's performance profile are NOT re-derived. The setScheme
+    still picks up the new sets/reps/rir and carries whatever load was
+    stamped on the dict (or null if the swap dropped it).
+    """
+    try:
+        from .set_programming import build_set_scheme  # noqa: WPS433
+    except Exception:
+        return
+    exercise_stub = {
+        "slug": ex_out.get("_slug"),
+        "name": ex_out.get("name"),
+        "primary_muscle": ex_out.get("_primary_muscle"),
+        "secondary_muscles": ex_out.get("_secondary_muscles") or [],
+        "movement_pattern": ex_out.get("_movement_pattern"),
+        "is_compound": ex_out.get("_role") in ("primary", "compound"),
+        "equipment_bucket": ex_out.get("_equipment_bucket")
+            or ("bodyweight" if (ex_out.get("equipment") or "").lower() == "bodyweight" else None),
+    }
+    try:
+        scheme = build_set_scheme(
+            exercise_stub,
+            total_sets=int(ex_out.get("sets") or 1),
+            reps=str(ex_out.get("reps") or ""),
+            rir_target=float(ex_out.get("_rir_target") or 2.0),
+            target_weight_lbs=ex_out.get("targetWeightLbs"),
+            goal_bucket=str(ex_out.get("_goal_bucket") or ""),
+            role=str(ex_out.get("_role") or "accessory"),
+            experience=str(ex_out.get("_experience") or "intermediate"),
+        )
+        ex_out["setScheme"] = [s.to_dict() for s in scheme]
+    except Exception:
+        # If the rep range is unparsable or other issues, leave
+        # setScheme as whatever it was; don't crash patch application.
+        ex_out.setdefault("setScheme", [])
+
+
 def _apply_one(days: list[dict], p: PlanPatch) -> str:
     if not (0 <= p.day_index < len(days)):
         return f"skip {p.action}: day_index {p.day_index} out of range"
@@ -609,13 +668,27 @@ def _apply_one(days: list[dict], p: PlanPatch) -> str:
         if not p.new_name:
             return "skip swap_exercise: no new_name provided"
         old = exs[p.exercise_index]
+        # After a swap we no longer trust the OLD exercise's target
+        # weight or slot-specific set scheme — the movement is different
+        # (possibly different equipment, different muscle). Drop stale
+        # load metadata and let `_rehydrate_derived_fields` rebuild the
+        # setScheme with the new sets/reps.
         new_ex = {
             "name": p.new_name,
             "sets": p.new_sets if p.new_sets is not None else old.get("sets", 3),
             "reps": p.new_reps or old.get("reps", "8-12"),
             "restSeconds": p.new_rest_seconds if p.new_rest_seconds is not None else old.get("restSeconds", 90),
             "equipment": p.new_equipment or old.get("equipment", "bodyweight"),
-            # Preserve role metadata so set-scheme stamping still works.
+            # Drop stale load / recommendation metadata — the exercise
+            # changed, so a weight targeted at the old movement is
+            # meaningless. Downstream load recommendation will re-stamp
+            # on next load.
+            "targetWeightLbs": None,
+            "weightRecommendationSource": None,
+            "weightRecommendationConfidence": None,
+            "weightRecommendationReason": None,
+            # Preserve role / slot / muscle metadata so set-scheme
+            # stamping still works with the right role context.
             "_role": old.get("_role"),
             "_slot": old.get("_slot"),
             "_rir_target": old.get("_rir_target"),
@@ -623,6 +696,7 @@ def _apply_one(days: list[dict], p: PlanPatch) -> str:
             "_secondary_muscles": old.get("_secondary_muscles"),
             "_review_patched": True,
         }
+        _rehydrate_derived_fields(new_ex)
         exs[p.exercise_index] = new_ex
         return f"swap day={p.day_index} idx={p.exercise_index} {old.get('name')!r}→{p.new_name!r} ({p.reason})"
 
@@ -641,6 +715,9 @@ def _apply_one(days: list[dict], p: PlanPatch) -> str:
             changed.append(f"rest {ex.get('restSeconds')}→{p.new_rest_seconds}")
             ex["restSeconds"] = p.new_rest_seconds
         ex["_review_patched"] = True
+        # Rebuild setScheme with the new sets/reps/rir so downstream
+        # per-set UI and progression engines see the right shape.
+        _rehydrate_derived_fields(ex)
         return f"change_sets_reps day={p.day_index} idx={p.exercise_index} " + ", ".join(changed) + f" ({p.reason})"
 
     if p.action == "add_exercise":
@@ -652,9 +729,17 @@ def _apply_one(days: list[dict], p: PlanPatch) -> str:
             "reps": p.new_reps or "8-12",
             "restSeconds": p.new_rest_seconds if p.new_rest_seconds is not None else 90,
             "equipment": p.new_equipment or "bodyweight",
+            "targetWeightLbs": None,
+            "weightRecommendationSource": None,
+            "weightRecommendationConfidence": None,
+            "weightRecommendationReason": None,
             "_role": "accessory",
+            "_rir_target": 2.0,
+            "_primary_muscle": None,
+            "_secondary_muscles": [],
             "_review_patched": True,
         }
+        _rehydrate_derived_fields(new_ex)
         day["exercises"] = list(exs) + [new_ex]
         return f"add day={p.day_index} name={p.new_name!r} ({p.reason})"
 

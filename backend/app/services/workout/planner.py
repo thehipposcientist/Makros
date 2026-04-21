@@ -244,8 +244,12 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
     - upper_body: upper muscles get 1.2x, lower muscles get 0.9x
     - balanced: no adjustment
 
+    Applies a focused-muscle +30% boost (min +2 sets) on top of region
+    priority. Keeps the volume-deficit scoring bias pulling extra work
+    toward the focused muscle even after generic targets are met.
     """
     from .region_priority import normalize_region, region_volume_multipliers
+    from .focus_profiles import get_focus_profile
     bucket = _goal_bucket(inputs.goal)
     base = _WEEKLY_VOLUME.get((bucket, inputs.experience), _DEFAULT_VOLUME).copy()
 
@@ -259,6 +263,15 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
                 adjusted = round(base[muscle] * mult)
                 cap = cap_source.get(muscle, adjusted) + 3
                 base[muscle] = min(adjusted, cap)
+
+    # Focused-muscle volume boost (+30%, rounded up, min +2 sets)
+    focus_profile = get_focus_profile(inputs.focused_muscle)
+    if focus_profile is not None:
+        muscle = focus_profile.muscle
+        if muscle in base:
+            current = base[muscle]
+            boosted = max(current + 2, int(round(current * 1.3)))
+            base[muscle] = boosted
 
     return base
 
@@ -945,6 +958,92 @@ def _equipment_label(exercise: dict) -> str:
 
 
 
+# Canonical keys every "planned exercise" dict the planner emits should
+# carry. Optional fields default to None rather than being missing so
+# downstream consumers (plan_review, AI regenerate, progression,
+# frontend) can rely on a stable shape.
+_CANONICAL_PLANNED_EXERCISE_KEYS: tuple[str, ...] = (
+    "name", "sets", "reps", "restSeconds", "equipment", "image_url",
+    "targetWeightLbs",
+    "weightRecommendationSource", "weightRecommendationConfidence", "weightRecommendationReason",
+    "setScheme",
+    "_slug", "_slot", "_role", "_rir_target",
+    "_primary_muscle", "_secondary_muscles",
+    "_archetype", "_training_type",
+)
+
+
+def build_planner_exercise(
+    exercise: dict,
+    *,
+    prescription,
+    slot_label: str | None,
+    role: str,
+    archetype_value: str | None,
+    training_type: str | None,
+    goal_bucket: str,
+    experience: str,
+    perf_profiles: dict | None = None,
+    all_exercises_by_slug: dict | None = None,
+) -> dict:
+    """Build the canonical planner-output exercise dict from a seed
+    exercise row + prescription. SINGLE source of truth for the shape
+    of a planned exercise — every producer (main day-builder, weekly
+    core injection, AI-regenerate rehydration, patch rehydration)
+    should route through this helper.
+
+    Guarantees:
+      * Keys are camelCase at the external surface (`restSeconds`, not
+        `rest_seconds`); `Prescription.rest_seconds` is mapped in.
+      * `targetWeightLbs`, `weightRecommendationSource/Confidence/Reason`,
+        and `setScheme` are always present (null when the exercise is
+        cardio/mobility/timed-only or no perf profile was supplied).
+      * Internal metadata (`_slug`, `_slot`, `_role`, `_rir_target`,
+        `_primary_muscle`, `_secondary_muscles`, `_archetype`,
+        `_training_type`) is always populated or None.
+    """
+    out_ex: dict = {
+        "name": exercise.get("name"),
+        "sets": prescription.sets,
+        "reps": prescription.reps,
+        "restSeconds": int(prescription.rest_seconds),
+        "equipment": _equipment_label(exercise),
+        "image_url": exercise.get("image_url") or None,
+        # Internal metadata the canonicalizer + progression engine read.
+        "_slug": exercise.get("slug"),
+        "_slot": slot_label,
+        "_role": role,
+        "_rir_target": prescription.rir_target,
+        "_primary_muscle": exercise.get("primary_muscle"),
+        "_secondary_muscles": list(exercise.get("secondary_muscles") or []),
+        "_archetype": archetype_value,
+        "_training_type": training_type,
+    }
+    _stamp_load_metadata(
+        out_ex,
+        exercise=exercise,
+        prescription=prescription,
+        role=role,
+        goal_bucket=goal_bucket,
+        experience=experience,
+        perf_profiles=perf_profiles,
+        all_exercises_by_slug=all_exercises_by_slug,
+    )
+    return out_ex
+
+
+def _normalize_rest_key(out_ex: dict) -> dict:
+    """Ensure the planner-output dict uses camelCase `restSeconds`,
+    never `rest_seconds`. Mutates AND returns the dict for convenience.
+    Idempotent and safe on dicts that already only have `restSeconds`.
+    """
+    if "rest_seconds" in out_ex:
+        if "restSeconds" not in out_ex:
+            out_ex["restSeconds"] = out_ex.get("rest_seconds")
+        out_ex.pop("rest_seconds", None)
+    return out_ex
+
+
 def _stamp_load_metadata(
     out_ex: dict,
     *,
@@ -1089,8 +1188,10 @@ def generate_workout_plan(
     # weekly recipe needs a traditional split for lifting-dominant
     # modes. Endurance / mobility / recovery / athletic modes build
     # their archetype sequence directly in `generate_weekly_recipe`.
+    # focused_muscle feeds FocusProfile.split_bias into the auto-pick;
+    # explicit user choice still wins inside pick_split.
     lifting_split = (
-        pick_split(inputs)
+        pick_split(inputs, focused_muscle=inputs.focused_muscle)
         if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
         else None
     )
@@ -1142,7 +1243,10 @@ def generate_workout_plan(
             name = gen_day.get("focus", meta.default_name)
             templates.append((name, None, archetype, gen_day))
             continue
-        slots = archetype_to_slots(archetype, idx, inputs.days_per_week)
+        slots = archetype_to_slots(
+            archetype, idx, inputs.days_per_week,
+            focused_muscle=inputs.focused_muscle,
+        )
         name = archetype_display_name(archetype, idx, recipe)
         slots = density_adjust_slots(
             slots, inputs.session_minutes, category=meta.category,
@@ -1190,13 +1294,23 @@ def generate_workout_plan(
     _focus_day_count: dict[str, int] = {}
 
     for day_idx, (day_name, slots, archetype, gen_day) in enumerate(templates):
-        # Pre-generated days (mobility/recovery) bypass the slot pipeline entirely
+        # Pre-generated days (mobility/recovery) bypass the slot pipeline entirely.
+        # Normalize `rest_seconds` → `restSeconds` on their exercises and stamp
+        # archetype/category so downstream consumers can treat these days
+        # identically to slot-built ones.
         if gen_day is not None:
+            gen_exs = gen_day.get("exercises", []) or []
+            for _gex in gen_exs:
+                if isinstance(_gex, dict):
+                    _normalize_rest_key(_gex)
+            gen_meta = ARCHETYPE_META[archetype]
             days_out.append({
                 "day": f"Day {day_idx + 1}",
                 "focus": gen_day.get("focus", day_name),
-                "stimulus": gen_day.get("stimulus", "recovery"),
-                "exercises": gen_day.get("exercises", []),
+                "archetype": archetype.value,
+                "category": gen_meta.category,
+                "stimulus": gen_day.get("stimulus", gen_meta.training_type),
+                "exercises": gen_exs,
             })
             continue
 
@@ -1241,30 +1355,13 @@ def generate_workout_plan(
                 logger.debug(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
                 continue
             prescription = prescribe_for_slot(archetype, slot, ex, inputs)
-            equipment_label = _equipment_label(ex)
-            out_ex = {
-                "name": ex["name"],
-                "sets": prescription.sets,
-                "reps": prescription.reps,
-                "restSeconds": prescription.rest_seconds,
-                "equipment": equipment_label,
-                **({"image_url": ex["image_url"]} if ex.get("image_url") else {}),
-                # Internal metadata the canonicalizer + progression engine
-                # can read. Frontend ignores unknown keys.
-                "_slug": ex.get("slug"),
-                "_slot": slot.label,
-                "_role": slot.role,
-                "_rir_target": prescription.rir_target,
-                "_primary_muscle": ex.get("primary_muscle"),
-                "_secondary_muscles": list(ex.get("secondary_muscles") or []),
-                "_archetype": archetype.value,
-                "_training_type": meta.training_type,
-            }
-            _stamp_load_metadata(
-                out_ex,
-                exercise=ex,
+            out_ex = build_planner_exercise(
+                ex,
                 prescription=prescription,
+                slot_label=slot.label,
                 role=slot.role,
+                archetype_value=archetype.value,
+                training_type=meta.training_type,
                 goal_bucket=goal_bucket,
                 experience=inputs.experience,
                 perf_profiles=perf_profiles,
@@ -1300,6 +1397,7 @@ def generate_workout_plan(
     volume_audit = {
         "targets": targets,
         "assigned": {k: round(v, 1) for k, v in assigned.items()},
+        "focused_muscle": inputs.focused_muscle,
     }
 
     plan_name_suffix = (
@@ -1331,84 +1429,258 @@ def generate_workout_plan(
             if already_has_core:
                 continue
 
-            # Create and fill a core slot
+            # Create and fill a core slot using the same Slot dataclass
+            # + pick_for_slot selection path the main loop uses. Any
+            # deviation here (e.g. stale kwargs on pick_for_slot) would
+            # silently break core injection.
             core_slot_def = make_core_slot(day_idx)
-            from .slots import Slot
             core_slot = Slot(
                 label=core_slot_def.label,
                 movement_pattern=core_slot_def.movement_pattern,
                 primary_muscle_hint="core",
                 role="core",
             )
-            # Pick a core exercise
-            _owned_eq = set(inputs.equipment_slugs)
-            _disliked = {d.lower() for d in inputs.disliked_exercises}
+            # Per-day "used slugs" seed so we don't pick the exact
+            # exercise already on this day. We pass a temporarily merged
+            # set to the scorer rather than mutating the weekly set.
+            day_used_slugs = {
+                ex.get("_slug", "") for ex in exercises if ex.get("_slug")
+            }
+            _core_used_slugs = used_exercise_slugs | day_used_slugs
             core_ex = pick_for_slot(
-                all_exercises, core_slot,
-                owned_equipment=_owned_eq,
-                disliked_exercises=_disliked,
-                rng=rng,
-                history_familiarity=history_familiarity,
-                day_used_slugs=set(ex.get("_slug", "") for ex in exercises),
-                recent_muscle_exercises=recent_muscle_exercises,
+                all_exercises, core_slot, inputs,
+                used_substitution_groups, _core_used_slugs,
+                history_familiarity,
+                volume_targets=targets,
+                volume_assigned=assigned,
+                injury_blocked_patterns=blocked_patterns,
+                accepts_types=frozenset({"strength"}),
+                day_focus_family=None,
             )
             if core_ex:
-                from .prescriptions import prescribe_for_slot
-                archetype = recipe[day_idx] if recipe and day_idx < len(recipe) else None
-                prescription = prescribe_for_slot(archetype, core_slot, core_ex, inputs) if archetype else None
-                equipment_label = _equipment_label(core_ex)
-                core_out = {
-                    "name": core_ex["name"],
-                    "sets": prescription.sets if prescription else 3,
-                    "reps": prescription.reps if prescription else "10-15",
-                    "restSeconds": prescription.rest_seconds if prescription else 45,
-                    "equipment": equipment_label,
-                    "_slug": core_ex.get("slug"),
-                    "_slot": core_slot.label,
-                    "_role": "core",
-                    "_primary_muscle": "core",
-                }
+                archetype_for_day = recipe[day_idx] if recipe and day_idx < len(recipe) else None
+                archetype_val = archetype_for_day.value if archetype_for_day is not None else None
+                meta_for_day = ARCHETYPE_META.get(archetype_for_day) if archetype_for_day is not None else None
+                training_type_for_day = meta_for_day.training_type if meta_for_day is not None else None
+                if archetype_for_day is not None:
+                    core_prescription = prescribe_for_slot(archetype_for_day, core_slot, core_ex, inputs)
+                else:
+                    # Fallback prescription so the injected exercise is
+                    # still fully-formed even without an archetype.
+                    core_prescription = Prescription(sets=3, reps="10-15", rest_seconds=45, rir_target=2.0)
+                core_out = build_planner_exercise(
+                    core_ex,
+                    prescription=core_prescription,
+                    slot_label=core_slot.label,
+                    role="core",
+                    archetype_value=archetype_val,
+                    training_type=training_type_for_day,
+                    goal_bucket=goal_bucket,
+                    experience=inputs.experience,
+                    perf_profiles=perf_profiles,
+                    all_exercises_by_slug=all_exercises_by_slug,
+                )
                 exercises.append(core_out)
                 day["exercises"] = exercises
+                if core_ex.get("slug"):
+                    used_exercise_slugs.add(core_ex["slug"])
 
         core_count = sum(1 for d in days_out
             for ex in d.get("exercises", [])
             if ex.get("_primary_muscle") == "core" or ex.get("_role") == "core")
         logger.debug(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
-    except Exception as e:
-        logger.debug(f"[planner] core injection failed (non-fatal): {e}")
+    except Exception:
+        # Never fatal — log the full trace so the failure is diagnosable
+        # next regeneration instead of silently swallowed.
+        logger.exception("[planner] weekly core injection failed (non-fatal)")
 
     # Age-adjusted warm-up: for 50+ users, prepend an extra joint-prep
     # warmup to every lift day. Older joints benefit from more prep work,
     # and the cost (~3-5 min) is a worthwhile trade for injury reduction.
+    # Uses the canonical `restSeconds` / `targetWeightLbs` keys so the
+    # output dict shape matches every other planned exercise.
     if inputs.user_age is not None and inputs.user_age >= 50:
-        _EXTRA_WARMUP = {
-            "name": "Extended Joint Prep",
-            "sets": 1,
-            "reps": "90s flow — mobility + activation",
-            "rest_seconds": 0,
-            "equipment": "bodyweight",
-            "target_weight_lbs": None,
-            "_role": "warmup",
-            "_primary_muscle": "full_body",
-            "notes": "Age-adjusted: extra prep for joint readiness",
-        }
+        def _extra_warmup_dict() -> dict:
+            # Fresh dict per day so mutations can't bleed across days.
+            return {
+                "name": "Extended Joint Prep",
+                "sets": 1,
+                "reps": "90s flow — mobility + activation",
+                "restSeconds": 0,
+                "equipment": "bodyweight",
+                "image_url": None,
+                "targetWeightLbs": None,
+                "weightRecommendationSource": None,
+                "weightRecommendationConfidence": None,
+                "weightRecommendationReason": None,
+                "setScheme": [],
+                "_slug": None,
+                "_slot": "Extended Warmup",
+                "_role": "warmup",
+                "_rir_target": None,
+                "_primary_muscle": "full_body",
+                "_secondary_muscles": [],
+                "_archetype": None,
+                "_training_type": "warmup",
+                "notes": "Age-adjusted: extra prep for joint readiness",
+            }
         for day in days_out:
             category = day.get("category", "")
             if category == "lift" and day.get("exercises"):
                 # Prepend so it sits before the regular warmup slot.
-                day["exercises"] = [_EXTRA_WARMUP] + day["exercises"]
+                day["exercises"] = [_extra_warmup_dict()] + day["exercises"]
+
+    # ── Focused-muscle exposure backfill + audit ───────────────────
+    # FocusProfile tells us the minimum number of training days that
+    # should hit the focused muscle AND the minimum number of DIRECT
+    # isolation accessories for it across the week. If the deterministic
+    # build missed either target, run a small backfill that injects
+    # isolation exercises on the best-fit days.
+    focus_audit: dict | None = None
+    from .focus_profiles import get_focus_profile, focus_min_exposure_days
+    _focus_profile_end = get_focus_profile(inputs.focused_muscle)
+    if _focus_profile_end is not None:
+        lift_day_indices = [
+            i for i, d in enumerate(days_out)
+            if (d.get("category") or "") == "lift"
+        ]
+        lifting_days = len(lift_day_indices) or max(1, inputs.days_per_week)
+        min_exposure = focus_min_exposure_days(_focus_profile_end, lifting_days)
+        min_accessories = _focus_profile_end.min_direct_accessories
+
+        def _hits_focus(ex: dict, muscle: str) -> bool:
+            pm = ex.get("_primary_muscle") or ""
+            sm = ex.get("_secondary_muscles") or []
+            return pm == muscle or muscle in sm
+
+        def _days_with_focus() -> int:
+            cnt = 0
+            for d in days_out:
+                for ex in d.get("exercises", []) or []:
+                    if _hits_focus(ex, _focus_profile_end.muscle):
+                        cnt += 1
+                        break
+            return cnt
+
+        def _count_direct_accessories() -> int:
+            return sum(
+                1 for d in days_out
+                for ex in (d.get("exercises", []) or [])
+                if ex.get("_primary_muscle") == _focus_profile_end.muscle
+                and ex.get("_role") == "isolation"
+            )
+
+        # Backfill direct accessories first — they also boost exposure.
+        # Bloat guard: derive a per-day exercise cap from session_minutes
+        # so the focus backfill can't push a density-trimmed 20-minute
+        # session up to 7+ exercises. ~7 min per exercise is the rule of
+        # thumb the slot density_adjust_slots pass uses — we mirror it
+        # here, with a floor of 5 so full-length sessions aren't capped.
+        _session_m = inputs.session_minutes or 45
+        _max_exs_per_day = max(5, min(10, _session_m // 7))
+        try:
+            attempts = 0
+            while _count_direct_accessories() < min_accessories and attempts < len(days_out) * 2:
+                attempts += 1
+                # Find the best lift day to host an extra accessory.
+                # Exclude days that already carry a direct accessory so
+                # we spread the extras across multiple days. ALSO exclude
+                # days that are already at the per-day exercise cap so
+                # the backfill can't bloat a short session past its
+                # minute budget.
+                already_hosting = {
+                    i for i, d in enumerate(days_out)
+                    if any(
+                        ex.get("_primary_muscle") == _focus_profile_end.muscle
+                        and ex.get("_role") == "isolation"
+                        for ex in (d.get("exercises", []) or [])
+                    )
+                }
+                at_cap = {
+                    i for i, d in enumerate(days_out)
+                    if len(d.get("exercises", []) or []) >= _max_exs_per_day
+                }
+                host = _find_best_accessory_host_day(
+                    days_out, _focus_profile_end.muscle,
+                    exclude=already_hosting | at_cap,
+                )
+                if host is None:
+                    break
+                iso_slot = Slot(
+                    label=f"{_focus_profile_end.muscle.title()} Isolation (focus)",
+                    movement_pattern="isolation",
+                    primary_muscle_hint=_focus_profile_end.muscle,
+                    role="isolation",
+                )
+                host_exs = days_out[host].get("exercises", []) or []
+                day_used = {e.get("_slug") for e in host_exs if e.get("_slug")}
+                focus_ex = pick_for_slot(
+                    all_exercises, iso_slot, inputs,
+                    used_substitution_groups,
+                    used_exercise_slugs | day_used,
+                    history_familiarity,
+                    volume_targets=targets,
+                    volume_assigned=assigned,
+                    injury_blocked_patterns=blocked_patterns,
+                    accepts_types=frozenset({"strength"}),
+                    day_focus_family=None,
+                )
+                if focus_ex is None:
+                    break
+                host_archetype = recipe[host] if recipe and host < len(recipe) else None
+                host_meta = ARCHETYPE_META.get(host_archetype) if host_archetype is not None else None
+                if host_archetype is not None:
+                    focus_pres = prescribe_for_slot(host_archetype, iso_slot, focus_ex, inputs)
+                else:
+                    focus_pres = Prescription(sets=3, reps="10-15", rest_seconds=60, rir_target=2.0)
+                focus_out = build_planner_exercise(
+                    focus_ex,
+                    prescription=focus_pres,
+                    slot_label=iso_slot.label,
+                    role="isolation",
+                    archetype_value=host_archetype.value if host_archetype is not None else None,
+                    training_type=host_meta.training_type if host_meta is not None else None,
+                    goal_bucket=goal_bucket,
+                    experience=inputs.experience,
+                    perf_profiles=perf_profiles,
+                    all_exercises_by_slug=all_exercises_by_slug,
+                )
+                days_out[host].setdefault("exercises", []).append(focus_out)
+                if focus_ex.get("slug"):
+                    used_exercise_slugs.add(focus_ex["slug"])
+        except Exception:
+            logger.exception("[planner] focused-muscle backfill failed (non-fatal)")
+
+        days_with_exposure = _days_with_focus()
+        direct_accessories = _count_direct_accessories()
+        focus_audit = {
+            "muscle": _focus_profile_end.muscle,
+            "days_with_exposure": days_with_exposure,
+            "min_exposure_days": min_exposure,
+            "direct_accessories": direct_accessories,
+            "min_direct_accessories": min_accessories,
+            "slot_variant": _focus_profile_end.slot_variant,
+        }
+        logger.info(
+            f"[planner] focus={_focus_profile_end.muscle} "
+            f"exposure={days_with_exposure}/{min_exposure} "
+            f"accessories={direct_accessories}/{min_accessories}"
+        )
+
+    workout_plan_block = {
+        "name": f"{profile.label} — {plan_name_suffix}",
+        "totalDays": inputs.days_per_week,
+        "days": days_out,
+        "volume_audit": volume_audit,
+        "planner_mode": profile.planner_mode,
+        "goal_bucket": profile.bucket,
+    }
+    if focus_audit is not None:
+        workout_plan_block["focus_audit"] = focus_audit
 
     plan = {
         "trainerNote": "",
-        "workout_plan": {
-            "name": f"{profile.label} — {plan_name_suffix}",
-            "totalDays": inputs.days_per_week,
-            "days": days_out,
-            "volume_audit": volume_audit,
-            "planner_mode": profile.planner_mode,
-            "goal_bucket": profile.bucket,
-        },
+        "workout_plan": workout_plan_block,
     }
     plan = validate_plan(plan, inputs, recipe)
     return plan
@@ -1948,9 +2220,11 @@ def _infer_bucket(equipment_label: str) -> str:
 # ─── On-demand day generators for focus overrides ────────────────────────────
 
 def _est_exercise_time(ex: dict) -> float:
-    """Rough estimate of minutes for one exercise based on sets, reps, rest."""
+    """Rough estimate of minutes for one exercise based on sets, reps, rest.
+    Accepts either `rest_seconds` (internal pool dicts) or `restSeconds`
+    (normalized planner-output dicts)."""
     sets = ex.get("sets", 1)
-    rest = ex.get("rest_seconds", 0)
+    rest = ex.get("rest_seconds", ex.get("restSeconds", 0)) or 0
     reps_str = str(ex.get("reps", ""))
     # Time-based reps like "60s each side", "5 min", "30s hold"
     if "min" in reps_str:
@@ -2028,7 +2302,7 @@ def generate_mobility_day(session_minutes: int = 45) -> dict:
     """
     sm = max(20, session_minutes)
     pool = [
-        {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(10, max(5, sm // 6))} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
+        {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(10, max(5, sm // 6))} min flow", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
         {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "60s flow", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
         {"name": "Low Lunge (Deep)", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["quads", "hip_flexors"]},
         {"name": "Hip 90/90 Stretch", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},

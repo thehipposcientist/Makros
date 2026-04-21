@@ -554,17 +554,42 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
          produces [Z2, Pull, Short, Legs, Push, Push] — reintroducing
          the adjacency that call #1 already cleaned up.
 
-    Only swaps when a true conflict exists; stable plans stay stable.
-    The swap target is the earliest later day that differs from both
-    neighbors; if none, we look backward (excluding day 0 which is
-    pinned by the rotation pass).
+    Repair strategy (three tiers, increasing aggressiveness):
+      Tier A — strict swap: swap a conflicting day with a later / earlier
+               day whose family differs AND the swap introduces no new
+               adjacency conflicts at either position.
+      Tier B — net-reducing swap: accept any swap that strictly reduces
+               the total adjacent-duplicate count, even if it creates a
+               transient conflict elsewhere (the next pass will clean
+               it up).
+      Tier C — force swap to break 3+ same-family streaks: when a streak
+               of >=3 same-family days survives tier A/B (e.g. a rotation
+               leaves [upper, lower, lower, lower] and every swap target
+               creates a new conflict under tier A), pick the swap that
+               minimises adjacency count; if none, pick the swap that
+               at least breaks the 3-in-a-row.
+
+    The whole thing runs in a fixed-iteration loop (bounded, deterministic)
+    until no improvement is possible. Stable plans stay stable — the
+    tiers only fire when conflicts exist.
     """
     from .archetypes import archetype_to_focus_family
+
     def _b(a):
         try:
             return archetype_to_focus_family(a)
         except KeyError:
             return None
+
+    def _total_dups(lst) -> int:
+        return sum(1 for i in range(1, len(lst)) if _b(lst[i]) == _b(lst[i - 1]))
+
+    def _has_triple(lst) -> bool:
+        return any(
+            _b(lst[i]) is not None
+            and _b(lst[i]) == _b(lst[i + 1]) == _b(lst[i + 2])
+            for i in range(len(lst) - 2)
+        )
 
     def _safe_swap(lst, a, b):
         """Return True if swapping positions a and b doesn't create
@@ -579,28 +604,140 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
                 return False
         return True
 
+    def _try_swap_at(lst, i):
+        """Tier A: find a swap that clears the conflict at i without
+        creating any new adjacency. Returns swap index or None."""
+        for j in range(i + 1, len(lst)):
+            if _b(lst[j]) != _b(lst[i]) and _safe_swap(lst, i, j):
+                return j
+        for j in range(i - 2, 0, -1):
+            if _b(lst[j]) != _b(lst[i]) and _safe_swap(lst, i, j):
+                return j
+        return None
+
+    def _best_net_reducing_swap_for_pair(lst, i):
+        """Tier B: for a conflict at (i-1, i), consider swapping EITHER
+        endpoint with any other index whose family differs. Pick the
+        swap that most reduces total duplicate count. Returns
+        (endpoint, j, new_dups) or (None, None, current) when no swap
+        strictly reduces the count. Unlike tier A, this does NOT
+        require the resulting state to be conflict-free — only that
+        the TOTAL adjacency count strictly decreases."""
+        current = _total_dups(lst)
+        best = (None, None, current)
+        for endpoint in (i - 1, i):
+            for j in range(len(lst)):
+                if j == endpoint:
+                    continue
+                if _b(lst[j]) == _b(lst[endpoint]):
+                    continue
+                test = list(lst)
+                test[endpoint], test[j] = test[j], test[endpoint]
+                nd = _total_dups(test)
+                if nd < best[2]:
+                    best = (endpoint, j, nd)
+        return best
+
+    def _force_triple_break(lst):
+        """Tier C: final guarantee no 3-in-a-row survives. For each
+        3-in-a-row we pick the single swap (any indices) that gives the
+        lowest adjacency count; tie-break on smallest (i, j). Even if
+        the chosen swap leaves some 2-adjacency behind (hardest cases),
+        it MUST eliminate the 3-in-a-row."""
+        changed = False
+        for start in range(len(lst) - 2):
+            fam = _b(lst[start])
+            if fam is None:
+                continue
+            if not (fam == _b(lst[start + 1]) == _b(lst[start + 2])):
+                continue
+            # Try every swap and pick the one that (a) breaks this
+            # triple and (b) has the lowest resulting total dup count.
+            best = None  # (total_dups, has_triple, i, j)
+            for i in range(start, start + 3):
+                for j in range(len(lst)):
+                    if j == i:
+                        continue
+                    if _b(lst[j]) == fam:
+                        continue
+                    test = list(lst)
+                    test[i], test[j] = test[j], test[i]
+                    # Require triple at THIS start to be broken.
+                    still_triple_here = (
+                        _b(test[start]) == _b(test[start + 1]) == _b(test[start + 2])
+                        and _b(test[start]) is not None
+                    )
+                    if still_triple_here:
+                        continue
+                    key = (_total_dups(test), _has_triple(test), i, j)
+                    if best is None or key < best:
+                        best = key
+            if best is not None:
+                _, _, i, j = best
+                logger.debug(
+                    f"[weekly_recipe] adjacency-repair tier-C: forced swap "
+                    f"{i}↔{j} to break {fam!r} triple at pos {start}"
+                )
+                lst[i], lst[j] = lst[j], lst[i]
+                changed = True
+        return changed
+
     out = list(recipe)
-    for i in range(1, len(out)):
-        if _b(out[i]) != _b(out[i - 1]):
-            continue
-        # Find a swap target that resolves THIS conflict without
-        # creating new ones at the target position.
-        swap_idx = None
-        for j in range(i + 1, len(out)):
-            if _b(out[j]) != _b(out[i]) and _safe_swap(out, i, j):
-                swap_idx = j
-                break
-        if swap_idx is None:
-            for j in range(i - 2, 0, -1):
-                if _b(out[j]) != _b(out[i]) and _safe_swap(out, i, j):
-                    swap_idx = j
-                    break
-        if swap_idx is not None:
-            out[i], out[swap_idx] = out[swap_idx], out[i]
-            logger.debug(
-                f"[weekly_recipe] adjacency-repair: swapped idx {i}↔{swap_idx} "
-                f"to break {_b(out[swap_idx])!r} streak"
-            )
+
+    # ── Tier A/B: iterative dup-clearing ────────────────────────────
+    # Bounded loop: each iteration must strictly reduce total dup count
+    # or we exit. Upper bound is len(out) — more than enough in practice.
+    max_iters = len(out) + 2
+    for _ in range(max_iters):
+        start_dups = _total_dups(out)
+        if start_dups == 0:
+            break
+
+        # Tier A: walk left-to-right, apply strict safe swaps.
+        for i in range(1, len(out)):
+            if _b(out[i]) != _b(out[i - 1]):
+                continue
+            swap_idx = _try_swap_at(out, i)
+            if swap_idx is not None:
+                out[i], out[swap_idx] = out[swap_idx], out[i]
+                logger.debug(
+                    f"[weekly_recipe] adjacency-repair tier-A: swapped idx "
+                    f"{i}↔{swap_idx} to break {_b(out[swap_idx])!r} streak"
+                )
+
+        mid_dups = _total_dups(out)
+        if mid_dups == 0:
+            break
+
+        # Tier B: for each remaining conflict (i-1, i), try the best
+        # net-reducing swap on EITHER endpoint. May temporarily create
+        # a new adjacency elsewhere — the outer loop will clean it up.
+        progress = False
+        for i in range(1, len(out)):
+            if _b(out[i]) != _b(out[i - 1]):
+                continue
+            endpoint, j, new_dups = _best_net_reducing_swap_for_pair(out, i)
+            if j is not None and new_dups < _total_dups(out):
+                logger.debug(
+                    f"[weekly_recipe] adjacency-repair tier-B: net-reducing "
+                    f"swap {endpoint}↔{j} (dups {_total_dups(out)}→{new_dups})"
+                )
+                out[endpoint], out[j] = out[j], out[endpoint]
+                progress = True
+
+        if not progress and _total_dups(out) >= start_dups:
+            # No forward progress with tier A or B — break out and let
+            # tier C handle any triples that remain.
+            break
+
+    # ── Tier C: guarantee no 3-in-a-row ─────────────────────────────
+    # Runs at most len(out) times (one pass per possible triple).
+    for _ in range(len(out)):
+        if not _has_triple(out):
+            break
+        if not _force_triple_break(out):
+            break
+
     return out
 
 

@@ -527,6 +527,16 @@ export default function Index() {
   const applyPlanResult = async (aiPlans: any): Promise<void> => {
     if (aiPlans?.workout_plan) {
       await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+      // A fresh plan replaces today's slot too. Clear the once-per-day
+      // freshDay marker so HomeScreen's loadPlans regenerates today's
+      // exercises against the new plan + recent history. Without this,
+      // a user who changes their split sees the new split's days at
+      // future positions but today's slot stays as the old split's day.
+      try {
+        const t = new Date();
+        const todayKey = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+        await AsyncStorage.removeItem(`freshDayGenerated_${todayKey}`);
+      } catch {}
       const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
       if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
     }

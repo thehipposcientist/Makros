@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
 import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
+import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
@@ -1092,6 +1093,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const loadPlansInFlightRef = useRef(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
+  // Shown as a full-screen overlay while the "Switch Day" flow regenerates
+  // the whole week (chosen day + ripple-sweep on conflicting neighbors).
+  // Kept separate from isWorkoutUpdating so the big plan-gen overlay
+  // doesn't trigger just because of a single day swap.
   const [showAllThemes, setShowAllThemes] = useState(false);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
@@ -3712,6 +3717,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
             {workoutSubTab === 'plan' && (() => {
+              const splitRaw = (userProfile.preferredSplit || '').toLowerCase();
+              const collapseUpper = /upper.?lower|full.?body/.test(splitRaw)
+                || (!splitRaw && (workoutPlan?.days ?? []).some(d => /upper|lower/i.test(d?.focus || '')));
+              // Focus-family normalizer. For U/L and full-body splits we
+              // collapse push/pull/arms/shoulders into a single "upper"
+              // bucket so the adjacency filter doesn't show every card
+              // wrapped in an unusable option set. For PPL we keep
+              // push/pull distinct since those are the split's whole point.
+              const normFamily = (f?: string): string => {
+                const s = (f ?? '').toLowerCase();
+                if (/legs?|quad|glute|hamstring|lower|squat|hinge|calves/.test(s)) return 'lower';
+                if (collapseUpper) {
+                  if (/upper|push|chest|tricep|press|pull|back|bicep|lat|shoulder|arm/.test(s)) return 'upper';
+                } else {
+                  if (/push|chest|tricep|press/.test(s)) return 'push';
+                  if (/pull|back|bicep|lat/.test(s)) return 'pull';
+                  if (/upper|shoulder|arm/.test(s)) return 'upper';
+                }
+                if (/full.?body|total/.test(s)) return 'full';
+                if (/cardio|zone.?2|interval|run|bike|swim|row/.test(s)) return 'cardio';
+                if (/recover|rest|mobil|stretch|yoga|flow/.test(s)) return 'easy';
+                return s || 'unknown';
+              };
+
               const split = userProfile.preferredSplit ?? 'ppl';
               const splitFocusOptions: Record<string, string[]> = {
                 ppl: ['Push', 'Pull', 'Legs'],
@@ -3724,11 +3753,82 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const extraOptions = ['Cardio', 'Mobility', 'Recovery'];
               const allOptions = [...focusOptions, ...extraOptions];
 
+              // Map dateKey → completed focus so when schedule index 0 is
+              // today, we can still see yesterday's focus (outside schedule).
+              const focusByDate = new Map<string, string>();
+              for (const s of workoutHistoryList) {
+                if (!s?.date || s.skipped) continue;
+                const k = (s.date || '').slice(0, 10);
+                if (k && !focusByDate.has(k)) focusByDate.set(k, s.focus || '');
+              }
+
+              // Helpers closed over schedule so the filter can read
+              // neighbors directly (workoutPlan.days indices are not
+              // always 1:1 with schedule indices — rest days cause drift).
+              const scheduleFocusAt = (j: number): string | undefined => {
+                if (j < 0) {
+                  const d = new Date(); d.setDate(d.getDate() + j);
+                  const dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                  return focusByDate.get(dk);
+                }
+                if (j >= schedule.length) return undefined;
+                return schedule[j]?.workout?.focus;
+              };
+              const isFixedNeighbor = (j: number): boolean => {
+                if (j < 0) {
+                  const d = new Date(); d.setDate(d.getDate() + j);
+                  const dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                  return focusByDate.has(dk);
+                }
+                if (j >= schedule.length) return false;
+                if (j === 0) return true; // today is always pinned for adjacency
+                const it = schedule[j];
+                const dk = it?.date ? dateKey(it.date) : '';
+                return completedDates.has(dk) || skippedDates.has(dk);
+              };
+
               return schedule.map((item, i) => {
               const key = dateKey(item.date);
               const isToday     = i === 0;
               const isCompleted = isToday && todayDone;
               const isSkipped   = skippedDates.has(key);
+
+              // Compute per-option warnings (don't filter — let user pick
+              // anything, but flag conflicts and low readiness so they
+              // see the trade-off before confirming).
+              const conflictFamilies = new Set<string>();
+              if (isFixedNeighbor(i - 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i - 1)));
+              if (isFixedNeighbor(i + 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i + 1)));
+              conflictFamilies.delete('unknown'); conflictFamilies.delete('');
+
+              const mf = readinessScore?.muscleFatigue ?? {};
+              const readinessFor = (focus: string): number | null => {
+                const lower = (focus || '').toLowerCase();
+                const avg = (keys: string[]) => {
+                  const vals = keys.map(k => mf[k] ?? 0);
+                  if (vals.length === 0) return 0;
+                  return vals.reduce((a, b) => a + b, 0) / vals.length;
+                };
+                let fatigue = 0;
+                if (/push|chest|pressing/.test(lower)) fatigue = avg(['chest', 'shoulders', 'triceps']);
+                else if (/pull|back|bicep|lat/.test(lower)) fatigue = avg(['back', 'biceps']);
+                else if (/legs|quad|hamstring|glute|lower/.test(lower)) fatigue = avg(['quads', 'hamstrings', 'glutes', 'calves']);
+                else if (/upper/.test(lower)) fatigue = avg(['chest', 'back', 'shoulders', 'biceps', 'triceps']);
+                else if (/full/.test(lower)) fatigue = avg(['chest', 'back', 'shoulders', 'quads', 'glutes', 'hamstrings']);
+                else if (/shoulders?/.test(lower)) fatigue = avg(['shoulders']);
+                else if (/arms?/.test(lower)) fatigue = avg(['biceps', 'triceps']);
+                else if (/cardio|zone|interval/.test(lower)) fatigue = mf['cardio'] ?? 0;
+                else return null; // no fatigue concept (mobility/recovery)
+                return Math.max(0, Math.min(100, Math.round((1 - fatigue) * 100)));
+              };
+
+              const optionWarnings: Record<string, { conflict: boolean; readiness: number | null }> = {};
+              for (const opt of allOptions) {
+                const conflict = conflictFamilies.has(normFamily(opt));
+                const readiness = readinessFor(opt);
+                optionWarnings[opt] = { conflict, readiness };
+              }
+
               return (
                 <FadeInView key={i} delay={i * 80}>
                 <DayCard
@@ -3745,6 +3845,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                   splitOptions={allOptions}
+                  optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
                   onToggleSwitch={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
                   onChangeFocus={async (newFocus) => {
@@ -3752,19 +3853,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     if (!workoutPlan || !item.workout) return;
                     const dayIdx = workoutPlan.days.indexOf(item.workout);
                     if (dayIdx < 0) return;
-                    // Adjacency is handled by the post-switch rebalance below —
-                    // no need to warn the user pre-swap. The sweep reshuffles
-                    // any conflicting days automatically.
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
 
+                    // Single-day swap only — no full-plan regen. User picked
+                    // an option (potentially with a warning they confirmed),
+                    // so just regenerate THIS day's exercises with the new
+                    // focus and update plan in place.
                     if (authToken) {
                       try {
                         const { generateWorkoutDay } = await import('../services/api');
-
-                        // Regenerate the changed day
-                        const freshDay = await generateWorkoutDay(authToken, {
+                        const fresh = await generateWorkoutDay(authToken, {
                           goal: userProfile.goal,
                           day_index: dayIdx,
                           days_per_week: userProfile.daysPerWeek,
@@ -3777,161 +3877,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           disliked_exercises: userProfile.dislikedExercises ?? [],
                           focus_override: newFocus,
                         });
-                        if (freshDay?.day) {
-                          const newDay = { ...freshDay.day, focus: newFocus };
+                        if (fresh?.day) {
                           const updatedDays = [...workoutPlan.days];
-                          updatedDays[dayIdx] = newDay;
-
-                          // Rebalance the REMAINDER of the week so the split
-                          // rotation is preserved. After switching day N to
-                          // newFocus, we walk days N+1..end and swap any day
-                          // whose focus collides with the previous day. This
-                          // keeps the overall distribution (same total Push/
-                          // Pull/Legs count) while fixing adjacency.
-                          const oldFocus = item.workout.focus;
-
-                          // Build a focus-family normalizer that matches the
-                          // backend's bucketing (push/pull/legs/cardio/etc).
-                          // Recovery and mobility collapse to the SAME family
-                          // ("easy") so the adjacency sweep treats them as
-                          // equivalent — two easy days back-to-back defeats
-                          // the purpose of a rest-like day.
-                          const normFamily = (f?: string): string => {
-                            const s = (f ?? '').toLowerCase();
-                            if (/legs?|quad|glute|hamstring|lower|squat|hinge/.test(s)) return 'legs';
-                            if (/push|chest|tricep|press/.test(s)) return 'push';
-                            if (/pull|back|bicep|lats/.test(s)) return 'pull';
-                            if (/upper/.test(s)) return 'upper';
-                            if (/full.?body|total/.test(s)) return 'full';
-                            if (/cardio|zone.?2|interval|run|bike/.test(s)) return 'cardio';
-                            if (/recover|rest|mobil|stretch|yoga|flow/.test(s)) return 'easy';
-                            return s || 'unknown';
-                          };
-
-                          // Walk forward from day 1 and fix every adjacent
-                          // family duplicate by swapping with a later day
-                          // whose focus differs from BOTH its target and
-                          // the target's new neighbors. The switched day
-                          // (dayIdx) is immutable — we never touch it as
-                          // a swap target OR source, because the user
-                          // explicitly chose that focus.
-                          // Run the pass up to MAX_PASSES times so a swap
-                          // that fixes one adjacency but creates a new one
-                          // downstream gets cleaned up on the next sweep.
-                          const daysToRegen = new Set<number>();
-
-                          // Priority: if the user switched TODAY's strength
-                          // day (push/pull/legs/etc) to an easy day (recovery
-                          // or mobility), promote the old strength focus to
-                          // TOMORROW. The user swapped "do push today" for
-                          // "rest today" — they still want to do push ASAP.
-                          const oldFam = normFamily(oldFocus);
-                          const newFam = normFamily(newFocus);
-                          const strengthFamilies = new Set(['push', 'pull', 'legs', 'upper', 'lower', 'full']);
-                          if (
-                            strengthFamilies.has(oldFam)
-                            && newFam === 'easy'
-                            && dayIdx + 1 < updatedDays.length
-                          ) {
-                            const tomorrowFam = normFamily(updatedDays[dayIdx + 1]?.focus);
-                            if (tomorrowFam !== oldFam) {
-                              // Find the next day >= dayIdx+2 that has oldFam
-                              // and swap it with dayIdx+1. That way tomorrow
-                              // holds the work the user was going to do today.
-                              for (let k = dayIdx + 2; k < updatedDays.length; k++) {
-                                if (normFamily(updatedDays[k]?.focus) === oldFam) {
-                                  const tmp = updatedDays[dayIdx + 1].focus;
-                                  updatedDays[dayIdx + 1] = { ...updatedDays[dayIdx + 1], focus: updatedDays[k].focus };
-                                  updatedDays[k] = { ...updatedDays[k], focus: tmp };
-                                  daysToRegen.add(dayIdx + 1);
-                                  daysToRegen.add(k);
-                                  break;
-                                }
-                              }
-                            }
-                          }
-                          const MAX_PASSES = 4;
-                          for (let pass = 0; pass < MAX_PASSES; pass++) {
-                            let anySwap = false;
-                            for (let i = 1; i < updatedDays.length; i++) {
-                              if (i === dayIdx) continue;  // skip the switched day itself
-                              const prev = normFamily(updatedDays[i - 1]?.focus);
-                              const curr = normFamily(updatedDays[i]?.focus);
-                              if (prev !== curr) continue;
-
-                              // Find ANY other day (past or future, excluding
-                              // dayIdx) whose focus differs from prev, whose
-                              // own neighbors won't conflict after the swap.
-                              let swapAt = -1;
-                              for (let j = 0; j < updatedDays.length; j++) {
-                                if (j === i || j === dayIdx) continue;
-                                const candidate = normFamily(updatedDays[j]?.focus);
-                                if (candidate === prev) continue;
-                                // Check the swap won't create new conflicts at j's position
-                                const prevOfJ = j > 0 ? normFamily(updatedDays[j - 1]?.focus) : '';
-                                const nextOfJ = j < updatedDays.length - 1 ? normFamily(updatedDays[j + 1]?.focus) : '';
-                                // After swap, position j will hold what was at i (= prev).
-                                // That means prev must differ from j's new neighbors.
-                                if (prev === prevOfJ || prev === nextOfJ) continue;
-                                swapAt = j;
-                                break;
-                              }
-                              if (swapAt < 0) continue;
-
-                              const tempFocus = updatedDays[i].focus;
-                              updatedDays[i] = { ...updatedDays[i], focus: updatedDays[swapAt].focus };
-                              updatedDays[swapAt] = { ...updatedDays[swapAt], focus: tempFocus };
-                              daysToRegen.add(i);
-                              daysToRegen.add(swapAt);
-                              anySwap = true;
-                            }
-                            if (!anySwap) break;
-                          }
-
-                          // Regenerate exercises for each day whose focus label
-                          // changed. Done in parallel; failures fall through
-                          // to just-swap-label as a graceful degradation.
-                          const regenList = Array.from(daysToRegen);
-                          if (regenList.length > 0) {
-                            await Promise.all(
-                              regenList.map(async (di) => {
-                                try {
-                                  const rebalanced = await generateWorkoutDay(authToken, {
-                                    goal: userProfile.goal,
-                                    day_index: di,
-                                    days_per_week: userProfile.daysPerWeek,
-                                    session_minutes: userProfile.workoutDurationMinutes ?? 60,
-                                    experience: userProfile.experienceLevel ?? 'intermediate',
-                                    equipment: userProfile.equipment ?? [],
-                                    preferred_split: userProfile.preferredSplit,
-                                    priority_region: userProfile.priorityRegion ?? 'balanced',
-                                    injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
-                                    disliked_exercises: userProfile.dislikedExercises ?? [],
-                                    focus_override: updatedDays[di].focus,
-                                  });
-                                  if (rebalanced?.day) {
-                                    updatedDays[di] = { ...rebalanced.day, focus: updatedDays[di].focus };
-                                  }
-                                } catch {
-                                  // Keep the focus-label swap even if exercise regen fails.
-                                }
-                              })
-                            );
-                          }
-                          void oldFocus;
-
+                          updatedDays[dayIdx] = { ...fresh.day, focus: newFocus };
                           const updatedPlan = { ...workoutPlan, days: updatedDays };
                           setWorkoutPlan(updatedPlan);
                           await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-                          // Mark fresh day as generated so loadPlans doesn't overwrite the switch
                           await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
                           return;
                         }
                       } catch (e) {
-                        console.log('[onChangeFocus] regeneration failed, using focus-only swap:', e);
+                        console.log('[onChangeFocus] day regen failed, using focus-only swap:', e);
                       }
                     }
-                    // Fallback: just change the focus label
+                    // Fallback (no token or regen failed): swap focus label only.
                     const updatedDays = [...workoutPlan.days];
                     updatedDays[dayIdx] = { ...updatedDays[dayIdx], focus: newFocus };
                     const updatedPlan = { ...workoutPlan, days: updatedDays };
@@ -6249,7 +6208,7 @@ const btStyles = StyleSheet.create({
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, showSwitchOptions, onToggleSwitch }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -6264,6 +6223,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   onUnskip: () => void;
   onChangeFocus?: (newFocus: string) => void;
   splitOptions?: string[];
+  optionWarnings?: Record<string, { conflict: boolean; readiness: number | null }>;
   showSwitchOptions?: boolean;
   onToggleSwitch?: () => void;
 }) {
@@ -6473,19 +6433,68 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                           <Ionicons name="close-circle" size={20} color={tc.textMuted} />
                         </TouchableOpacity>
                       </View>
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                        {splitOptions.filter(f => f !== item.workout?.focus).map(focus => (
-                          <TouchableOpacity
-                            key={focus}
-                            style={{
-                              paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10,
-                              borderWidth: 1.5, borderColor: workoutPalette.strong + '55',
-                              backgroundColor: tc.surface,
-                            }}
-                            onPress={() => { if (onToggleSwitch) onToggleSwitch(); onChangeFocus(focus); }}>
-                            <Text style={{ fontSize: 14, fontWeight: '700', color: workoutPalette.strong }}>{focus}</Text>
-                          </TouchableOpacity>
-                        ))}
+                      <View style={{ flexDirection: 'column', gap: 8 }}>
+                        {splitOptions.filter(f => f !== item.workout?.focus).map(focus => {
+                          const w = optionWarnings?.[focus];
+                          const hasConflict = !!w?.conflict;
+                          const lowReady = w?.readiness != null && w.readiness < 40;
+                          const warned = hasConflict || lowReady;
+                          const tier = w?.readiness == null ? null
+                            : w.readiness >= 70 ? '#22C55E'
+                            : w.readiness >= 40 ? '#F59E0B'
+                            : '#EF4444';
+                          const warnMsg = hasConflict && lowReady
+                            ? 'Back-to-back same family + low readiness'
+                            : hasConflict
+                              ? 'Same family as a fixed neighbor day'
+                              : lowReady
+                                ? `Low readiness (${w.readiness}%) — muscles still recovering`
+                                : null;
+                          const handlePick = () => {
+                            const apply = () => { if (onToggleSwitch) onToggleSwitch(); onChangeFocus(focus); };
+                            if (warned && warnMsg) {
+                              Alert.alert(
+                                `Switch to ${focus}?`,
+                                warnMsg + '. You can still proceed if you want.',
+                                [
+                                  { text: 'Cancel', style: 'cancel' },
+                                  { text: 'Switch anyway', style: 'destructive', onPress: apply },
+                                ],
+                              );
+                            } else {
+                              apply();
+                            }
+                          };
+                          return (
+                            <TouchableOpacity
+                              key={focus}
+                              style={{
+                                paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10,
+                                borderWidth: 1.5,
+                                borderColor: warned ? '#F59E0B' + '88' : workoutPalette.strong + '55',
+                                backgroundColor: tc.surface,
+                              }}
+                              onPress={handlePick}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                                  <Text style={{ fontSize: 14, fontWeight: '700', color: workoutPalette.strong }}>{focus}</Text>
+                                  {tier && (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: tier }} />
+                                      <Text style={{ fontSize: 10, fontWeight: '700', color: tier }}>{w!.readiness}%</Text>
+                                    </View>
+                                  )}
+                                </View>
+                                {warned && (
+                                  <Ionicons name="warning-outline" size={14} color="#F59E0B" />
+                                )}
+                              </View>
+                              {warnMsg && (
+                                <Text style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>{warnMsg}</Text>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
                       </View>
                     </View>
                   )}

@@ -211,7 +211,27 @@ export function lookupFood(name: string, allFoods: FoodItem[]): FoodItem | undef
   return allFoods.find(f => f.name.toLowerCase() === lower);
 }
 
-/** Get pace options for a specific goal from the loaded paces array. */
+// Primary goal ids (build_muscle, lose_fat, ...) map to bucket names the
+// backend /paces endpoint keys off (muscle_gain, fat_loss, ...). Without
+// this map pacesForGoal returns [] for every launch goal, which kills the
+// pace picker and the ETA lookup on Progress. Mirror of GOAL_TO_BUCKET in
+// src/utils/goalEstimate.ts.
+const PRIMARY_GOAL_TO_PACE_BUCKET: Record<string, string> = {
+  build_muscle: 'muscle_gain', lean_bulk: 'muscle_gain', gain_weight: 'muscle_gain',
+  improve_aesthetics: 'muscle_gain', build_glutes: 'muscle_gain',
+  build_upper_body: 'muscle_gain', build_lower_body: 'muscle_gain',
+  build_arms: 'muscle_gain', build_shoulders: 'muscle_gain',
+  lose_fat: 'fat_loss', get_lean: 'fat_loss', cut: 'fat_loss',
+  preserve_muscle_cutting: 'fat_loss',
+  body_recomp: 'body_recomp',
+  tone: 'toning', get_toned: 'toning',
+};
+
+/** Get pace options for a specific goal from the loaded paces array.
+ *  Falls back through: bucket name → raw goal id → []. */
 export function pacesForGoal(goal: string, paces: PaceOption[]): PaceOption[] {
+  const bucket = PRIMARY_GOAL_TO_PACE_BUCKET[goal] ?? goal;
+  const byBucket = paces.filter(p => p.goal_value === bucket);
+  if (byBucket.length > 0) return byBucket;
   return paces.filter(p => p.goal_value === goal);
 }

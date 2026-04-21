@@ -341,18 +341,26 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
+  // Ref-based in-flight lock. `scanLoading` state is one render behind,
+  // so a quick double-tap can enter pickAndScan twice before the disabled
+  // prop rerenders. The ref flips synchronously so the second call bails.
+  const scanLock = useRef(false);
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
+    if (scanLock.current) return;
+    scanLock.current = true;
     if (source === 'camera') {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Camera permission needed', 'Enable camera access in Settings to scan food photos.');
+        scanLock.current = false;
         return;
       }
     } else {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Photo library permission needed', 'Enable photo access in Settings to scan food photos.');
+        scanLock.current = false;
         return;
       }
     }
@@ -362,7 +370,10 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     const result = source === 'camera'
       ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any)
       : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.4, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any);
-    if (result.canceled || !result.assets[0]?.base64) return;
+    if (result.canceled || !result.assets[0]?.base64) {
+      scanLock.current = false;
+      return;
+    }
     const asset = result.assets[0];
     setScanLoading(true);
     try {
@@ -456,6 +467,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       Alert.alert('Scan failed', detail);
     } finally {
       setScanLoading(false);
+      scanLock.current = false;
     }
   };
 
@@ -696,6 +708,19 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   }, [foodCategories, search, items]);
 
   const handleSave = () => {
+    // Empty-meal guard: if every item has 0 calories, saving would create
+    // a ghost meal that muddies the nutrition totals. Prompt instead.
+    // Only runs on SAVE — cancel skips this so the user can always bail
+    // out of a mistaken add.
+    if (items.length === 0 || items.every(it => Math.round(it.calories ?? 0) === 0)) {
+      Alert.alert(
+        'Meal is empty',
+        items.length === 0
+          ? 'Add at least one food before saving, or cancel to discard.'
+          : 'Every food in this meal shows 0 calories. Add macros to at least one food before saving, or cancel to discard.',
+      );
+      return;
+    }
     // Recompute meal-level micronutrients from per-item micros so the
     // nutrition details modal reflects edits immediately.
     const resummedMicros: Record<string, number> = {};
@@ -716,6 +741,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     };
     const synced = syncLegacyFieldsFromItems(finalMeal);
     onSave(synced);
+    onClose();
+  };
+
+  // Cancel never goes through the save pipeline — no empty-meal prompt,
+  // no onSave. Just dismiss. This is deliberate: if the user opened the
+  // modal by accident (or added foods they immediately regret) the X
+  // button should always exit without a fight.
+  const handleCancel = () => {
     onClose();
   };
 
@@ -774,12 +807,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
   return (
     <>
-    <Modal visible={visible} animationType="slide" onRequestClose={() => { handleSave(); }}>
+    <Modal visible={visible} animationType="slide" onRequestClose={() => { handleCancel(); }}>
       <View style={s.container}>
 
         {/* Header */}
         <View style={s.header}>
-          <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <TouchableOpacity onPress={handleCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
           <View style={s.headerCenter}>

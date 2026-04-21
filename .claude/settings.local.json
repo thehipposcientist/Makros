@@ -147,7 +147,11 @@
       "Bash(/opt/homebrew/bin/npx expo *)",
       "Bash(git log *)",
       "Bash(aws ecr *)",
-      "Bash(make -n deploy-backend)"
+      "Bash(make -n deploy-backend)",
+      "Bash(PYTHONPATH=. python3 -m tests.run_all)",
+      "Bash(PYTHONPATH=. python3 -m tests.test_planner_schema)",
+      "Bash(cat Makefile)",
+      "Bash(ls ../Makefile)"
     ]
   }
 }
