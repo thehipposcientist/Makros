@@ -32,6 +32,9 @@ interface NutritionCardProps {
   onRenameMeal?: (mealType: string, newName: string) => void;
   /** Reorder the day's meals[]. `direction` is -1 (move up) or +1 (move down). */
   onMoveMeal?: (mealType: string, direction: -1 | 1) => void;
+  /** Regenerate a single meal with a fresh seed, preserving calorie/macro targets.
+   *  Shuffles ingredients within the same nutrient envelope. */
+  onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
   goal?: string;
 }
 
@@ -50,6 +53,7 @@ export default function NutritionCard({
   onShowRecipe,
   onRenameMeal,
   onMoveMeal,
+  onShuffleMeal,
   goal,
 }: NutritionCardProps) {
   const [showMicroModal, setShowMicroModal] = useState(false);
@@ -490,6 +494,7 @@ export default function NutritionCard({
               onMoveUp={i > 0 && onMoveMeal ? () => onMoveMeal(key, -1) : undefined}
               onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
               onRenameMeal={onRenameMeal}
+              onShuffle={onShuffleMeal ? () => onShuffleMeal(key, meal) : undefined}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -557,7 +562,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, colors, styles, mealAccent }: {
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, colors, styles, mealAccent }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -571,6 +576,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   onRenameMeal?: (mealType: string, newName: string) => void;
   onMoveUp?: () => void;
   onMoveDown?: () => void;
+  onShuffle?: () => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
@@ -605,6 +611,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
   const swipeActions: SwipeAction[] = [];
   if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: '#fff', bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
+  if (onShuffle) swipeActions.push({ icon: 'shuffle', color: '#fff', bgColor: mealAccent.strong, onPress: onShuffle, label: 'Shuffle' });
   if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp });
   if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown });
   if (onRemove) swipeActions.push({ icon: 'trash-outline', color: '#fff', bgColor: colors.error ?? '#EF4444', onPress: () => onRemove(mealType), label: 'Remove' });

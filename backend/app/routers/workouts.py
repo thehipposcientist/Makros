@@ -670,12 +670,21 @@ def mark_workout_complete(
                 ex_list = []
                 for ep in body.exercises:
                     seed = seed_map.get(ep.name.lower(), {})
+                    # Pass structured per-set data (reps, weight, RIR) so
+                    # resolve_exercise_fatigue can compute volume-load and
+                    # stimulus-specific fatigue (heavy vs hypertrophy vs volume
+                    # produce different systemic/muscular ratios).
+                    set_dicts = [
+                        {"reps": s.reps, "weight_lbs": s.weight_lbs, "rir": s.rir}
+                        for s in ep.sets
+                    ]
                     ex_list.append({
                         "name": ep.name,
                         "primary_muscle": seed.get("primary_muscle", ""),
                         "secondary_muscles": seed.get("secondary_muscles", []),
                         "is_compound": seed.get("is_compound", False),
                         "sets_logged": len(ep.sets),
+                        "sets": set_dicts,
                     })
                 resolved = resolve_exercise_fatigue(
                     ex_list,
@@ -701,6 +710,30 @@ def mark_workout_complete(
                     if inferred and inferred != completion_row.focus_label:
                         logger.info(f"[workouts/complete] focus corrected: {completion_row.focus_label!r} → {inferred!r} (from exercises)")
                         completion_row.focus_label = inferred
+                # Re-derive stimulus from what the user ACTUALLY did, not
+                # what the plan said to do. A planned "heavy" day done at
+                # 12+ rep sets is really a volume day; the planner's
+                # intensity-spacing rules should react to reality.
+                all_reps: list[int] = []
+                for ep in body.exercises:
+                    for s in ep.sets:
+                        if s.reps and s.reps > 0:
+                            all_reps.append(s.reps)
+                if all_reps:
+                    avg_reps = sum(all_reps) / len(all_reps)
+                    if avg_reps <= 6:
+                        derived_stimulus = "strength"
+                    elif avg_reps <= 11:
+                        derived_stimulus = "hypertrophy"
+                    else:
+                        derived_stimulus = "volume"
+                    if completion_row.stimulus != derived_stimulus:
+                        logger.info(
+                            f"[workouts/complete] stimulus re-derived: "
+                            f"{completion_row.stimulus!r} → {derived_stimulus!r} "
+                            f"(avg_reps={avg_reps:.1f})"
+                        )
+                        completion_row.stimulus = derived_stimulus
             db.add(completion_row)
     except Exception as e:
         logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")

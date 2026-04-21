@@ -619,7 +619,7 @@ function seededIndex(length: number, seed: string, salt: string): number {
   return hashString(`${seed}|${salt}`) % length;
 }
 
-function generateMealSuggestion(
+export function generateMealSuggestion(
   mealType: string,
   calorieTarget: number,
   foodsAvailable: string[],

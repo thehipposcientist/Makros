@@ -2822,6 +2822,54 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [persistDayState]);
 
+  const handleShuffleMeal = useCallback(async (date: string, mealType: string, meal: MealSuggestion) => {
+    // Regenerate a single meal with a fresh random seed, preserving its
+    // calorie + macro envelope. Uses the client-side template library
+    // (instant, free). If the user wants AI variety later, we can add a
+    // long-press option to call the backend /meals/swap endpoint.
+    const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
+    if (idx < 0 || !userProfile) return;
+    const calorieTarget = Math.max(100, Math.round(meal.calories || 500));
+
+    const { generateMealSuggestion } = await import('../utils/planGenerator');
+    const foodList = meta.foods ?? [];
+    const foodMap: Record<string, any> = {};
+    for (const f of foodList) foodMap[f.name.toLowerCase()] = f;
+    for (const f of (userProfile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as any;
+
+    const seed = `shuffle:${date}:${idx}:${Date.now()}:${Math.random()}`;
+    const shuffled = generateMealSuggestion(
+      meal.meal || 'Meal',
+      calorieTarget,
+      userProfile.foodsAvailable,
+      foodMap,
+      seed,
+    );
+
+    let nextPlan: DailyNutritionPlan | null = null;
+    setNutritionPlansByDate(prev => {
+      const current = prev[date];
+      if (!current) return prev;
+      const meals = (current.meals ?? []).slice();
+      if (idx < 0 || idx >= meals.length) return prev;
+      // Preserve the meal's identity (name, routine pin) while swapping
+      // in the new ingredient list. Keep name if it's been user-renamed.
+      const existing = meals[idx];
+      meals[idx] = {
+        ...shuffled,
+        meal: existing.meal,
+        isRoutine: existing.isRoutine,
+        ...(existing as any)._routineId ? { _routineId: (existing as any)._routineId } : {},
+      };
+      nextPlan = { ...current, meals };
+      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+    });
+    if (nextPlan) {
+      await saveNutritionPlan(date, nextPlan);
+      await persistDayState(date, { nutrition_plan: nextPlan });
+    }
+  }, [userProfile, persistDayState, meta.foods]);
+
   const handleRenameMeal = useCallback(async (date: string, mealType: string, newName: string) => {
     const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
     if (idx < 0) return;
@@ -4165,6 +4213,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
                       onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
                       onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
+                      onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
                     />

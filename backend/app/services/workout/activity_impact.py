@@ -130,6 +130,41 @@ _MUSCLE_ROLLUP: dict[str, str] = {
 }
 
 
+def _set_stimulus_multipliers(avg_reps: float, avg_rir: float | None) -> tuple[float, float]:
+    """Given average reps-per-set (and optional RIR), return (systemic_mult,
+    muscular_mult) that reflect how heavy vs volume work differ in their
+    fatigue fingerprint.
+
+    Heavy work (low reps, near failure): taxes the CNS harder per unit
+    of muscular damage. Volume work (high reps): more time-under-tension
+    and more mechanical damage, less CNS cost. Hypertrophy lives in the
+    middle and is the baseline (1.0 / 1.0).
+
+    Multipliers:
+      heavy (avg ≤ 6 reps)             — systemic 1.30, muscular 0.80
+      hypertrophy (7–11 reps)          — systemic 1.00, muscular 1.00
+      volume (12+ reps)                — systemic 0.75, muscular 1.20
+
+    RIR adjustment (when provided):
+      RIR 0 (failure)    — systemic × 1.15 (CNS cost higher at failure)
+      RIR ≥ 3            — systemic × 0.90, muscular × 0.95 (sub-max)
+    """
+    if avg_reps <= 6:
+        sys_m, mus_m = 1.30, 0.80
+    elif avg_reps <= 11:
+        sys_m, mus_m = 1.00, 1.00
+    else:
+        sys_m, mus_m = 0.75, 1.20
+
+    if avg_rir is not None:
+        if avg_rir <= 0.5:
+            sys_m *= 1.15
+        elif avg_rir >= 3.0:
+            sys_m *= 0.90
+            mus_m *= 0.95
+    return sys_m, mus_m
+
+
 def resolve_exercise_fatigue(
     exercises: list[dict],
     intensity: str = "moderate",
@@ -137,33 +172,63 @@ def resolve_exercise_fatigue(
 ) -> dict[str, float]:
     """Resolve a list of completed exercises into per-muscle fatigue scores.
 
+    Reads actual per-set `reps` + `weight_lbs` + `rir` when provided and
+    scales fatigue by:
+      - total reps (not just set count — 4×12 = more damage than 4×5)
+      - stimulus bracket (heavy vs hypertrophy vs volume produces different
+        ratios of systemic to muscular fatigue — see `_set_stimulus_multipliers`)
+      - RIR proximity to failure when available
+
     Each exercise dict should have:
       - name (str)
       - primary_muscle (str)
       - secondary_muscles (list[str])
       - is_compound (bool)
-      - sets logged or target_sets (int)
+      - sets: list[dict] with {reps, weight_lbs, rir} per set (preferred)
+      - OR sets_logged / target_sets as a count fallback
     """
     intensity_mult = {"easy": 0.5, "moderate": 1.0, "hard": 1.4}.get(intensity, 1.0)
     fatigue: dict[str, float] = {}
+
+    # Baseline: ~0.08 per set for a "typical" 10-rep working set. Convert
+    # to a per-rep coefficient so total-rep count drives fatigue.
+    base_per_rep = 0.008 * intensity_mult
 
     for ex in exercises:
         primary = _MUSCLE_ROLLUP.get(ex.get("primary_muscle", ""), "")
         secondaries = [_MUSCLE_ROLLUP.get(m, "") for m in (ex.get("secondary_muscles") or [])]
         secondaries = [s for s in secondaries if s and s != primary]
         is_compound = ex.get("is_compound", False)
-        sets = ex.get("sets_logged") or ex.get("target_sets") or ex.get("sets") or 3
 
-        # Per-exercise fatigue: ~0.08 per set for primary, scaled by intensity
-        base_per_set = 0.08 * intensity_mult
+        # Prefer structured per-set data when present so we can read
+        # actual reps + RIR. Fall back to set count with assumed 10 reps.
+        structured_sets: list[dict] = ex.get("sets") or []
+        if structured_sets and any(isinstance(s, dict) and s.get("reps") for s in structured_sets):
+            set_reps = [max(1, int(s.get("reps") or 0)) for s in structured_sets if isinstance(s, dict)]
+            set_rirs = [float(s["rir"]) for s in structured_sets if isinstance(s, dict) and s.get("rir") is not None]
+            total_reps = sum(set_reps)
+            avg_reps = total_reps / max(1, len(set_reps))
+            avg_rir = (sum(set_rirs) / len(set_rirs)) if set_rirs else None
+        else:
+            sets_count = ex.get("sets_logged") or ex.get("target_sets") or ex.get("sets") or 3
+            if isinstance(sets_count, list):
+                sets_count = len(sets_count) or 3
+            total_reps = int(sets_count) * 10   # assume 10 reps/set when we don't know
+            avg_reps = 10.0
+            avg_rir = None
+
+        sys_mult, mus_mult = _set_stimulus_multipliers(avg_reps, avg_rir)
+        per_rep = base_per_rep
+
         if primary:
-            fatigue[primary] = fatigue.get(primary, 0.0) + base_per_set * sets
+            fatigue[primary] = fatigue.get(primary, 0.0) + per_rep * total_reps * mus_mult
         for sec in secondaries:
-            fatigue[sec] = fatigue.get(sec, 0.0) + base_per_set * 0.3 * sets
+            fatigue[sec] = fatigue.get(sec, 0.0) + per_rep * total_reps * 0.3 * mus_mult
 
-        # Systemic contribution
-        sys_mult = 0.4 if is_compound else 0.15
-        fatigue["systemic"] = fatigue.get("systemic", 0.0) + base_per_set * sys_mult * sets
+        # Systemic: compound lifts cost more CNS than isolation, but also
+        # scale by the heavy/volume stimulus multiplier.
+        sys_base = 0.4 if is_compound else 0.15
+        fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult
 
     # Cap individual muscles at 1.0
     return {k: round(min(1.0, v), 3) for k, v in fatigue.items()}
