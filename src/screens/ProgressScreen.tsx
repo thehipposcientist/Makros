@@ -26,8 +26,7 @@ import RecoveryCard from '../components/RecoveryCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore, getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
-import { getMealCheckTimestamps, computeEatingWindow, weeklyAverageWindow, windowInsightFor } from '../utils/eatingWindow';
-import { proteinTimingInsights, lateEatingInsight } from '../utils/nutritionInsights';
+import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -131,15 +130,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
   // Gut / longevity signals. All computed client-side from existing plan + check data.
+  // Eating-window/late-eating intentionally NOT included — would require
+  // real-time meal logging which adds friction.
   const [gutInsights, setGutInsights] = useState<{
     plantCount: number;
     plantTier: 'on_track' | 'building' | 'low';
     plantMessage: string;
     fiberToday: { grams: number; target: number; pct: number; message: string };
-    eatingWindowToday: { hours: number | null; target: number; message: string };
-    weeklyWindow: { avgHours: number | null; days: number };
     proteinFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
-    lateEatingFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -214,27 +212,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         );
         const fiber = computeFiberToday(plansByDate[todayKey] ?? null, checksByDate[todayKey] ?? null, fiberTarget);
 
-        const tsMap = await getMealCheckTimestamps();
-        const todayWindow = computeEatingWindow(tsMap, todayKey);
-        const weeklyWindow = weeklyAverageWindow(tsMap, todayKey, 7);
-        // Longevity-goal users default to 12h eating window; everyone else 14h.
-        const windowTarget = (userProfile.goal || '').toLowerCase() === 'longevity' ? 12 : 14;
-        const winInsight = windowInsightFor(todayWindow, windowTarget);
-
         const proteinInsights = proteinTimingInsights(plansByDate[todayKey] ?? null);
         const proteinFlag = proteinInsights[0] ? { tier: proteinInsights[0].tier, detail: proteinInsights[0].detail } : null;
-        const lateInsight = lateEatingInsight(todayWindow.lastMealTime);
-        const lateFlag = lateInsight ? { tier: lateInsight.tier, detail: lateInsight.detail } : null;
 
         setGutInsights({
           plantCount: diversity.distinctCount,
           plantTier: diversity.tier,
           plantMessage: diversity.message,
           fiberToday: { grams: fiber.grams, target: fiber.target, pct: fiber.pct, message: fiber.message },
-          eatingWindowToday: { hours: todayWindow.windowHours, target: windowTarget, message: winInsight.message },
-          weeklyWindow: { avgHours: weeklyWindow.avgHours, days: weeklyWindow.daysWithData },
           proteinFlag,
-          lateEatingFlag: lateFlag,
         });
       } catch (e) {
         console.warn('[Progress] gut insights failed:', e);
@@ -1376,23 +1362,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   }} />
                 </View>
               </View>
-              {/* Eating window */}
-              {gutInsights.eatingWindowToday.hours != null && (
-                <View style={{ marginBottom: 10 }}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Eating window today</Text>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.eatingWindowToday.hours <= gutInsights.eatingWindowToday.target ? '#22C55E' : '#F59E0B' }}>
-                      {gutInsights.eatingWindowToday.hours}h / ≤{gutInsights.eatingWindowToday.target}h
-                    </Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
-                    {gutInsights.weeklyWindow.avgHours != null
-                      ? `7-day avg: ${gutInsights.weeklyWindow.avgHours}h`
-                      : 'Building weekly trend…'}
-                  </Text>
-                </View>
-              )}
-              {/* Late-eating + protein timing flags */}
+              {/* Protein timing flag — derived from per-meal protein only,
+                  no timing required. */}
               {gutInsights.proteinFlag && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
                   <Ionicons
@@ -1401,16 +1372,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
                   />
                   <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
-                </View>
-              )}
-              {gutInsights.lateEatingFlag && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
-                  <Ionicons
-                    name={gutInsights.lateEatingFlag.tier === 'good' ? 'checkmark-circle' : gutInsights.lateEatingFlag.tier === 'watch' ? 'alert-circle-outline' : 'warning-outline'}
-                    size={14}
-                    color={gutInsights.lateEatingFlag.tier === 'good' ? '#22C55E' : gutInsights.lateEatingFlag.tier === 'watch' ? '#F59E0B' : '#EF4444'}
-                  />
-                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.lateEatingFlag.detail}</Text>
                 </View>
               )}
             </View>
