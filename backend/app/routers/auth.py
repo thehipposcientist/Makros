@@ -50,7 +50,7 @@ def _validate_password(pwd: str) -> None:
 
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-@limiter.limit("5/hour")
+@limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
     _validate_password(body.password)
     ip = _client_ip(request)
