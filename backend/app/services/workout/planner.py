@@ -1993,9 +1993,11 @@ def generate_recovery_day(session_minutes: int = 45) -> dict:
     sm = max(20, session_minutes)
     pool = [
         {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(8, max(4, sm // 8))} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core"]},
-        {"name": "Cat-Cow Stretch", "sets": 2, "reps": "10", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
+        # Cat-Cow removed from recovery pool — it's a lift-day warmup drill.
+        # Recovery day should be passive holds + walk, not activation flows.
         {"name": "Hip 90/90 Stretch", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "World's Greatest Stretch", "sets": 2, "reps": "5 each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
+        {"name": "Reclined Pigeon (Figure-4)", "sets": 2, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes"]},
+        {"name": "World's Greatest Stretch", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
         {"name": "Supine Spinal Twist", "sets": 2, "reps": "30s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["core", "back"]},
         {"name": "Child's Pose", "sets": 1, "reps": "45s hold", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["back", "shoulders"]},
         {"name": "Pigeon Pose", "sets": 2, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["glutes", "hamstrings"]},
@@ -2013,25 +2015,34 @@ def generate_recovery_day(session_minutes: int = 45) -> dict:
 
 
 def generate_mobility_day(session_minutes: int = 45) -> dict:
-    """Generate a mobility day that fits within session_minutes."""
+    """Generate a mobility day that fits within session_minutes.
+
+    Content philosophy: mobility day is a dedicated yoga/long-hold
+    session — NOT a lift warmup. Entries are long passive holds, deep
+    hip/shoulder openers, and flow sequences that would be awkward or
+    time-consuming to squeeze into a lifting day's 5-min warmup.
+    Short activation drills (Wall Slides, Shoulder Dislocates, Thoracic
+    Rotation, Cat-Cow) live in lift-day warmup slots instead — putting
+    them here would make the mobility day feel like a random assortment
+    of warmups with no distinct identity.
+    """
     sm = max(20, session_minutes)
-    # Use longer holds (60s+) and 3 sets to fill time properly.
-    # Each exercise is ~4-5 min, so 10 exercises = ~45 min.
     pool = [
         {"name": "Foam Rolling — Full Body", "sets": 1, "reps": f"{min(10, max(5, sm // 6))} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
-        {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "60s each side", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
+        {"name": "Downward Dog to Cobra Flow", "sets": 3, "reps": "60s flow", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders", "hamstrings", "core"]},
+        {"name": "Low Lunge (Deep)", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["quads", "hip_flexors"]},
         {"name": "Hip 90/90 Stretch", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "Thoracic Spine Rotation", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "core"]},
         {"name": "World's Greatest Stretch", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "shoulders", "hamstrings"]},
-        {"name": "Pigeon Pose", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
-        {"name": "Shoulder Dislocates", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+        {"name": "Pigeon Pose", "sets": 3, "reps": "90s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "hamstrings"]},
         {"name": "Couch Stretch", "sets": 3, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["quads", "core"]},
         {"name": "Dead Hang", "sets": 3, "reps": "30s hold", "rest_seconds": 15, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "shoulders"]},
-        {"name": "Wall Slides", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["shoulders"]},
+        {"name": "Cobbler's Pose (Baddha Konasana)", "sets": 2, "reps": "90s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "core"]},
         {"name": "Seated Straddle Stretch", "sets": 3, "reps": "60s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["hamstrings", "glutes"]},
-        {"name": "Supine Spinal Twist", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
-        {"name": "Lying Butterfly Stretch", "sets": 2, "reps": "60s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "core"]},
-        {"name": "Cat-Cow Stretch", "sets": 3, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
+        {"name": "Supine Spinal Twist", "sets": 2, "reps": "45s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
+        {"name": "Sphinx Pose", "sets": 2, "reps": "60s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core", "back"]},
+        {"name": "Happy Baby", "sets": 2, "reps": "45s hold", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes", "core"]},
+        {"name": "Legs-Up-The-Wall", "sets": 1, "reps": "3 min hold", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["core"]},
+        {"name": "Reclined Pigeon (Figure-4)", "sets": 2, "reps": "60s each side", "rest_seconds": 10, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["glutes"]},
         {"name": "Child's Pose", "sets": 2, "reps": "60s hold", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "mobility", "muscles_targeted": ["back", "shoulders"]},
     ]
     exercises = _pick_exercises_for_time(pool, sm)

@@ -65,10 +65,12 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
   const titleSize = compact ? 13 : 17;
   const titleWeight: '700' | '800' = compact ? '700' : '800';
 
-  const muscleEntries = Object.entries(data.muscleFatigue ?? {})
-    .filter(([k]) => k !== 'cardio' && k !== 'systemic')
-    .sort((a, b) => b[1] - a[1]);
-  const hasAnyFatigue = muscleEntries.some(([, v]) => v >= 0.05);
+  // Show every tracked muscle group regardless of fatigue level — even 100%
+  // recovered ones render (useful for "nothing is fatigued right now" read).
+  // Canonical order matches MuscleGroup enum so the list is stable run-to-run.
+  const MUSCLE_ORDER = ['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes', 'calves', 'core'];
+  const fatigueMap = data.muscleFatigue ?? {};
+  const muscleEntries: [string, number][] = MUSCLE_ORDER.map(m => [m, fatigueMap[m] ?? 0]);
 
   return (
     <TouchableOpacity
@@ -108,41 +110,25 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
       {expanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
-          {!hasAnyFatigue ? (
-            <Text style={{ fontSize: 13, color: tc.textMuted }}>
-              All muscle groups are fresh and recovered.
-            </Text>
-          ) : (
-            muscleEntries
-              .filter(([, v]) => v >= 0.05)
-              .map(([muscle, fatigue]) => {
-                const pct = Math.round(fatigue * 100);
-                const recovery = Math.max(0, 100 - pct);
-                const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
-                return (
-                  <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 75, textTransform: 'capitalize' }}>
-                      {muscle.replace('_', ' ')}
-                    </Text>
-                    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                      <View style={{ width: `${Math.min(100, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
-                    </View>
-                    <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
-                  </View>
-                );
-              })
-          )}
-          {(data.muscleFatigue?.systemic ?? 0) > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: tc.border }}>
-              <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 75 }}>Overall Load</Text>
-              <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                <View style={{ width: `${Math.min(100, Math.max(0, 100 - Math.round((data.muscleFatigue!.systemic) * 100)))}%` as any, height: 5, borderRadius: 3, backgroundColor: data.muscleFatigue!.systemic > 0.5 ? '#EF4444' : '#F59E0B' }} />
+          {muscleEntries.map(([muscle, fatigue]) => {
+            const pct = Math.round(fatigue * 100);
+            const recovery = Math.max(0, 100 - pct);
+            const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
+            return (
+              <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 75, textTransform: 'capitalize' }}>
+                  {muscle.replace('_', ' ')}
+                </Text>
+                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                  <View style={{ width: `${Math.min(100, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
+                </View>
+                <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
               </View>
-              <Text style={{ fontSize: 10, fontWeight: '700', color: data.muscleFatigue!.systemic > 0.5 ? '#EF4444' : '#F59E0B', width: 32, textAlign: 'right' }}>
-                {Math.max(0, 100 - Math.round((data.muscleFatigue!.systemic) * 100))}%
-              </Text>
-            </View>
-          )}
+            );
+          })}
+          {/* Overall Load / systemic bar removed per request — the per-muscle
+              bars above cover the useful signal. Users found the aggregate
+              redundant with the headline readiness score. */}
           {(() => {
             const acts = data.activities ?? [];
             if (acts.length === 0) return null;

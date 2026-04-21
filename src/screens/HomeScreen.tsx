@@ -3819,6 +3819,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           // that fixes one adjacency but creates a new one
                           // downstream gets cleaned up on the next sweep.
                           const daysToRegen = new Set<number>();
+
+                          // Priority: if the user switched TODAY's strength
+                          // day (push/pull/legs/etc) to an easy day (recovery
+                          // or mobility), promote the old strength focus to
+                          // TOMORROW. The user swapped "do push today" for
+                          // "rest today" — they still want to do push ASAP.
+                          const oldFam = normFamily(oldFocus);
+                          const newFam = normFamily(newFocus);
+                          const strengthFamilies = new Set(['push', 'pull', 'legs', 'upper', 'lower', 'full']);
+                          if (
+                            strengthFamilies.has(oldFam)
+                            && newFam === 'easy'
+                            && dayIdx + 1 < updatedDays.length
+                          ) {
+                            const tomorrowFam = normFamily(updatedDays[dayIdx + 1]?.focus);
+                            if (tomorrowFam !== oldFam) {
+                              // Find the next day >= dayIdx+2 that has oldFam
+                              // and swap it with dayIdx+1. That way tomorrow
+                              // holds the work the user was going to do today.
+                              for (let k = dayIdx + 2; k < updatedDays.length; k++) {
+                                if (normFamily(updatedDays[k]?.focus) === oldFam) {
+                                  const tmp = updatedDays[dayIdx + 1].focus;
+                                  updatedDays[dayIdx + 1] = { ...updatedDays[dayIdx + 1], focus: updatedDays[k].focus };
+                                  updatedDays[k] = { ...updatedDays[k], focus: tmp };
+                                  daysToRegen.add(dayIdx + 1);
+                                  daysToRegen.add(k);
+                                  break;
+                                }
+                              }
+                            }
+                          }
                           const MAX_PASSES = 4;
                           for (let pass = 0; pass < MAX_PASSES; pass++) {
                             let anySwap = false;
