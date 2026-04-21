@@ -132,46 +132,58 @@ def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
     M = (DayArchetype.LIFT_PUSH,        DayArchetype.LIFT_PULL,        DayArchetype.LIFT_LEGS)
     V = (DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME, DayArchetype.LIFT_LEGS_VOLUME)
 
-    # Explicit 6-day sequences — keeps Push → Pull → Legs rotation intact
-    # inside each three-day block so the rotation-avoidance pass has a
-    # clean base to work from.
+    # Explicit sequences per day-count AND goal. Keeping the Push → Pull
+    # → Legs rotation inside each three-day block so the rotation-avoidance
+    # pass has a clean base. 5-day sequences deliberately DROP the duplicate
+    # Pull (not Legs) — legs is easier to under-train naturally and the
+    # plan reviewer repeatedly flagged single-Legs weeks as imbalanced.
     goal_lower = (goal or "").lower()
+
+    # 6-day sequences (each goal gets 2 Push + 2 Pull + 2 Legs, varying
+    # the stimulus intensity). 5-day sequences give 2P + 1Pu + 2L.
+    # 4-day sequences give 1P + 1Pu + 2L (still prioritizing legs).
     if goal_lower == "strength":
-        # 4 heavy + 2 hypertrophy. Second rotation swaps push to M so we
-        # still get some higher-rep work in the week without diluting the
-        # heavy emphasis across all three movement patterns.
-        six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]
+        six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]        # 4H + 2M
+        five_day = [H[0], H[1], H[2], H[0], M[2]]             # 4H + 1M, 2/1/2
+        four_day = [H[0], H[1], H[2], M[2]]                   # 3H + 1M, 1/1/2
     elif goal_lower == "muscle_gain":
-        # Legacy behavior: first rotation heavy, second rotation volume.
-        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]
+        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]        # 3H + 3V
+        five_day = [H[0], H[1], H[2], V[0], V[2]]             # 3H + 2V, 2/1/2
+        four_day = [H[0], H[1], H[2], V[2]]                   # 3H + 1V, 1/1/2
     elif goal_lower == "body_recomp":
-        # Balanced: 2 heavy + 2 hypertrophy + 2 volume, rotated so each
-        # movement pattern gets a different stimulus across the week.
-        six_day = [H[0], M[1], H[2], V[0], M[1], V[2]]
+        six_day = [H[0], M[1], H[2], V[0], M[1], V[2]]        # balanced 2+2+2
+        five_day = [H[0], M[1], H[2], V[0], V[2]]             # 2/1/2
+        four_day = [H[0], M[1], H[2], V[2]]                   # 1/1/2
     elif goal_lower == "athletic_performance":
-        # Power + size: 3 heavy + 3 hypertrophy, no 15-rep sets.
-        six_day = [H[0], H[1], H[2], M[0], M[1], M[2]]
+        six_day = [H[0], H[1], H[2], M[0], M[1], M[2]]        # 3H + 3M
+        five_day = [H[0], H[1], H[2], M[0], M[2]]             # 3H + 2M, 2/1/2
+        four_day = [H[0], H[1], H[2], M[2]]                   # 3H + 1M, 1/1/2
     elif goal_lower == "hyrox":
-        # Functional endurance: 2 heavy (for strength floor) + 4 hypertrophy.
-        six_day = [H[0], M[1], H[2], M[0], M[1], M[2]]
+        six_day = [H[0], M[1], H[2], M[0], M[1], M[2]]        # 2H + 4M
+        five_day = [H[0], M[1], H[2], M[0], M[2]]             # 2H + 3M, 2/1/2
+        four_day = [H[0], M[1], H[2], M[2]]                   # 2H + 2M, 1/1/2
     elif goal_lower == "toning":
-        # No heavy: 3 hypertrophy + 3 volume.
-        six_day = [M[0], M[1], M[2], V[0], V[1], V[2]]
+        six_day = [M[0], M[1], M[2], V[0], V[1], V[2]]        # 3M + 3V, no heavy
+        five_day = [M[0], M[1], M[2], V[0], V[2]]             # 3M + 2V, 2/1/2
+        four_day = [M[0], M[1], M[2], V[2]]                   # 3M + 1V, 1/1/2
     elif goal_lower == "fat_loss":
-        # Metabolic stress: 2 hypertrophy + 4 volume.
-        six_day = [M[0], V[1], M[2], V[0], V[1], V[2]]
+        six_day = [M[0], V[1], M[2], V[0], V[1], V[2]]        # 2M + 4V
+        five_day = [M[0], V[1], M[2], V[0], V[2]]             # 2M + 3V, 2/1/2
+        four_day = [M[0], V[1], M[2], V[2]]                   # 2M + 2V, 1/1/2
     else:
         # Unknown / general_health / maintain / endurance lifting day:
-        # default to the legacy 3H + 3V mix — safest broad-appeal default.
+        # default to the legacy 3H + 3V mix.
         six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]
+        five_day = [H[0], H[1], H[2], V[0], V[2]]
+        four_day = [H[0], H[1], H[2], V[2]]
 
     if days >= 6:
         return six_day[:days]
-    if days >= 4:
-        # Take the first N of the 6-day sequence. Preserves the intended
-        # emphasis order: heavier / harder days land first.
-        return six_day[:days]
-    # 3 days or fewer: one clean hypertrophy rotation.
+    if days == 5:
+        return five_day
+    if days == 4:
+        return four_day
+    # 3 days or fewer: one clean hypertrophy rotation (P/Pu/L).
     return [M[i % 3] for i in range(days)]
 
 
