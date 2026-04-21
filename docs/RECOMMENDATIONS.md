@@ -66,6 +66,10 @@ Triaged by blast radius × effort. Tackle top-down.
 
 ## In Flight
 
+### Known bugs pending deeper investigation (2026-04-21)
+- **Day 5/6 meal plan macro overflow** — specific days of a 7-day plan generate meals dramatically over target calories. Root-cause candidates: `planGenerator.ts` uses a single `NutritionTargets` for all 7 days (no per-day normalization on regeneration); backend AI meal-gen path may skip `_normalize_template_to_target` for partial/late days. Reproduce with fresh 7-day plan generation and dump the day 5/6 meal arrays before/after the final normalize pass.
+- **Meal checks appear pre-checked on days 5/6** — check state keyed by `meal_${idx}` in `HomeScreen.tsx:1410` collides across regenerations. Real fix: stamp every meal with a stable `_localId` on first creation and key checks by that ID. ~1–2 hours of surgery across `HomeScreen.tsx`, `mealTracker.ts`, and the check-read paths. Test before shipping.
+
 ### HealthKit on TestFlight — rejected
 iOS rejects the HealthKit entitlement at runtime despite:
 - App ID has HealthKit capability (verified in Developer Portal)

@@ -197,7 +197,7 @@ def most_recent_completed_focus(
     from datetime import date, datetime, timedelta
     from sqlmodel import select, or_
     from app.models import WorkoutCompletion
-    from .focus_normalize import normalize_focus_to_bucket, normalize_focus_to_family
+    from .focus_normalize import normalize_focus_to_bucket, normalize_focus_to_family, infer_family_from_muscles
 
     # Naive UTC "now" — matches the TIMESTAMP WITHOUT TIME ZONE storage
     # (see docstring). `datetime.utcnow()` is deprecated in Python 3.12+;
@@ -223,12 +223,50 @@ def most_recent_completed_focus(
         .limit(max(limit, 5))  # over-fetch a bit so we can drop unnormalizable rows
     ).all()
 
+    # Family mapping from fine family → coarse bucket, used when we
+    # derive the family from muscle distribution (no coarse bucket
+    # in the label). Matches BUCKET_TO_FAMILIES reversed.
+    _FAMILY_TO_BUCKET = {
+        "push": "upper_body",
+        "pull": "upper_body",
+        "upper": "upper_body",
+        "legs": "lower_body",
+        "lower": "lower_body",
+        "full_body": "full_body",
+        "cardio": "cardio",
+        "mobility": "mobility",
+        "recovery": "recovery",
+    }
+
     buckets: list[str] = []
     families: list[str] = []
     for row in rows:
         raw_focus = (row.focus_label or "").strip()
         bucket = normalize_focus_to_bucket(raw_focus)
         family = normalize_focus_to_family(raw_focus)
+        # Fallback + override: derive family from the session's actual
+        # muscle distribution when `resolved_muscle_fatigue` is present.
+        # Covers two cases:
+        #   1. Label didn't normalize (empty / generic / "Hypertrophy")
+        #      → family=None → use inference.
+        #   2. Label says "Upper Body" but muscles say 75% back + biceps
+        #      → prefer muscle-derived "pull" so rotation avoids it
+        #      the next day.
+        muscle_family = infer_family_from_muscles(getattr(row, "resolved_muscle_fatigue", None))
+        if muscle_family:
+            # Use muscle inference when label family is missing OR when
+            # label was coarse (upper/lower) but muscles resolve to a
+            # specific sub-family (push/pull/legs). Never overrides a
+            # specific family with the SAME specificity — if label says
+            # "push" and muscles say "push", we keep the label.
+            if family is None:
+                family = muscle_family
+            elif family in ("upper", "lower") and muscle_family in ("push", "pull", "legs"):
+                family = muscle_family
+            # Also upgrade bucket when missing — a "pull" family row
+            # should also count as "upper_body" bucket if bucket was None.
+            if bucket is None:
+                bucket = _FAMILY_TO_BUCKET.get(muscle_family)
         inside_cutoff = (
             row.completed_at is not None and row.completed_at >= cutoff_dt
         ) or (
@@ -237,7 +275,8 @@ def most_recent_completed_focus(
         print(
             f"[history] recent completion: workout_date={row.workout_date} "
             f"completed_at={row.completed_at} raw_focus={raw_focus!r} "
-            f"bucket={bucket!r} family={family!r} inside_cutoff={inside_cutoff}"
+            f"bucket={bucket!r} family={family!r} muscle_family={muscle_family!r} "
+            f"inside_cutoff={inside_cutoff}"
         )
         if bucket and len(buckets) < limit:
             buckets.append(bucket)

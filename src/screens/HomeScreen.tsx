@@ -1636,10 +1636,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         try {
           const { generateWorkoutDay } = await import('../services/api');
           const todayIdx = completedDates.size % baseWorkout.days.length;
-          // Lock the backend to the existing day's focus so "fresh day"
-          // only regenerates exercises, never swaps the split (e.g. a PPL
-          // plan won't suddenly show "Upper A — Strength" for today).
-          const existingFocus = baseWorkout.days[todayIdx % baseWorkout.days.length]?.focus;
+          // Don't pass focus_override here — that would lock the backend
+          // to the stale cached plan's focus for this day_index, bypassing
+          // rotation. The split is already locked via `preferred_split`
+          // (the planner treats that as an explicit user choice, so PPL
+          // won't silently flip to Upper/Lower). Letting the backend
+          // rotate freely means the fresh day honors recent completions
+          // — e.g. if the user just did Push yesterday, today's fresh
+          // day comes back Pull even if the stale plan said Push.
           const freshDay = await generateWorkoutDay(authToken, {
             goal: profile.goal,
             day_index: todayIdx,
@@ -1651,7 +1655,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             priority_region: profile.priorityRegion ?? 'balanced',
             injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
             disliked_exercises: profile.dislikedExercises ?? [],
-            focus_override: existingFocus,
           });
           if (freshDay?.day) {
             const updatedDays = [...baseWorkout.days];

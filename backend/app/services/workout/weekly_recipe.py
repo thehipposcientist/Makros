@@ -107,6 +107,74 @@ def _pick_recovery_archetype(profile: GoalProfile) -> DayArchetype:
 # ── Lifting mode ────────────────────────────────────────────────────
 
 
+def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
+    """Goal-specific stimulus mix for a PPL split.
+
+    The base rotation is always Push → Pull → Legs (preserves the split's
+    identity and rotation). What varies per goal is which *stimulus* each
+    day carries — heavy (3–5 reps), moderate/hypertrophy (6–10), or
+    volume (10–15). For 6 days we run two rotations; for 4–5 we take the
+    first N entries of the 6-day sequence; for 3 we use one rotation at
+    the goal's middle stimulus.
+
+    Goal dial:
+      strength                 → 4 heavy + 2 hypertrophy
+      muscle_gain              → 3 heavy + 3 volume (legacy default)
+      body_recomp              → 2 heavy + 2 hypertrophy + 2 volume
+      athletic_performance     → 3 heavy + 3 hypertrophy (no 15-rep sets)
+      hyrox                    → 2 heavy + 4 hypertrophy (muscle endurance)
+      toning                   → 3 hypertrophy + 3 volume (no heavy)
+      fat_loss                 → 2 hypertrophy + 4 volume
+      default (unknown / other)→ 3 hypertrophy + 3 volume
+    """
+    # Sequences in Push/Pull/Legs order for each stimulus type.
+    H = (DayArchetype.LIFT_PUSH_HEAVY,  DayArchetype.LIFT_PULL_HEAVY,  DayArchetype.LIFT_LEGS_HEAVY)
+    M = (DayArchetype.LIFT_PUSH,        DayArchetype.LIFT_PULL,        DayArchetype.LIFT_LEGS)
+    V = (DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME, DayArchetype.LIFT_LEGS_VOLUME)
+
+    # Explicit 6-day sequences — keeps Push → Pull → Legs rotation intact
+    # inside each three-day block so the rotation-avoidance pass has a
+    # clean base to work from.
+    goal_lower = (goal or "").lower()
+    if goal_lower == "strength":
+        # 4 heavy + 2 hypertrophy. Second rotation swaps push to M so we
+        # still get some higher-rep work in the week without diluting the
+        # heavy emphasis across all three movement patterns.
+        six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]
+    elif goal_lower == "muscle_gain":
+        # Legacy behavior: first rotation heavy, second rotation volume.
+        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]
+    elif goal_lower == "body_recomp":
+        # Balanced: 2 heavy + 2 hypertrophy + 2 volume, rotated so each
+        # movement pattern gets a different stimulus across the week.
+        six_day = [H[0], M[1], H[2], V[0], M[1], V[2]]
+    elif goal_lower == "athletic_performance":
+        # Power + size: 3 heavy + 3 hypertrophy, no 15-rep sets.
+        six_day = [H[0], H[1], H[2], M[0], M[1], M[2]]
+    elif goal_lower == "hyrox":
+        # Functional endurance: 2 heavy (for strength floor) + 4 hypertrophy.
+        six_day = [H[0], M[1], H[2], M[0], M[1], M[2]]
+    elif goal_lower == "toning":
+        # No heavy: 3 hypertrophy + 3 volume.
+        six_day = [M[0], M[1], M[2], V[0], V[1], V[2]]
+    elif goal_lower == "fat_loss":
+        # Metabolic stress: 2 hypertrophy + 4 volume.
+        six_day = [M[0], V[1], M[2], V[0], V[1], V[2]]
+    else:
+        # Unknown / general_health / maintain / endurance lifting day:
+        # default to the legacy 3H + 3V mix — safest broad-appeal default.
+        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]
+
+    if days >= 6:
+        return six_day[:days]
+    if days >= 4:
+        # Take the first N of the 6-day sequence. Preserves the intended
+        # emphasis order: heavier / harder days land first.
+        return six_day[:days]
+    # 3 days or fewer: one clean hypertrophy rotation.
+    return [M[i % 3] for i in range(days)]
+
+
 def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_region: str = "balanced") -> list[DayArchetype]:
     """Translate a traditional split id (from `pick_split`) into a
     list of `LIFT_*` archetypes. Mirrors the old `build_day_templates`
@@ -141,23 +209,60 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
 
     if split == SPLIT_UPPER_LOWER:
         if _has_stimulus and days >= 3:
-            # Region-biased U/L: when priority_region is lower_body,
-            # start with Lower so odd-day counts give an extra lower day.
-            # When upper_body, start with Upper (same as current default).
-            if priority_region == "lower_body":
-                stimulus_cycle = [
-                    DayArchetype.LIFT_LOWER_HEAVY,
-                    DayArchetype.LIFT_UPPER_HEAVY,
-                    DayArchetype.LIFT_LOWER_HYPERTROPHY,
-                    DayArchetype.LIFT_UPPER_HYPERTROPHY,
-                ]
+            # Goal shapes the heavy/hypertrophy mix. Strength goals bias
+            # heavy; toning/fat_loss avoid pure-heavy; body_recomp balances.
+            goal_lower = (profile.bucket or "").lower()
+            if goal_lower in ("strength", "athletic_performance"):
+                # Lead with two heavy days per region, then hypertrophy.
+                # 4-day plan = pure heavy; 5-6 day plan adds hypertrophy.
+                if priority_region == "lower_body":
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                    ]
+                else:
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                    ]
+            elif goal_lower in ("toning", "fat_loss"):
+                # No pure heavy days. Hypertrophy dominant, with one
+                # lighter heavy to maintain strength floor.
+                if priority_region == "lower_body":
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                    ]
+                else:
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                    ]
             else:
-                stimulus_cycle = [
-                    DayArchetype.LIFT_UPPER_HEAVY,
-                    DayArchetype.LIFT_LOWER_HEAVY,
-                    DayArchetype.LIFT_UPPER_HYPERTROPHY,
-                    DayArchetype.LIFT_LOWER_HYPERTROPHY,
-                ]
+                # muscle_gain / body_recomp / hyrox / unknown → balanced
+                # (legacy default: alternating heavy / hypertrophy)
+                if priority_region == "lower_body":
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                    ]
+                else:
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                    ]
             result = [stimulus_cycle[i % len(stimulus_cycle)] for i in range(days)]
             # Odd day: repeat an extra upper or lower hypertrophy day
             # instead of breaking the split with full body
@@ -175,32 +280,8 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
         return result
 
     if split == SPLIT_PPL:
-        if _has_stimulus and days >= 6:
-            # Full PPL × 2: first rotation heavy (3-5 reps), second volume (10-15).
-            # Gives the user both strength and hypertrophy stimulus in one week.
-            heavy = [
-                DayArchetype.LIFT_PUSH_HEAVY,
-                DayArchetype.LIFT_PULL_HEAVY,
-                DayArchetype.LIFT_LEGS_HEAVY,
-            ]
-            volume = [
-                DayArchetype.LIFT_PUSH_VOLUME,
-                DayArchetype.LIFT_PULL_VOLUME,
-                DayArchetype.LIFT_LEGS_VOLUME,
-            ]
-            return (heavy + volume)[:days]
         if _has_stimulus and days >= 4:
-            # PPL at 4-5 days: standard hypertrophy base + volume extras.
-            base = [
-                DayArchetype.LIFT_PUSH,
-                DayArchetype.LIFT_PULL,
-                DayArchetype.LIFT_LEGS,
-            ]
-            volume = [
-                DayArchetype.LIFT_PUSH_VOLUME,
-                DayArchetype.LIFT_PULL_VOLUME,
-            ]
-            return (base + volume)[:days]
+            return _ppl_stimulus_mix(profile.bucket, days)
         cycle = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
         return [cycle[i % 3] for i in range(days)]
 
@@ -1148,7 +1229,14 @@ def generate_weekly_recipe(
         recipe = _maintain_recipe(profile, days)
 
     pre_rotation = [a.value for a in recipe]
-    logger.debug(f"[weekly_recipe] mode={mode} days={days} recipe={pre_rotation}")
+    # Promote from debug to info so we can diagnose rotation issues in
+    # prod without flipping log levels. Low volume (1/regen) so it won't
+    # flood CloudWatch.
+    logger.info(
+        f"[weekly_recipe] DIAG goal={profile.bucket} split={lifting_split} "
+        f"mode={mode} days={days} recipe_before_rotation={pre_rotation} "
+        f"recent_families={list(recent_focus_families) if recent_focus_families else []}"
+    )
     # Use fine-grained focus families for rotation when available.
     # Families preserve split identity (push != pull) while coarse
     # buckets collapse both to "upper_body" -- which means the rotation
@@ -1170,12 +1258,21 @@ def generate_weekly_recipe(
     )
     # Fatigue-aware rotation: if user has real muscle fatigue data,
     # prefer starting the week with the freshest focus.
-    if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
+    #
+    # BUT — skip for PPL splits. PPL has a built-in rotation where each
+    # day pattern targets different muscles, so the recent-focus rotation
+    # above already handles freshness correctly. Running fatigue rotation
+    # on top of a PPL recipe can shift day 0 to a fresh muscle but
+    # scramble the Push→Pull→Legs rotation integrity (e.g. producing
+    # Push→Pull→Push→Pull→Legs instead of the clean P→Pu→L→P→Pu).
+    from .day_templates import SPLIT_PPL, SPLIT_PPL_UL
+    skip_fatigue_rotation = lifting_split in (SPLIT_PPL, SPLIT_PPL_UL)
+    if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain") and not skip_fatigue_rotation:
         recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
     # Rotation can reintroduce adjacent same-bucket duplicates.
     recipe = _repair_adjacent_duplicates(recipe)
-    logger.debug(
-        f"[weekly_recipe] recipe_after_rotation={[a.value for a in recipe]}"
+    logger.info(
+        f"[weekly_recipe] DIAG recipe_after_all_rotation={[a.value for a in recipe]}"
     )
 
     # Active recovery: 7-day pure-lifting weeks need at least one easy

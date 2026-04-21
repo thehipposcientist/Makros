@@ -204,25 +204,64 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           baseFat:      it.baseFat      ?? it.fat,
         };
       }
+      // Preserve existing macro values when possible. Two earlier bugs
+      // informed this guarded order:
+      //   1. Re-running the scale ratio on every modal open caused a 100x
+      //      multiplier blowup (sweet potato → 40000 cal) when library
+      //      units didn't match item units and convertQuantity returned
+      //      null. Fix: never overwrite when baseCalories is already set.
+      //   2. Re-seeding from the library for freshly-generated plan items
+      //      (which have `calories` populated but no `baseCalories`) made
+      //      the values drift slightly on open due to rounding differences.
+      //      Fix: if the item already carries macros, trust them — they
+      //      came from the plan generator or a prior save. Only compute
+      //      from the library when the item literally has no macros.
       const lib = lookupFood(it.name, allFoods);
+      const hasMacros = (it.calories ?? 0) > 0
+        || (it.protein ?? 0) > 0
+        || (it.carbs ?? 0) > 0
+        || (it.fat ?? 0) > 0;
+
+      if (hasMacros) {
+        // Trust the item's own values — don't re-derive from library.
+        return {
+          ...it,
+          baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
+          baseCalories: it.baseCalories ?? it.calories,
+          baseProtein:  it.baseProtein  ?? it.protein,
+          baseCarbs:    it.baseCarbs    ?? it.carbs,
+          baseFat:      it.baseFat      ?? it.fat,
+        };
+      }
+
       if (lib && (lib.calories ?? 0) > 0) {
         const libParsed = lib.unit ? parseAmountString(lib.unit) : null;
         const libQty = libParsed?.quantity ?? 1;
         const libUnit = libParsed?.unit ?? it.unit;
         const conv = libUnit !== it.unit ? convertQuantity(it.quantity, it.unit, libUnit) : it.quantity;
         const effectiveQty = conv ?? it.quantity;
-        const ratio = libQty > 0 ? effectiveQty / libQty : 1;
+        // Guard against catastrophic ratios. If convertQuantity failed
+        // (libUnit is incompatible with it.unit — e.g. grams↔medium) we'd
+        // divide raw quantity by 1 and blow up. Require a safe ratio.
+        const safeRatio =
+          libQty > 0 && conv !== null && Number.isFinite(effectiveQty / libQty)
+            ? effectiveQty / libQty
+            : 1;
+        const cal = Math.round((lib.calories ?? 0) * safeRatio);
+        const pro = Math.round((lib.protein  ?? 0) * safeRatio);
+        const car = Math.round((lib.carbs    ?? 0) * safeRatio);
+        const fat = Math.round((lib.fat      ?? 0) * safeRatio);
         return {
           ...it,
-          baseQuantity: it.quantity > 0 ? it.quantity : 1,
-          calories:     Math.round((lib.calories ?? 0) * ratio),
-          protein:      Math.round((lib.protein  ?? 0) * ratio),
-          carbs:        Math.round((lib.carbs    ?? 0) * ratio),
-          fat:          Math.round((lib.fat      ?? 0) * ratio),
-          baseCalories: Math.round((lib.calories ?? 0) * ratio),
-          baseProtein:  Math.round((lib.protein  ?? 0) * ratio),
-          baseCarbs:    Math.round((lib.carbs    ?? 0) * ratio),
-          baseFat:      Math.round((lib.fat      ?? 0) * ratio),
+          baseQuantity: it.baseQuantity ?? (it.quantity > 0 ? it.quantity : 1),
+          calories:     cal,
+          protein:      pro,
+          carbs:        car,
+          fat:          fat,
+          baseCalories: cal,
+          baseProtein:  pro,
+          baseCarbs:    car,
+          baseFat:      fat,
         };
       }
       return {

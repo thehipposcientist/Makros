@@ -264,6 +264,62 @@ def normalize_focus_to_family(raw_focus: Optional[str]) -> FocusBucket:
     return None
 
 
+def infer_family_from_muscles(muscle_fatigue: dict | None) -> Optional[str]:
+    """Back-infer the training family from a per-muscle fatigue dict.
+
+    Used when `focus_label` is ambiguous/generic (e.g. "Hypertrophy",
+    AI-generated names) but the session's muscle distribution tells us
+    what it actually was. Contracts:
+
+      - `muscle_fatigue` is the dict-shape from `MuscleFatigue.to_dict()`
+        or `WorkoutCompletion.resolved_muscle_fatigue`:
+        `{"chest": 0.6, "back": 0.1, "biceps": 0.05, ...}`
+      - Returns "push" / "pull" / "legs" / "full_body" / "cardio" / None.
+      - Requires at least 60% of non-systemic fatigue to fall in one
+        family. Below that threshold, returns "full_body" if spread
+        across 3+ families, else None.
+
+    Threshold is deliberately loose (60%) so a Pull day that includes
+    some overhead press still buckets correctly as pull. Raise if false
+    positives show up in practice.
+    """
+    if not muscle_fatigue or not isinstance(muscle_fatigue, dict):
+        return None
+
+    # Family → set of muscles that contribute to it. Systemic + cardio
+    # don't count as "body region" — they're session-wide stress.
+    push_muscles = ("chest", "shoulders", "triceps")
+    pull_muscles = ("back", "biceps", "lats", "traps", "rear_delts")
+    legs_muscles = ("quads", "hamstrings", "glutes", "calves")
+
+    def _sum(keys):
+        return sum(float(muscle_fatigue.get(k, 0) or 0) for k in keys)
+
+    push = _sum(push_muscles)
+    pull = _sum(pull_muscles)
+    legs = _sum(legs_muscles)
+    cardio = float(muscle_fatigue.get("cardio", 0) or 0)
+    total = push + pull + legs
+
+    if total <= 0 and cardio > 0:
+        return "cardio"
+    if total <= 0:
+        return None
+
+    # Find dominant family. Require >=60% share to claim the day.
+    shares = {"push": push / total, "pull": pull / total, "legs": legs / total}
+    dominant, share = max(shares.items(), key=lambda kv: kv[1])
+    if share >= 0.60:
+        return dominant
+
+    # No single dominant family — if the work is spread across 3+
+    # families reasonably evenly, call it full body. Otherwise, unknown.
+    nonzero_families = sum(1 for v in shares.values() if v >= 0.15)
+    if nonzero_families >= 3:
+        return "full_body"
+    return None
+
+
 # Reverse mapping: given a coarse bucket, what focus families could
 # it contain? Used when only a coarse bucket is available.
 BUCKET_TO_FAMILIES: dict[str, tuple[str, ...]] = {
