@@ -1311,7 +1311,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const hs = healthSummary;
             const hasAnyData = hs && (
               hs.restingHeartRate != null || hs.avgSteps7d != null ||
-              hs.lastNightSleepHours != null || hs.workouts7d != null ||
+              hs.lastNightSleepHours != null ||
               hs.activeEnergy7d != null || hs.hrvAvg != null
             );
 
@@ -1328,7 +1328,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 }
                 const hasAny = fresh && (
                   fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
-                  fresh.lastNightSleepHours != null || fresh.workouts7d != null ||
+                  fresh.lastNightSleepHours != null ||
                   fresh.activeEnergy7d != null
                 );
                 if (granted && !hasAny) {
@@ -1415,7 +1415,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
                 {vitalsRow('walk-outline', 'Steps (avg)', hs!.avgSteps7d)}
                 {vitalsRow('flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal')}
-                {vitalsRow('barbell-outline', 'Workouts', hs!.workouts7d)}
                 {vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? `${hs!.avgSleepHours7d}` : null, 'hrs')}
                 {hs!.vo2Max != null && vitalsRow('fitness-outline', 'VO2 Max', Math.round(hs!.vo2Max * 10) / 10, 'ml/kg/min')}
                 {hs!.respiratoryRate != null && vitalsRow('leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm')}
@@ -1492,34 +1491,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
-
-          {/* Workout Details from Apple Health */}
-          {healthSummary?.workoutDetails && healthSummary.workoutDetails.length > 0 && (
-            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-              <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
-                <Ionicons name="barbell-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Recent Workouts</Text>
-                <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>from Apple Health</Text>
-              </View>
-              {healthSummary.workoutDetails.slice(0, 5).map((w, i) => {
-                const d = new Date(w.startDate);
-                return (
-                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border + '44' }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>{w.activityName}</Text>
-                      <Text style={{ fontSize: 11, color: tc.textMuted }}>
-                        {d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} · {Math.round(w.duration)} min
-                        {w.calories ? ` · ${Math.round(w.calories)} cal` : ''}
-                      </Text>
-                    </View>
-                    {w.distanceMiles != null && w.distanceMiles > 0 && (
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>{w.distanceMiles.toFixed(1)} mi</Text>
-                    )}
-                  </View>
-                );
-              })}
-            </View>
-          )}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
