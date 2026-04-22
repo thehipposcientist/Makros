@@ -169,7 +169,11 @@
       "Bash(find / -maxdepth 5 -name \"node\" -type f)",
       "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit)",
       "Bash(/Users/sawyerhannel/Documents/GitHub/Makros/node_modules/.bin/tsc --noEmit)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(./node_modules/.bin/tsc --noEmit --pretty)",
+      "Bash(/opt/homebrew/bin/node -e 'const m = require\\('\\\\''react-native'\\\\''\\).NativeModules; console.log\\('\\\\''AppleHealthKit:'\\\\'', !!m.AppleHealthKit\\); console.log\\('\\\\''keys:'\\\\'', Object.keys\\(m.AppleHealthKit || {}\\)\\)')",
+      "Bash(which eas *)",
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" eas build *)"
     ]
   }
 }

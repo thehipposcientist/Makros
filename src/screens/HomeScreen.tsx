@@ -28,7 +28,7 @@ import {
   savePreservedCompletedWorkout,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
-import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature } from '../utils/mealTracker';
+import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
 import { formatWaterTarget } from '../utils/hydration';
@@ -1644,6 +1644,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       mealDays.forEach((d, i) => { checkMap[d.key] = checksList[i] as MealChecks; });
     }
 
+    // Merge historical meal checks (past days) so the calendar strip and
+    // history tab show data beyond the forward 7-day window.
+    try {
+      const allHistoricalChecks = await getAllMealChecks();
+      for (const [date, checks] of Object.entries(allHistoricalChecks)) {
+        if (!checkMap[date]) checkMap[date] = checks;
+      }
+    } catch {}
+
     setSkippedDates(skipped);
     setCheckedMealsByDate(checkMap);
 
@@ -2144,6 +2153,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       })
     );
     const raw: Record<string, DailyNutritionPlan> = Object.fromEntries(localEntries);
+
+    // Merge historical per-day plans so the calendar strip and history tab
+    // have past data. Forward days from template rotation take precedence.
+    try {
+      const historicalPlans = await getAllSavedNutritionPlans();
+      for (const [date, plan] of Object.entries(historicalPlans)) {
+        if (!raw[date] && plan) {
+          raw[date] = migrateNutritionPlanShape(plan) as DailyNutritionPlan;
+        }
+      }
+    } catch {}
+
     setNutritionPlansByDate(raw);
 
     // ── Background enrichment for routine/custom meals missing micros ──
@@ -4399,8 +4420,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const dt = new Date(Date.now() - i * 86400000);
                 const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
                 const p = nutritionPlansByDate[key];
+                const checks = checkedMealsByDate[key] ?? {};
+                const anyChecked = Object.values(checks).some(Boolean);
+                const isPast = key < todayStr;
                 let sc: number | null = null;
-                if (p && p.meals && p.meals.length > 0) {
+                // Past days: only show a score when at least one meal was logged.
+                // Today: show the planned score regardless.
+                if (p && p.meals && p.meals.length > 0 && (!isPast || anyChecked)) {
                   try {
                     const ds = computeNutritionScore(p, userProfile?.goal ?? 'body_recomp');
                     sc = ds && ds.score > 0 ? ds.score : null;

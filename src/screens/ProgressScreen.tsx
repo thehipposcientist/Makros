@@ -19,7 +19,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
+import { readHealthSummary, isHealthKitAvailable, isHealthKitNativeBindingsMissing, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -1329,7 +1329,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   ) : null}
                 </View>
 
-                {!healthEnabled ? (
+                {isHealthKitNativeBindingsMissing() ? (
+                  <>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
+                      Apple Health requires a native rebuild. The JS package is installed but the native iOS module isn't linked in this binary.
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, lineHeight: 16, marginBottom: 4 }}>
+                      Run: eas build --profile development --platform ios --clear-cache
+                    </Text>
+                  </>
+                ) : !healthEnabled ? (
                   <>
                     <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
                       Connect Apple Health to see your resting heart rate, sleep, steps, and workouts — and get a more accurate fitness score.

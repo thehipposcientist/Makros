@@ -91,11 +91,22 @@ function _buildPermissionsObject(hk: any) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/** Returns true if this device can use Apple Health. */
+/** Returns true if this device could use Apple Health — including when the
+ *  JS module loaded but native bindings are missing (needs a rebuild). The
+ *  UI should still render the Apple Health section so the user sees a
+ *  Connect button that surfaces an actionable error instead of hiding the
+ *  entire feature. */
 export function isHealthKitAvailable(): boolean {
   if (Platform.OS !== 'ios') return false;
   const hk = getHealthKit();
-  return !!hk;
+  return !!hk || _nativeBindingsMissing;
+}
+
+/** True when the JS package loaded but NativeModules.AppleHealthKit is null.
+ *  Callers can use this to show a "rebuild required" message instead of the
+ *  normal Connect flow. */
+export function isHealthKitNativeBindingsMissing(): boolean {
+  return _nativeBindingsMissing;
 }
 
 // Last error from initHealthKit, exposed so UI can show the raw iOS
@@ -169,7 +180,9 @@ export function requestHealthPermissions(): Promise<boolean> {
   return new Promise((resolve) => {
     const hk = getHealthKit();
     if (!hk) {
-      _lastHealthKitError = 'Native module not loaded (getHealthKit returned null)';
+      _lastHealthKitError = _nativeBindingsMissing
+        ? 'Native iOS module not linked in this binary. Run: eas build --profile development --platform ios --clear-cache, then install the new build on device.'
+        : 'Native module not loaded — this build does not include react-native-health. A custom dev build is required (Expo Go cannot use HealthKit).';
       resolve(false);
       return;
     }
