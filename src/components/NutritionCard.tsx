@@ -150,20 +150,20 @@ export default function NutritionCard({
             <TouchableOpacity
               activeOpacity={0.7}
               onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setScoreExpanded(p => !p); }}
-              style={{ marginBottom: 6, marginTop: 2, backgroundColor: colors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: colors.border }}>
+              style={{ marginBottom: 4, marginTop: 2, paddingVertical: 6, paddingHorizontal: 2 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: scoreColor + '18', alignItems: 'center', justifyContent: 'center' }}>
-                    <Text style={{ fontSize: 14, fontWeight: '900', color: scoreColor }}>{sc.score}</Text>
+                  <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: scoreColor + '18', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ fontSize: 12, fontWeight: '800', color: scoreColor }}>{sc.score}</Text>
                   </View>
                   <View>
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textPrimary }}>Nutrition Score</Text>
-                    <Text style={{ fontSize: 10, color: colors.textMuted }}>
+                    <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textMuted, letterSpacing: 0.2 }}>Nutrition Score</Text>
+                    <Text style={{ fontSize: 11, color: colors.textSecondary }}>
                       {sc.wins.length > 0 ? sc.wins[0] : sc.improvements.length > 0 ? sc.improvements[0] : 'Tap for details'}
                     </Text>
                   </View>
                 </View>
-                <Ionicons name={scoreExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textMuted} />
+                <Ionicons name={scoreExpanded ? 'chevron-up' : 'chevron-down'} size={14} color={colors.textMuted} />
               </View>
               {scoreExpanded && (
                 <View style={{ marginTop: 8, gap: 5 }}>
@@ -234,14 +234,14 @@ export default function NutritionCard({
             </TouchableOpacity>
           );
         })()}
-        {/* Nutrition details button + modal — always visible */}
+        {/* Nutrition details — muted inline link, supplementary to the score */}
         <TouchableOpacity
           style={styles.microBtn}
           onPress={() => setShowMicroModal(true)}
-          activeOpacity={0.7}>
-          <Ionicons name="bar-chart-outline" size={13} color={section.strong} />
-          <Text style={styles.microBtnText}>Nutrition Details</Text>
-          <Ionicons name="chevron-forward" size={14} color={section.strong} />
+          activeOpacity={0.6}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+          <Text style={styles.microBtnText}>Nutrition details</Text>
+          <Ionicons name="chevron-forward" size={12} color={colors.textMuted} />
         </TouchableOpacity>
 
         <Modal
@@ -470,13 +470,15 @@ export default function NutritionCard({
             📌 emoji but are otherwise rendered identically to other meals. */}
         <View style={styles.meals}>
           {visibleMeals.length > 0 && !swipeHintDismissed && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 8, paddingBottom: 4, gap: 4 }}>
-              <Ionicons name="arrow-back" size={11} color={colors.textMuted} />
-              <Text style={{ fontSize: 10, color: colors.textMuted }}>Swipe meal for more options</Text>
-              <TouchableOpacity onPress={() => setSwipeHintDismissed(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Ionicons name="close" size={12} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              onPress={() => setSwipeHintDismissed(true)}
+              activeOpacity={0.6}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              style={{ paddingHorizontal: 2, paddingBottom: 6, marginTop: -2 }}>
+              <Text style={{ fontSize: 10, color: colors.textMuted, fontStyle: 'italic' }}>
+                swipe a meal to see actions
+              </Text>
+            </TouchableOpacity>
           )}
           {visibleMeals.map(({ key, emoji, meal }, i) => (
             <MealRow
@@ -748,11 +750,13 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
             )}
           </View>
         </View>
-        {/* Edit button — primary visible action */}
+        {/* Secondary icon strip — pencil (edit) stays muted + outlined so
+            it reads as a secondary action, not the primary CTA. The
+            primary action on a meal row is the check box on the left. */}
         <View style={styles.iconStrip}>
           {onEdit && (
             <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel={`Edit ${meal.meal}`}>
-              <Ionicons name="create-outline" size={17} color={mealAccent.strong} />
+              <Ionicons name="pencil-outline" size={16} color={colors.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -760,8 +764,8 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
       {/* Item list — collapsed by default, tap to expand */}
       {itemRows.length > 0 && !itemsExpanded ? (
-        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3 }}>
-          <Text style={{ fontSize: 12, color: colors.textMuted }}>
+        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3, paddingLeft: 32 }}>
+          <Text style={{ fontSize: 12, color: colors.textSecondary, fontWeight: '500' }}>
             {itemRows.length} item{itemRows.length !== 1 ? 's' : ''} · tap to see details
           </Text>
         </TouchableOpacity>
@@ -941,7 +945,9 @@ const createStyles = (
     borderColor: section.strong + '2A',
     gap: 6,
   },
-  mealItemDone: { opacity: 0.62, borderColor: colors.success },
+  // Completed state: no opacity fade — full strength with strikethrough
+  // title + muted subtitle so it reads "done", not "dead".
+  mealItemDone: { borderColor: section.strong + '55', backgroundColor: section.soft + '66' },
 
   mealHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
 
@@ -980,17 +986,18 @@ const createStyles = (
   },
 
   checkbox: {
-    width: 20, height: 20, borderRadius: 6,
-    borderWidth: 2, borderColor: colors.border,
+    width: 22, height: 22, borderRadius: 6,
+    borderWidth: 2, borderColor: section.strong + '88',
     alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'transparent',
   },
-  checkboxDone: { backgroundColor: colors.success, borderColor: colors.success },
-  checkmark:    { fontSize: 12, color: colors.background, fontWeight: '800' },
+  checkboxDone: { backgroundColor: section.strong, borderColor: section.strong },
+  checkmark:    { fontSize: 12, color: '#fff', fontWeight: '800' },
 
-  mealName:     { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  mealName:     { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
 
-  mealFoodsDetail: { gap: 3, marginTop: 6, paddingLeft: 30 },
+  mealFoodsDetail: { gap: 3, marginTop: 6, paddingLeft: 32 },
   mealFoodRow:     { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   mealFoodName:    { fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
   mealFoodsDone:   { color: colors.textMuted },
@@ -1040,23 +1047,18 @@ const createStyles = (
   pillValue: { fontSize: 13, fontWeight: '700' },
   pillLabel: { fontSize: 9, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
 
-  // ── Micro details button (compact secondary action) ──────────────────────
+  // ── Nutrition details inline link (muted, supplementary) ────────────────
   microBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    backgroundColor: 'transparent',
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: section.strong + '55',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    marginBottom: 12,
-    gap: 5,
+    paddingVertical: 4,
+    marginBottom: 10,
+    gap: 3,
   },
   microBtnIcon: { fontSize: 11 },
-  microBtnText: { fontSize: 11, fontWeight: '700', color: section.strong },
-  microBtnArrow: { fontSize: 13, fontWeight: '600', color: section.strong, marginLeft: 1 },
+  microBtnText: { fontSize: 12, fontWeight: '500', color: colors.textMuted },
+  microBtnArrow: { fontSize: 12, fontWeight: '500', color: colors.textMuted, marginLeft: 1 },
 
   // ── Micro modal ──────────────────────────────────────────────────────────────
   modalOverlay: {

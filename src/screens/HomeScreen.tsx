@@ -1518,6 +1518,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { cancelled = true; };
   }, [workoutPlan, planRefreshKey]);
 
+  // Defensive re-schedule of the 9pm meal-log reminder. Cheap: if the
+  // settings say disabled, the helper no-ops. If already scheduled,
+  // the helper cancels + re-schedules so we don't stack duplicates.
+  // Also re-establishes the repeating schedule after a
+  // `maybeCancelTodayReminder` path swapped it for a one-shot tomorrow.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { loadMealReminderSettings, scheduleMealReminder } = await import('../utils/mealReminders');
+        const settings = await loadMealReminderSettings();
+        if (settings.enabled) await scheduleMealReminder(settings);
+      } catch {}
+    })();
+  }, []);
+
   useEffect(() => {
     if (unloggedPromptCheckedRef.current) return;
     if (!userProfile || !authToken) return;
@@ -2866,6 +2881,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setCheckedMealsByDate(prev => ({ ...prev, [date]: next }));
     await saveMealChecks(date, next);
     await persistDayState(date, { meal_checks: next });
+
+    // If this check completes today's plan, suppress the 9pm reminder
+    // for today — no point nudging the user when they've already logged
+    // everything. `maybeCancelTodayReminder` no-ops if reminder is off.
+    try {
+      if (date === todayKey()) {
+        const todayPlan = nutritionPlansByDate[date];
+        const allMealsChecked = !!todayPlan?.meals?.length
+          && todayPlan.meals.every((_, idx) => !!next[`meal_${idx}`]);
+        if (allMealsChecked) {
+          const { maybeCancelTodayReminder } = await import('../utils/mealReminders');
+          maybeCancelTodayReminder(true).catch(() => {});
+        }
+      }
+    } catch {}
     // Snapshot the meal on check, clear on uncheck. Preserved meals survive
     // plan regeneration — loadPlans overlays them after picking a template.
     const plan = nutritionPlansByDate[date];
@@ -4546,86 +4576,95 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 ? userProfile.goalSelection.primaryGoal.replace(/_/g, ' ')
                 : userProfile.goal?.replace(/_/g, ' ') ?? '';
               return (
-                <View style={[styles.dailyTargetBanner, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      Daily target
+                <View style={[styles.dailyTargetBanner, { backgroundColor: themeColors.surface }]}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <Text style={{ fontSize: 22, fontWeight: '800', color: themeColors.textPrimary }}>
+                      Daily Target
                     </Text>
-                    <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                    {/* Edit Plan — small outlined pill, meta-action for the
+                        current plan. Reads as secondary, doesn't compete
+                        with meal cards below. */}
+                    <TouchableOpacity
+                      onPress={() => setMealsSubTab('foods')}
+                      activeOpacity={0.7}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 4,
+                        paddingHorizontal: 10,
+                        paddingVertical: 5,
+                        borderRadius: 999,
+                        borderWidth: 1,
+                        borderColor: themeColors.border,
+                      }}>
+                      <Ionicons name="settings-outline" size={12} color={themeColors.textSecondary} />
+                      <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary }}>
+                        Edit Plan
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {goalLabel ? (
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 10, textTransform: 'capitalize' }}>
                       {goalLabel}
                     </Text>
-                  </View>
+                  ) : null}
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                     <View style={{ alignItems: 'center' }}>
                       <Text style={{ fontSize: 20, fontWeight: '800', color: mealPalette.strong }}>{t.calories}</Text>
-                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>cal</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>cal</Text>
                     </View>
                     <View style={{ alignItems: 'center' }}>
                       <Text style={{ fontSize: 20, fontWeight: '800', color: themeColors.primary }}>{t.protein ?? 0}g</Text>
-                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>protein · {protPct}%</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>protein · {protPct}%</Text>
                     </View>
                     <View style={{ alignItems: 'center' }}>
                       <Text style={{ fontSize: 20, fontWeight: '800', color: '#F59E0B' }}>{t.carbs ?? 0}g</Text>
-                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>carbs · {carbPct}%</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>carbs · {carbPct}%</Text>
                     </View>
                     <View style={{ alignItems: 'center' }}>
                       <Text style={{ fontSize: 20, fontWeight: '800', color: '#A78BFA' }}>{t.fat ?? 0}g</Text>
-                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>fat · {fatPct}%</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>fat · {fatPct}%</Text>
                     </View>
                   </View>
                   {/* Workout-aware nutrition tip */}
                   {(() => {
                     const todaySchedule = schedule[0];
-                    if (!todaySchedule || todaySchedule.isRest) {
-                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Rest day — prioritize protein and recovery nutrition</Text>;
+                    let tip = 'Training day — keep protein high for muscle recovery';
+                    if (!todaySchedule || todaySchedule.isRest) tip = 'Rest day — prioritize protein and recovery nutrition';
+                    else {
+                      const stim = todaySchedule.workout?.stimulus;
+                      if (stim === 'strength' || stim === 'power') tip = 'Heavy training day — extra carbs around your workout for fuel';
+                      else if (stim === 'conditioning') tip = 'Cardio day — stay hydrated and replenish electrolytes';
                     }
-                    const stim = todaySchedule.workout?.stimulus;
-                    if (stim === 'strength' || stim === 'power') {
-                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Heavy training day — extra carbs around your workout for fuel</Text>;
-                    }
-                    if (stim === 'conditioning') {
-                      return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Cardio day — stay hydrated and replenish electrolytes</Text>;
-                    }
-                    return <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 6 }}>Training day — keep protein high for muscle recovery</Text>;
+                    return <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 8, fontWeight: '500' }}>{tip}</Text>;
                   })()}
                   {userProfile?.physicalStats?.weightLbs ? (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6, backgroundColor: themeColors.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: themeColors.border }}>
-                      <Ionicons name="water-outline" size={16} color="#38BDF8" />
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
+                      <Ionicons name="water-outline" size={14} color="#38BDF8" />
+                      <Text style={{ fontSize: 12, fontWeight: '500', color: themeColors.textSecondary }}>
                         {formatWaterTarget(userProfile.physicalStats.weightLbs, userProfile.workoutDurationMinutes ?? 0)}
                       </Text>
-                      <Text style={{ fontSize: 10, color: themeColors.textMuted }}>daily target</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>daily target</Text>
                     </View>
+                  ) : null}
+                  {/* "Why this plan" — inline muted text link, reads as a
+                      meta-explanation for today's plan rather than a CTA. */}
+                  {nutritionistNote ? (
+                    <TouchableOpacity
+                      onPress={() => setShowNutritionistNote(true)}
+                      activeOpacity={0.6}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 10, alignSelf: 'flex-start' }}>
+                      <Text style={{ fontSize: 12, fontWeight: '500', color: themeColors.textMuted }}>
+                        Why this plan
+                      </Text>
+                      <Ionicons name="chevron-forward" size={12} color={themeColors.textMuted} />
+                    </TouchableOpacity>
                   ) : null}
                 </View>
               );
             })()}
-
-            {/* Plan actions row — Why + Edit */}
-            {mealsSubTab === 'plan' && (
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-                {nutritionistNote ? (
-                  <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: mealPalette.strong + '55', flex: 1 }]}
-                    onPress={() => setShowNutritionistNote(true)}
-                    activeOpacity={0.7}>
-                    <Ionicons name="information-circle-outline" size={14} color={mealPalette.strong} />
-                    <Text style={[styles.planNoteLinkText, { color: mealPalette.strong }]}>
-                      Why this plan
-                    </Text>
-                  </TouchableOpacity>
-                ) : null}
-                <TouchableOpacity
-                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: nutritionistNote ? 0 : 1 }]}
-                  onPress={() => setMealsSubTab('foods')}
-                  activeOpacity={0.7}>
-                  <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
-                  <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]}>
-                    Edit Plan
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            )}
 
             {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
@@ -6507,7 +6546,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
       hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
       style={{
         flex: 1,
-        paddingVertical: 7,
+        paddingVertical: 5,
         paddingHorizontal: 10,
         borderRadius: 7,
         backgroundColor: active ? tint : 'transparent',
@@ -6516,7 +6555,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
       }}>
       <Text style={{
         fontSize: 12,
-        fontWeight: '700',
+        fontWeight: '600',
         color: active ? '#fff' : mutedColor,
         letterSpacing: 0.1,
       }} numberOfLines={1}>
@@ -7433,9 +7472,9 @@ const styles = StyleSheet.create({
 
   dailyTargetBanner: {
     borderRadius: radius.lg,
-    borderWidth: 1,
-    padding: 14,
-    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 10,
   },
   mealAccordionCard: {
     backgroundColor: colors.surface,
@@ -7453,8 +7492,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: 'transparent',
   },
-  mealAccordionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
-  mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  mealAccordionTitle: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 3, fontWeight: '500' },
   mealAccordionChevron: { fontSize: 11, color: colors.textMuted, marginLeft: 8 },
 
   groceryCard: {
