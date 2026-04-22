@@ -145,8 +145,36 @@ def _enrich_from_db(ctx: dict, db: Any, user_id: int) -> None:
             for s in sessions[:4]
         ]
 
+    # ── Meal history: 7-day rolling averages + common meals ───────
+    # Unlocks "user eats chicken + rice 4 days a week — lean into that"
+    # reasoning in the nutrition AI, plus detection of habits the AI
+    # should AVOID recreating as generated meals. No DB writes.
+    try:
+        from app.services.nutrition.meal_history import (
+            get_rolling_averages, get_common_meals,
+        )
+        rolling = get_rolling_averages(user_id, window=7, db=db)
+        if rolling:
+            if rolling.get("avg_calories"):
+                ctx["meal_log_avg_kcal_7d"] = round(rolling["avg_calories"])
+            if rolling.get("avg_protein_g"):
+                ctx["meal_log_avg_protein_g_7d"] = round(rolling["avg_protein_g"], 1)
+            if rolling.get("days_with_data"):
+                ctx["meal_log_days_7d"] = rolling["days_with_data"]
+        # `lookback_days=14` to cover two training weeks — long enough to
+        # surface habits, short enough to stay relevant to current diet.
+        common = get_common_meals(user_id, lookback_days=14, limit=5, db=db)
+        if common:
+            # Compact name-only list; the meal AI uses this to COMPLEMENT
+            # the user's existing habits instead of duplicating them.
+            ctx["common_meals_14d"] = [str(m.get("name", "")).strip() for m in common if m.get("name")]
+    except Exception as exc:
+        # Meal history is additive context — failure MUST NOT block
+        # generation. Log verbosely so the wiring bug is visible.
+        print(f"[nutrition_context] meal_history enrichment failed: {exc}")
 
-def format_for_prompt(ctx: dict, max_lines: int = 15) -> str:
+
+def format_for_prompt(ctx: dict, max_lines: int = 22) -> str:
     """Render the context dict as a terse prompt block. Each field is
     one line of `KEY: VALUE`. Only non-empty fields are included.
     Keeps the prompt addition to ~200-400 chars so token cost is tiny.
@@ -171,6 +199,10 @@ def format_for_prompt(ctx: dict, max_lines: int = 15) -> str:
         ("sessions_planned_7d", "Workouts planned (7d): {v}"),
         ("days_with_meals_logged_7d", "Days with meals logged (7d): {v}"),
         ("recent_workouts_3d", "Recent workouts (3d): {v}"),
+        ("meal_log_avg_kcal_7d", "Actual logged kcal (7d avg): {v}"),
+        ("meal_log_avg_protein_g_7d", "Actual logged protein (7d avg): {v}g"),
+        ("meal_log_days_7d", "Days with meals logged via check-off (7d): {v}"),
+        ("common_meals_14d", "User's frequent meals (14d): {v}"),
     ]
     for key, template in field_map:
         v = ctx.get(key)

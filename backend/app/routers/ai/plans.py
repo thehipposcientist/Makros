@@ -2030,9 +2030,14 @@ async def run_full_plan_generation(
         enriched_local = await asyncio.to_thread(
             enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
         )
+        # db/user_id threaded in so the skeleton prompt sees the user's
+        # real meal-history (rolling averages, common meals from the
+        # check-off log) — AI picks can complement what they actually
+        # eat instead of duplicating it.
         nut = await asyncio.to_thread(
             assemble_nutrition_response,
             client, req, nutrition_target_macros, variety_n, req.foodsAvailable, enriched_local,
+            db=db, user_id=user_id,
         )
         return {"enriched": enriched_local, "nutrition": nut}
 
@@ -2464,8 +2469,17 @@ async def generate_workout_plan(
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
 
 
-async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
-    """Shared nutrition-only generator — callable from sync endpoint and job worker."""
+async def run_nutrition_only_generation(
+    plan_req: PlanRequest,
+    *,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict:
+    """Shared nutrition-only generator — callable from sync endpoint and job worker.
+
+    When `db` + `user_id` are supplied the skeleton prompt gains the
+    user's real meal-history context (rolling averages, common meals).
+    Both are optional for back-compat with legacy call sites."""
     api_key = get_openai_api_key()
     if not api_key:
         raise ValueError("OpenAI API key not configured")
@@ -2487,6 +2501,7 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
     nutrition_data = await asyncio.to_thread(
         assemble_nutrition_response,
         client, plan_req, nutrition_target_macros, variety_n, plan_req.foodsAvailable, enriched,
+        db=db, user_id=user_id,
     )
     plans_list = nutrition_data.get("nutrition_plans") or []
     if not plans_list:
@@ -2616,6 +2631,7 @@ async def run_nutrition_only_generation(plan_req: PlanRequest) -> dict:
 async def generate_nutrition_plan(
     req: NutritionOnlyRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     """Generate a nutrition plan only — called when foods change (sync legacy).
 
@@ -2644,7 +2660,9 @@ async def generate_nutrition_plan(
         userContext=req.userContext,
     )
     try:
-        result = await run_nutrition_only_generation(plan_req)
+        result = await run_nutrition_only_generation(
+            plan_req, db=db, user_id=current_user.id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -2784,7 +2802,7 @@ async def _run_plan_job(job_id: int) -> None:
             if job.kind == "workout":
                 result = await run_workout_only_generation(req, db=db, user_id=job.user_id)
             elif job.kind == "nutrition":
-                result = await run_nutrition_only_generation(req)
+                result = await run_nutrition_only_generation(req, db=db, user_id=job.user_id)
             else:
                 result = await run_full_plan_generation(req, db=db, user_id=job.user_id)
 

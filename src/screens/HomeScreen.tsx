@@ -1639,6 +1639,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // rotate freely means the fresh day honors recent completions
           // — e.g. if the user just did Push yesterday, today's fresh
           // day comes back Pull even if the stale plan said Push.
+          // Pass preceding plan-day focuses so the backend's split
+          // rotation respects what the user has already queued up
+          // (Switch Day picks, manual edits) even before those days
+          // are completed in history. Newest-last (natural order).
+          const prevFocuses: string[] = [];
+          for (let k = 0; k < todayIdx; k += 1) {
+            const f = baseWorkout.days[k]?.focus;
+            if (f) prevFocuses.push(String(f));
+          }
           const freshDay = await generateWorkoutDay(authToken, {
             goal: profile.goal,
             day_index: todayIdx,
@@ -1650,6 +1659,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             priority_region: profile.priorityRegion ?? 'balanced',
             injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
             disliked_exercises: profile.dislikedExercises ?? [],
+            prev_focuses: prevFocuses,
           });
           if (freshDay?.day) {
             const updatedDays = [...baseWorkout.days];
@@ -3874,6 +3884,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     if (authToken) {
                       try {
                         const { generateWorkoutDay } = await import('../services/api');
+                        // Preceding plan-day focuses (queued, possibly
+                        // not yet completed) — keeps split rotation
+                        // honest when the user switches a day mid-week.
+                        const prevFocuses: string[] = [];
+                        for (let k = 0; k < dayIdx; k += 1) {
+                          const f = workoutPlan.days[k]?.focus;
+                          if (f) prevFocuses.push(String(f));
+                        }
                         const fresh = await generateWorkoutDay(authToken, {
                           goal: userProfile.goal,
                           day_index: dayIdx,
@@ -3886,6 +3904,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
                           disliked_exercises: userProfile.dislikedExercises ?? [],
                           focus_override: newFocus,
+                          prev_focuses: prevFocuses,
                         });
                         if (fresh?.day) {
                           const updatedDays = [...workoutPlan.days];
@@ -6363,10 +6382,60 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             })()}
           </View>
           {(() => {
-            const muscles = Array.from(new Set(
-              item.workout!.exercises.map(ex => inferGroup(`${item.workout!.focus} ${ex.name}`))
-            )).filter(g => g !== 'Other').slice(0, 3);
+            const focusLower = (item.workout!.focus || '').toLowerCase();
             const countText = `${item.workout!.exercises.length} exercises`;
+            // Mobility / recovery / stretch / flow days get a single
+            // collapsed label instead of a list of stretched muscles.
+            // The stretches target hip/hamstring/chest muscles but the
+            // user-facing summary is just "Mobility" or "Recovery".
+            if (/mobility|stretch|yoga|flow/.test(focusLower)) {
+              return (
+                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                  {countText} · Mobility
+                </Text>
+              );
+            }
+            if (/recover|rest/.test(focusLower)) {
+              return (
+                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                  {countText} · Recovery
+                </Text>
+              );
+            }
+            if (/cardio|zone.?2|interval/.test(focusLower)) {
+              return (
+                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                  {countText} · Cardio
+                </Text>
+              );
+            }
+            // Lift days: group by `primary_muscle` straight from the
+            // planner so a Push day never picks up "Back" because some
+            // exercise name contains the word "pull". Only fall back to
+            // name inference when primary_muscle is missing.
+            const PRIMARY_TO_LABEL: Record<string, string> = {
+              chest: 'Chest', back: 'Back', shoulders: 'Shoulders',
+              biceps: 'Arms', triceps: 'Arms',
+              quads: 'Legs', hamstrings: 'Legs', calves: 'Legs',
+              glutes: 'Glutes', core: 'Core', cardio: 'Cardio',
+              full_body: 'Full Body',
+            };
+            const labels: string[] = [];
+            for (const ex of item.workout!.exercises) {
+              const key = (ex.primary_muscle ?? '').toLowerCase().replace(/\s+/g, '_');
+              // Skip mobility/systemic muscles inside lift days — they
+              // come from warm-up / accessory stretches, not the day focus.
+              if (key === 'mobility' || key === 'systemic') continue;
+              const label = PRIMARY_TO_LABEL[key] ?? (ex.primary_muscle ? humanizeToken(ex.primary_muscle) : null);
+              if (label && label !== 'Other' && !labels.includes(label)) labels.push(label);
+            }
+            if (labels.length === 0) {
+              for (const ex of item.workout!.exercises) {
+                const g = inferGroup(`${item.workout!.focus} ${ex.name}`);
+                if (g !== 'Other' && !labels.includes(g)) labels.push(g);
+              }
+            }
+            const muscles = labels.slice(0, 3);
             const muscleText = muscles.length ? ` · ${muscles.join(', ')}` : '';
             return (
               <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>

@@ -913,6 +913,11 @@ export async function generateWorkoutDay(
     injuries?: string[];
     disliked_exercises?: string[];
     focus_override?: string;
+    // Preceding-day focuses the user has already fixed in their
+    // current plan but haven't completed yet. Most-recent LAST (natural
+    // plan order). Backend normalizes these into the recent-focus
+    // rotation so single-day generation respects the split pattern.
+    prev_focuses?: string[];
   },
 ): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string; readiness_score?: number }> {
   return request('/workouts/generate-day', {

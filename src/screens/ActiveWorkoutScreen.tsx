@@ -31,6 +31,7 @@ import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
@@ -163,11 +164,10 @@ function getTargetSetCount(targetSets: unknown): number {
 
 const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
-const BODYWEIGHT_ONLY_RE = /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|face pull|wall slide/i;
-
-function isBodyweightOnly(name: string): boolean {
-  return BODYWEIGHT_ONLY_RE.test(name);
-}
+// `isBodyweightOnly` name-regex was replaced by the richer
+// `shouldHideWeight(ex)` predicate in `utils/exerciseDisplay.ts`,
+// which also checks equipment / archetype / training_type / reps
+// string. Old regex removed with the function.
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
   if (TIMED_EXERCISE_RE.test(name)) return true;
@@ -1040,10 +1040,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
       newSet = { setNumber: setSlot + 1, reps: 0, weightLbs: 0, durationSeconds };
     } else {
-      const weightNum = parseFloat(input?.weight ?? '');
-      const repsNum   = parseInt(input?.reps ?? '', 10);
-      if (!input?.weight || !input?.reps || isNaN(weightNum) || isNaN(repsNum) || repsNum <= 0) {
-        if (!silent) Alert.alert('Enter values', 'Fill in weight and reps before logging this set.');
+      // Mirror the UI display predicates: when the exercise is
+      // bodyweight-only we don't ask for weight, and when reps are a
+      // duration string ("60s hold", "3 min") we don't ask for a rep
+      // count. Logging succeeds with whatever the user actually
+      // touched — the other axis stays null.
+      const exMeta = {
+        name: ex?.name, equipment: (ex as any)?.equipment,
+        reps: ex?.targetReps,
+        primary_muscle: (ex as any)?.primary_muscle,
+        _primary_muscle: (ex as any)?._primary_muscle,
+        _archetype: (ex as any)?._archetype,
+        _training_type: (ex as any)?._training_type,
+      };
+      const skipWeight = shouldHideWeight(exMeta);
+      const skipReps   = shouldHideReps(exMeta);
+      const weightNum  = skipWeight ? 0 : parseFloat(input?.weight ?? '');
+      const repsNum    = skipReps   ? 0 : parseInt(input?.reps ?? '', 10);
+      if (!skipWeight && (!input?.weight || isNaN(weightNum))) {
+        if (!silent) Alert.alert('Enter values', 'Fill in weight before logging this set.');
+        return;
+      }
+      if (!skipReps && (!input?.reps || isNaN(repsNum) || repsNum <= 0)) {
+        if (!silent) Alert.alert('Enter values', 'Fill in reps before logging this set.');
         return;
       }
       newSet = { setNumber: setSlot + 1, reps: repsNum, weightLbs: weightNum };
@@ -2541,12 +2560,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                         {/* ── Standard set header + rows for non-timed exercises ── */}
                         {!timed && (() => {
-                          const hideWeight = isBodyweightOnly(ex.name);
+                          // Shared predicates — also considers archetype /
+                          // training type / primary_muscle / reps string,
+                          // not just the hard-coded name regex.
+                          const hideWeight = shouldHideWeight({
+                            name: ex.name, equipment: ex.equipment,
+                            reps: ex.targetReps,
+                            primary_muscle: (ex as any).primary_muscle,
+                            _primary_muscle: (ex as any)._primary_muscle,
+                            _archetype: (ex as any)._archetype,
+                            _training_type: (ex as any)._training_type,
+                          });
+                          const hideReps = shouldHideReps({
+                            name: ex.name, equipment: ex.equipment,
+                            reps: ex.targetReps,
+                            primary_muscle: (ex as any).primary_muscle,
+                            _primary_muscle: (ex as any)._primary_muscle,
+                            _archetype: (ex as any)._archetype,
+                            _training_type: (ex as any)._training_type,
+                          });
                           return (
                         <View style={styles.inlineSetsHeader}>
                           <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
                               {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight</Text>}
-                              <Text style={styles.inlineSetsLabel}>Reps</Text>
+                              <Text style={styles.inlineSetsLabel}>{hideReps ? 'Duration' : 'Reps'}</Text>
                           <Text style={styles.inlineSetsLabel}>Last time</Text>
                           <View style={{ width: 40 }} />
                         </View>
@@ -2559,7 +2596,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const input = setInputs[inputKey] ?? { weight: '', reps: '', duration: '' };
                           const lastSet = lastExerciseSets[ex.name]?.[slot] ?? lastExerciseSets[ex.name]?.[lastExerciseSets[ex.name]?.length - 1];
                           const isLogged = !!logged;
-                          const hideWeight = isBodyweightOnly(ex.name);
+                          const exMeta = {
+                            name: ex.name, equipment: ex.equipment,
+                            reps: ex.targetReps,
+                            primary_muscle: (ex as any).primary_muscle,
+                            _primary_muscle: (ex as any)._primary_muscle,
+                            _archetype: (ex as any)._archetype,
+                            _training_type: (ex as any)._training_type,
+                          };
+                          const hideWeight = shouldHideWeight(exMeta);
+                          const hideReps = shouldHideReps(exMeta);
 
                           const lastTimeLabel = lastSet
                             ? (lastSet.durationSeconds != null
@@ -2630,29 +2676,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 placeholderTextColor={themeColors.textMuted}
                                 selectTextOnFocus
                               />}
-                              <TextInput
-                                style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
-                                value={isLogged ? (editingSetKey === inputKey ? (editDraft.reps ?? String(logged.reps)) : String(logged.reps)) : input.reps}
-                                onChangeText={v => {
-                                  if (isLogged) {
-                                    setEditingSetKey(inputKey);
-                                    setEditDraft(prev => ({ ...prev, reps: v }));
-                                  } else {
-                                    setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, reps: v } }));
-                                  }
-                                }}
-                                onEndEditing={() => {
-                                  if (isLogged && editingSetKey === inputKey) {
-                                    commitInlineEdit(i, slot);
-                                  } else if (!isLogged) {
-                                    handleLogSetInline(i, slot, true);
-                                  }
-                                }}
-                                keyboardType="number-pad"
-                                placeholder="reps"
-                                placeholderTextColor={themeColors.textMuted}
-                                selectTextOnFocus
-                              />
+                              {hideReps ? (
+                                // Time-based target (60s hold, 3 min flow) —
+                                // render the prescribed duration inline
+                                // instead of a numeric reps input. Logging
+                                // is done via the row's check button which
+                                // records a single "completed" set tagged
+                                // with the target string.
+                                <Text style={[styles.inlineInput, { textAlignVertical: 'center', textAlign: 'center' }]}>
+                                  {formatDurationTarget({ reps: ex.targetReps })}
+                                </Text>
+                              ) : (
+                                <TextInput
+                                  style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
+                                  value={isLogged ? (editingSetKey === inputKey ? (editDraft.reps ?? String(logged.reps)) : String(logged.reps)) : input.reps}
+                                  onChangeText={v => {
+                                    if (isLogged) {
+                                      setEditingSetKey(inputKey);
+                                      setEditDraft(prev => ({ ...prev, reps: v }));
+                                    } else {
+                                      setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, reps: v } }));
+                                    }
+                                  }}
+                                  onEndEditing={() => {
+                                    if (isLogged && editingSetKey === inputKey) {
+                                      commitInlineEdit(i, slot);
+                                    } else if (!isLogged) {
+                                      handleLogSetInline(i, slot, true);
+                                    }
+                                  }}
+                                  keyboardType="number-pad"
+                                  placeholder="reps"
+                                  placeholderTextColor={themeColors.textMuted}
+                                  selectTextOnFocus
+                                />
+                              )}
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               <TouchableOpacity
                                 style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}

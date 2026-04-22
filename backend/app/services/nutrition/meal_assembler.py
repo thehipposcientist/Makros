@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Iterable, TYPE_CHECKING
+from typing import Any, Iterable, TYPE_CHECKING
 
 import openai
 from openai import OpenAI
@@ -215,6 +215,9 @@ def build_skeleton_prompt(
     target_macros: tuple[int, int, int, int],
     variety_n: int,
     allowed_foods: list[str],
+    *,
+    db: Any = None,
+    user_id: int | None = None,
 ) -> str:
     """The new skeleton-only prompt. ~80% smaller than the old nutrition prompt.
 
@@ -303,6 +306,8 @@ def build_skeleton_prompt(
         dietary_preference=getattr(req, "dietaryPreference", None),
         allergies=getattr(req, "allergies", None),
         foods_available=allowed_foods,
+        db=db,
+        user_id=user_id,
     )
     user_context_block = format_for_prompt(_nctx)
 
@@ -370,6 +375,9 @@ def call_skeleton_ai(
     variety_n: int,
     allowed_foods: list[str],
     model: str | None = None,
+    *,
+    db: Any = None,
+    user_id: int | None = None,
 ) -> tuple[list[TemplateSkeleton], str, list[dict]]:
     """Call the AI once for skeletons + note + supps. Parses and validates.
 
@@ -381,7 +389,7 @@ def call_skeleton_ai(
         _build_chat_kwargs, _chat_create, _extract_json, _log_openai_error,
         _looks_truncated, model_plan_generation,
     )
-    prompt = build_skeleton_prompt(req, target_macros, variety_n, allowed_foods)
+    prompt = build_skeleton_prompt(req, target_macros, variety_n, allowed_foods, db=db, user_id=user_id)
     _model = model or model_plan_generation()
     last_error: Exception | None = None
 
@@ -1239,6 +1247,9 @@ def assemble_nutrition_response(
     variety_n: int,
     allowed_foods: list[str],
     enriched: dict | None,
+    *,
+    db: Any = None,
+    user_id: int | None = None,
 ) -> dict:
     """Build the full nutrition response using the hybrid pipeline.
 
@@ -1351,7 +1362,8 @@ def assemble_nutrition_response(
         try:
             req.mealsPerDay = generate_count
             templates, note, supps = call_skeleton_ai(
-                client, req, adjusted, variety_n, allowed_foods
+                client, req, adjusted, variety_n, allowed_foods,
+                db=db, user_id=user_id,
             )
         finally:
             req.mealsPerDay = original_mpd

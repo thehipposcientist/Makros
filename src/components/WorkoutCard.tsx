@@ -5,6 +5,7 @@ import { WorkoutDay, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { getExerciseImage } from '../utils/exerciseImages';
+import { shouldHideWeight } from '../utils/exerciseDisplay';
 
 /** Turn a planner-emitted equipment string into a display label.
  *  The planner outputs comma-separated slugs like
@@ -216,7 +217,14 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
         <View style={styles.exChips}>
           <Chip
             icon="repeat-outline"
-            label={`${exercise.sets} × ${exercise.reps}`}
+            // Append "hold" on the preview chip for bodyweight/stretch
+            // rows where the reps value is a duration — makes it obvious
+            // at a glance that "60s" is a hold, not a rep count.
+            label={
+              shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(String(exercise.reps ?? ''))
+                ? `${exercise.sets} × ${exercise.reps} hold`
+                : `${exercise.sets} × ${exercise.reps}`
+            }
             strong={section.strong}
             soft={section.soft}
             text={section.text}

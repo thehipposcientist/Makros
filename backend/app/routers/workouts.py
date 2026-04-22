@@ -256,6 +256,15 @@ class GenerateDayRequest(BaseModel):
     injuries: list[str] = []
     disliked_exercises: list[str] = []     # exercises to exclude from selection
     focus_override: str | None = None      # force a specific focus (e.g. "Legs")
+    # Optional: focus labels the client already has queued up in the
+    # preceding days of the plan (e.g. user tapped Switch Day on day 2
+    # → they've now fixed day 2's focus to "Pull", but that pick won't
+    # be in WorkoutCompletion until the user finishes it). Pass them
+    # here so single-day generation for day 3 still sees "Pull" as a
+    # recent focus and avoids picking Pull again. Most-recent LAST
+    # (natural plan order). Coarse bucket strings and/or fine-family
+    # strings both accepted — everything is normalized downstream.
+    prev_focuses: list[str] = []
 
 
 @router.post("/generate-day")
@@ -293,7 +302,42 @@ def generate_single_day(
         recent_focus_buckets = tuple(buckets)
         recent_focus_families = tuple(families)
     except Exception:
-        pass
+        logger.exception("[generate-day] most_recent_completed_focus failed")
+
+    # Merge in any client-supplied prev_focuses (user forced focuses on
+    # preceding days of the plan that haven't been completed yet). We
+    # normalize each label the same way history does — to a bucket and
+    # family — and PREPEND so they count as the most-recent entries for
+    # rotation purposes (history tuples are newest-first).
+    if body.prev_focuses:
+        try:
+            from app.services.workout.focus_normalize import (
+                normalize_focus_to_bucket, normalize_focus_to_family,
+            )
+            extra_buckets: list[str] = []
+            extra_families: list[str] = []
+            # Iterate newest-last → newest-first. The client sends the
+            # plan's natural order (day 1, day 2, ...) so reverse for
+            # history semantics.
+            for raw in reversed(body.prev_focuses):
+                if not raw:
+                    continue
+                b = normalize_focus_to_bucket(raw)
+                f = normalize_focus_to_family(raw)
+                if b:
+                    extra_buckets.append(b)
+                if f:
+                    extra_families.append(f)
+            if extra_buckets:
+                recent_focus_buckets = tuple(extra_buckets) + recent_focus_buckets
+            if extra_families:
+                recent_focus_families = tuple(extra_families) + recent_focus_families
+            logger.debug(
+                f"[generate-day] prev_focuses merged: {body.prev_focuses} → "
+                f"buckets_prepended={extra_buckets} families_prepended={extra_families}"
+            )
+        except Exception:
+            logger.exception("[generate-day] prev_focuses merge failed")
     try:
         history_familiarity = build_history_familiarity(current_user.id, db)
     except Exception:
