@@ -117,6 +117,14 @@ export async function getMe(token: string) {
   });
 }
 
+export async function updateEmail(token: string, email: string) {
+  return request<{ email: string }>('/auth/update-email', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ email }),
+  });
+}
+
 export async function getMyProfile(token: string): Promise<import('../types').UserProfile | null> {
   try {
     const data = await request<any>('/profile/me', {
@@ -871,6 +879,23 @@ export async function syncOnboarding(token: string, profile: import('../types').
         equipment:       profile.equipment,
         foods_available: profile.foodsAvailable,
       },
+    }),
+  });
+}
+
+export async function updatePhysicalStats(
+  token: string,
+  stats: { weightLbs: number; heightFeet: number; heightInches: number; age: number; gender: string },
+) {
+  return request('/profile/physical-stats', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      weight_lbs:    stats.weightLbs,
+      height_feet:   stats.heightFeet,
+      height_inches: stats.heightInches,
+      age:           stats.age,
+      gender:        stats.gender,
     }),
   });
 }
@@ -1936,6 +1961,23 @@ export async function getWeeklyDigest(token: string): Promise<WeeklyDigest> {
   });
 }
 
+// ── Adherence trend ──────────────────────────────────────────────────────────
+
+export interface AdherenceWeek {
+  week_start: string;
+  week_end: string;
+  planned: number;
+  completed: number;
+  compliance_pct: number;
+  total_volume: number;
+}
+
+export async function getAdherenceTrend(token: string, weeks = 8): Promise<{ weeks: AdherenceWeek[] }> {
+  return request(`/ai/adherence-trend?weeks=${weeks}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // ── Plateau detection (Feature 5) ──────────────────────────────────────────
 
 export interface PlateauEntry {
@@ -1964,6 +2006,23 @@ export interface StreakSummary {
 
 export async function getStreak(token: string): Promise<StreakSummary> {
   return request('/workouts/streak', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ── Muscle Balance ───────────────────────────────────────────────────────────
+
+export interface MuscleBalanceEntry { sets: number; pct: number }
+
+export interface MuscleBalanceResult {
+  muscles: Record<string, MuscleBalanceEntry>;
+  period_days: number;
+  total_sets: number;
+  balance_score: number;
+}
+
+export async function getMuscleBalance(token: string, days = 14): Promise<MuscleBalanceResult> {
+  return request(`/ai/muscle-balance?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

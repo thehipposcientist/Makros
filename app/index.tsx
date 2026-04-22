@@ -328,7 +328,7 @@ export default function Index() {
   const [authToken, setAuthToken]         = useState<string | null>(null);
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
-  const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme'>('goal');
+  const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme' | 'body'>('goal');
   const [pendingSave, setPendingSave]     = useState<{ profile: UserProfile; mode: string } | null>(null);
   // Optional sub-tab to pre-select when opening the EditProfileScreen in
   // 'mealplan' mode. Lets HomeScreen jump straight into Foods/Supplements/Macros.
@@ -1211,6 +1211,7 @@ export default function Index() {
           setIsEditing(true);
         }}
         onEditThemes={() => { setEditMode('theme'); setIsEditing(true); }}
+        onEditBody={() => { setEditMode('body'); setIsEditing(true); }}
         onStartWorkout={(workout) => setActiveWorkout(workout)}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}

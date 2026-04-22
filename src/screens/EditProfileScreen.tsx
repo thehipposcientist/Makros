@@ -13,7 +13,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood } from '../types';
+import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
@@ -35,7 +35,7 @@ interface EditProfileScreenProps {
   profile: UserProfile;
   onSave: (updated: UserProfile) => void;
   onCancel: () => void;
-  mode?: 'goal' | 'workout' | 'mealplan' | 'theme';
+  mode?: 'goal' | 'workout' | 'mealplan' | 'theme' | 'body';
   // Initial sub-tab when opening in mealplan mode. Lets callers jump
   // straight to Foods / Supplements / Macros instead of the Foods default.
   initialMealTab?: 'foods' | 'supplements' | 'macros';
@@ -263,6 +263,21 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   );
   const [currentWeightModalVisible, setCurrentWeightModalVisible] = useState(false);
   const [currentWeightInput, setCurrentWeightInput]               = useState('');
+
+  // Body mode fields
+  const [bodyHeightFeet, setBodyHeightFeet] = useState<string>(
+    profile.physicalStats.heightFeet ? String(profile.physicalStats.heightFeet) : ''
+  );
+  const [bodyHeightInches, setBodyHeightInches] = useState<string>(
+    profile.physicalStats.heightInches != null ? String(profile.physicalStats.heightInches) : ''
+  );
+  const [bodyAge, setBodyAge] = useState<string>(
+    profile.physicalStats.age ? String(profile.physicalStats.age) : ''
+  );
+  const [bodyGender, setBodyGender] = useState<Gender>(
+    profile.physicalStats.gender ?? 'prefer_not_to_say'
+  );
+  const [bodySaving, setBodySaving] = useState(false);
 
   // Workout prefs
   const _defaultDays = (n: number): number[] => {
@@ -1044,7 +1059,39 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     return false;
   };
 
+  const handleSaveBody = async () => {
+    const w = parseFloat(currentWeight);
+    const hf = parseInt(bodyHeightFeet, 10);
+    const hi = parseInt(bodyHeightInches, 10);
+    const a = parseInt(bodyAge, 10);
+    if (!w || w <= 0) { Alert.alert('Invalid weight', 'Enter a valid weight in pounds.'); return; }
+    if (!hf || hf < 3 || hf > 8) { Alert.alert('Invalid height', 'Enter a valid height (feet).'); return; }
+    if (isNaN(hi) || hi < 0 || hi > 11) { Alert.alert('Invalid height', 'Inches must be 0-11.'); return; }
+    if (!a || a < 10 || a > 120) { Alert.alert('Invalid age', 'Enter a valid age.'); return; }
+
+    setBodySaving(true);
+    try {
+      const { updatePhysicalStats } = await import('../services/api');
+      await updatePhysicalStats(authToken, {
+        weightLbs: w, heightFeet: hf, heightInches: hi, age: a, gender: bodyGender,
+      });
+      if (w !== profile.physicalStats.weightLbs && w > 0) {
+        const { saveWeightEntry } = await import('../utils/weightHistory');
+        await saveWeightEntry(w, 'manual');
+      }
+      onSave({
+        ...profile,
+        physicalStats: { weightLbs: w, heightFeet: hf, heightInches: hi, age: a, gender: bodyGender },
+      });
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message ?? 'Could not update stats. Try again.');
+    } finally {
+      setBodySaving(false);
+    }
+  };
+
   const handleSave = () => {
+    if (mode === 'body') { handleSaveBody(); return; }
     // Validate training days match days per week
     if (trainingDays.length > 0 && trainingDays.length !== daysPerWeek) {
       Alert.alert(
@@ -1226,14 +1273,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       ? 'Edit Meal Plan'
       : mode === 'theme'
         ? 'Themes'
-        : 'Edit Goal';
+        : mode === 'body'
+          ? 'Body & Stats'
+          : 'Edit Goal';
   const saveLabel = mode === 'workout'
     ? 'Save & Update Workout'
     : mode === 'mealplan'
       ? 'Save & Update Nutrition'
       : mode === 'theme'
         ? 'Save Theme'
-        : 'Save & Update Plan';
+        : mode === 'body'
+          ? 'Save Stats'
+          : 'Save & Update Plan';
 
   return (
     <View style={styles.container}>
@@ -2217,6 +2268,90 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             })}
           </View>
 
+        </View>
+        )}
+
+        {mode === 'body' && (
+        <View style={styles.section}>
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Weight (lbs)</Text>
+            <TextInput
+              style={[styles.macroFieldInput, { textAlign: 'left', paddingHorizontal: 14 }]}
+              value={currentWeight}
+              onChangeText={setCurrentWeight}
+              keyboardType="decimal-pad"
+              placeholder="e.g. 185"
+              placeholderTextColor={tc.textMuted}
+            />
+          </View>
+
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Height</Text>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.macroFieldLabel, { marginBottom: 6 }]}>Feet</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={bodyHeightFeet}
+                  onChangeText={setBodyHeightFeet}
+                  keyboardType="number-pad"
+                  placeholder="5"
+                  placeholderTextColor={tc.textMuted}
+                  maxLength={1}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.macroFieldLabel, { marginBottom: 6 }]}>Inches</Text>
+                <TextInput
+                  style={styles.macroFieldInput}
+                  value={bodyHeightInches}
+                  onChangeText={setBodyHeightInches}
+                  keyboardType="number-pad"
+                  placeholder="10"
+                  placeholderTextColor={tc.textMuted}
+                  maxLength={2}
+                />
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Age</Text>
+            <TextInput
+              style={[styles.macroFieldInput, { textAlign: 'left', paddingHorizontal: 14 }]}
+              value={bodyAge}
+              onChangeText={setBodyAge}
+              keyboardType="number-pad"
+              placeholder="e.g. 27"
+              placeholderTextColor={tc.textMuted}
+              maxLength={3}
+            />
+          </View>
+
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Biological Sex</Text>
+            <Text style={styles.sectionHint}>Used to calculate calorie and macro targets.</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {([
+                { value: 'male' as const, label: 'Male' },
+                { value: 'female' as const, label: 'Female' },
+                { value: 'nonbinary' as const, label: 'Non-binary' },
+                { value: 'prefer_not_to_say' as const, label: 'Prefer not to say' },
+              ]).map(opt => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.chip, bodyGender === opt.value && styles.chipActive]}
+                  onPress={() => setBodyGender(opt.value)}
+                >
+                  <Text style={[styles.chipText, bodyGender === opt.value && styles.chipTextActive]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {bodySaving && <ActivityIndicator color={tc.primary} style={{ marginTop: 10 }} />}
         </View>
         )}
 

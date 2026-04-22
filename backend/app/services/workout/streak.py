@@ -161,3 +161,65 @@ def compute_streak_summary(
         "compliance_30d": _compliance(30),
         "last_active_date": last_active.isoformat() if last_active else None,
     }
+
+
+def _volume_for_week(
+    user_id: int, start: date, end: date, db: Session
+) -> float:
+    from app.models import WorkoutSession, WorkoutExercise, ExerciseSet
+
+    rows = db.exec(
+        select(ExerciseSet.actual_weight_lbs, ExerciseSet.actual_reps)
+        .join(WorkoutExercise, WorkoutExercise.id == ExerciseSet.workout_exercise_id)
+        .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+        .where(WorkoutSession.user_id == user_id)
+        .where(WorkoutSession.workout_date >= start)
+        .where(WorkoutSession.workout_date <= end)
+        .where(ExerciseSet.completed == True)  # noqa: E712
+    ).all()
+    total = 0.0
+    for weight, reps in rows:
+        w = float(weight or 0)
+        r = int(reps or 0)
+        if r > 0:
+            total += w * r
+    return round(total, 1)
+
+
+def build_adherence_trend(
+    user_id: int,
+    *,
+    db: Session,
+    weeks: int = 8,
+    today: date | None = None,
+) -> list[dict]:
+    """Return per-week adherence data for the last *weeks* weeks.
+
+    Each entry: {week_start, week_end, planned, completed, compliance_pct, total_volume}.
+    Sorted oldest-first.
+    """
+    today = today or date.today()
+    planned_per_week = _planned_days_per_week(user_id, db)
+
+    lookback_start = today - timedelta(days=weeks * 7)
+    completed = _completed_dates(user_id, db, lookback_start)
+
+    result: list[dict] = []
+    for i in range(weeks):
+        week_end = today - timedelta(days=i * 7)
+        week_start = week_end - timedelta(days=6)
+        done = sum(1 for d in completed if week_start <= d <= week_end)
+        planned = max(planned_per_week, 1)
+        pct = round(min(done / planned, 1.0) * 100, 1)
+        vol = _volume_for_week(user_id, week_start, week_end, db)
+        result.append({
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "planned": planned,
+            "completed": done,
+            "compliance_pct": pct,
+            "total_volume": vol,
+        })
+
+    result.reverse()
+    return result

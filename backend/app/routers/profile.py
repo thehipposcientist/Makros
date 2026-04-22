@@ -166,6 +166,30 @@ def sync_onboarding(
     return {"status": "ok"}
 
 
+@router.put("/physical-stats")
+def update_physical_stats(
+    body: ProfileUpsert,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    now = datetime.now(timezone.utc)
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    profile.weight_lbs    = body.weight_lbs
+    profile.height_feet   = body.height_feet
+    profile.height_inches = body.height_inches
+    profile.age           = body.age
+    profile.gender        = body.gender
+    profile.updated_at    = now
+    session.add(profile)
+    session.commit()
+    return {"status": "ok"}
+
+
 @router.get("/me")
 def get_my_profile(
     current_user: User = Depends(get_current_user),

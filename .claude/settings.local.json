@@ -173,7 +173,13 @@
       "Bash(./node_modules/.bin/tsc --noEmit --pretty)",
       "Bash(/opt/homebrew/bin/node -e 'const m = require\\('\\\\''react-native'\\\\''\\).NativeModules; console.log\\('\\\\''AppleHealthKit:'\\\\'', !!m.AppleHealthKit\\); console.log\\('\\\\''keys:'\\\\'', Object.keys\\(m.AppleHealthKit || {}\\)\\)')",
       "Bash(which eas *)",
-      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" eas build *)"
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" eas build *)",
+      "Bash(eas build:view decdf316-7f94-4d08-b396-d1a956cbeb5f --json)",
+      "WebFetch(domain:job-logs.eascdn.net)",
+      "Bash(eas build:view decdf316-7f94-4d08-b396-d1a956cbeb5f)",
+      "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:$PATH\")",
+      "Bash(npm --version)",
+      "Bash(npx expo-doctor@latest)"
     ]
   }
 }

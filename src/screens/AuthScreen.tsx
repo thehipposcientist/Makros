@@ -10,6 +10,8 @@ import { colors, radius } from '../constants/theme';
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white.png');
 
+const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+
 interface AuthScreenProps {
   onAuthenticated: (token: string, isNewUser: boolean) => void;
 }
@@ -27,6 +29,10 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const emailTouched = email.length > 0;
+  const emailValid = EMAIL_RE.test(email.trim());
+  const signupDisabled = mode === 'signup' && emailTouched && !emailValid;
 
   const usernameRef        = useRef<TextInput>(null);
   const passwordRef        = useRef<TextInput>(null);
@@ -87,6 +93,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       return;
     }
     if (mode === 'signup') {
+      if (!EMAIL_RE.test(email.trim())) { setError('Enter a valid email address'); return; }
       if (!username.trim()) { setError('Username is required'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
@@ -151,23 +158,28 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
           {/* Email — hidden in reset_answer since the question is shown instead */}
           {mode !== 'reset_answer' && (
-            <TextInput
-              style={styles.input}
-              placeholder="Email"
-              placeholderTextColor={colors.textMuted}
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              returnKeyType={mode === 'reset_email' ? 'go' : 'next'}
-              onSubmitEditing={() => {
-                if (mode === 'reset_email') handleSubmit();
-                else if (mode === 'signup') usernameRef.current?.focus();
-                else passwordRef.current?.focus();
-              }}
-              blurOnSubmit={false}
-            />
+            <>
+              <TextInput
+                style={[styles.input, signupDisabled && styles.inputError]}
+                placeholder="Email"
+                placeholderTextColor={colors.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType={mode === 'reset_email' ? 'go' : 'next'}
+                onSubmitEditing={() => {
+                  if (mode === 'reset_email') handleSubmit();
+                  else if (mode === 'signup') usernameRef.current?.focus();
+                  else passwordRef.current?.focus();
+                }}
+                blurOnSubmit={false}
+              />
+              {signupDisabled && (
+                <Text style={styles.inlineError}>Enter a valid email address</Text>
+              )}
+            </>
           )}
 
           {/* Username (signup only) */}
@@ -254,9 +266,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
           <TouchableOpacity
-            style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+            style={[styles.submitButton, (loading || signupDisabled) && styles.submitButtonDisabled]}
             onPress={handleSubmit}
-            disabled={loading}>
+            disabled={loading || signupDisabled}>
             {loading
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
@@ -335,6 +347,8 @@ const styles = StyleSheet.create({
   },
   eyeText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
 
+  inputError: { borderColor: colors.error },
+  inlineError: { fontSize: 12, color: colors.error, marginTop: -4 },
   error: { fontSize: 14, color: colors.error, textAlign: 'center' },
 
   submitButton: {

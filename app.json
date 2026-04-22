@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "icon": "./assets/images/thallo-icon.png",
     "splash": {
       "backgroundColor": "#0D0F14"
@@ -20,12 +20,6 @@
         "expo-camera",
         {
           "cameraPermission": "Thallo uses the camera to scan food barcodes for nutrition tracking."
-        }
-      ],
-      [
-        "react-native-health",
-        {
-          "isClinicalDataEnabled": false
         }
       ],
       "@bacons/apple-targets"
@@ -44,7 +38,7 @@
       "entitlements": {
         "com.apple.developer.healthkit": true
       },
-      "buildNumber": "12"
+      "buildNumber": "13"
     },
     "android": {
       "package": "com.thallo.app",

@@ -41,6 +41,14 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "-"
 
 
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+def _validate_email(email: str) -> None:
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+
+
 def _validate_password(pwd: str) -> None:
     """Password policy: >=8 chars AND contains at least one digit."""
     if len(pwd) < 8:
@@ -52,6 +60,7 @@ def _validate_password(pwd: str) -> None:
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
+    _validate_email(body.email)
     _validate_password(body.password)
     ip = _client_ip(request)
     # Check email not taken
@@ -100,6 +109,30 @@ def login(body: LoginRequest, request: Request, session: Session = Depends(get_s
 
 @router.get("/me", response_model=UserRead)
 def me(current_user: User = Depends(get_current_user)):
+    return _user_read(current_user)
+
+
+class UpdateEmailBody(BaseModel):
+    email: str
+
+
+@router.put("/update-email", response_model=UserRead)
+def update_email(
+    body: UpdateEmailBody,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    new_email = body.email.strip().lower()
+    _validate_email(new_email)
+    if new_email == current_user.email:
+        return _user_read(current_user)
+    if session.exec(select(User).where(User.email == new_email)).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    current_user.email = new_email
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    logger.info("auth_email_updated", extra={"user_id": current_user.id, "new_email": new_email})
     return _user_read(current_user)
 
 

@@ -1,132 +1,53 @@
-/**
- * Apple Health (HealthKit) integration — iOS only.
- *
- * This module handles all HealthKit interaction:
- *   - Permission requests
- *   - Reading resting heart rate, steps, workouts, sleep, active energy
- *   - Returning a compact HealthSummary
- *
- * Scoring logic lives in utils/healthScore.ts — this module is ingestion only.
- *
- * Requires a custom Expo dev build (won't work in Expo Go).
- * Gated behind Platform.OS === 'ios' — Android/web callers get null safely.
- */
-
 import { Platform } from 'react-native';
 import type { HealthSummary } from '../types';
 
-// ── Lazy-load react-native-health (iOS only) ────────────────────────────────
-// We use dynamic require so the module is never imported on Android/web,
-// which would crash since HealthKit native bindings don't exist there.
+let _module: any = null;
+let _moduleChecked = false;
+let _lastHealthKitError: string | null = null;
 
-let AppleHealthKit: any = null;
-// Distinguishes "JS package missing" from "JS loaded but native bindings absent"
-let _nativeBindingsMissing = false;
-
-function getHealthKit(): any {
+function getModule(): any {
   if (Platform.OS !== 'ios') return null;
-  if (!AppleHealthKit) {
+  if (!_moduleChecked) {
+    _moduleChecked = true;
     try {
-      // react-native-health uses `module.exports = HealthKit`, so the module
-      // IS the kit — there's no `.default`. Fall through in case a future
-      // version adds a default export.
-      const mod = require('react-native-health');
-      const hk = mod?.default ?? mod;
-      // react-native-health builds its export via
-      //   Object.assign({}, NativeModules.AppleHealthKit, { Constants })
-      // When the native module isn't linked in the binary, NativeModules.AppleHealthKit
-      // is null — Object.assign skips it silently, leaving an object with only
-      // Constants and no initHealthKit. Detect this and treat as unavailable so
-      // callers get null instead of a broken shell object.
-      if (!hk || typeof hk.initHealthKit !== 'function') {
-        _nativeBindingsMissing = true;
-        console.warn('[appleHealth] react-native-health JS loaded but NativeModules.AppleHealthKit is null — native module not linked in this binary. Need a fresh EAS build.');
-        return null;
-      }
-      _nativeBindingsMissing = false;
-      AppleHealthKit = hk;
+      _module = require('../../modules/thallo-healthkit').default;
     } catch {
-      console.warn('[appleHealth] react-native-health not available — custom dev build required');
-      return null;
+      console.warn('[appleHealth] thallo-healthkit module not available');
     }
   }
-  return AppleHealthKit;
+  return _module;
 }
 
-// ── Permission constants ─────────────────────────────────────────────────────
-//
-// Preferred path: use `AppleHealthKit.Constants.Permissions.*` — those
-// are the canonical enum values from the native binding and survive
-// renames across react-native-health versions. We fall back to string
-// literals if Constants isn't exposed (older package versions / partial
-// module load). The literals DO match what the constants resolve to in
-// the current v1.19.x series, so in practice both paths produce the
-// same authorization request.
-function _buildPermissionsObject(hk: any) {
-  const C = hk?.Constants?.Permissions;
-  const read = C ? [
-    C.HeartRate,
-    C.RestingHeartRate,
-    C.StepCount,
-    C.SleepAnalysis,
-    C.ActiveEnergyBurned,
-    C.Workout,
-    C.Weight,           // BodyMass — enables weight sync + fitness score bodyweight field
-  ] : [
-    'HeartRate',
-    'RestingHeartRate',
-    'StepCount',
-    'SleepAnalysis',
-    'ActiveEnergyBurned',
-    'Workout',
-    'Weight',
-  ];
-  return {
-    permissions: {
-      read,
-      write: [] as string[],  // read-only for v1; writes (log workouts back) later
-    },
-  };
-}
+const READ_TYPES = [
+  'HeartRate',
+  'RestingHeartRate',
+  'StepCount',
+  'SleepAnalysis',
+  'ActiveEnergyBurned',
+  'Workout',
+  'Weight',
+];
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/** Returns true if this device could use Apple Health — including when the
- *  JS module loaded but native bindings are missing (needs a rebuild). The
- *  UI should still render the Apple Health section so the user sees a
- *  Connect button that surfaces an actionable error instead of hiding the
- *  entire feature. */
 export function isHealthKitAvailable(): boolean {
   if (Platform.OS !== 'ios') return false;
-  const hk = getHealthKit();
-  return !!hk || _nativeBindingsMissing;
+  const mod = getModule();
+  if (!mod) return false;
+  try {
+    return mod.isAvailable();
+  } catch {
+    return false;
+  }
 }
 
-/** True when the JS package loaded but NativeModules.AppleHealthKit is null.
- *  Callers can use this to show a "rebuild required" message instead of the
- *  normal Connect flow. */
 export function isHealthKitNativeBindingsMissing(): boolean {
-  return _nativeBindingsMissing;
+  if (Platform.OS !== 'ios') return false;
+  return !getModule();
 }
 
-// Last error from initHealthKit, exposed so UI can show the raw iOS
-// message — invaluable for debugging entitlement/profile issues on
-// TestFlight where console logs are invisible.
-let _lastHealthKitError: string | null = null;
 export function getLastHealthKitError(): string | null {
   return _lastHealthKitError;
 }
 
-/**
- * Deep diagnostic snapshot of the HealthKit integration state. Call from
- * a debug button / settings row and display the resulting text so
- * TestFlight users can paste back what they see. Covers every common
- * failure mode: Android device, native module not loaded, Constants
- * missing (wrong package version), initHealthKit not a function,
- * entitlement missing (iOS rejects the init call outright with a
- * specific error string), user-denied permissions (no way to detect
- * directly — we describe what to check in iOS Settings).
- */
 export async function diagnoseHealthKit(): Promise<string> {
   const lines: string[] = [];
   lines.push(`platform=${Platform.OS}`);
@@ -134,243 +55,116 @@ export async function diagnoseHealthKit(): Promise<string> {
     lines.push('result=SKIP (iOS only)');
     return lines.join('\n');
   }
-  const hk = getHealthKit();
-  if (!hk) {
-    if (_nativeBindingsMissing) {
-      lines.push('native_module=JS_LOADED_NATIVE_MISSING');
-      lines.push('cause=NativeModules.AppleHealthKit is null — react-native-health JS package is present but the native iOS module is not linked in this binary.');
-      lines.push('fix=Run: eas build --profile development --platform ios --clear-cache  then install the new build on device.');
-    } else {
-      lines.push('native_module=NOT_LOADED');
-      lines.push('fix=You need a custom dev build (Expo Go does not ship react-native-health). Run eas build --profile development.');
-    }
+  const mod = getModule();
+  if (!mod) {
+    lines.push('native_module=NOT_LOADED');
+    lines.push('fix=Run: eas build --profile development --platform ios --clear-cache, then install the new build on device.');
     return lines.join('\n');
   }
   lines.push('native_module=LOADED');
-  lines.push(`constants_present=${!!hk.Constants?.Permissions}`);
-  lines.push(`initHealthKit_fn=${typeof hk.initHealthKit === 'function'}`);
-  lines.push(`getSamples_fn=${typeof hk.getSamples === 'function'}`);
-  const perms = _buildPermissionsObject(hk);
-  lines.push(`read_permissions_count=${perms.permissions.read.length}`);
+  try {
+    lines.push(`isAvailable=${mod.isAvailable()}`);
+  } catch (e: any) {
+    lines.push(`isAvailable=error: ${e?.message}`);
+  }
 
-  // Try the init — captures entitlement missing errors.
   const ok = await requestHealthPermissions();
-  lines.push(`init_ok=${ok}`);
+  lines.push(`auth_ok=${ok}`);
   if (!ok && _lastHealthKitError) {
-    lines.push(`init_error=${_lastHealthKitError}`);
-    // Heuristic guidance for the most common strings.
-    const err = _lastHealthKitError.toLowerCase();
-    if (err.includes('not available') || err.includes('entitlement') || err.includes('authorization')) {
-      lines.push('likely_cause=HealthKit entitlement missing from provisioning profile.');
-      lines.push('fix=(1) Apple Developer -> Identifiers -> App ID -> enable HealthKit. (2) eas credentials -> regenerate provisioning profile. (3) eas build --clear-cache + eas submit.');
-    }
+    lines.push(`auth_error=${_lastHealthKitError}`);
   }
   if (ok) {
-    lines.push('fix=If you still see no data, iOS Settings -> Privacy & Security -> Health -> Thallo -> enable each category.');
+    lines.push('tip=If you still see no data, iOS Settings -> Privacy & Security -> Health -> Thallo -> enable each category.');
   }
   return lines.join('\n');
 }
 
-/**
- * Request HealthKit permissions. Returns true if the user saw the dialog
- * (iOS doesn't tell us whether they actually granted — only denies show up
- * when we try to read).
- */
-export function requestHealthPermissions(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const hk = getHealthKit();
-    if (!hk) {
-      _lastHealthKitError = _nativeBindingsMissing
-        ? 'Native iOS module not linked in this binary. Run: eas build --profile development --platform ios --clear-cache, then install the new build on device.'
-        : 'Native module not loaded — this build does not include react-native-health. A custom dev build is required (Expo Go cannot use HealthKit).';
-      resolve(false);
-      return;
-    }
-    if (typeof hk.initHealthKit !== 'function') {
-      _lastHealthKitError = `initHealthKit is not a function. Module keys: ${Object.keys(hk).slice(0, 10).join(', ')}`;
-      resolve(false);
-      return;
-    }
-
-    try {
-      const perms = _buildPermissionsObject(hk);
-      console.log('[appleHealth] requesting permissions:', perms.permissions.read.length, 'read types');
-      hk.initHealthKit(perms, (err: any) => {
-        if (err) {
-          _lastHealthKitError = typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err));
-          console.warn('[appleHealth] initHealthKit error:', _lastHealthKitError);
-          resolve(false);
-          return;
-        }
-        _lastHealthKitError = null;
-        console.log('[appleHealth] initHealthKit ok');
-        resolve(true);
-      });
-    } catch (e: any) {
-      _lastHealthKitError = `initHealthKit threw: ${e?.message ?? String(e)}`;
-      console.warn('[appleHealth]', _lastHealthKitError);
-      resolve(false);
-    }
-  });
+export async function requestHealthPermissions(): Promise<boolean> {
+  const mod = getModule();
+  if (!mod) {
+    _lastHealthKitError = 'Native module not loaded — needs a fresh EAS build.';
+    return false;
+  }
+  try {
+    const ok = await mod.requestAuthorization(READ_TYPES);
+    _lastHealthKitError = ok ? null : 'Authorization returned false';
+    return ok;
+  } catch (e: any) {
+    _lastHealthKitError = e?.message ?? String(e);
+    console.warn('[appleHealth] requestAuthorization error:', _lastHealthKitError);
+    return false;
+  }
 }
 
-/**
- * Read all health metrics and return a compact HealthSummary.
- * Call this after workout completion. Returns null if HealthKit unavailable.
- */
 export async function readHealthSummary(): Promise<HealthSummary | null> {
-  const hk = getHealthKit();
-  if (!hk) return null;
+  const mod = getModule();
+  if (!mod) return null;
 
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000);
+  const startMs = sevenDaysAgo.getTime();
+  const endMs = now.getTime();
 
-  const [
-    restingHR,
-    avgSteps,
-    workoutCount,
-    sleepData,
-    activeEnergy,
-  ] = await Promise.all([
-    readRestingHeartRate(hk, sevenDaysAgo, now),
-    readAvgSteps7d(hk, sevenDaysAgo, now),
-    readWorkoutCount7d(hk, sevenDaysAgo, now),
-    readSleepData(hk, sevenDaysAgo, now),
-    readActiveEnergy7d(hk, sevenDaysAgo, now),
+  const [restingHR, steps, workoutCount, sleepSamples, energySamples] = await Promise.all([
+    mod.getRestingHeartRate(startMs, endMs, 7).catch(() => []),
+    mod.getDailySteps(startMs, endMs).catch(() => []),
+    mod.getWorkoutCount(startMs, endMs).catch(() => 0),
+    mod.getSleepSamples(startMs, endMs).catch(() => []),
+    mod.getActiveEnergyBurned(startMs, endMs).catch(() => []),
   ]);
 
   return {
-    restingHeartRate: restingHR,
-    avgSteps7d: avgSteps,
+    restingHeartRate: avgValue(restingHR),
+    avgSteps7d: avgValue(steps),
     workouts7d: workoutCount,
-    avgSleepHours7d: sleepData.avgHours,
-    lastNightSleepHours: sleepData.lastNightHours,
-    activeEnergy7d: activeEnergy,
+    avgSleepHours7d: calcAvgSleep(sleepSamples),
+    lastNightSleepHours: calcLastNightSleep(sleepSamples),
+    activeEnergy7d: totalValue(energySamples),
     fetchedAt: now.toISOString(),
   };
 }
 
-// ── Internal read helpers ────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-function readRestingHeartRate(hk: any, start: Date, end: Date): Promise<number | null> {
-  return new Promise((resolve) => {
-    try {
-      hk.getRestingHeartRateSamples(
-        { startDate: start.toISOString(), endDate: end.toISOString(), ascending: false, limit: 7 },
-        (err: any, results: any[]) => {
-          if (err || !results?.length) { resolve(null); return; }
-          // Average the most recent samples
-          const values = results.map((r: any) => r.value).filter((v: number) => v > 0);
-          if (values.length === 0) { resolve(null); return; }
-          resolve(Math.round(values.reduce((a, b) => a + b, 0) / values.length));
-        },
-      );
-    } catch { resolve(null); }
-  });
+function avgValue(samples: Array<{ value: number }> | null): number | null {
+  if (!samples?.length) return null;
+  const vals = samples.map((s) => s.value).filter((v) => v > 0);
+  if (!vals.length) return null;
+  return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
 }
 
-function readAvgSteps7d(hk: any, start: Date, end: Date): Promise<number | null> {
-  return new Promise((resolve) => {
-    try {
-      hk.getDailyStepCountSamples(
-        { startDate: start.toISOString(), endDate: end.toISOString() },
-        (err: any, results: any[]) => {
-          if (err || !results?.length) { resolve(null); return; }
-          const total = results.reduce((sum: number, r: any) => sum + (r.value ?? 0), 0);
-          resolve(Math.round(total / Math.max(1, results.length)));
-        },
-      );
-    } catch { resolve(null); }
-  });
+function totalValue(samples: Array<{ value: number }> | null): number | null {
+  if (!samples?.length) return null;
+  return Math.round(samples.reduce((sum, s) => sum + (s.value ?? 0), 0));
 }
 
-function readWorkoutCount7d(hk: any, start: Date, end: Date): Promise<number | null> {
-  return new Promise((resolve) => {
-    try {
-      hk.getSamples(
-        {
-          typeIdentifier: 'HKWorkoutTypeIdentifier',
-          startDate: start.toISOString(),
-          endDate: end.toISOString(),
-        },
-        (err: any, results: any[]) => {
-          if (err) { resolve(null); return; }
-          resolve(results?.length ?? 0);
-        },
-      );
-    } catch { resolve(null); }
-  });
+function calcAvgSleep(samples: Array<{ value: string; startDate: string; endDate: string }> | null): number | null {
+  const nights = groupSleepByNight(samples);
+  if (!nights.size) return null;
+  const total = [...nights.values()].reduce((a, b) => a + b, 0);
+  return Math.round((total / nights.size) * 10) / 10;
 }
 
-interface SleepResult {
-  avgHours: number | null;
-  lastNightHours: number | null;
+function calcLastNightSleep(samples: Array<{ value: string; startDate: string; endDate: string }> | null): number | null {
+  const nights = groupSleepByNight(samples);
+  if (!nights.size) return null;
+  const sorted = [...nights.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  return Math.round(sorted[0][1] * 10) / 10;
 }
 
-function readSleepData(hk: any, start: Date, end: Date): Promise<SleepResult> {
-  return new Promise((resolve) => {
-    try {
-      hk.getSleepSamples(
-        { startDate: start.toISOString(), endDate: end.toISOString() },
-        (err: any, results: any[]) => {
-          if (err || !results?.length) {
-            resolve({ avgHours: null, lastNightHours: null });
-            return;
-          }
+function groupSleepByNight(samples: Array<{ value: string; startDate: string; endDate: string }> | null): Map<string, number> {
+  const nightMap = new Map<string, number>();
+  if (!samples?.length) return nightMap;
 
-          // Filter to only "asleep" samples (exclude InBed, Awake)
-          const asleepSamples = results.filter((r: any) =>
-            r.value === 'ASLEEP' || r.value === 'CORE' || r.value === 'DEEP' || r.value === 'REM'
-          );
+  const asleep = samples.filter(
+    (s) => s.value === 'ASLEEP' || s.value === 'CORE' || s.value === 'DEEP' || s.value === 'REM',
+  );
 
-          if (asleepSamples.length === 0) {
-            resolve({ avgHours: null, lastNightHours: null });
-            return;
-          }
-
-          // Group by night — a "night" is the calendar date of the END time
-          // (sleeping from 11pm to 7am = the 7am date's night)
-          const nightMap = new Map<string, number>();
-
-          for (const s of asleepSamples) {
-            const sStart = new Date(s.startDate).getTime();
-            const sEnd = new Date(s.endDate).getTime();
-            const durationHours = (sEnd - sStart) / 3600000;
-            if (durationHours <= 0 || durationHours > 24) continue; // skip bad data
-
-            const nightKey = new Date(s.endDate).toISOString().slice(0, 10);
-            nightMap.set(nightKey, (nightMap.get(nightKey) ?? 0) + durationHours);
-          }
-
-          if (nightMap.size === 0) {
-            resolve({ avgHours: null, lastNightHours: null });
-            return;
-          }
-
-          // Sort nights descending
-          const nights = [...nightMap.entries()].sort((a, b) => b[0].localeCompare(a[0]));
-          const totalHours = nights.reduce((sum, [, h]) => sum + h, 0);
-          const avgHours = Math.round((totalHours / nights.length) * 10) / 10;
-          const lastNightHours = Math.round(nights[0][1] * 10) / 10;
-
-          resolve({ avgHours, lastNightHours });
-        },
-      );
-    } catch { resolve({ avgHours: null, lastNightHours: null }); }
-  });
-}
-
-function readActiveEnergy7d(hk: any, start: Date, end: Date): Promise<number | null> {
-  return new Promise((resolve) => {
-    try {
-      hk.getActiveEnergyBurned(
-        { startDate: start.toISOString(), endDate: end.toISOString() },
-        (err: any, results: any[]) => {
-          if (err || !results?.length) { resolve(null); return; }
-          const total = results.reduce((sum: number, r: any) => sum + (r.value ?? 0), 0);
-          resolve(Math.round(total));
-        },
-      );
-    } catch { resolve(null); }
-  });
+  for (const s of asleep) {
+    const dur = (new Date(s.endDate).getTime() - new Date(s.startDate).getTime()) / 3600000;
+    if (dur <= 0 || dur > 24) continue;
+    const nightKey = s.endDate.slice(0, 10);
+    nightMap.set(nightKey, (nightMap.get(nightKey) ?? 0) + dur);
+  }
+  return nightMap;
 }

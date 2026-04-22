@@ -1,0 +1,7 @@
+{
+  "name": "thallo-healthkit",
+  "version": "1.0.0",
+  "description": "Local Expo module bridging HealthKit to JS.",
+  "main": "index.ts",
+  "private": true
+}

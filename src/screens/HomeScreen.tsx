@@ -19,7 +19,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, setRecoveryQuestion, updateEmail } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -69,6 +69,7 @@ interface HomeScreenProps {
   onEditWorkout: () => void;
   onEditMealPlan: (initialTab?: 'foods' | 'supplements' | 'macros') => void;
   onEditThemes: () => void;
+  onEditBody: () => void;
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
@@ -128,6 +129,9 @@ interface ExerciseLibraryItem {
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const EMAIL_BANNER_DISMISS_KEY = 'emailBannerDismissedAt';
 
 // Meal-side today accent. Hardcoded (not theme-derived) so the meal
 // accordion's today highlight is guaranteed visually distinct from the
@@ -1017,7 +1021,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1112,6 +1116,105 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [recoveryQuestion, setRecoveryQuestionText] = useState('');
+  const [recoveryAnswer, setRecoveryAnswer] = useState('');
+  const [recoverySaving, setRecoverySaving] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const dismissed = await AsyncStorage.getItem('recovery_prompt_dismissed');
+        if (dismissed) {
+          const ts = parseInt(dismissed, 10);
+          if (Date.now() - ts < 14 * 24 * 60 * 60 * 1000) return;
+        }
+        const me: any = await getMe(authToken);
+        if (cancelled) return;
+        if (me?.has_recovery_question) return;
+        if (me?.created_at) {
+          const created = new Date(me.created_at);
+          const age = Date.now() - created.getTime();
+          if (age < 24 * 60 * 60 * 1000) return;
+        }
+        setShowRecoveryBanner(true);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [authToken]);
+  const dismissRecoveryBanner = useCallback(async () => {
+    setShowRecoveryBanner(false);
+    try { await AsyncStorage.setItem('recovery_prompt_dismissed', String(Date.now())); } catch {}
+  }, []);
+  const handleSaveRecoveryQuestion = useCallback(async () => {
+    const q = recoveryQuestion.trim();
+    const a = recoveryAnswer.trim();
+    if (q.length < 5) { setRecoveryError('Question must be at least 5 characters'); return; }
+    if (a.length < 2) { setRecoveryError('Answer must be at least 2 characters'); return; }
+    setRecoverySaving(true);
+    setRecoveryError('');
+    try {
+      await setRecoveryQuestion(authToken, q, a);
+      setShowRecoveryModal(false);
+      setShowRecoveryBanner(false);
+      setRecoveryQuestionText('');
+      setRecoveryAnswer('');
+      try { await AsyncStorage.removeItem('recovery_prompt_dismissed'); } catch {}
+    } catch (e: any) {
+      setRecoveryError(e?.message || 'Failed to save');
+    } finally {
+      setRecoverySaving(false);
+    }
+  }, [authToken, recoveryQuestion, recoveryAnswer]);
+
+  const [showEmailBanner, setShowEmailBanner] = useState(false);
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailError, setEmailError] = useState('');
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const dismissed = await AsyncStorage.getItem(EMAIL_BANNER_DISMISS_KEY);
+        if (dismissed) {
+          const ts = parseInt(dismissed, 10);
+          if (Date.now() - ts < 7 * 24 * 60 * 60 * 1000) return;
+        }
+        const me: any = await getMe(authToken);
+        if (cancelled) return;
+        if (me?.email && EMAIL_RE.test(me.email)) return;
+        setShowEmailBanner(true);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [authToken]);
+  const dismissEmailBanner = useCallback(async () => {
+    setShowEmailBanner(false);
+    try { await AsyncStorage.setItem(EMAIL_BANNER_DISMISS_KEY, String(Date.now())); } catch {}
+  }, []);
+  const handleSaveEmail = useCallback(async () => {
+    const trimmed = newEmail.trim();
+    if (!EMAIL_RE.test(trimmed)) { setEmailError('Enter a valid email address'); return; }
+    setEmailSaving(true);
+    setEmailError('');
+    try {
+      await updateEmail(authToken, trimmed);
+      setShowEmailModal(false);
+      setShowEmailBanner(false);
+      setNewEmail('');
+      try { await AsyncStorage.removeItem(EMAIL_BANNER_DISMISS_KEY); } catch {}
+    } catch (e: any) {
+      setEmailError(e?.message || 'Failed to update email');
+    } finally {
+      setEmailSaving(false);
+    }
+  }, [authToken, newEmail]);
+
   useEffect(() => { import('../utils/feedback').then(f => f.loadSettings()).then(setFeedbackSettings).catch(() => {}); }, []);
   useEffect(() => {
     if (mealsSubTab === 'foods' && authToken) {
@@ -1341,6 +1444,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   } | null>(null);
   const [recoveryExpanded, setRecoveryExpanded] = useState(false);
   const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
+  const [plateauedExercises, setPlateauedExercises] = useState<Set<string>>(new Set());
   const [username, setUsername] = useState('');
 
   // Skip reason modal
@@ -1708,6 +1812,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
       }
       // Nutrition score is computed client-side from plan data (see updateNutritionScore)
+      import('../services/api').then(({ getPlateaus }) =>
+        getPlateaus(authToken, 4)
+          .then(r => {
+            const names = new Set((r.plateaus || []).map(p => p.exercise_name.toLowerCase()));
+            setPlateauedExercises(names);
+          })
+          .catch(() => setPlateauedExercises(new Set()))
+      );
     } else {
       setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
     }
@@ -3967,6 +4079,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
+            {workoutSubTab === 'plan' && showEmailBanner && (
+              <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.warning + '44' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="mail-outline" size={16} color={themeColors.warning} />
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary, flex: 1 }}>
+                    Add a valid email to secure your account
+                  </Text>
+                  <TouchableOpacity onPress={dismissEmailBanner} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Ionicons name="close" size={16} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity
+                  style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8, backgroundColor: themeColors.warning }}
+                  onPress={() => { setEmailError(''); setNewEmail(''); setShowEmailModal(true); }}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Update Email</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {workoutSubTab === 'plan' && showRecoveryBanner && (
+              <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.primary + '44' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="shield-checkmark-outline" size={16} color={themeColors.primary} />
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary, flex: 1 }}>
+                    Set up a recovery question so you can reset your password if you forget it
+                  </Text>
+                  <TouchableOpacity onPress={dismissRecoveryBanner} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Ionicons name="close" size={16} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity
+                  style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8, backgroundColor: themeColors.primary }}
+                  onPress={() => setShowRecoveryModal(true)}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Set Up</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
               <RecoveryCard data={readinessScore} themeName={userProfile.themePreference} compact />
@@ -4239,6 +4389,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
                   onToggleSwitch={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
+                  hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some(ex => plateauedExercises.has(ex.name.toLowerCase()))}
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
@@ -4971,6 +5122,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             </View>
           ))}
+
+          {/* Body & Stats */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>BODY & STATS</Text>
+          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={onEditBody}>
+              <Ionicons name="person-outline" size={18} color={themeColors.textSecondary} style={{ marginRight: 8 }} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Edit Physical Stats</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Weight, height, age, biological sex</Text>
+              </View>
+              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+            </TouchableOpacity>
+          </View>
 
           {/* Workout Reminders */}
           <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
@@ -6536,6 +6700,95 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* AI Coach button moved to the header (top right) — see the
           header block above where the hamburger used to live. */}
 
+      <Modal visible={showRecoveryModal} transparent animationType="slide" onRequestClose={() => setShowRecoveryModal(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>
+          <View style={{ width: '85%', maxWidth: 380, backgroundColor: themeColors.surface, borderRadius: 16, padding: 20 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>Security Question</Text>
+              <TouchableOpacity onPress={() => setShowRecoveryModal(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={themeColors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 14 }}>
+              This lets you reset your password without email verification.
+            </Text>
+            <TextInput
+              style={{ backgroundColor: themeColors.background, borderRadius: 10, padding: 12, fontSize: 14, color: themeColors.textPrimary, borderWidth: 1, borderColor: themeColors.border, marginBottom: 10 }}
+              placeholder="e.g. What was your first pet's name?"
+              placeholderTextColor={themeColors.textMuted}
+              value={recoveryQuestion}
+              onChangeText={setRecoveryQuestionText}
+              autoCapitalize="sentences"
+              returnKeyType="next"
+            />
+            <TextInput
+              style={{ backgroundColor: themeColors.background, borderRadius: 10, padding: 12, fontSize: 14, color: themeColors.textPrimary, borderWidth: 1, borderColor: themeColors.border, marginBottom: 14 }}
+              placeholder="Your answer"
+              placeholderTextColor={themeColors.textMuted}
+              value={recoveryAnswer}
+              onChangeText={setRecoveryAnswer}
+              autoCapitalize="none"
+              returnKeyType="done"
+              onSubmitEditing={handleSaveRecoveryQuestion}
+            />
+            {recoveryError ? (
+              <Text style={{ fontSize: 12, color: '#EF4444', marginBottom: 10 }}>{recoveryError}</Text>
+            ) : null}
+            <TouchableOpacity
+              style={{ backgroundColor: themeColors.primary, borderRadius: 10, paddingVertical: 12, alignItems: 'center', opacity: recoverySaving ? 0.6 : 1 }}
+              onPress={handleSaveRecoveryQuestion}
+              disabled={recoverySaving}>
+              {recoverySaving ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Save</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showEmailModal} transparent animationType="slide" onRequestClose={() => setShowEmailModal(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>
+          <View style={{ width: '85%', maxWidth: 380, backgroundColor: themeColors.surface, borderRadius: 16, padding: 20 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>Update Email</Text>
+              <TouchableOpacity onPress={() => setShowEmailModal(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={themeColors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 14 }}>
+              A valid email keeps your account secure and recoverable.
+            </Text>
+            <TextInput
+              style={{ backgroundColor: themeColors.background, borderRadius: 10, padding: 12, fontSize: 14, color: themeColors.textPrimary, borderWidth: 1, borderColor: themeColors.border, marginBottom: 14 }}
+              placeholder="your@email.com"
+              placeholderTextColor={themeColors.textMuted}
+              value={newEmail}
+              onChangeText={setNewEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={handleSaveEmail}
+            />
+            {emailError ? (
+              <Text style={{ fontSize: 12, color: '#EF4444', marginBottom: 10 }}>{emailError}</Text>
+            ) : null}
+            <TouchableOpacity
+              style={{ backgroundColor: themeColors.primary, borderRadius: 10, paddingVertical: 12, alignItems: 'center', opacity: emailSaving ? 0.6 : 1 }}
+              onPress={handleSaveEmail}
+              disabled={emailSaving}>
+              {emailSaving ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Save</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {/* ── Bottom tab bar ────────────────────────────────────────────────
           Five top-level destinations. Each tab simply sets `activeTab`
           and the screen body re-renders the matching content block. */}
@@ -6693,7 +6946,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -6711,6 +6964,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   optionWarnings?: Record<string, { conflict: boolean; readiness: number | null }>;
   showSwitchOptions?: boolean;
   onToggleSwitch?: () => void;
+  hasPlateauedExercises?: boolean;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -6821,10 +7075,8 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
         </View>
         <View style={styles.dayCardRight}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <FocusLabelCrossfade focus={item.workout!.focus} style={[styles.focusLabel, { color: tc.textPrimary }]} />
-            {/* Stimulus badge — shows the training intent (strength/hypertrophy/volume/etc.)
-                so the user knows what kind of session this is at a glance. */}
             {(() => {
               const stim = item.workout?.stimulus;
               if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
@@ -6836,6 +7088,11 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                 </View>
               );
             })()}
+            {hasPlateauedExercises && !isCompleted && (
+              <View style={{ backgroundColor: '#F59E0B18', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 }}>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B', letterSpacing: 0.3 }}>DELOAD SUGGESTED</Text>
+              </View>
+            )}
           </View>
           {(() => {
             const focusLower = (item.workout!.focus || '').toLowerCase();

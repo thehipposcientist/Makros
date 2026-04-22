@@ -23,6 +23,7 @@ import { readHealthSummary, isHealthKitAvailable, isHealthKitNativeBindingsMissi
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
+import AdherenceTrendCard from '../components/AdherenceTrendCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore, getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
@@ -159,12 +160,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
   const [plateaus, setPlateaus] = useState<import('../services/api').PlateauEntry[]>([]);
   const [plateauModalVisible, setPlateauModalVisible] = useState(false);
+  const [plateauDismissed, setPlateauDismissed] = useState(true);
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
+  const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
+  const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   // Gut / longevity signals. All computed client-side from existing plan + check data.
   // Eating-window/late-eating intentionally NOT included — would require
   // real-time meal logging which adds friction.
@@ -207,10 +211,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             .then(setOneRepMaxLifts)
             .catch(() => setOneRepMaxLifts([]))
         );
-        // Plateau detection (Feature 5) — silent on error; empty list when API unreachable.
         import('../services/api').then(({ getPlateaus }) =>
           getPlateaus(authToken, 4)
-            .then(r => setPlateaus(r.plateaus || []))
+            .then(r => {
+              setPlateaus(r.plateaus || []);
+              AsyncStorage.getItem('plateauDismissedAt').then(raw => {
+                if (raw) {
+                  const dismissed = Date.now() - parseInt(raw, 10) < 7 * 24 * 60 * 60 * 1000;
+                  setPlateauDismissed(dismissed);
+                } else {
+                  setPlateauDismissed(false);
+                }
+              }).catch(() => setPlateauDismissed(false));
+            })
             .catch(() => setPlateaus([]))
         );
       }
@@ -221,6 +234,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
       import('../services/api').then(({ getMealAverages }) =>
         getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+      );
+      import('../services/api').then(({ getMuscleBalance }) =>
+        getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
       );
     }
     // Load body scan history
@@ -589,33 +605,62 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
           {/* Weight tracking moved to Body Check tab */}
 
-          {/* Plateaus — flag exercises stuck for 4+ weeks (Feature 5) */}
-          {plateaus.length > 0 && (
-            <TouchableOpacity
-              onPress={() => setPlateauModalVisible(true)}
-              activeOpacity={0.7}
-              style={{
-                marginBottom: 16,
-                backgroundColor: tc.surfaceRaised,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: '#F59E0B55',
-                padding: 12,
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 10,
-              }}>
-              <Ionicons name="alert-circle-outline" size={20} color="#F59E0B" />
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                  {plateaus.length} exercise{plateaus.length === 1 ? '' : 's'} plateaued
-                </Text>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                  Tap for suggestions
-                </Text>
+          {plateaus.length > 0 && !plateauDismissed && (
+            <View style={{
+              marginBottom: 16,
+              backgroundColor: tc.surfaceRaised,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: '#F59E0B55',
+              padding: 14,
+            }}>
+              <TouchableOpacity
+                onPress={() => setPlateauModalVisible(true)}
+                activeOpacity={0.7}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Ionicons name="alert-circle-outline" size={20} color="#F59E0B" />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                    {plateaus.length} exercise{plateaus.length === 1 ? '' : 's'} plateaued
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
+              </TouchableOpacity>
+              <View style={{ marginTop: 10, gap: 4 }}>
+                {plateaus.slice(0, 3).map((p, i) => (
+                  <Text key={i} style={{ fontSize: 12, color: tc.textSecondary }}>
+                    {p.exercise_name} — flat for {p.weeks_stuck} week{p.weeks_stuck === 1 ? '' : 's'}
+                  </Text>
+                ))}
+                {plateaus.length > 3 && (
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                    +{plateaus.length - 3} more
+                  </Text>
+                )}
               </View>
-              <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
-            </TouchableOpacity>
+              {plateaus.some(p => p.suggestion === 'deload') && (
+                <Text style={{ fontSize: 12, color: '#F59E0B', marginTop: 8, lineHeight: 17 }}>
+                  Consider a deload week — reduce weights by 40% for one week to recover.
+                </Text>
+              )}
+              <TouchableOpacity
+                onPress={() => {
+                  AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
+                  setPlateauDismissed(true);
+                }}
+                style={{
+                  alignSelf: 'flex-start',
+                  marginTop: 10,
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  backgroundColor: tc.surface,
+                }}>
+                <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>Dismiss</Text>
+              </TouchableOpacity>
+            </View>
           )}
 
           {/* Estimated 1RM showcase — deterministic Epley estimates
@@ -1461,6 +1506,58 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
+          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
+          {muscleBalance && muscleBalance.total_sets > 0 && (() => {
+            const entries = Object.entries(muscleBalance.muscles);
+            const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
+            const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);
+            const balEntries = entries.filter(([m]) => BALANCE_MUSCLES.has(m));
+            const avgPct = balEntries.length ? balEntries.reduce((s, [, v]) => s + v.pct, 0) / balEntries.length : 0;
+            const barColor = (muscle: string, pct: number) => {
+              if (!BALANCE_MUSCLES.has(muscle)) return tc.textMuted;
+              if (avgPct === 0) return tc.primary;
+              const ratio = pct / avgPct;
+              if (ratio >= 0.7) return '#22C55E';
+              if (ratio >= 0.4) return '#F59E0B';
+              return '#EF4444';
+            };
+            const score = muscleBalance.balance_score;
+            const scoreColor = score >= 70 ? '#22C55E' : score >= 45 ? '#F59E0B' : '#EF4444';
+
+            return (
+              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setMuscleBalanceExpanded(prev => !prev); }}
+                >
+                  <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
+                    <Ionicons name="body-outline" size={16} color={tc.primary} />
+                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Balance</Text>
+                    <Text style={{ fontSize: 20, fontWeight: '800', color: scoreColor }}>{score}</Text>
+                    <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginLeft: 2 }}>/100</Text>
+                    <Ionicons name={muscleBalanceExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} style={{ marginLeft: 6 }} />
+                  </View>
+                </TouchableOpacity>
+                {muscleBalanceExpanded && (
+                  <View style={{ gap: 6 }}>
+                    <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>
+                      {muscleBalance.period_days}d / {Math.round(muscleBalance.total_sets)} total sets
+                    </Text>
+                    {entries.map(([muscle, data]) => (
+                      <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Text style={{ width: 72, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>{muscle.replace(/_/g, ' ')}</Text>
+                        <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
+                          <View style={{ width: `${Math.max(3, (data.sets / maxSets) * 100)}%` as any, height: 8, borderRadius: 4, backgroundColor: barColor(muscle, data.pct) }} />
+                        </View>
+                        <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            );
+          })()}
+
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
             const completedWorkouts = history.filter(s => s.completed);
@@ -1593,6 +1690,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 );
               })()}
             </View>
+          )}
+
+          {authToken && (
+            <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
           {/* Weight Trend */}
