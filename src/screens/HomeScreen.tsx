@@ -5683,11 +5683,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </>
                     );
                   })()}
-                  <Text style={[styles.trainerEmpty, { color: themeColors.textMuted, marginTop: 8 }]}>
-                    {coachMode === 'nutritionist'
-                      ? 'Try: "Replace dinner with a high-protein option under 500 calories."'
-                      : 'Try: "My shoulder hurts on pressing — can you swap the bench press for something safer?"'}
-                  </Text>
                 </View>
               ) : (() => {
                 // Display cap: show the 50 most recent messages.
@@ -7923,6 +7918,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
     paddingTop: 8,
+    paddingBottom: 20,
   },
   trainerInput: {
     flex: 1,
