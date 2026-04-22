@@ -20,6 +20,8 @@ import type { HealthSummary } from '../types';
 // which would crash since HealthKit native bindings don't exist there.
 
 let AppleHealthKit: any = null;
+// Distinguishes "JS package missing" from "JS loaded but native bindings absent"
+let _nativeBindingsMissing = false;
 
 function getHealthKit(): any {
   if (Platform.OS !== 'ios') return null;
@@ -29,7 +31,20 @@ function getHealthKit(): any {
       // IS the kit — there's no `.default`. Fall through in case a future
       // version adds a default export.
       const mod = require('react-native-health');
-      AppleHealthKit = mod?.default ?? mod;
+      const hk = mod?.default ?? mod;
+      // react-native-health builds its export via
+      //   Object.assign({}, NativeModules.AppleHealthKit, { Constants })
+      // When the native module isn't linked in the binary, NativeModules.AppleHealthKit
+      // is null — Object.assign skips it silently, leaving an object with only
+      // Constants and no initHealthKit. Detect this and treat as unavailable so
+      // callers get null instead of a broken shell object.
+      if (!hk || typeof hk.initHealthKit !== 'function') {
+        _nativeBindingsMissing = true;
+        console.warn('[appleHealth] react-native-health JS loaded but NativeModules.AppleHealthKit is null — native module not linked in this binary. Need a fresh EAS build.');
+        return null;
+      }
+      _nativeBindingsMissing = false;
+      AppleHealthKit = hk;
     } catch {
       console.warn('[appleHealth] react-native-health not available — custom dev build required');
       return null;
@@ -110,8 +125,14 @@ export async function diagnoseHealthKit(): Promise<string> {
   }
   const hk = getHealthKit();
   if (!hk) {
-    lines.push('native_module=NOT_LOADED');
-    lines.push('fix=You need a custom dev build (Expo Go does not ship react-native-health). Run eas build --profile development.');
+    if (_nativeBindingsMissing) {
+      lines.push('native_module=JS_LOADED_NATIVE_MISSING');
+      lines.push('cause=NativeModules.AppleHealthKit is null — react-native-health JS package is present but the native iOS module is not linked in this binary.');
+      lines.push('fix=Run: eas build --profile development --platform ios --clear-cache  then install the new build on device.');
+    } else {
+      lines.push('native_module=NOT_LOADED');
+      lines.push('fix=You need a custom dev build (Expo Go does not ship react-native-health). Run eas build --profile development.');
+    }
     return lines.join('\n');
   }
   lines.push('native_module=LOADED');

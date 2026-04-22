@@ -168,7 +168,8 @@
       "Read(//usr/bin/**)",
       "Bash(find / -maxdepth 5 -name \"node\" -type f)",
       "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit)",
-      "Bash(/Users/sawyerhannel/Documents/GitHub/Makros/node_modules/.bin/tsc --noEmit)"
+      "Bash(/Users/sawyerhannel/Documents/GitHub/Makros/node_modules/.bin/tsc --noEmit)",
+      "Bash(git *)"
     ]
   }
 }
