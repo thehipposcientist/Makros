@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import openai
@@ -28,8 +29,124 @@ from app.workout_progression import (
     SetResult, SetType, UserTrainingProfile, WorkoutContext,
 )
 from app.services.workout.performance import build_performance_profile
-from app.services.workout.recommendation import recommend_starting_weight
+from app.services.workout.recommendation import (
+    apply_fatigue_override,
+    recommend_starting_weight,
+)
+from app.services.workout.ai_first_time_weight import (
+    ai_first_time_weight_recommendation,
+)
 from app.seed_exercises_data import SEED_EXERCISES  # noqa: F401  (used inside handler)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _try_ai_first_time_branch(
+    *,
+    user_id: int,
+    db: Session,
+    exercise_name: str,
+    exercise_slug: str | None,
+    target_reps: str,
+    experience: str,
+) -> tuple[float, dict] | None:
+    """Try the AI first-time branch. Returns `(weight_lbs, meta)` on
+    success, None when we should fall through to the deterministic
+    tiers below.
+
+    Pre-conditions enforced:
+      1. The resolved exercise has a `primary_muscle` we can look up.
+      2. User has NO direct history for the target exercise (we're
+         past the exact-history tier by the time this fires).
+      3. User DOES have >= 1 recent session for that same muscle.
+
+    On missing API key, empty muscle sessions, or any AI failure we
+    return None — the existing tiers 5/6/7 handle fallback.
+    """
+    if not exercise_name:
+        return None
+
+    # Resolve canonical seed row so we know which muscle to look up.
+    seed_row: dict | None = None
+    from app.seed_exercises_data import SEED_EXERCISES
+    if exercise_slug:
+        seed_row = next(
+            (ex for ex in SEED_EXERCISES if ex.get("slug") == exercise_slug), None
+        )
+    if seed_row is None:
+        lname = (exercise_name or "").strip().lower()
+        seed_row = next(
+            (ex for ex in SEED_EXERCISES if (ex.get("name") or "").strip().lower() == lname),
+            None,
+        )
+    primary_muscle = (seed_row or {}).get("primary_muscle")
+    if isinstance(primary_muscle, str):
+        primary_muscle_str = primary_muscle
+    elif primary_muscle is not None and hasattr(primary_muscle, "value"):
+        primary_muscle_str = str(primary_muscle.value)
+    else:
+        primary_muscle_str = ""
+    if not primary_muscle_str:
+        return None
+
+    try:
+        from app.services.workout.history import most_recent_sessions_for_muscle
+        muscle_sessions = most_recent_sessions_for_muscle(
+            user_id, primary_muscle_str, db, limit=3,
+        )
+    except Exception:
+        logger.exception(
+            "[recommend-weight] most_recent_sessions_for_muscle failed (non-fatal)"
+        )
+        return None
+    if not muscle_sessions:
+        return None
+
+    # Fetch bodyweight for the prompt; default to 0 when the profile
+    # row is missing (AI can cope, just adds uncertainty).
+    bw_lbs = 0.0
+    try:
+        from app.models import UserProfile as _UP
+        row = db.exec(select(_UP).where(_UP.user_id == user_id)).first()
+        if row and row.weight_lbs:
+            bw_lbs = float(row.weight_lbs)
+    except Exception:
+        logger.exception(
+            "[recommend-weight] bodyweight lookup failed (non-fatal)"
+        )
+
+    api_key = get_openai_api_key()
+    if not api_key:
+        return None
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception:
+        logger.exception(
+            "[recommend-weight] OpenAI client init failed (non-fatal)"
+        )
+        return None
+
+    rec = ai_first_time_weight_recommendation(
+        exercise_name=exercise_name,
+        primary_muscle=primary_muscle_str,
+        target_reps=target_reps,
+        experience=experience,
+        bodyweight_lbs=bw_lbs,
+        muscle_sessions=muscle_sessions,
+        openai_client=client,
+        model=model_chat(),
+        chat_kwargs_builder=_build_chat_kwargs,
+        chat_invoker=_chat_create,
+        json_extractor=_extract_json,
+    )
+    if rec is None or rec.weight_lbs <= 0:
+        return None
+    return rec.weight_lbs, {
+        "source": "ai_first_time",
+        "confidence": rec.confidence,
+        "reason": rec.reason,
+    }
 
 
 def _resolve_exercise_slug(db: Session, exercise_name: str, exercise_slug: str | None) -> str | None:
@@ -43,6 +160,58 @@ def _resolve_exercise_slug(db: Session, exercise_name: str, exercise_slug: str |
         return None
     row = db.exec(select(Exercise).where(Exercise.name.ilike(exercise_name))).first()
     return row.slug if row else None
+
+
+def _primary_muscle_for(
+    db: Session, exercise_name: str, exercise_slug: str | None
+) -> str | None:
+    """Best-effort primary-muscle lookup for the fatigue overlay.
+
+    Tries (in order): the client-provided slug against the seed, the
+    exercise name against the seed, and finally the Exercise DB row.
+    Returns None when we can't find a muscle — the fatigue override
+    silently skips in that case.
+    """
+    try:
+        from app.seed_exercises_data import SEED_EXERCISES
+        seed_row = None
+        if exercise_slug:
+            seed_row = next(
+                (ex for ex in SEED_EXERCISES if ex.get("slug") == exercise_slug),
+                None,
+            )
+        if seed_row is None and exercise_name:
+            lname = exercise_name.strip().lower()
+            seed_row = next(
+                (
+                    ex for ex in SEED_EXERCISES
+                    if (ex.get("name") or "").strip().lower() == lname
+                ),
+                None,
+            )
+        if seed_row is not None:
+            pm = seed_row.get("primary_muscle")
+            if hasattr(pm, "value"):
+                return str(pm.value)
+            if pm:
+                return str(pm)
+    except Exception:
+        logger.exception(
+            "[recommend-weight] seed primary_muscle lookup failed (non-fatal)"
+        )
+
+    if not exercise_name:
+        return None
+    try:
+        row = db.exec(select(Exercise).where(Exercise.name.ilike(exercise_name))).first()
+        if row and row.primary_muscle is not None:
+            pm = row.primary_muscle
+            return str(pm.value) if hasattr(pm, "value") else str(pm)
+    except Exception:
+        logger.exception(
+            "[recommend-weight] DB primary_muscle lookup failed (non-fatal)"
+        )
+    return None
 
 
 @router.post("/recommend-weight")
@@ -89,6 +258,29 @@ def recommend_weight(
             for s in body.lastSets
         ]
         last_weight = sets_completed[-1].weight_lbs if sets_completed else None
+
+        # Fetch the user's current per-muscle fatigue snapshot once so
+        # the fatigue overlay (below) can downshift the first-set anchor
+        # when the target muscle is elevated. Non-fatal — on any error
+        # we just skip the override. The downstream in-workout path
+        # already tolerates a None snapshot.
+        muscle_fatigue_dict: dict | None = None
+        try:
+            from app.services.workout.history import (
+                get_recent_completions_for_fatigue,
+            )
+            from app.services.workout.activity_impact import (
+                compute_rolling_fatigue,
+            )
+            _completions = get_recent_completions_for_fatigue(current_user.id, db)
+            if _completions:
+                _snap = compute_rolling_fatigue(_completions)
+                muscle_fatigue_dict = _snap.muscle_fatigue.to_dict()
+        except Exception:
+            logger.exception(
+                "[recommend-weight] fatigue snapshot lookup failed (non-fatal)"
+            )
+            muscle_fatigue_dict = None
 
         goal_type  = map_goal_type(body.goal)
         profile    = UserTrainingProfile(
@@ -155,6 +347,22 @@ def recommend_weight(
                                 "reason": rec_anchor.reason,
                             }
 
+            # Tier 4.5 — AI first-time. No direct history AND no
+            # transferable anchor from the seed pipeline, but the user
+            # DOES have recent sessions for the same primary_muscle.
+            # Hand the recent sessions to the AI and ask for a
+            # conservative starting weight. Fail-safe: any failure
+            # falls through to the deterministic tiers below.
+            if last_weight is None:
+                last_weight, recommendation_meta = _try_ai_first_time_branch(
+                    user_id=current_user.id,
+                    db=db,
+                    exercise_name=body.exerciseName,
+                    exercise_slug=body.exerciseSlug,
+                    target_reps=body.targetReps or "8-12",
+                    experience=(body.experienceLevel or "intermediate"),
+                ) or (last_weight, recommendation_meta)
+
             # Tier 5 — client-provided last-session best (oldest code path).
             if last_weight is None and body.lastSessionBestWeightLbs and body.lastSessionBestWeightLbs > 0:
                 last_weight = float(body.lastSessionBestWeightLbs)
@@ -184,6 +392,44 @@ def recommend_weight(
                     "confidence": 0.15,
                     "reason": "Starting weight for this movement — adjust after your first set",
                 }
+
+        # ── Fatigue overlay ────────────────────────────────────────
+        # Only meaningful for the FIRST set of the session (no sets
+        # logged yet). Mid-workout, the progression engine is already
+        # reacting to what just happened — a fatigue downshift on top
+        # would double-count. `sets_completed` being empty is the
+        # same guard we use for every tier-resolution branch above.
+        fatigue_override_flag = False
+        if not sets_completed and last_weight is not None and last_weight > 0:
+            primary_muscle_for_fatigue = _primary_muscle_for(
+                db, body.exerciseName, body.exerciseSlug
+            )
+            if primary_muscle_for_fatigue and muscle_fatigue_dict:
+                base_conf = (
+                    (recommendation_meta or {}).get("confidence")
+                    if recommendation_meta else None
+                )
+                base_reason = (
+                    (recommendation_meta or {}).get("reason")
+                    if recommendation_meta else ""
+                )
+                adj = apply_fatigue_override(
+                    weight_lbs=float(last_weight),
+                    base_confidence=base_conf if base_conf is not None else 0.15,
+                    base_reason=base_reason or "",
+                    primary_muscle=primary_muscle_for_fatigue,
+                    muscle_fatigue=muscle_fatigue_dict,
+                    muscle_label=primary_muscle_for_fatigue,
+                )
+                if adj.fatigue_override:
+                    last_weight = adj.weight_lbs
+                    fatigue_override_flag = True
+                    recommendation_meta = {
+                        "source": (recommendation_meta or {}).get("source") or "default",
+                        "confidence": adj.confidence,
+                        "reason": adj.reason,
+                    }
+
         prescription = ExercisePrescription(
             exercise_name=body.exerciseName,
             category=ex_category,
@@ -216,6 +462,7 @@ def recommend_weight(
                 "action": rec.action.value,
                 "debug": rec.debug,
                 "recommendation": recommendation_meta,
+                "fatigue_override": fatigue_override_flag,
             }
 
         rec_weight = float(rec.recommended_weight_lbs or last_weight or 0)
@@ -322,6 +569,11 @@ def recommend_weight(
             "awaitingFeel": False,
             "source": reviewed_source,
             "suspicionReasons": reviewed_reasons,
+            # Top-level flag so the UI can style the rec differently
+            # (e.g. "recovering" badge) without parsing the reason
+            # string. True iff the fatigue overlay downshifted the
+            # weight; False in every other case.
+            "fatigue_override": fatigue_override_flag,
         }
     except Exception as e:
         print(f"[BACKEND] recommend-weight error: {e}")

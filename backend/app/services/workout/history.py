@@ -289,6 +289,97 @@ def most_recent_completed_focus(
     return buckets, families
 
 
+def most_recent_sessions_for_muscle(
+    user_id: int,
+    primary_muscle: str,
+    db_session,
+    *,
+    limit: int = 3,
+    days: int = 60,
+) -> list[dict]:
+    """Return up to `limit` recent completed sessions for exercises that
+    share the given `primary_muscle`. Used by the AI starting-weight
+    branch: when the user has NO direct history for the target exercise
+    but DOES have history for the same muscle family, we want to show
+    the AI the user's recent lifts so it can calibrate a sensible
+    starting weight.
+
+    Each entry carries:
+        - exercise_name, exercise_slug
+        - equipment_bucket (seed-level)
+        - top_weight_lbs, top_reps, set_count
+        - reps_logged (the reps across logged sets, e.g. "8,8,7,6")
+        - completed_on (ISO date)
+
+    Sorted newest-first. Returns [] when the user has no matching
+    history inside the lookback window.
+    """
+    if not primary_muscle:
+        return []
+    from sqlmodel import select
+    from app.models import (
+        Exercise as ExModel,
+        ExerciseSet,
+        WorkoutExercise,
+        WorkoutSession,
+    )
+
+    cutoff = date.today() - timedelta(days=days)
+    # Pull the most recent N workout_exercises (one per session/exercise
+    # pair) whose linked Exercise.primary_muscle matches. Ordering by
+    # session.completed_at desc gives newest-first semantics.
+    rows = db_session.exec(
+        select(
+            ExModel.slug,
+            ExModel.name,
+            ExModel.equipment,
+            WorkoutExercise.id,
+            WorkoutSession.workout_date,
+            WorkoutSession.completed_at,
+        )
+        .join(WorkoutExercise, WorkoutExercise.exercise_id == ExModel.id)
+        .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+        .where(WorkoutSession.user_id == user_id)
+        .where(WorkoutSession.completed_at.is_not(None))
+        .where(WorkoutSession.workout_date >= cutoff)
+        .where(ExModel.primary_muscle == primary_muscle)
+        .order_by(WorkoutSession.completed_at.desc())
+        .limit(max(limit, 1) * 4)  # over-fetch to tolerate empty-set rows
+    ).all()
+
+    sessions: list[dict] = []
+    seen_ex_ids: set[int] = set()
+    for slug, name, equipment, we_id, workout_date, completed_at in rows:
+        if we_id is None or we_id in seen_ex_ids:
+            continue
+        seen_ex_ids.add(we_id)
+        # Pull the completed sets for this workout_exercise row.
+        sets = db_session.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id == we_id)
+            .where(ExerciseSet.completed == True)  # noqa: E712
+            .order_by(ExerciseSet.set_number)
+        ).all()
+        if not sets:
+            continue
+        top_weight = max((s.actual_weight_lbs or 0.0) for s in sets)
+        reps_list = [int(s.actual_reps or 0) for s in sets if s.actual_reps]
+        top_reps = max(reps_list) if reps_list else 0
+        sessions.append({
+            "exercise_slug": slug,
+            "exercise_name": name,
+            "equipment": (equipment.value if hasattr(equipment, "value") else str(equipment or "")).lower(),
+            "set_count": len(sets),
+            "top_weight_lbs": float(top_weight),
+            "top_reps": int(top_reps),
+            "reps_logged": ",".join(str(r) for r in reps_list),
+            "completed_on": workout_date.isoformat() if workout_date else None,
+        })
+        if len(sessions) >= limit:
+            break
+    return sessions
+
+
 def get_recent_completions_for_fatigue(
     user_id: int,
     db_session,

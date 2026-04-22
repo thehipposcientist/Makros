@@ -15,6 +15,13 @@ Each recommendation carries a weight, a 0–1 confidence, a source tag,
 and a human-readable reason string so the UI can explain the choice.
 
 No LLM, no randomness. Every step is auditable.
+
+Fatigue-aware overlay (layered on top of any tier's base rec):
+    `apply_fatigue_override` downshifts the chosen weight by 0%/5%/10%/15%
+    based on the current per-muscle fatigue for the target exercise's
+    `primary_muscle`. When a downshift fires, the reason string is
+    rewritten to cite the fatigue value, and the caller also receives a
+    `fatigue_override` flag so the UI can flag the rec visually.
 """
 from __future__ import annotations
 
@@ -365,3 +372,124 @@ def _pick_best_1rm(
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: item[1].estimated_1rm_lbs, reverse=True)[0]
+
+
+# ── Fatigue-aware overlay ────────────────────────────────────────────
+
+# Muscle-group aliases used by the fatigue snapshot. The fatigue model
+# has 12 canonical buckets (see activity_impact.FATIGUE_MUSCLES). The
+# seed catalog uses slightly finer names (e.g. "traps", "forearms",
+# "adductors"). Map the outliers onto the canonical buckets so a
+# `primary_muscle` lookup always hits the right fatigue dimension.
+_PRIMARY_MUSCLE_TO_FATIGUE_KEY = {
+    "traps": "back",
+    "lats": "back",
+    "forearms": "biceps",
+    "adductors": "quads",
+    "abductors": "glutes",
+    "obliques": "core",
+}
+
+
+@dataclass
+class FatigueAdjustment:
+    """Result of `apply_fatigue_override`. All fields are already
+    adjusted — callers just stamp them onto the outgoing response.
+
+    `fatigue_override` is True iff the fatigue tier triggered a load
+    change. `reason` is rewritten to cite the fatigue value; callers
+    can pass the original reason through as-is when the override
+    doesn't fire (the helper does this internally).
+    """
+    weight_lbs: float
+    confidence: float | str
+    reason: str
+    fatigue_override: bool
+
+
+def _fatigue_key_for_muscle(primary_muscle: str | None) -> str | None:
+    """Map a seed `primary_muscle` string onto the canonical fatigue
+    bucket key. Returns None when the muscle can't be mapped so callers
+    can silently skip the override (better than guessing)."""
+    if not primary_muscle:
+        return None
+    key = str(primary_muscle).strip().lower()
+    if not key:
+        return None
+    return _PRIMARY_MUSCLE_TO_FATIGUE_KEY.get(key, key)
+
+
+def apply_fatigue_override(
+    *,
+    weight_lbs: float,
+    base_confidence: float | str,
+    base_reason: str,
+    primary_muscle: str | None,
+    muscle_fatigue: dict[str, float] | None,
+    muscle_label: str | None = None,
+) -> FatigueAdjustment:
+    """Downshift a base weight recommendation based on the current
+    fatigue level of the target exercise's `primary_muscle`.
+
+    Rules (specified in the feature brief):
+        fatigue ≤ 0.4 → no change
+        0.4 < fatigue ≤ 0.6 → -5% of base weight
+        0.6 < fatigue ≤ 0.8 → -10% of base weight
+        fatigue > 0.8 → -15% + confidence downgraded to "low"
+
+    Weight is always rounded to the nearest 2.5 lb. `muscle_fatigue`
+    can be None or empty (no snapshot yet) — we return the base rec
+    unchanged in that case. `muscle_label` is the human-facing name
+    used in the reason string (e.g. "Chest" rather than "chest").
+    """
+    if weight_lbs <= 0 or not muscle_fatigue:
+        return FatigueAdjustment(
+            weight_lbs=weight_lbs,
+            confidence=base_confidence,
+            reason=base_reason,
+            fatigue_override=False,
+        )
+    key = _fatigue_key_for_muscle(primary_muscle)
+    if key is None:
+        return FatigueAdjustment(
+            weight_lbs=weight_lbs,
+            confidence=base_confidence,
+            reason=base_reason,
+            fatigue_override=False,
+        )
+    try:
+        fatigue = float(muscle_fatigue.get(key, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        fatigue = 0.0
+
+    if fatigue <= 0.4:
+        return FatigueAdjustment(
+            weight_lbs=weight_lbs,
+            confidence=base_confidence,
+            reason=base_reason,
+            fatigue_override=False,
+        )
+
+    if fatigue <= 0.6:
+        pct = 0.05
+        confidence = base_confidence
+    elif fatigue <= 0.8:
+        pct = 0.10
+        confidence = base_confidence
+    else:
+        pct = 0.15
+        confidence = "low"
+
+    new_weight = _round_to_plate(weight_lbs * (1.0 - pct), increment=2.5)
+    label = (muscle_label or key).strip().title()
+    pct_int = int(round(pct * 100))
+    reason = (
+        f"{label} still recovering ({fatigue:.2f} fatigue) — starting "
+        f"~{pct_int}% lighter than last session"
+    )
+    return FatigueAdjustment(
+        weight_lbs=new_weight,
+        confidence=confidence,
+        reason=reason,
+        fatigue_override=True,
+    )

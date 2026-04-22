@@ -34,6 +34,8 @@ _TEST_MODULES = (
     "tests.test_planner_schema",
     # prev_focuses → planner rotation + meal_history → nutrition context.
     "tests.test_history_plumbing",
+    # Fatigue overlay + AI first-time starting-weight branch.
+    "tests.test_recommendation_fatigue_and_ai",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",
