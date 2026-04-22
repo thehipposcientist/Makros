@@ -5001,6 +5001,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
+            {/* Apple Health diagnostic — shown only on iOS. Prints the
+                full init/permission/entitlement state so pilot users
+                can paste the output back when HealthKit silently fails. */}
+            {Platform.OS === 'ios' && (
+              <TouchableOpacity
+                style={[styles.profileMenuItem, { borderTopWidth: 1, borderTopColor: themeColors.border }]}
+                onPress={async () => {
+                  try {
+                    const { diagnoseHealthKit } = await import('../services/appleHealth');
+                    const report = await diagnoseHealthKit();
+                    Alert.alert(
+                      'Apple Health diagnosis',
+                      report,
+                      [
+                        { text: 'Share', onPress: async () => {
+                          try {
+                            const { Share } = await import('react-native');
+                            await Share.share({ message: report, title: 'Thallo HealthKit diagnosis' });
+                          } catch {}
+                        }},
+                        { text: 'OK', style: 'default' },
+                      ],
+                    );
+                  } catch (e: any) {
+                    Alert.alert('Diagnostic failed', String(e?.message ?? e));
+                  }
+                }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health Diagnostic</Text>
+                <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <TouchableOpacity

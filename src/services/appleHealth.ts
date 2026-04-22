@@ -39,20 +39,40 @@ function getHealthKit(): any {
 }
 
 // ── Permission constants ─────────────────────────────────────────────────────
-
-const HEALTH_PERMISSIONS = {
-  permissions: {
-    read: [
-      'HeartRate',
-      'RestingHeartRate',
-      'StepCount',
-      'SleepAnalysis',
-      'ActiveEnergyBurned',
-      'Workout',
-    ],
-    write: [] as string[],  // v1: read-only — no writes yet
-  },
-};
+//
+// Preferred path: use `AppleHealthKit.Constants.Permissions.*` — those
+// are the canonical enum values from the native binding and survive
+// renames across react-native-health versions. We fall back to string
+// literals if Constants isn't exposed (older package versions / partial
+// module load). The literals DO match what the constants resolve to in
+// the current v1.19.x series, so in practice both paths produce the
+// same authorization request.
+function _buildPermissionsObject(hk: any) {
+  const C = hk?.Constants?.Permissions;
+  const read = C ? [
+    C.HeartRate,
+    C.RestingHeartRate,
+    C.StepCount,
+    C.SleepAnalysis,
+    C.ActiveEnergyBurned,
+    C.Workout,
+    C.Weight,           // BodyMass — enables weight sync + fitness score bodyweight field
+  ] : [
+    'HeartRate',
+    'RestingHeartRate',
+    'StepCount',
+    'SleepAnalysis',
+    'ActiveEnergyBurned',
+    'Workout',
+    'Weight',
+  ];
+  return {
+    permissions: {
+      read,
+      write: [] as string[],  // read-only for v1; writes (log workouts back) later
+    },
+  };
+}
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -69,6 +89,54 @@ export function isHealthKitAvailable(): boolean {
 let _lastHealthKitError: string | null = null;
 export function getLastHealthKitError(): string | null {
   return _lastHealthKitError;
+}
+
+/**
+ * Deep diagnostic snapshot of the HealthKit integration state. Call from
+ * a debug button / settings row and display the resulting text so
+ * TestFlight users can paste back what they see. Covers every common
+ * failure mode: Android device, native module not loaded, Constants
+ * missing (wrong package version), initHealthKit not a function,
+ * entitlement missing (iOS rejects the init call outright with a
+ * specific error string), user-denied permissions (no way to detect
+ * directly — we describe what to check in iOS Settings).
+ */
+export async function diagnoseHealthKit(): Promise<string> {
+  const lines: string[] = [];
+  lines.push(`platform=${Platform.OS}`);
+  if (Platform.OS !== 'ios') {
+    lines.push('result=SKIP (iOS only)');
+    return lines.join('\n');
+  }
+  const hk = getHealthKit();
+  if (!hk) {
+    lines.push('native_module=NOT_LOADED');
+    lines.push('fix=You need a custom dev build (Expo Go does not ship react-native-health). Run eas build --profile development.');
+    return lines.join('\n');
+  }
+  lines.push('native_module=LOADED');
+  lines.push(`constants_present=${!!hk.Constants?.Permissions}`);
+  lines.push(`initHealthKit_fn=${typeof hk.initHealthKit === 'function'}`);
+  lines.push(`getSamples_fn=${typeof hk.getSamples === 'function'}`);
+  const perms = _buildPermissionsObject(hk);
+  lines.push(`read_permissions_count=${perms.permissions.read.length}`);
+
+  // Try the init — captures entitlement missing errors.
+  const ok = await requestHealthPermissions();
+  lines.push(`init_ok=${ok}`);
+  if (!ok && _lastHealthKitError) {
+    lines.push(`init_error=${_lastHealthKitError}`);
+    // Heuristic guidance for the most common strings.
+    const err = _lastHealthKitError.toLowerCase();
+    if (err.includes('not available') || err.includes('entitlement') || err.includes('authorization')) {
+      lines.push('likely_cause=HealthKit entitlement missing from provisioning profile.');
+      lines.push('fix=(1) Apple Developer -> Identifiers -> App ID -> enable HealthKit. (2) eas credentials -> regenerate provisioning profile. (3) eas build --clear-cache + eas submit.');
+    }
+  }
+  if (ok) {
+    lines.push('fix=If you still see no data, iOS Settings -> Privacy & Security -> Health -> Thallo -> enable each category.');
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -91,7 +159,9 @@ export function requestHealthPermissions(): Promise<boolean> {
     }
 
     try {
-      hk.initHealthKit(HEALTH_PERMISSIONS, (err: any) => {
+      const perms = _buildPermissionsObject(hk);
+      console.log('[appleHealth] requesting permissions:', perms.permissions.read.length, 'read types');
+      hk.initHealthKit(perms, (err: any) => {
         if (err) {
           _lastHealthKitError = typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err));
           console.warn('[appleHealth] initHealthKit error:', _lastHealthKitError);

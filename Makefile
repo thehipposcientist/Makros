@@ -1,5 +1,5 @@
 .PHONY: start tunnel stop reset-db wait-backend test dev \
-        deploy deploy-backend deploy-ios smoke-prod smoke-mobile
+        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -150,6 +150,21 @@ deploy-ios:
 	@echo "(~15-25 min for build, another ~5-15 min for Apple processing.)"
 	@echo ""
 	@eas build --platform ios --profile production --non-interactive
+	@echo ""
+	@echo "Build finished. Submitting latest to TestFlight..."
+	@eas submit --platform ios --latest --non-interactive
+
+# Fresh iOS build — clears EAS's cached entitlements / provisioning plists.
+# Use when entitlements changed (HealthKit, Push, etc.) OR app.json
+# infoPlist keys changed. Slightly slower than `deploy-ios` since nothing
+# can be cached. Required after any `ios.entitlements` or capability edit
+# in Apple Developer portal.
+deploy-ios-clean:
+	@echo ""
+	@echo "Building iOS with --clear-cache (fresh entitlements)..."
+	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
+	@echo ""
+	@eas build --platform ios --profile production --clear-cache --non-interactive
 	@echo ""
 	@echo "Build finished. Submitting latest to TestFlight..."
 	@eas submit --platform ios --latest --non-interactive
