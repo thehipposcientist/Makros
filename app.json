@@ -40,7 +40,11 @@
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true
       },
-      "buildNumber": "10"
+      "entitlements": {
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.healthkit.access": []
+      },
+      "buildNumber": "11"
     },
     "android": {
       "package": "com.thallo.app",
