@@ -21,7 +21,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
-import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
+import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
@@ -1890,13 +1890,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         });
         // If the user wore an Apple Watch, prefer its calorie total — it's more
         // accurate than our METs estimate. Fall back to the default otherwise.
+        // Also pull HR samples for the window to annotate avg/max + zone time.
         try {
           if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
-            const watchCal = await getAppleWorkoutCaloriesForWindow(
-              startTime.current,
-              now.getTime(),
-            );
+            let profileAge: number | null = null;
+            try {
+              const r = await AsyncStorage.getItem('userProfile');
+              if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
+            } catch {}
+            const [watchCal, hrSummary] = await Promise.all([
+              getAppleWorkoutCaloriesForWindow(startTime.current, now.getTime()),
+              getWorkoutHrSummary(startTime.current, now.getTime(), profileAge),
+            ]);
             if (watchCal != null && watchCal > 0) (s as any).caloriesBurned = watchCal;
+            if (hrSummary) {
+              (s as any).hrAvg = hrSummary.avgBpm;
+              (s as any).hrMax = hrSummary.maxBpm;
+              (s as any).hrZoneMinutes = hrSummary.zoneMinutes;
+            }
           }
         } catch {}
         setSummaryData(s);
@@ -3201,7 +3212,45 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           <Text style={styles.shareStatLabel}>Calories</Text>
                         </View>
                       ) : null}
+                      {summaryData?.hrAvg ? (
+                        <View style={styles.shareStatTile}>
+                          <Text style={styles.shareStatIcon}><Ionicons name="pulse" size={14} /></Text>
+                          <Text style={styles.shareStatValue}>{summaryData.hrAvg}</Text>
+                          <Text style={styles.shareStatLabel}>Avg HR</Text>
+                        </View>
+                      ) : null}
+                      {summaryData?.hrMax ? (
+                        <View style={styles.shareStatTile}>
+                          <Text style={styles.shareStatIcon}><Ionicons name="heart" size={14} /></Text>
+                          <Text style={styles.shareStatValue}>{summaryData.hrMax}</Text>
+                          <Text style={styles.shareStatLabel}>Max HR</Text>
+                        </View>
+                      ) : null}
                     </View>
+                    {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
+                      <View style={{ marginTop: 10, paddingHorizontal: 2 }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                          TIME IN ZONES
+                        </Text>
+                        {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
+                          const min = summaryData.hrZoneMinutes![i];
+                          const totalMin = summaryData.hrZoneMinutes!.reduce((a, b) => a + b, 0);
+                          const pct = totalMin > 0 ? (min / totalMin) : 0;
+                          const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
+                          return (
+                            <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                              <Text style={{ width: 24, fontSize: 10, fontWeight: '700', color: zoneColor }}>{label}</Text>
+                              <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: themeColors.border }}>
+                                <View style={{ width: `${Math.max(1, pct * 100)}%` as any, height: 6, borderRadius: 3, backgroundColor: zoneColor }} />
+                              </View>
+                              <Text style={{ width: 50, fontSize: 10, color: themeColors.textSecondary, textAlign: 'right' }}>
+                                {Math.round(min)} min
+                              </Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ) : null}
 
                     {/* Best sets */}
                     {(summaryData?.achievements?.length ?? 0) > 0 && (

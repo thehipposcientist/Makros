@@ -40,6 +40,9 @@ import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
 import RecoveryCard from '../components/RecoveryCard';
 import WeeklyDigestCard from '../components/WeeklyDigestCard';
+import PreparednessCard from '../components/PreparednessCard';
+import CyclePhaseCard from '../components/CyclePhaseCard';
+import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
@@ -1114,6 +1117,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
+  const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [showEmailBanner, setShowEmailBanner] = useState(false);
@@ -3976,6 +3980,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.theme} />
             )}
 
+            {/* Daily preparedness score */}
+            {workoutSubTab === 'plan' && authToken && (() => {
+              const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+              return (
+                <PreparednessCard
+                  authToken={authToken}
+                  themeName={userProfile.theme}
+                  age={userProfile.physicalStats?.age ?? null}
+                  proteinTarget={todayPlan?.targets?.protein ?? null}
+                  calorieTarget={todayPlan?.targets?.calories ?? null}
+                />
+              );
+            })()}
+
+            {/* Menstrual cycle phase (auto-hides if no Apple Health data) */}
+            {workoutSubTab === 'plan' && authToken && (
+              <CyclePhaseCard themeName={userProfile.theme} />
+            )}
+
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
             {workoutSubTab === 'plan' && authToken && (
               <WeeklyDigestCard authToken={authToken} themeName={userProfile.theme} />
@@ -4437,17 +4460,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 flash-through to the previous tab's content. */}
             {(mealsSubTab !== 'plan' && mealsSubTab !== 'history') && (
               <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
-                {mealsSubTab === 'foods' && commonMeals.length > 0 && (
+                {mealsSubTab === 'foods' && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                      {commonMeals.map(m => (
-                        <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
-                          <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>{m.name}</Text>
-                          <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{m.count}x · {Math.round(m.avg_calories)} cal · {Math.round(m.avg_protein_g)}g protein</Text>
-                        </View>
-                      ))}
-                    </ScrollView>
+                    <TouchableOpacity
+                      onPress={() => setShowGroceryList(true)}
+                      activeOpacity={0.8}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 10,
+                        backgroundColor: themeColors.surface,
+                        borderRadius: 12, padding: 12, marginBottom: 10,
+                        borderWidth: 1, borderColor: themeColors.primary + '44',
+                      }}
+                    >
+                      <View style={{
+                        width: 36, height: 36, borderRadius: 18,
+                        backgroundColor: themeColors.primary + '22',
+                        alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <Ionicons name="cart-outline" size={18} color={themeColors.primary} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>Grocery list</Text>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Auto-built from this week's meals</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+                    </TouchableOpacity>
+                    {commonMeals.length > 0 && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                          {commonMeals.map(m => (
+                            <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>{m.name}</Text>
+                              <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{m.count}x · {Math.round(m.avg_calories)} cal · {Math.round(m.avg_protein_g)}g protein</Text>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      </>
+                    )}
                   </View>
                 )}
                 <EditProfileScreen
@@ -6108,6 +6158,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           )}
         </View>
       </Modal>
+
+      {/* Grocery list modal */}
+      <GroceryListModal
+        visible={showGroceryList}
+        onClose={() => setShowGroceryList(false)}
+        plansByDate={nutritionPlansByDate}
+        themeName={userProfile.theme}
+      />
 
       {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>

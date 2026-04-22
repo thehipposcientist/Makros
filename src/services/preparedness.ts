@@ -31,6 +31,8 @@ export interface PreparednessInput {
   calorieTarget?: number | null;
   yesterdayWorkoutMinutes?: number | null;  // total logged training yesterday
   age?: number | null;
+  /** Optional cycle phase — small ±3pt modifier. Menses slight -, ovulation slight +. */
+  cyclePhase?: 'menses' | 'follicular' | 'ovulation' | 'luteal' | null;
 }
 
 export interface PreparednessPillars {
@@ -175,8 +177,15 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
     else { yesterdayStrain = 1; insights.push('Heavy session yesterday — consider lighter day'); }
   }
 
+  // Optional cycle-phase modifier: ±3 pts max.
+  let cycleMod = 0;
+  if (input.cyclePhase === 'ovulation') cycleMod = 3;
+  else if (input.cyclePhase === 'follicular') cycleMod = 1;
+  else if (input.cyclePhase === 'menses') cycleMod = -2;
+  // luteal: 0 — too variable to generalize.
+
   const total = clamp(
-    sleep + hrv + fatigue + nutrition + restingHr + yesterdayStrain,
+    sleep + hrv + fatigue + nutrition + restingHr + yesterdayStrain + cycleMod,
     0,
     100,
   );

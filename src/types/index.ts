@@ -467,6 +467,11 @@ export interface WorkoutSummary {
   comparison?: string;
   coachingPoint?: string;
   motivation?: string;
+  /** HR stats from Apple Health (if user wore watch). Annotated after finish. */
+  hrAvg?: number;
+  hrMax?: number;
+  /** Minutes in each HR zone Z1..Z5. */
+  hrZoneMinutes?: [number, number, number, number, number];
 }
 
 /** Per-exercise logged detail kept alongside the AI summary so the

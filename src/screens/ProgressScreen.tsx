@@ -31,6 +31,8 @@ import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { computeFitnessAge } from '../utils/fitnessAge';
+import WorkoutImportCard from '../components/WorkoutImportCard';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -1306,6 +1308,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Unlogged Apple Health workouts — import into Thallo */}
+          <WorkoutImportCard
+            healthSummary={healthSummary}
+            themeName={userProfile.theme}
+            onImported={() => { loadWorkoutHistory().then(setHistory); }}
+          />
+
           {/* Apple Health vitals */}
           {isHealthKitAvailable() && (() => {
             const hs = healthSummary;
@@ -1426,6 +1435,45 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
+          {/* Fitness Age */}
+          {(() => {
+            const vo2 = healthSummary?.vo2Max;
+            const age = userProfile.physicalStats?.age;
+            const fa = vo2 != null && age != null ? computeFitnessAge(vo2, age) : null;
+            if (!fa) return null;
+            const deltaColor =
+              fa.delta >= 8 ? '#22C55E' :
+              fa.delta >= 2 ? tc.primary :
+              fa.delta >= -5 ? tc.textSecondary : '#EF4444';
+            return (
+              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+                <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
+                  <Ionicons name="fitness" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Fitness Age</Text>
+                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>{fa.label}</Text>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                  <View style={{ alignItems: 'center', paddingVertical: 4, paddingHorizontal: 10, borderRadius: radius.md, backgroundColor: deltaColor + '22' }}>
+                    <Text style={{ fontSize: 30, fontWeight: '900', color: deltaColor, lineHeight: 34 }}>{fa.fitnessAge}</Text>
+                    <Text style={{ fontSize: 9, fontWeight: '700', color: deltaColor, letterSpacing: 1 }}>YRS</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary, lineHeight: 18 }}>
+                      {fa.delta === 0
+                        ? `Cardio fitness matches your age (${age}).`
+                        : fa.delta > 0
+                          ? `Cardio fitness of a ${fa.fitnessAge}-year-old — ${fa.delta} yr${fa.delta !== 1 ? 's' : ''} younger than your actual age.`
+                          : `Cardio fitness of a ${fa.fitnessAge}-year-old — ${-fa.delta} yr${-fa.delta !== 1 ? 's' : ''} older than your actual age.`}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>
+                      Based on VO₂ Max {Math.round(vo2! * 10) / 10} ml/kg/min
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            );
+          })()}
+
           {/* Sleep Score */}
           {healthSummary?.sleepScore && (() => {
             const ss = healthSummary.sleepScore;
@@ -1442,6 +1490,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               );
             };
+            const isPersonalized = (ss as any).mode === 'personalized';
+            const pillars = (ss as any).pillars as {
+              duration: number; efficiency: number; hrv: number;
+              regularity?: number; stageComposite: number; healthFlags: number;
+            } | undefined;
+            const effRatio = (ss as any).efficiency as number | null | undefined;
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
@@ -1452,10 +1506,46 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={{ fontSize: 10, color: tc.textMuted }}>{ss.rating} · {ss.duration}h total</Text>
                   </View>
                 </View>
+                {/* Mode badge */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                  <View style={{
+                    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10,
+                    backgroundColor: isPersonalized ? tc.primary + '22' : tc.border + '66',
+                  }}>
+                    <Text style={{
+                      fontSize: 9, fontWeight: '800', letterSpacing: 0.8,
+                      color: isPersonalized ? tc.primary : tc.textSecondary,
+                    }}>
+                      {isPersonalized ? 'PERSONALIZED' : 'BUILDING BASELINE'}
+                    </Text>
+                  </View>
+                  {!isPersonalized && (
+                    <Text style={{ fontSize: 10, color: tc.textMuted, flex: 1 }}>
+                      Score will adapt to your HRV + sleep-timing baseline after 14 nights
+                    </Text>
+                  )}
+                </View>
                 {stageBar('Deep', ss.stages.deep, '#6366F1', ss.stages.total)}
                 {stageBar('Core', ss.stages.core, '#818CF8', ss.stages.total)}
                 {stageBar('REM', ss.stages.rem, '#A78BFA', ss.stages.total)}
                 {ss.stages.awake > 0 && stageBar('Awake', ss.stages.awake, '#EF4444', ss.stages.total + ss.stages.awake)}
+                {/* Efficiency + regularity summary row */}
+                {(effRatio != null || (isPersonalized && pillars?.regularity != null)) && (
+                  <View style={{ flexDirection: 'row', gap: 12, marginTop: 6 }}>
+                    {effRatio != null && (
+                      <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 10, backgroundColor: tc.background }}>
+                        <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{Math.round(effRatio * 100)}%</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>EFFICIENCY</Text>
+                      </View>
+                    )}
+                    {isPersonalized && pillars?.regularity != null && (
+                      <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 10, backgroundColor: tc.background }}>
+                        <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{pillars.regularity}</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>REGULARITY /15</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
                 {(ss.hrvAvg != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
                   <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                     {ss.hrvAvg != null && (

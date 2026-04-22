@@ -35,6 +35,7 @@ const READ_TYPES = [
   'StandHour',
   'MindfulSession',
   'BasalEnergyBurned',
+  'MenstrualFlow',
 ];
 
 const SLEEP_HISTORY_KEY = 'sleepHistory_v1';
@@ -129,6 +130,15 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     mod.getHRV(historyStartMs, endMs, 200).catch(() => []),
   ]);
 
+  // Fetch recent Apple workouts separately (not part of the parallel set because
+  // it's optional and catches its own errors). Used by auto-import flow.
+  let recentWorkouts: any[] = [];
+  try {
+    if (typeof mod.getWorkouts === 'function') {
+      recentWorkouts = await mod.getWorkouts(startMs, endMs);
+    }
+  } catch { recentWorkouts = []; }
+
   // Build and persist nightly history (for personalized score).
   const history = buildNightlyHistory(historySleep as SleepSample[], historyHRV as any[]);
   persistSleepHistory(history).catch(() => null);
@@ -173,9 +183,140 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     mindfulMinutes7d: totalMinutes(mindfulSamples),
     basalEnergy7d: totalValue(basalSamples),
     sleepScore,
-    workoutDetails: [],
+    workoutDetails: Array.isArray(recentWorkouts) ? recentWorkouts : [],
     fetchedAt: now.toISOString(),
   };
+}
+
+// ── Workout HR annotation ───────────────────────────────────────────────────
+//
+// Pulls raw HR samples for a workout window and summarizes them into avg, max,
+// and minutes-in-zone. Zones are %MHR bands (220 - age formula).
+
+export interface WorkoutHrSummary {
+  avgBpm: number;
+  maxBpm: number;
+  samples: number;
+  zoneMinutes: [number, number, number, number, number]; // Z1..Z5
+}
+
+export async function getWorkoutHrSummary(
+  startMs: number,
+  endMs: number,
+  age: number | null,
+): Promise<WorkoutHrSummary | null> {
+  const mod = getModule();
+  if (!mod || typeof mod.getHeartRate !== 'function') return null;
+  try {
+    const samples = await mod.getHeartRate(startMs, endMs, 500);
+    if (!Array.isArray(samples) || samples.length === 0) return null;
+    const maxHR = age && age > 0 ? 220 - age : 190;
+
+    let sum = 0;
+    let max = 0;
+    const zones: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+    const sorted = samples
+      .map((s: any) => ({ v: Number(s.value), t: new Date(s.startDate).getTime() }))
+      .filter((x) => x.v > 0 && x.t > 0)
+      .sort((a, b) => a.t - b.t);
+    if (sorted.length === 0) return null;
+
+    for (let i = 0; i < sorted.length; i++) {
+      const { v, t } = sorted[i];
+      sum += v;
+      if (v > max) max = v;
+      // Assign the gap until next sample (or end) to this zone.
+      const nextT = i + 1 < sorted.length ? sorted[i + 1].t : endMs;
+      const minutes = Math.max(0, (nextT - t) / 60000);
+      const pct = (v / maxHR) * 100;
+      const zIdx = pct >= 90 ? 4 : pct >= 80 ? 3 : pct >= 70 ? 2 : pct >= 60 ? 1 : 0;
+      zones[zIdx] += minutes;
+    }
+    return {
+      avgBpm: Math.round(sum / sorted.length),
+      maxBpm: Math.round(max),
+      samples: sorted.length,
+      zoneMinutes: zones.map(m => Math.round(m * 10) / 10) as [number, number, number, number, number],
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ── Cycle tracking ──────────────────────────────────────────────────────────
+//
+// Returns current menstrual-cycle phase from Apple Health data. Phases:
+//   menses       (day 1-5 of flow)
+//   follicular   (day 6 to ovulation)
+//   ovulation    (mid-cycle, days 13-15)
+//   luteal       (post-ovulation to next menses)
+//   unknown      (no data)
+
+export type CyclePhase = 'menses' | 'follicular' | 'ovulation' | 'luteal' | 'unknown';
+
+export interface CycleStatus {
+  phase: CyclePhase;
+  dayOfCycle: number | null;   // 1-indexed; null if unknown
+  cycleLengthDays: number;     // estimated from history; defaults to 28
+  nextExpectedMenses: string | null; // ISO date
+}
+
+export async function getCycleStatus(): Promise<CycleStatus | null> {
+  const mod = getModule();
+  if (!mod || typeof mod.getMenstrualFlow !== 'function') return null;
+  try {
+    const now = Date.now();
+    const lookbackMs = now - 90 * 86400000; // 90 days to estimate cycle length
+    const samples = await mod.getMenstrualFlow(lookbackMs, now);
+    if (!Array.isArray(samples) || samples.length === 0) return null;
+
+    // Group consecutive flow days (value 1-4 = flow; 5 = none/notation).
+    type Period = { start: number; end: number };
+    const flowDays = samples
+      .filter((s: any) => s.value >= 1 && s.value <= 4)
+      .map((s: any) => ({ startMs: new Date(s.startDate).getTime(), endMs: new Date(s.endDate).getTime() }))
+      .sort((a: any, b: any) => a.startMs - b.startMs);
+    if (flowDays.length === 0) return null;
+
+    const periods: Period[] = [];
+    let current: Period = { start: flowDays[0].startMs, end: flowDays[0].endMs };
+    for (let i = 1; i < flowDays.length; i++) {
+      const gapDays = (flowDays[i].startMs - current.end) / 86400000;
+      if (gapDays <= 3) {
+        current.end = Math.max(current.end, flowDays[i].endMs);
+      } else {
+        periods.push(current);
+        current = { start: flowDays[i].startMs, end: flowDays[i].endMs };
+      }
+    }
+    periods.push(current);
+
+    // Cycle length = median of gaps between consecutive period starts.
+    const starts = periods.map(p => p.start).sort((a, b) => a - b);
+    const gaps: number[] = [];
+    for (let i = 1; i < starts.length; i++) gaps.push((starts[i] - starts[i - 1]) / 86400000);
+    gaps.sort((a, b) => a - b);
+    const cycleLengthDays = gaps.length > 0 ? Math.round(gaps[Math.floor(gaps.length / 2)]) : 28;
+
+    const lastPeriodStart = starts[starts.length - 1];
+    const dayOfCycle = Math.floor((now - lastPeriodStart) / 86400000) + 1;
+    const nextExpectedMs = lastPeriodStart + cycleLengthDays * 86400000;
+    const nextExpectedMenses = new Date(nextExpectedMs).toISOString().slice(0, 10);
+
+    const lastPeriodLengthDays = Math.round((periods[periods.length - 1].end - lastPeriodStart) / 86400000) + 1;
+    const ovulationDay = Math.round(cycleLengthDays - 14);
+
+    let phase: CyclePhase;
+    if (dayOfCycle <= Math.max(3, Math.min(7, lastPeriodLengthDays))) phase = 'menses';
+    else if (dayOfCycle < ovulationDay - 1) phase = 'follicular';
+    else if (dayOfCycle <= ovulationDay + 1) phase = 'ovulation';
+    else if (dayOfCycle <= cycleLengthDays + 2) phase = 'luteal';
+    else phase = 'unknown';
+
+    return { phase, dayOfCycle, cycleLengthDays, nextExpectedMenses };
+  } catch {
+    return null;
+  }
 }
 
 // ── Workout calorie lookup (Apple Watch override) ───────────────────────────

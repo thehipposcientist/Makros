@@ -32,6 +32,29 @@ public class ThalloHealthKitModule: Module {
             }
         }
 
+        // Raw HR samples during a time window. Used to annotate past workouts
+        // with avg / max HR and time-in-zones.
+        AsyncFunction("getHeartRate") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .heartRate) else { return [] }
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: HKUnit(from: "count/min")),
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        // Menstrual flow samples. `value` is an integer 1-5 from
+        // HKCategoryValueVaginalBleeding (unspecified, light, medium, heavy, none).
+        AsyncFunction("getMenstrualFlow") { (startMs: Double, endMs: Double) -> [[String: Any]] in
+            guard let ct = HKCategoryType.categoryType(forIdentifier: .menstrualFlow) else { return [] }
+            return try await self.queryCategorySamples(type: ct, start: startMs, end: endMs) { sample in
+                return [
+                    "value": sample.value,
+                    "startDate": self.iso(sample.startDate),
+                    "endDate": self.iso(sample.endDate),
+                ]
+            }
+        }
+
         AsyncFunction("getDailySteps") { (startMs: Double, endMs: Double) -> [[String: Any]] in
             guard let qt = HKQuantityType.quantityType(forIdentifier: .stepCount) else { return [] }
             return try await self.statisticsPerDay(type: qt, unit: .count(), start: startMs, end: endMs)
@@ -165,6 +188,7 @@ public class ThalloHealthKitModule: Module {
             "StandHour": HKCategoryType.categoryType(forIdentifier: .appleStandHour)!,
             "MindfulSession": HKCategoryType.categoryType(forIdentifier: .mindfulSession)!,
             "BasalEnergyBurned": HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned)!,
+            "MenstrualFlow": HKCategoryType.categoryType(forIdentifier: .menstrualFlow)!,
         ]
         return map[name]
     }
