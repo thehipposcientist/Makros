@@ -58,8 +58,33 @@ _PROMPT_TEMPLATE = (
     "exercises.\n"
     "- Target rep range suggests lower weight if higher reps, vice versa.\n"
     "- Be conservative — first-time rec, user can add weight next set.\n"
-    'Respond as JSON: {{"weight_lbs": int, "reason": str, '
-    '"confidence": "low"|"medium"|"high"}}.'
+    'Respond as JSON: {{"weight_lbs": int}}.'
+)
+
+# Brand-new user — no training history at all for this muscle group.
+# The AI recommends off bodyweight + age + sex + experience using
+# standard strength-ratio norms.
+_PROMPT_TEMPLATE_NO_HISTORY = (
+    "User is about to do {exercise_name} for the first time.\n"
+    "Target rep range: {target_reps}. Primary muscle: {primary_muscle}.\n"
+    "They have NO prior logged sessions for this muscle group — so infer "
+    "a reasonable starting weight from their profile using strength "
+    "standards for their demographics.\n"
+    "User profile:\n"
+    "- Sex: {sex}\n"
+    "- Age: {age}\n"
+    "- Bodyweight: {weight_lbs} lb\n"
+    "- Experience: {experience}\n"
+    "Rules:\n"
+    "- Use bodyweight ratios for the exercise + muscle (e.g. bench ≈ "
+    "0.35–0.5× BW novice male, 0.2–0.33× BW novice female; squat "
+    "≈ 0.5–0.75× BW novice; deadlift ≈ 0.75–1× BW novice).\n"
+    "- Age > 50 → reduce by ~15%.\n"
+    "- Beginner → lower end of the range; intermediate → middle; "
+    "advanced → upper end.\n"
+    "- Bodyweight-only / mobility exercises → return 0 lb.\n"
+    "- Be conservative — the user can add weight next set.\n"
+    'Respond as JSON: {{"weight_lbs": int}}.'
 )
 
 
@@ -68,11 +93,9 @@ _SCHEMA = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["weight_lbs", "reason", "confidence"],
+        "required": ["weight_lbs"],
         "properties": {
             "weight_lbs": {"type": "number"},
-            "reason": {"type": "string", "maxLength": 300},
-            "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         },
     },
 }
@@ -125,43 +148,68 @@ def ai_first_time_weight_recommendation(
     chat_kwargs_builder,
     chat_invoker,
     json_extractor,
+    age: int | None = None,
+    sex: str | None = None,
     max_tokens: int = 250,
     timeout_secs: int = 15,
 ) -> Optional[AIFirstTimeRecommendation]:
     """Ask the AI to pick a starting weight for a first-time exercise.
 
-    Dependencies are injected so this module stays testable without
-    booting FastAPI / openai. The router wires in `_build_chat_kwargs`,
-    `_chat_create`, and `_extract_json` from `ai.utils`.
+    TWO modes:
+    - If `muscle_sessions` is non-empty → use the user's recent logged
+      sessions for the same primary muscle as anchors (high signal).
+    - If `muscle_sessions` is empty → use profile data only
+      (bodyweight / age / sex / experience) against strength-standard
+      ratios. Lower confidence, more conservative.
 
-    Returns None on ANY failure (no sessions, no client, AI error,
-    malformed JSON) so the caller can fall through to the existing
-    deterministic defaults. Never raises.
+    Returns None on ANY failure (no client, AI error, malformed JSON)
+    so the caller can fall through to the deterministic default.
     """
-    if not muscle_sessions:
-        return None
     if openai_client is None:
         return None
 
-    session_lines = "\n".join(_format_session_line(s) for s in muscle_sessions[:3])
-    prompt = _PROMPT_TEMPLATE.format(
-        exercise_name=exercise_name,
-        target_reps=target_reps or "8-12",
-        primary_muscle=primary_muscle,
-        session_lines=session_lines,
-        experience=experience or "intermediate",
-        weight_lbs=int(round(bodyweight_lbs or 0)),
-    )
+    if muscle_sessions:
+        session_lines = "\n".join(_format_session_line(s) for s in muscle_sessions[:3])
+        prompt = _PROMPT_TEMPLATE.format(
+            exercise_name=exercise_name,
+            target_reps=target_reps or "8-12",
+            primary_muscle=primary_muscle,
+            session_lines=session_lines,
+            experience=experience or "intermediate",
+            weight_lbs=int(round(bodyweight_lbs or 0)),
+        )
+        system_msg = (
+            "You are a strength coach. Pick a sensible, conservative "
+            "starting weight (lb) for a first-time exercise based on "
+            "the user's recent logged sessions for the same muscle. "
+            "Return only the required JSON."
+        )
+    else:
+        # No history path — brand-new user or first session on this
+        # muscle group. Anchor the estimate on profile + bodyweight
+        # ratios. If bodyweight is missing we can't estimate
+        # meaningfully, so bail and let the deterministic default
+        # take over.
+        if not bodyweight_lbs or bodyweight_lbs <= 0:
+            return None
+        prompt = _PROMPT_TEMPLATE_NO_HISTORY.format(
+            exercise_name=exercise_name,
+            target_reps=target_reps or "8-12",
+            primary_muscle=primary_muscle,
+            sex=(sex or "unspecified"),
+            age=(age if age else "unspecified"),
+            weight_lbs=int(round(bodyweight_lbs)),
+            experience=experience or "intermediate",
+        )
+        system_msg = (
+            "You are a strength coach. The user has no training history "
+            "for this muscle group. Use standard strength ratios by "
+            "bodyweight / age / sex / experience to pick a conservative "
+            "starting weight. Return only the required JSON."
+        )
+
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a strength coach. Pick a sensible, conservative "
-                "starting weight (lb) for a first-time exercise based on "
-                "the user's recent logged sessions for the same muscle. "
-                "Return only the required JSON."
-            ),
-        },
+        {"role": "system", "content": system_msg},
         {"role": "user", "content": prompt},
     ]
 
@@ -213,16 +261,11 @@ def ai_first_time_weight_recommendation(
         )
         return None
 
-    reason = str(data.get("reason") or "").strip()
-    if not reason:
-        reason = (
-            f"First-time recommendation — estimated from your recent "
-            f"{primary_muscle} work."
-        )
-    confidence = _coerce_confidence(data.get("confidence"))
-
+    # Reason + confidence no longer requested from the AI — we return
+    # just the weight. Fixed stamps are used downstream so the client
+    # can still distinguish this path if it wants to style differently.
     return AIFirstTimeRecommendation(
         weight_lbs=_round_to_plate(weight, increment=2.5),
-        reason=reason[:300],
-        confidence=confidence,
+        reason="",
+        confidence="low",
     )

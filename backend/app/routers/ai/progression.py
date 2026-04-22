@@ -99,22 +99,40 @@ def _try_ai_first_time_branch(
         logger.exception(
             "[recommend-weight] most_recent_sessions_for_muscle failed (non-fatal)"
         )
-        return None
-    if not muscle_sessions:
-        return None
+        muscle_sessions = []
+    # NB: we no longer bail on empty sessions — the AI helper has a
+    # no-history mode that uses profile + bodyweight + strength-
+    # standard ratios to pick a starting weight.
 
-    # Fetch bodyweight for the prompt; default to 0 when the profile
-    # row is missing (AI can cope, just adds uncertainty).
+    # Fetch bodyweight + age + sex for the prompt. Bodyweight is
+    # mandatory for the no-history path — without it we can't estimate.
     bw_lbs = 0.0
+    age_val: int | None = None
+    sex_val: str | None = None
     try:
         from app.models import UserProfile as _UP
         row = db.exec(select(_UP).where(_UP.user_id == user_id)).first()
-        if row and row.weight_lbs:
-            bw_lbs = float(row.weight_lbs)
+        if row:
+            if row.weight_lbs:
+                bw_lbs = float(row.weight_lbs)
+            if row.age:
+                age_val = int(row.age)
+            if row.gender:
+                # SQLModel enum → value string ("male" / "female" / etc.)
+                try:
+                    sex_val = str(row.gender.value)
+                except Exception:
+                    sex_val = str(row.gender)
     except Exception:
         logger.exception(
-            "[recommend-weight] bodyweight lookup failed (non-fatal)"
+            "[recommend-weight] profile lookup failed (non-fatal)"
         )
+
+    # Still need SOMETHING to anchor on. If there are no sessions AND
+    # no bodyweight, the AI can't do better than the planner default,
+    # so we fall through.
+    if not muscle_sessions and bw_lbs <= 0:
+        return None
 
     api_key = get_openai_api_key()
     if not api_key:
@@ -134,6 +152,8 @@ def _try_ai_first_time_branch(
         experience=experience,
         bodyweight_lbs=bw_lbs,
         muscle_sessions=muscle_sessions,
+        age=age_val,
+        sex=sex_val,
         openai_client=client,
         model=model_chat(),
         chat_kwargs_builder=_build_chat_kwargs,
@@ -142,10 +162,11 @@ def _try_ai_first_time_branch(
     )
     if rec is None or rec.weight_lbs <= 0:
         return None
+    # Weight only. No reason string surfaced — the number IS the answer.
     return rec.weight_lbs, {
         "source": "ai_first_time",
         "confidence": rec.confidence,
-        "reason": rec.reason,
+        "reason": "",
     }
 
 
@@ -1176,6 +1197,7 @@ def generate_warmup(
 def pre_set_recommendation(
     body: PreSetRecommendRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
     from app.services.workout.set_programming import (
         PlannedSet as PS,
@@ -1242,18 +1264,38 @@ def pre_set_recommendation(
             ) if weight > 0 else "Opening at the planned weight.",
         )
     else:
-        # First-ever session on this exercise — use anchor weight with
-        # low confidence and ask for feel after the set.
-        det = NextSetRecommendation(
-            next_set_weight_lbs=planned.target_weight_lbs,
-            next_set_rep_target=planned.target_reps,
-            action="hold_load",
-            explanation=(
-                f"First time on {body.exerciseName} — starting at "
-                f"{int(planned.target_weight_lbs or 0) or '?'} lb to calibrate. "
-                "Tell me how it feels after the set."
-            ),
+        # First-ever session on this exercise — try the AI first-time
+        # branch first (uses the user's last 3 same-muscle sessions to
+        # infer a sensible starting weight). Falls through to the
+        # deterministic planner target on any failure (missing muscle
+        # metadata, no prior same-muscle sessions, AI error).
+        ai_rec = _try_ai_first_time_branch(
+            user_id=current_user.id,
+            db=db,
+            exercise_name=body.exerciseName,
+            exercise_slug=body.exerciseSlug,
+            target_reps=str(planned.target_reps or "8-12"),
+            experience="intermediate",
         )
+        if ai_rec is not None:
+            ai_weight, _ = ai_rec
+            det = NextSetRecommendation(
+                next_set_weight_lbs=float(ai_weight),
+                next_set_rep_target=planned.target_reps,
+                action="hold_load",
+                explanation="",
+            )
+        else:
+            det = NextSetRecommendation(
+                next_set_weight_lbs=planned.target_weight_lbs,
+                next_set_rep_target=planned.target_reps,
+                action="hold_load",
+                explanation=(
+                    f"First time on {body.exerciseName} — starting at "
+                    f"{int(planned.target_weight_lbs or 0) or '?'} lb to calibrate. "
+                    "Tell me how it feels after the set."
+                ),
+            )
 
     rec = enrich_to_set_recommendation(
         det=det,
@@ -1264,7 +1306,7 @@ def pre_set_recommendation(
         is_first_session=is_first_session,
         is_first_set=is_first_set,
         rep_range=parse_rep_range(planned.target_reps),
-        source="deterministic",
+        source=("ai_first_time" if is_first_session and not prior and "ai_first_time" in (det.explanation or "").lower() else "deterministic"),
     )
     return rec.to_dict()
 

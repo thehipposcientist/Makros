@@ -3408,7 +3408,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             </View>
             {swapTargetIdx != null && (
               <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6 }}>
-                Ranked by match — same muscle, same movement, similar equipment, compound vs isolation. Logged sets carry over.
+                Ranked by overlap. Logged sets carry over.
               </Text>
             )}
 
