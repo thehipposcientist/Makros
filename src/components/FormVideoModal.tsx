@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Modal, View, Text, TouchableOpacity,
-  StyleSheet, Dimensions,
+  StyleSheet, Dimensions, Animated,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -36,12 +36,31 @@ export default function FormVideoModal({
     if (visible) setSearchKey(k => k + 1);
   }, [visible, exerciseName]);
 
+  // App-native presentation: fade the Modal and spring the inner sheet
+  // from 0.9 → 1.0 on open. Feels softer than the default slide-up.
+  const scale = useRef(new Animated.Value(0.9)).current;
+  const sheetOpacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (visible) {
+      scale.setValue(0.9);
+      sheetOpacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(scale, { toValue: 1, useNativeDriver: true, friction: 7, tension: 80 }),
+        Animated.timing(sheetOpacity, { toValue: 1, duration: 180, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [visible, scale, sheetOpacity]);
+
   const searchUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' proper form')}`;
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <View style={styles.backdrop}>
-        <View style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <Animated.View
+          style={[
+            styles.sheet,
+            { backgroundColor: colors.surface, borderColor: colors.border, opacity: sheetOpacity, transform: [{ scale }] },
+          ]}>
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
@@ -83,7 +102,7 @@ export default function FormVideoModal({
               <Text style={styles.primaryBtnText}>Done</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );

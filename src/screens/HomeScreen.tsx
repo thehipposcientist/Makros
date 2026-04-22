@@ -553,6 +553,39 @@ function bgIsDark(hex: string): boolean {
   return (0.299 * r + 0.587 * g + 0.114 * b) < 0.5;
 }
 
+/**
+ * Amber fatigue notice that slides down from above + fades in on mount.
+ * Lives in this file (not a shared component) because it's only used by
+ * HomeScreen. Uses native driver — both transform and opacity qualify.
+ */
+function FatigueNoticeBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  const translateY = useRef(new Animated.Value(-20)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.parallel([
+      // 250ms spring damping ~0.7 — friction/tension approximations land
+      // close to that damping visually without bouncing past the target.
+      Animated.spring(translateY, { toValue: 0, useNativeDriver: true, friction: 8, tension: 90 }),
+      Animated.timing(opacity, { toValue: 1, duration: 250, useNativeDriver: true }),
+    ]).start();
+  }, [translateY, opacity]);
+  return (
+    <Animated.View style={{
+      flexDirection: 'row', alignItems: 'flex-start', gap: 8,
+      padding: 12, borderRadius: 12,
+      backgroundColor: '#F59E0B22', borderWidth: 1, borderColor: '#F59E0B88',
+      marginBottom: 10,
+      opacity, transform: [{ translateY }],
+    }}>
+      <Ionicons name="information-circle-outline" size={18} color="#B45309" style={{ marginTop: 1 }} />
+      <Text style={{ flex: 1, fontSize: 12, color: '#B45309', lineHeight: 16 }}>{message}</Text>
+      <TouchableOpacity onPress={onDismiss} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Ionicons name="close" size={16} color="#B45309" />
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
 const SKIP_REASONS = [
   { icon: 'moon-outline' as const, label: 'Too tired' },
   { icon: 'bandage-outline' as const, label: 'Injury / Pain' },
@@ -1045,6 +1078,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
   const setActiveTab = useCallback((tab: typeof activeTab) => {
+    // Soft fade-through between top-level tabs. Tabs are siblings in the
+    // layout tree, so the easiest crossfade is a short LayoutAnimation —
+    // no per-tab Animated.Value wiring, no layout shift, and the
+    // Progress tab (which is kept mounted via display:'none') still
+    // flips cleanly. Keeping the duration short (180ms) avoids fighting
+    // the sub-tab animations already in place.
+    LayoutAnimation.configureNext({
+      duration: 180,
+      create: { type: 'easeInEaseOut', property: 'opacity' },
+      update: { type: 'easeInEaseOut' },
+      delete: { type: 'easeInEaseOut', property: 'opacity' },
+    });
     setActiveTabRaw(tab);
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
   }, []);
@@ -1186,6 +1231,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   //      its plausible range instead of racing to the cap early.
   const [planProgress, setPlanProgress] = useState(0);
   const [planStep, setPlanStep] = useState('');
+  // Splash → home cross-fade: the plan-regen overlay has historically
+  // hard-cut when `isWorkoutUpdating && isNutritionUpdating` flips false.
+  // We keep the overlay mounted for a 400ms fade-out by tracking our own
+  // `splashMounted` state that lags behind the prop. Opacity is driven
+  // by `splashOpacity` and interpolated on the Animated.View below.
+  const splashOpacity = useRef(new Animated.Value(0)).current;
+  const [splashMounted, setSplashMounted] = useState(false);
+  const bothUpdating = !!(isWorkoutUpdating && isNutritionUpdating);
+  useEffect(() => {
+    if (bothUpdating) {
+      setSplashMounted(true);
+      Animated.timing(splashOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+      return;
+    }
+    // Flag flipped off — fade out, then unmount.
+    Animated.timing(splashOpacity, { toValue: 0, duration: 400, useNativeDriver: true }).start(({ finished }) => {
+      if (finished) setSplashMounted(false);
+    });
+  }, [bothUpdating, splashOpacity]);
   useEffect(() => {
     if (!(isWorkoutUpdating || isNutritionUpdating)) {
       // When flags flip off, briefly snap to 100% so the bar fills before
@@ -3402,8 +3466,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           When only one section is rebuilding we show a section-scoped
           placeholder inside that tab (see below) so the other tab stays
           fully usable. */}
-      {(isWorkoutUpdating && isNutritionUpdating) ? (
-        <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
+      {splashMounted ? (
+        <Animated.View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background, opacity: splashOpacity }]}>
           <FadeInView delay={0}>
             <ShimmerLogo
               logoSource={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
@@ -3444,7 +3508,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Cancel</Text>
             </TouchableOpacity>
           )}
-        </View>
+        </Animated.View>
       ) : null}
 
       {/* Chat-triggered plan update — slim inline banner */}
@@ -3918,15 +3982,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Fatigue notice — shown when the backend auto-reduced
                 sets on today's workout for recovering muscles. Dismissable.
-                Only visible on the Plan sub-tab. */}
+                Only visible on the Plan sub-tab. Slides down from above +
+                fades in on mount so the context shift feels deliberate. */}
             {workoutSubTab === 'plan' && fatigueNotice && (
-              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 12, borderRadius: 12, backgroundColor: '#F59E0B22', borderWidth: 1, borderColor: '#F59E0B88', marginBottom: 10 }}>
-                <Ionicons name="information-circle-outline" size={18} color="#B45309" style={{ marginTop: 1 }} />
-                <Text style={{ flex: 1, fontSize: 12, color: '#B45309', lineHeight: 16 }}>{fatigueNotice}</Text>
-                <TouchableOpacity onPress={() => setFatigueNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Ionicons name="close" size={16} color="#B45309" />
-                </TouchableOpacity>
-              </View>
+              <FatigueNoticeBanner
+                message={fatigueNotice}
+                onDismiss={() => setFatigueNotice(null)}
+              />
             )}
 
             {/* Plan actions row — Why + Log + Edit */}
@@ -3964,6 +4026,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
+            {workoutSubTab === 'plan' && availabilityItems.length > 0 && (() => {
+              // Animate chip additions/removals after plan regens — the
+              // chip set can churn between weeks/plans, so snap-in looks
+              // jarring. Fire once per render branch; cheap and harmless.
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              return null;
+            })()}
             {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
               <View style={{
                 flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -6502,6 +6571,30 @@ const btStyles = StyleSheet.create({
   label: { fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
 });
 
+// ── FocusLabelCrossfade ─────────────────────────────────────────────────────
+// Small helper that fades the focus label out, swaps the text mid-fade,
+// then fades back in — so changing a day's focus via the Switch Day
+// picker doesn't snap to the new label. Pure animation; no logic change.
+function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
+  const [displayed, setDisplayed] = useState<string>(focus);
+  const opacity = useRef(new Animated.Value(1)).current;
+  const prevFocus = useRef<string>(focus);
+  useEffect(() => {
+    if (prevFocus.current === focus) return;
+    prevFocus.current = focus;
+    Animated.sequence([
+      Animated.timing(opacity, { toValue: 0, duration: 150, useNativeDriver: true }),
+      // Swap the label while the text is invisible.
+      Animated.timing(opacity, { toValue: 1, duration: 150, useNativeDriver: true }),
+    ]).start();
+    const t = setTimeout(() => setDisplayed(focus), 150);
+    return () => clearTimeout(t);
+  }, [focus, opacity]);
+  return (
+    <Animated.Text style={[style, { opacity }]}>{displayed}</Animated.Text>
+  );
+}
+
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
 function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch }: {
@@ -6633,7 +6726,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
         </View>
         <View style={styles.dayCardRight}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+            <FocusLabelCrossfade focus={item.workout!.focus} style={[styles.focusLabel, { color: tc.textPrimary }]} />
             {/* Stimulus badge — shows the training intent (strength/hypertrophy/volume/etc.)
                 so the user knows what kind of session this is at a glance. */}
             {(() => {

@@ -161,7 +161,13 @@
       "Bash(/opt/homebrew/bin/node --version)",
       "Bash(/usr/local/bin/node --version)",
       "Bash(/opt/homebrew/bin/node --experimental-strip-types /Users/sawyerhannel/Documents/GitHub/Makros/src/utils/__tests__/planCacheReset.test.mjs)",
-      "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit -p tsconfig.json)"
+      "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
+      "Bash(export PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin\")",
+      "Bash(/usr/local/bin/node ./node_modules/.bin/tsc --noEmit -p .)",
+      "Bash(/usr/local/bin/node ./node_modules/.bin/tsc --noEmit)",
+      "Read(//usr/bin/**)",
+      "Bash(find / -maxdepth 5 -name \"node\" -type f)",
+      "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit)"
     ]
   }
 }

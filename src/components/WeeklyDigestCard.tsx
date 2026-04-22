@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator, Animated } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
@@ -54,6 +54,13 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
   const [loading, setLoading] = useState(true);
   const [dismissed, setDismissed] = useState(false);
 
+  // One-shot entrance animation: slide up + fade in the first time the
+  // card becomes visible. `hasAnimated` flips permanently after the first
+  // run so re-renders (e.g. digest refetch, theme change) don't replay it.
+  const translateY = useRef(new Animated.Value(40)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  const hasAnimated = useRef(false);
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -91,6 +98,16 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
   }
   if (!digest) return null;
 
+  // Kick off the entrance once we have real content to show. Guarded by
+  // hasAnimated so subsequent renders leave the final pose alone.
+  if (!hasAnimated.current) {
+    hasAnimated.current = true;
+    Animated.parallel([
+      Animated.spring(translateY, { toValue: 0, useNativeDriver: true, friction: 8, tension: 55 }),
+      Animated.timing(opacity, { toValue: 1, duration: 350, useNativeDriver: true }),
+    ]).start();
+  }
+
   const sessionsDelta = digest.deltas.sessions;
   const setsDelta = digest.deltas.total_sets;
   const copy = sessionsDelta > 0
@@ -100,13 +117,15 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
     : `Consistent with last week. ${digest.sessions.completed} session${digest.sessions.completed === 1 ? '' : 's'} locked in.`;
 
   return (
-    <View style={{
+    <Animated.View style={{
       backgroundColor: tc.surface,
       borderRadius: radius.lg,
       padding: 16,
       marginBottom: 12,
       borderWidth: 1,
       borderColor: tc.border,
+      opacity,
+      transform: [{ translateY }],
     }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <Text style={{ fontSize: 16, fontWeight: '700', color: tc.text }}>
@@ -180,6 +199,6 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
           )}
         </View>
       )}
-    </View>
+    </Animated.View>
   );
 }

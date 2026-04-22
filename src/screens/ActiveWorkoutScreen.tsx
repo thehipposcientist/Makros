@@ -1,13 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
-  LayoutAnimation, UIManager, AppState,
+  LayoutAnimation, UIManager, AppState, Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
 import AnimatedNumber from '../components/AnimatedNumber';
+import PRCelebrationModal from '../components/PRCelebrationModal';
+import Svg, { Circle } from 'react-native-svg';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -641,6 +643,46 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
 
+  // Animated TextInput so we can lerp borderColor / borderWidth on
+  // focus. Memo'd once — React's createAnimatedComponent returns a
+  // new class each call, so we don't want to rebuild on every render.
+  const AnimatedTextInput = useMemo(() => Animated.createAnimatedComponent(TextInput), []);
+  // Pulse animation values keyed by "exIdx-setSlot". Drives the green
+  // flash-fade that runs when a set is successfully logged. We lazily
+  // allocate an Animated.Value per row and reuse it across re-renders.
+  const setPulseValues = useRef<Record<string, Animated.Value>>({}).current;
+  const getSetPulse = (key: string): Animated.Value => {
+    if (!setPulseValues[key]) setPulseValues[key] = new Animated.Value(0);
+    return setPulseValues[key];
+  };
+  // Focus animation values keyed by "exIdx-setSlot-axis" (weight|reps).
+  // Drives the border-color/width lerp on the inline input when it
+  // gains/loses focus. 0 = blurred, 1 = focused.
+  const inputFocusValues = useRef<Record<string, Animated.Value>>({}).current;
+  const getInputFocus = (key: string): Animated.Value => {
+    if (!inputFocusValues[key]) inputFocusValues[key] = new Animated.Value(0);
+    return inputFocusValues[key];
+  };
+  const setInputFocus = (key: string, focused: boolean) => {
+    const v = getInputFocus(key);
+    Animated.timing(v, {
+      toValue: focused ? 1 : 0,
+      duration: 150,
+      useNativeDriver: false, // animating borderColor / borderWidth
+    }).start();
+  };
+  const triggerSetPulse = (key: string) => {
+    const v = getSetPulse(key);
+    v.stopAnimation();
+    v.setValue(0);
+    Animated.sequence([
+      // Color / background is non-native-driver (layout prop). Short
+      // sequence so the flash is legible but doesn't linger.
+      Animated.timing(v, { toValue: 1, duration: 250, useNativeDriver: false }),
+      Animated.timing(v, { toValue: 0, duration: 400, useNativeDriver: false }),
+    ]).start();
+  };
+
   // Extra set rows added by user beyond target set count
   const [extraSetCounts, setExtraSetCounts] = useState<Record<number, number>>({});
   /** Number of unlogged sets the user explicitly removed per exercise.
@@ -802,6 +844,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
   const [finishedSession, setFinishedSession] = useState<WorkoutSession | null>(null);
+  // PR celebration modal — populated after handleFinish when the backend
+  // returns one or more PRs. Null = no modal shown.
+  const [prModalData, setPrModalData] = useState<PRAchievement[] | null>(null);
 
   // Post-workout feedback. The step sequence is:
   //   'summary'      — AI-generated summary (achievements / recommendations)
@@ -1087,6 +1132,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const updatedExercises = exercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
     setExercises(updatedExercises);
     setAiErrorIdx(null);
+
+    // Flash the row green + fade back. Purely visual confirmation — the
+    // haptic above already fired. Non-native driver (color prop).
+    triggerSetPulse(`${exIdx}-${setSlot}`);
 
     // Mark workout as started in the backend DB on first logged set.
     // This ensures getWorkoutStatus returns done=true immediately,
@@ -1815,33 +1864,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             session.prs = prs;
             await saveWorkoutSession(session);
           } catch {}
-          try {
-            import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-          } catch {}
-          // Dedupe kinds-per-exercise and prefer heaviest_weight when both fire.
-          const byExercise: Record<string, PRAchievement> = {};
-          const priority: Record<PRAchievement['kind'], number> = {
-            heaviest_weight: 3,
-            estimated_1rm: 2,
-            volume_record: 1,
-          };
-          for (const pr of prs) {
-            const cur = byExercise[pr.exercise_name];
-            if (!cur || priority[pr.kind] > priority[cur.kind]) {
-              byExercise[pr.exercise_name] = pr;
-            }
-          }
-          const top = Object.values(byExercise).slice(0, 5);
-          const lines = top.map((pr) => {
-            if (pr.kind === 'heaviest_weight') {
-              return `${pr.exercise_name} — ${pr.new_value} lb` + (pr.old_value > 0 ? ` (prev ${pr.old_value})` : '');
-            }
-            if (pr.kind === 'estimated_1rm') {
-              return `${pr.exercise_name} — est 1RM ${pr.new_value} lb`;
-            }
-            return `${pr.exercise_name} — set volume ${pr.new_value}`;
-          });
-          Alert.alert('🏆 New PR!', lines.join('\n'));
+          // Fire the themed celebration modal — it handles the trophy
+          // scale animation, staggered PR row fade-in, and success haptic
+          // on mount. Dedupe/priority logic lives inside the component
+          // so we can hand it the raw PR list.
+          setPrModalData(prs);
         }
       }
     } catch (e) {
@@ -2191,12 +2218,56 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
       {restRemaining > 0 && (
         <View style={[styles.restBanner, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }, restRemaining <= 10 && styles.restBannerUrgent]}>
-          {/* Left: big countdown */}
+          {/* Left: circular countdown ring with big numeric time inside.
+              Ring fills as the timer counts DOWN (progress = elapsed /
+              total), so the user sees how much rest they've burned. The
+              strokeDashoffset is computed per render off `restRemaining`
+              — the state already ticks every second, so no Animated.Value
+              is needed here. */}
           <View style={styles.restBannerLeft}>
-            <Text style={[styles.restBannerLabel, { color: workoutPalette.text }]}>REST</Text>
-            <Text style={[styles.restBannerTime, { color: workoutPalette.text }, restRemaining <= 10 && styles.restBannerTimeUrgent]}>
-              {formatTime(restRemaining)}
-            </Text>
+            {(() => {
+              const size = 88;
+              const strokeWidth = 6;
+              const r = (size - strokeWidth) / 2;
+              const circumference = 2 * Math.PI * r;
+              const total = Math.max(1, restDurationSeconds.current || restRemaining);
+              const progress = Math.max(0, Math.min(1, 1 - (restRemaining / total)));
+              const ringColor = restRemaining <= 10 ? themeColors.warning : workoutPalette.strong;
+              return (
+                <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+                  <Svg width={size} height={size} style={{ position: 'absolute' }}>
+                    <Circle
+                      cx={size / 2}
+                      cy={size / 2}
+                      r={r}
+                      stroke={workoutPalette.strong + '22'}
+                      strokeWidth={strokeWidth}
+                      fill="none"
+                    />
+                    <Circle
+                      cx={size / 2}
+                      cy={size / 2}
+                      r={r}
+                      stroke={ringColor}
+                      strokeWidth={strokeWidth}
+                      strokeLinecap="round"
+                      fill="none"
+                      strokeDasharray={`${circumference} ${circumference}`}
+                      strokeDashoffset={circumference * (1 - progress)}
+                      transform={`rotate(-90 ${size / 2} ${size / 2})`}
+                    />
+                  </Svg>
+                  <Text style={[styles.restBannerLabel, { color: workoutPalette.text, marginTop: -4 }]}>REST</Text>
+                  <Text style={[
+                    styles.restBannerTime,
+                    { color: workoutPalette.text, fontSize: 22, lineHeight: 26 },
+                    restRemaining <= 10 && styles.restBannerTimeUrgent,
+                  ]}>
+                    {formatTime(restRemaining)}
+                  </Text>
+                </View>
+              );
+            })()}
           </View>
           {/* Center: next set info + AI recommendation */}
           <View style={styles.restBannerCenter}>
@@ -2700,11 +2771,39 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               doDelete();
                             }
                           };
+                          const pulseValue = getSetPulse(`${i}-${slot}`);
+                          const pulseBg = pulseValue.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: ['transparent', themeColors.success + '33'],
+                          });
+                          // Focus-driven border highlight for the weight
+                          // input. Interpolation runs on JS (color + width
+                          // are non-native props) but only for the one
+                          // focused input at a time — cheap.
+                          const weightFocusKey = `${i}-${slot}-weight`;
+                          const weightFocusV = getInputFocus(weightFocusKey);
+                          const weightBorderColor = weightFocusV.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [themeColors.border, workoutPalette.strong],
+                          });
+                          const weightBorderWidth = weightFocusV.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [1, 2],
+                          });
                           return (
-                            <View key={slot} style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone]}>
+                            <Animated.View
+                              key={slot}
+                              style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone, { backgroundColor: pulseBg }]}>
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
-                              {!hideWeight && <TextInput
-                                style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
+                              {!hideWeight && <AnimatedTextInput
+                                style={[
+                                  styles.inlineInput,
+                                  isLogged && styles.inlineInputDone,
+                                  // Override border props with animated values on unlogged
+                                  // rows. Logged rows keep the "done" tint so the user can
+                                  // see at a glance which sets are already written.
+                                  !isLogged && { borderColor: weightBorderColor, borderWidth: weightBorderWidth },
+                                ]}
                                 value={isLogged ? (editingSetKey === inputKey ? (editDraft.weight ?? String(logged.weightLbs)) : String(logged.weightLbs)) : input.weight}
                                 onChangeText={v => {
                                   if (isLogged) {
@@ -2714,6 +2813,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, weight: v } }));
                                   }
                                 }}
+                                onFocus={() => setInputFocus(weightFocusKey, true)}
+                                onBlur={() => setInputFocus(weightFocusKey, false)}
                                 onEndEditing={() => {
                                   if (isLogged && editingSetKey === inputKey) {
                                     commitInlineEdit(i, slot);
@@ -2782,7 +2883,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   <Text style={styles.inlineDeleteBtnText}>×</Text>
                                 </TouchableOpacity>
                               )}
-                            </View>
+                            </Animated.View>
                           );
                         })}
                       </>
@@ -3592,6 +3693,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         themeName={themeName}
         onClose={() => setFormVideoExerciseName(null)}
       />
+
+      {/* PR celebration — fires after handleFinish when the backend returns
+          PRs. Replaces the old Alert.alert() with an animated themed modal. */}
+      {prModalData && prModalData.length > 0 && (
+        <PRCelebrationModal
+          prs={prModalData}
+          themeName={themeName}
+          onDismiss={() => setPrModalData(null)}
+        />
+      )}
     </View>
   );
 }
@@ -3668,7 +3779,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     gap: 10,
   },
   restBannerUrgent: { borderColor: tc.warning, backgroundColor: tc.warning + '18' },
-  restBannerLeft: { alignItems: 'center', minWidth: 64 },
+  restBannerLeft: { alignItems: 'center', justifyContent: 'center', minWidth: 96 },
   restBannerLabel: { fontSize: 9, fontWeight: '800', color: tc.primary, textTransform: 'uppercase', letterSpacing: 1 },
   restBannerTime: { fontSize: 32, fontWeight: '900', color: tc.primary, lineHeight: 36 },
   restBannerTimeUrgent: { color: tc.warning },

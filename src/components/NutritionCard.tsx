@@ -1,5 +1,5 @@
-import { useState, useMemo, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager, Animated } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -585,6 +585,46 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(meal.meal);
   useEffect(() => { if (!editingName) setNameDraft(meal.meal); }, [meal.meal, editingName]);
+
+  // Meal-row animation values:
+  //   • checkScale — drives the check icon's spring from 0 → 1.2 → 1.0
+  //     so it pops in when the user taps the checkbox.
+  //   • rowFlash — drives a brief green background flash on the row,
+  //     mirroring the set-complete pulse on the workout side.
+  // `lastChecked` tracks the previous `checked` prop so we only fire
+  // when the value transitions false → true.
+  const checkScale = useRef(new Animated.Value(checked ? 1 : 0)).current;
+  const rowFlash = useRef(new Animated.Value(0)).current;
+  const lastChecked = useRef<boolean>(checked);
+  useEffect(() => {
+    if (checked && !lastChecked.current) {
+      // Light haptic on check (best-effort — feedback util is async-imported
+      // to avoid pulling the module on cold start).
+      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+      checkScale.setValue(0);
+      rowFlash.setValue(0);
+      Animated.parallel([
+        Animated.sequence([
+          Animated.spring(checkScale, { toValue: 1.2, friction: 4, tension: 120, useNativeDriver: true }),
+          Animated.spring(checkScale, { toValue: 1.0, friction: 5, tension: 120, useNativeDriver: true }),
+        ]),
+        Animated.sequence([
+          // Non-native driver (background color) — only runs 650ms total.
+          Animated.timing(rowFlash, { toValue: 1, duration: 250, useNativeDriver: false }),
+          Animated.timing(rowFlash, { toValue: 0, duration: 400, useNativeDriver: false }),
+        ]),
+      ]).start();
+    } else if (!checked && lastChecked.current) {
+      // Reset silently on uncheck.
+      checkScale.setValue(0);
+      rowFlash.setValue(0);
+    }
+    lastChecked.current = checked;
+  }, [checked, checkScale, rowFlash]);
+  const rowFlashBg = rowFlash.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['transparent', mealAccent.strong + '33'],
+  });
   const commitRename = () => {
     const trimmed = nameDraft.trim();
     setEditingName(false);
@@ -618,7 +658,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
   return (
     <SwipeableRow actions={swipeActions}>
-    <View style={[styles.mealItem, checked && styles.mealItemDone]}>
+    <Animated.View style={[styles.mealItem, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
       {/* Title row — checkbox + meal name + inline pin badge + actions. */}
       <View style={styles.mealHeader}>
         <TouchableOpacity
@@ -628,7 +668,11 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           accessibilityRole="checkbox"
           accessibilityLabel={`Mark ${meal.meal} as ${checked ? 'not done' : 'done'}`}
           accessibilityState={{ checked }}>
-          {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
+          {checked && (
+            <Animated.View style={{ transform: [{ scale: checkScale }] }}>
+              <Ionicons name="checkmark" size={14} color="#fff" />
+            </Animated.View>
+          )}
         </TouchableOpacity>
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -769,7 +813,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           </View>
         );
       })()}
-    </View>
+    </Animated.View>
     </SwipeableRow>
   );
 }

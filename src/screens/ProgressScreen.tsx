@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
-  TextInput, Alert, Image, Linking, Modal,
+  TextInput, Alert, Image, Linking, Modal, Animated,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -83,6 +83,40 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
       const d = new Date(s.date);
       return { label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume };
     });
+}
+
+/**
+ * AnimatedChartBar — "draw-in" a chart bar from height 0 → target over
+ * ~800ms on mount / when the target changes significantly. Staggered by
+ * `delay` so the full chart paints left-to-right.
+ *
+ * Replaces the old static `<View style={[styles.graphBar, { height }]} />`
+ * render. Height is a layout prop → non-native-driver (JS animation).
+ */
+function AnimatedChartBar({
+  targetHeight,
+  delay = 0,
+  style,
+}: {
+  targetHeight: number;
+  delay?: number;
+  style?: any;
+}) {
+  const height = useRef(new Animated.Value(0)).current;
+  const prevTarget = useRef<number>(0);
+  useEffect(() => {
+    // Only run the draw-in when height changes — prevents re-triggering
+    // on theme/pallette re-renders.
+    if (prevTarget.current === targetHeight) return;
+    prevTarget.current = targetHeight;
+    Animated.timing(height, {
+      toValue: targetHeight,
+      duration: 800,
+      delay,
+      useNativeDriver: false,
+    }).start();
+  }, [targetHeight, delay, height]);
+  return <Animated.View style={[style, { height }]} />;
 }
 
 export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan }: ProgressScreenProps) {
@@ -496,7 +530,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         return (
                           <View key={i} style={styles.graphBarCol}>
                             <Text style={[styles.graphBarValue, isLast && { color: colors.primary }]}>{val}</Text>
-                            <View style={[styles.graphBar, { height: h }, isLast && { backgroundColor: colors.accent }]} />
+                            <AnimatedChartBar
+                              targetHeight={h}
+                              delay={i * 40}
+                              style={[styles.graphBar, isLast && { backgroundColor: colors.accent }]}
+                            />
                             <Text style={styles.graphBarLabel}>{point.label}</Text>
                           </View>
                         );

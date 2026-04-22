@@ -1,8 +1,50 @@
-import { useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, LayoutAnimation, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+
+/**
+ * Per-muscle recovery bar with animated fill. Width is a layout prop so
+ * the animation must run on the JS thread (useNativeDriver: false) — fine
+ * at this scale since we only drive ~10 bars briefly on mount / value
+ * changes. Each bar staggers its start by 40ms for a cascading reveal.
+ */
+function AnimatedRecoveryBar({
+  recovery, color, borderColor, delay,
+}: { recovery: number; color: string; borderColor: string; delay: number }) {
+  const widthAnim = useRef(new Animated.Value(0)).current;
+  // Track the last target we animated to so prop changes re-trigger the
+  // fill animation (not just mount). Starting value zero guarantees the
+  // initial render gets the 0 → target cascade.
+  const lastTarget = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (lastTarget.current === recovery) return;
+    lastTarget.current = recovery;
+    Animated.timing(widthAnim, {
+      toValue: recovery,
+      duration: 600,
+      delay,
+      // easeOutCubic — fast start, gentle settle
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [recovery, delay, widthAnim]);
+
+  return (
+    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: borderColor }}>
+      <Animated.View
+        style={{
+          width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+          height: 5,
+          borderRadius: 3,
+          backgroundColor: color,
+        }}
+      />
+    </View>
+  );
+}
 
 export interface RecoveryCardData {
   score: number;
@@ -110,18 +152,16 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
       {expanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
-          {muscleEntries.map(([muscle, fatigue]) => {
+          {muscleEntries.map(([muscle, fatigue], idx) => {
             const pct = Math.round(fatigue * 100);
-            const recovery = Math.max(0, 100 - pct);
+            const recovery = Math.max(0, Math.min(100, 100 - pct));
             const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
             return (
               <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 75, textTransform: 'capitalize' }}>
                   {muscle.replace('_', ' ')}
                 </Text>
-                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{ width: `${Math.min(100, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
-                </View>
+                <AnimatedRecoveryBar recovery={recovery} color={color} borderColor={tc.border} delay={idx * 40} />
                 <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
               </View>
             );
