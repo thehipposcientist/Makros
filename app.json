@@ -5,6 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
     "icon": "./assets/images/thallo-icon.png",
     "splash": {
       "backgroundColor": "#0D0F14"
@@ -43,7 +44,7 @@
       "entitlements": {
         "com.apple.developer.healthkit": true
       },
-      "buildNumber": "11"
+      "buildNumber": "12"
     },
     "android": {
       "package": "com.thallo.app",
