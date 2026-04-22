@@ -11,6 +11,7 @@ import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
+import RecoveryQuestionModal from '../components/RecoveryQuestionModal';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
@@ -19,7 +20,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, setRecoveryQuestion, updateEmail } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -1118,10 +1119,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
-  const [recoveryQuestion, setRecoveryQuestionText] = useState('');
-  const [recoveryAnswer, setRecoveryAnswer] = useState('');
-  const [recoverySaving, setRecoverySaving] = useState(false);
-  const [recoveryError, setRecoveryError] = useState('');
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
@@ -1149,26 +1146,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setShowRecoveryBanner(false);
     try { await AsyncStorage.setItem('recovery_prompt_dismissed', String(Date.now())); } catch {}
   }, []);
-  const handleSaveRecoveryQuestion = useCallback(async () => {
-    const q = recoveryQuestion.trim();
-    const a = recoveryAnswer.trim();
-    if (q.length < 5) { setRecoveryError('Question must be at least 5 characters'); return; }
-    if (a.length < 2) { setRecoveryError('Answer must be at least 2 characters'); return; }
-    setRecoverySaving(true);
-    setRecoveryError('');
-    try {
-      await setRecoveryQuestion(authToken, q, a);
-      setShowRecoveryModal(false);
-      setShowRecoveryBanner(false);
-      setRecoveryQuestionText('');
-      setRecoveryAnswer('');
-      try { await AsyncStorage.removeItem('recovery_prompt_dismissed'); } catch {}
-    } catch (e: any) {
-      setRecoveryError(e?.message || 'Failed to save');
-    } finally {
-      setRecoverySaving(false);
-    }
-  }, [authToken, recoveryQuestion, recoveryAnswer]);
+  const handleRecoveryDone = useCallback(async () => {
+    setShowRecoveryModal(false);
+    setShowRecoveryBanner(false);
+    try { await AsyncStorage.removeItem('recovery_prompt_dismissed'); } catch {}
+  }, []);
 
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -6700,53 +6682,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* AI Coach button moved to the header (top right) — see the
           header block above where the hamburger used to live. */}
 
-      <Modal visible={showRecoveryModal} transparent animationType="slide" onRequestClose={() => setShowRecoveryModal(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>
-          <View style={{ width: '85%', maxWidth: 380, backgroundColor: themeColors.surface, borderRadius: 16, padding: 20 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>Security Question</Text>
-              <TouchableOpacity onPress={() => setShowRecoveryModal(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                <Ionicons name="close" size={20} color={themeColors.textMuted} />
-              </TouchableOpacity>
-            </View>
-            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 14 }}>
-              This lets you reset your password without email verification.
-            </Text>
-            <TextInput
-              style={{ backgroundColor: themeColors.background, borderRadius: 10, padding: 12, fontSize: 14, color: themeColors.textPrimary, borderWidth: 1, borderColor: themeColors.border, marginBottom: 10 }}
-              placeholder="e.g. What was your first pet's name?"
-              placeholderTextColor={themeColors.textMuted}
-              value={recoveryQuestion}
-              onChangeText={setRecoveryQuestionText}
-              autoCapitalize="sentences"
-              returnKeyType="next"
-            />
-            <TextInput
-              style={{ backgroundColor: themeColors.background, borderRadius: 10, padding: 12, fontSize: 14, color: themeColors.textPrimary, borderWidth: 1, borderColor: themeColors.border, marginBottom: 14 }}
-              placeholder="Your answer"
-              placeholderTextColor={themeColors.textMuted}
-              value={recoveryAnswer}
-              onChangeText={setRecoveryAnswer}
-              autoCapitalize="none"
-              returnKeyType="done"
-              onSubmitEditing={handleSaveRecoveryQuestion}
-            />
-            {recoveryError ? (
-              <Text style={{ fontSize: 12, color: '#EF4444', marginBottom: 10 }}>{recoveryError}</Text>
-            ) : null}
-            <TouchableOpacity
-              style={{ backgroundColor: themeColors.primary, borderRadius: 10, paddingVertical: 12, alignItems: 'center', opacity: recoverySaving ? 0.6 : 1 }}
-              onPress={handleSaveRecoveryQuestion}
-              disabled={recoverySaving}>
-              {recoverySaving ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Save</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      <RecoveryQuestionModal visible={showRecoveryModal} authToken={authToken} onDone={handleRecoveryDone} />
 
       <Modal visible={showEmailModal} transparent animationType="slide" onRequestClose={() => setShowEmailModal(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>

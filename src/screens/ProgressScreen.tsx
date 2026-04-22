@@ -19,7 +19,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable, isHealthKitNativeBindingsMissing, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
+import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -124,7 +124,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
-  const [tab, setTab] = useState<'prs' | 'charts' | 'body'>('body');
+  const [tab, setTab] = useState<'health' | 'body' | 'prs' | 'charts'>('health');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const fitnessScoreRef = useRef<ViewShot>(null);
@@ -464,7 +464,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       <View style={styles.tabs}>
         {([
-          ['body', 'Body Check'],
+          ['health', 'Health'],
+          ['body', 'Body'],
           ['prs', 'PRs'],
           ['charts', 'Charts'],
         ] as const).map(([key, label]) => (
@@ -1302,23 +1303,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })}
         </ScrollView>
-      ) : tab === 'body' ? (
-        /* ── Body Scan Tab ─────────────────────────────────────────── */
+      ) : tab === 'health' ? (
+        /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Apple Health — three render states:
-               1. Not enabled → show Connect button
-               2. Enabled but HealthKit returned all null → show "Open iOS Settings"
-               3. Has data → show vitals grid */}
+          {/* Apple Health vitals */}
           {isHealthKitAvailable() && (() => {
-            const hasAnyData =
-              healthSummary && (
-                healthSummary.restingHeartRate != null ||
-                healthSummary.avgSteps7d != null ||
-                healthSummary.lastNightSleepHours != null ||
-                healthSummary.avgSleepHours7d != null ||
-                healthSummary.workouts7d != null ||
-                healthSummary.activeEnergy7d != null
-              );
+            const hs = healthSummary;
+            const hasAnyData = hs && (
+              hs.restingHeartRate != null || hs.avgSteps7d != null ||
+              hs.lastNightSleepHours != null || hs.workouts7d != null ||
+              hs.activeEnergy7d != null || hs.hrvAvg != null
+            );
 
             const handleConnect = async () => {
               setHealthConnecting(true);
@@ -1333,23 +1328,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 }
                 const hasAny = fresh && (
                   fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
-                  fresh.lastNightSleepHours != null || fresh.avgSleepHours7d != null ||
-                  fresh.workouts7d != null || fresh.activeEnergy7d != null
+                  fresh.lastNightSleepHours != null || fresh.workouts7d != null ||
+                  fresh.activeEnergy7d != null
                 );
-                // If init succeeded but no data came back, prompt user to
-                // check Settings (iOS's permission sheet may have been
-                // bypassed because they already answered it once).
                 if (granted && !hasAny) {
-                  Alert.alert(
-                    'No data yet',
-                    'Apple Health is connected but no data came back. Open iPhone Settings → Privacy & Security → Health → Thallo and enable the categories you want to share.',
-                  );
+                  Alert.alert('No data yet', 'Apple Health is connected but no data came back. Open iPhone Settings → Privacy & Security → Health → Thallo and enable the categories you want to share.');
                 } else if (!granted) {
                   const err = getLastHealthKitError();
-                  Alert.alert(
-                    'HealthKit not available',
-                    `iOS error: ${err ?? 'unknown'}\n\nThis usually means the provisioning profile doesn't include HealthKit, or the entitlement is missing from the IPA.`,
-                  );
+                  Alert.alert('HealthKit not available', `iOS error: ${err ?? 'unknown'}\n\nThis usually means the provisioning profile doesn't include HealthKit.`);
                 }
               } catch (e: any) {
                 Alert.alert('Apple Health error', String(e?.message ?? e));
@@ -1364,32 +1350,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               });
             };
 
-            return (
-              <View style={styles.vitalsCard}>
-                <View style={styles.vitalsHeader}>
-                  <Ionicons name="heart-outline" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
-                  {healthEnabled && hasAnyData ? (
-                    <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Today's vitals</Text>
-                  ) : null}
-                </View>
-
-                {isHealthKitNativeBindingsMissing() ? (
-                  <>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
-                      Apple Health requires a native rebuild. The JS package is installed but the native iOS module isn't linked in this binary.
-                    </Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, lineHeight: 16, marginBottom: 4 }}>
-                      Run: eas build --profile development --platform ios --clear-cache
-                    </Text>
-                  </>
-                ) : !healthEnabled ? (
-                  <>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
-                      Connect Apple Health to see your resting heart rate, sleep, steps, and workouts — and get a more accurate fitness score.
+            if (!healthEnabled) {
+              return (
+                <View style={styles.vitalsCard}>
+                  <View style={{ alignItems: 'center', paddingVertical: 12 }}>
+                    <Ionicons name="heart-outline" size={36} color={tc.primary} />
+                    <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health</Text>
+                    <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
+                      Connect to see heart rate, sleep stages, HRV, steps, and more.
                     </Text>
                     <TouchableOpacity
-                      style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' }}
+                      style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
                       onPress={handleConnect}
                       disabled={healthConnecting}
                     >
@@ -1397,159 +1368,123 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         ? <ActivityIndicator color="#fff" />
                         : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
                     </TouchableOpacity>
-                  </>
-                ) : !hasAnyData ? (
-                  <>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18, marginBottom: 12 }}>
-                      Connected, but no data is coming through yet. Either your Watch hasn't synced, or permission categories are off in iOS Settings.
+                  </View>
+                </View>
+              );
+            }
+
+            if (!hasAnyData) {
+              return (
+                <View style={styles.vitalsCard}>
+                  <View style={{ alignItems: 'center', paddingVertical: 12 }}>
+                    <Ionicons name="cloud-offline-outline" size={32} color={tc.textMuted} />
+                    <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary, marginTop: 8 }}>Connected — no data yet</Text>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4, marginBottom: 12 }}>
+                      Your Watch may not have synced, or permission categories are off.
                     </Text>
                     <TouchableOpacity
-                      style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' }}
+                      style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 24 }}
                       onPress={handleOpenSettings}
                     >
-                      <Text style={{ color: tc.textPrimary, fontWeight: '700', fontSize: 14 }}>Open iOS Settings</Text>
+                      <Text style={{ color: tc.textPrimary, fontWeight: '600', fontSize: 13 }}>Open iOS Settings</Text>
                     </TouchableOpacity>
-                  </>
-                ) : (
-                  <View style={styles.vitalsGrid}>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>{healthSummary!.restingHeartRate ?? '—'}</Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Resting HR</Text>
-                    </View>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                        {healthSummary!.lastNightSleepHours != null ? `${healthSummary!.lastNightSleepHours}h` : '—'}
-                      </Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Last night</Text>
-                    </View>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                        {healthSummary!.avgSteps7d != null ? healthSummary!.avgSteps7d.toLocaleString() : '—'}
-                      </Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Steps (7d avg)</Text>
-                    </View>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>{healthSummary!.workouts7d ?? '—'}</Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Workouts (7d)</Text>
-                    </View>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                        {healthSummary!.activeEnergy7d != null ? healthSummary!.activeEnergy7d.toLocaleString() : '—'}
-                      </Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Active cal (7d)</Text>
-                    </View>
-                    <View style={styles.vitalsCell}>
-                      <Text style={[styles.vitalsValue, { color: tc.textPrimary }]}>
-                        {healthSummary!.avgSleepHours7d != null ? `${healthSummary!.avgSleepHours7d}h` : '—'}
-                      </Text>
-                      <Text style={[styles.vitalsLabel, { color: tc.textMuted }]}>Sleep (7d avg)</Text>
-                    </View>
                   </View>
-                )}
+                </View>
+              );
+            }
+
+            const vitalsRow = (icon: string, label: string, value: string | number | null, unit?: string) => (
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '44' }}>
+                <Ionicons name={icon as any} size={18} color={tc.primary} style={{ width: 28 }} />
+                <Text style={{ fontSize: 13, color: tc.textSecondary, flex: 1 }}>{label}</Text>
+                <Text style={{ fontSize: 16, fontWeight: '700', color: value != null ? tc.textPrimary : tc.textMuted }}>
+                  {value != null ? (typeof value === 'number' ? value.toLocaleString() : value) : '—'}
+                  {value != null && unit ? <Text style={{ fontSize: 11, fontWeight: '500', color: tc.textMuted }}> {unit}</Text> : null}
+                </Text>
+              </View>
+            );
+
+            return (
+              <View style={styles.vitalsCard}>
+                <View style={[styles.vitalsHeader, { marginBottom: 4 }]}>
+                  <Ionicons name="heart-outline" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
+                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>7-day snapshot</Text>
+                </View>
+                {vitalsRow('pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm')}
+                {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
+                {vitalsRow('walk-outline', 'Steps (avg)', hs!.avgSteps7d)}
+                {vitalsRow('flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal')}
+                {vitalsRow('barbell-outline', 'Workouts', hs!.workouts7d)}
+                {vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? `${hs!.avgSleepHours7d}` : null, 'hrs')}
+                {hs!.vo2Max != null && vitalsRow('fitness-outline', 'VO2 Max', Math.round(hs!.vo2Max * 10) / 10, 'ml/kg/min')}
+                {hs!.respiratoryRate != null && vitalsRow('leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm')}
+                {hs!.oxygenSaturation != null && vitalsRow('water-outline', 'Blood oxygen', hs!.oxygenSaturation, '%')}
+                {hs!.standingHours7d != null && vitalsRow('body-outline', 'Standing hours', hs!.standingHours7d, 'hrs')}
+                {hs!.mindfulMinutes7d != null && vitalsRow('flower-outline', 'Mindful minutes', hs!.mindfulMinutes7d, 'min')}
+                {hs!.basalEnergy7d != null && vitalsRow('flash-outline', 'Basal energy', hs!.basalEnergy7d, 'kcal')}
               </View>
             );
           })()}
 
-          {/* Longevity & Gut Health — derived from meal logs + check timestamps.
-              Quiet-UX: every row is optional. Only renders rows we have data for. */}
-          {gutInsights && (
-            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-              <View style={styles.vitalsHeader}>
-                <Ionicons name="leaf-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Longevity & Gut Health</Text>
-              </View>
-              {/* Plant diversity */}
-              <View style={{ marginBottom: 10 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Plant diversity (7d)</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444' }}>
-                    {gutInsights.plantCount} / 30
-                  </Text>
+          {/* Sleep Score */}
+          {healthSummary?.sleepScore && (() => {
+            const ss = healthSummary.sleepScore;
+            const scoreColor = ss.score >= 80 ? '#22C55E' : ss.score >= 60 ? '#F59E0B' : '#EF4444';
+            const stageBar = (label: string, hours: number, color: string, total: number) => {
+              const pct = total > 0 ? Math.round((hours / total) * 100) : 0;
+              return (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <Text style={{ width: 44, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label}</Text>
+                  <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
+                    <View style={{ width: `${Math.max(3, pct)}%` as any, height: 8, borderRadius: 4, backgroundColor: color }} />
+                  </View>
+                  <Text style={{ width: 50, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{hours}h ({pct}%)</Text>
                 </View>
-                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{
-                    width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
-                    height: 5, borderRadius: 3,
-                    backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
-                  }} />
-                </View>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
-              </View>
-              {/* Fiber today */}
-              <View style={{ marginBottom: 10 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Fiber today</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B' }}>
-                    {gutInsights.fiberToday.grams}g / {gutInsights.fiberToday.target}g
-                  </Text>
-                </View>
-                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{
-                    width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
-                    height: 5, borderRadius: 3,
-                    backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
-                  }} />
-                </View>
-              </View>
-              {/* Protein timing flag — derived from per-meal protein only,
-                  no timing required. */}
-              {gutInsights.proteinFlag && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
-                  <Ionicons
-                    name={gutInsights.proteinFlag.tier === 'good' ? 'checkmark-circle' : 'alert-circle-outline'}
-                    size={14}
-                    color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
-                  />
-                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
-                </View>
-              )}
-            </View>
-          )}
-
-          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
-          {muscleBalance && muscleBalance.total_sets > 0 && (() => {
-            const entries = Object.entries(muscleBalance.muscles);
-            const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
-            const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);
-            const balEntries = entries.filter(([m]) => BALANCE_MUSCLES.has(m));
-            const avgPct = balEntries.length ? balEntries.reduce((s, [, v]) => s + v.pct, 0) / balEntries.length : 0;
-            const barColor = (muscle: string, pct: number) => {
-              if (!BALANCE_MUSCLES.has(muscle)) return tc.textMuted;
-              if (avgPct === 0) return tc.primary;
-              const ratio = pct / avgPct;
-              if (ratio >= 0.7) return '#22C55E';
-              if (ratio >= 0.4) return '#F59E0B';
-              return '#EF4444';
+              );
             };
-            const score = muscleBalance.balance_score;
-            const scoreColor = score >= 70 ? '#22C55E' : score >= 45 ? '#F59E0B' : '#EF4444';
-
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <TouchableOpacity
-                  activeOpacity={0.7}
-                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setMuscleBalanceExpanded(prev => !prev); }}
-                >
-                  <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
-                    <Ionicons name="body-outline" size={16} color={tc.primary} />
-                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Balance</Text>
-                    <Text style={{ fontSize: 20, fontWeight: '800', color: scoreColor }}>{score}</Text>
-                    <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginLeft: 2 }}>/100</Text>
-                    <Ionicons name={muscleBalanceExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} style={{ marginLeft: 6 }} />
+                <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
+                  <Ionicons name="moon-outline" size={16} color="#818CF8" />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 24, fontWeight: '900', color: scoreColor }}>{ss.score}</Text>
+                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{ss.rating} · {ss.duration}h total</Text>
                   </View>
-                </TouchableOpacity>
-                {muscleBalanceExpanded && (
-                  <View style={{ gap: 6 }}>
-                    <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>
-                      {muscleBalance.period_days}d / {Math.round(muscleBalance.total_sets)} total sets
-                    </Text>
-                    {entries.map(([muscle, data]) => (
-                      <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                        <Text style={{ width: 72, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>{muscle.replace(/_/g, ' ')}</Text>
-                        <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
-                          <View style={{ width: `${Math.max(3, (data.sets / maxSets) * 100)}%` as any, height: 8, borderRadius: 4, backgroundColor: barColor(muscle, data.pct) }} />
-                        </View>
-                        <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
+                </View>
+                {stageBar('Deep', ss.stages.deep, '#6366F1', ss.stages.total)}
+                {stageBar('Core', ss.stages.core, '#818CF8', ss.stages.total)}
+                {stageBar('REM', ss.stages.rem, '#A78BFA', ss.stages.total)}
+                {ss.stages.awake > 0 && stageBar('Awake', ss.stages.awake, '#EF4444', ss.stages.total + ss.stages.awake)}
+                {(ss.hrvAvg != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
+                  <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
+                    {ss.hrvAvg != null && (
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.hrvAvg}</Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>HRV (ms)</Text>
+                      </View>
+                    )}
+                    {ss.respiratoryRate != null && (
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.respiratoryRate}</Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>Resp (brpm)</Text>
+                      </View>
+                    )}
+                    {ss.oxygenSaturation != null && (
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.oxygenSaturation}%</Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>SpO2</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+                {ss.insights.length > 0 && (
+                  <View style={{ marginTop: 8, gap: 4 }}>
+                    {ss.insights.map((insight, i) => (
+                      <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
+                        <Ionicons name="information-circle-outline" size={14} color={tc.textMuted} style={{ marginTop: 1 }} />
+                        <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1, lineHeight: 16 }}>{insight}</Text>
                       </View>
                     ))}
                   </View>
@@ -1557,6 +1492,34 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
+
+          {/* Workout Details from Apple Health */}
+          {healthSummary?.workoutDetails && healthSummary.workoutDetails.length > 0 && (
+            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
+                <Ionicons name="barbell-outline" size={16} color={tc.primary} />
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Recent Workouts</Text>
+                <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>from Apple Health</Text>
+              </View>
+              {healthSummary.workoutDetails.slice(0, 5).map((w, i) => {
+                const d = new Date(w.startDate);
+                return (
+                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border + '44' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>{w.activityName}</Text>
+                      <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                        {d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} · {Math.round(w.duration)} min
+                        {w.calories ? ` · ${Math.round(w.calories)} cal` : ''}
+                      </Text>
+                    </View>
+                    {w.distanceMiles != null && w.distanceMiles > 0 && (
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>{w.distanceMiles.toFixed(1)} mi</Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
@@ -1641,60 +1604,115 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {muscleFatigue && (
             <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
           )}
-          {/* Legacy block kept as unreachable fallback while we verify the
-              shared component covers every placement. Gated off. */}
-          {false && muscleFatigue && (
-            <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <Ionicons
-                  name={muscleFatigue.score >= 65 ? 'battery-full' : muscleFatigue.score >= 40 ? 'battery-half' : 'battery-dead'}
-                  size={22}
-                  color={muscleFatigue.score >= 65 ? '#22C55E' : muscleFatigue.score >= 40 ? '#F59E0B' : '#EF4444'}
-                />
-                <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
-                  Recovery: {muscleFatigue.label} ({muscleFatigue.score}%)
-                </Text>
-              </View>
-              {(() => {
-                const muscles = Object.entries(muscleFatigue.muscleFatigue || {})
-                  .filter(([k]) => k !== 'cardio' && k !== 'systemic')
-                  .sort((a, b) => b[1] - a[1]);
-                if (muscles.length === 0 || muscles.every(([, v]) => v < 0.05)) {
-                  return <Text style={{ fontSize: 13, color: tc.textMuted }}>All muscle groups are fresh and recovered.</Text>;
-                }
-                return (
-                  <View style={{ gap: 6 }}>
-                    {muscles.filter(([, v]) => v >= 0.05).map(([muscle, value]) => {
-                      const pct = Math.min(100, Math.round(value * 100));
-                      const color = pct >= 70 ? '#EF4444' : pct >= 40 ? '#F59E0B' : '#22C55E';
-                      return (
-                        <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{muscle.replace('_', ' ')}</Text>
-                          <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                            <View style={{ width: `${pct}%` as any, height: 6, borderRadius: 3, backgroundColor: color }} />
-                          </View>
-                          <Text style={{ fontSize: 10, fontWeight: '700', color, width: 30, textAlign: 'right' }}>{pct}%</Text>
-                        </View>
-                      );
-                    })}
-                    {(muscleFatigue.muscleFatigue?.cardio ?? 0) >= 0.05 && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                        <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 70 }}>cardio</Text>
-                        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                          <View style={{ width: `${Math.min(100, Math.round((muscleFatigue.muscleFatigue?.cardio ?? 0) * 100))}%` as any, height: 6, borderRadius: 3, backgroundColor: '#3B82F6' }} />
-                        </View>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: '#3B82F6', width: 30, textAlign: 'right' }}>{Math.round((muscleFatigue.muscleFatigue?.cardio ?? 0) * 100)}%</Text>
-                      </View>
-                    )}
-                  </View>
-                );
-              })()}
-            </View>
-          )}
-
           {authToken && (
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
+
+          {/* Longevity & Gut Health */}
+          {gutInsights && (
+            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View style={styles.vitalsHeader}>
+                <Ionicons name="leaf-outline" size={16} color={tc.primary} />
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Longevity & Gut Health</Text>
+              </View>
+              <View style={{ marginBottom: 10 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Plant diversity (7d)</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444' }}>
+                    {gutInsights.plantCount} / 30
+                  </Text>
+                </View>
+                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                  <View style={{
+                    width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
+                    height: 5, borderRadius: 3,
+                    backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
+                  }} />
+                </View>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
+              </View>
+              <View style={{ marginBottom: 10 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Fiber today</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B' }}>
+                    {gutInsights.fiberToday.grams}g / {gutInsights.fiberToday.target}g
+                  </Text>
+                </View>
+                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                  <View style={{
+                    width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
+                    height: 5, borderRadius: 3,
+                    backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
+                  }} />
+                </View>
+              </View>
+              {gutInsights.proteinFlag && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                  <Ionicons
+                    name={gutInsights.proteinFlag.tier === 'good' ? 'checkmark-circle' : 'alert-circle-outline'}
+                    size={14}
+                    color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
+                  />
+                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
+                </View>
+              )}
+            </View>
+          )}
+        </ScrollView>
+      ) : tab === 'body' ? (
+        /* ── Body Tab ───────────────────────────────────────────────── */
+        <ScrollView contentContainerStyle={styles.content}>
+          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
+          {muscleBalance && muscleBalance.total_sets > 0 && (() => {
+            const entries = Object.entries(muscleBalance.muscles);
+            const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
+            const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);
+            const balEntries = entries.filter(([m]) => BALANCE_MUSCLES.has(m));
+            const avgPct = balEntries.length ? balEntries.reduce((s, [, v]) => s + v.pct, 0) / balEntries.length : 0;
+            const barColor = (muscle: string, pct: number) => {
+              if (!BALANCE_MUSCLES.has(muscle)) return tc.textMuted;
+              if (avgPct === 0) return tc.primary;
+              const ratio = pct / avgPct;
+              if (ratio >= 0.7) return '#22C55E';
+              if (ratio >= 0.4) return '#F59E0B';
+              return '#EF4444';
+            };
+            const score = muscleBalance.balance_score;
+            const scoreColor = score >= 70 ? '#22C55E' : score >= 45 ? '#F59E0B' : '#EF4444';
+
+            return (
+              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setMuscleBalanceExpanded(prev => !prev); }}
+                >
+                  <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
+                    <Ionicons name="body-outline" size={16} color={tc.primary} />
+                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Balance</Text>
+                    <Text style={{ fontSize: 20, fontWeight: '800', color: scoreColor }}>{score}</Text>
+                    <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginLeft: 2 }}>/100</Text>
+                    <Ionicons name={muscleBalanceExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} style={{ marginLeft: 6 }} />
+                  </View>
+                </TouchableOpacity>
+                {muscleBalanceExpanded && (
+                  <View style={{ gap: 6 }}>
+                    <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>
+                      {muscleBalance.period_days}d / {Math.round(muscleBalance.total_sets)} total sets
+                    </Text>
+                    {entries.map(([muscle, data]) => (
+                      <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Text style={{ width: 72, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>{muscle.replace(/_/g, ' ')}</Text>
+                        <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
+                          <View style={{ width: `${Math.max(3, (data.sets / maxSets) * 100)}%` as any, height: 8, borderRadius: 4, backgroundColor: barColor(muscle, data.pct) }} />
+                        </View>
+                        <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            );
+          })()}
 
           {/* Weight Trend */}
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>

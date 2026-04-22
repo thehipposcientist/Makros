@@ -19,6 +19,10 @@ const PRESET_QUESTIONS = [
   'What was the make of your first car?',
   'What was the name of your elementary school?',
   'What is the name of your best childhood friend?',
+  'What street did you grow up on?',
+  'What was your childhood nickname?',
+  'What is your favorite sports team?',
+  'What was the first concert you attended?',
 ];
 
 export default function RecoveryQuestionModal({ visible, authToken, onDone }: Props) {

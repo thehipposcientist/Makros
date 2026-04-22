@@ -660,14 +660,52 @@ export interface BodyScanEntry {
 
 export type RecoveryMarker = 'green' | 'yellow' | 'red';
 
+export interface SleepStages {
+  core: number;
+  deep: number;
+  rem: number;
+  awake: number;
+  total: number;
+}
+
+export interface WorkoutDetail {
+  activityType: number;
+  activityName: string;
+  duration: number;
+  startDate: string;
+  endDate: string;
+  calories?: number;
+  distanceMiles?: number;
+}
+
+export interface SleepScore {
+  score: number;
+  rating: 'Excellent' | 'Good' | 'Fair' | 'Poor';
+  duration: number;
+  stages: SleepStages;
+  hrvAvg: number | null;
+  respiratoryRate: number | null;
+  oxygenSaturation: number | null;
+  insights: string[];
+}
+
 export interface HealthSummary {
-  restingHeartRate: number | null;    // bpm
+  restingHeartRate: number | null;
   avgSteps7d: number | null;
-  workouts7d: number | null;          // Apple Health workout count
+  workouts7d: number | null;
   avgSleepHours7d: number | null;
   lastNightSleepHours: number | null;
-  activeEnergy7d: number | null;      // kcal, optional
-  fetchedAt: string;                  // ISO timestamp
+  activeEnergy7d: number | null;
+  hrvAvg: number | null;
+  vo2Max: number | null;
+  respiratoryRate: number | null;
+  oxygenSaturation: number | null;
+  standingHours7d: number | null;
+  mindfulMinutes7d: number | null;
+  basalEnergy7d: number | null;
+  sleepScore: SleepScore | null;
+  workoutDetails: WorkoutDetail[];
+  fetchedAt: string;
 }
 
 export interface HealthScoreResult {

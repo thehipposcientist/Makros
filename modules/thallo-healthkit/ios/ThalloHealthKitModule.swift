@@ -55,7 +55,6 @@ public class ThalloHealthKitModule: Module {
                     default: val = "INBED"
                     }
                 } else {
-                    // Pre-iOS 16: asleep = 1, inBed = 0
                     val = sample.value == 1 ? "ASLEEP" : "INBED"
                 }
                 return ["value": val, "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
@@ -65,6 +64,86 @@ public class ThalloHealthKitModule: Module {
         AsyncFunction("getActiveEnergyBurned") { (startMs: Double, endMs: Double) -> [[String: Any]] in
             guard let qt = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned) else { return [] }
             return try await self.statisticsPerDay(type: qt, unit: .kilocalorie(), start: startMs, end: endMs)
+        }
+
+        AsyncFunction("getHRV") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN) else { return [] }
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: .secondUnit(with: .milli)),
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getVO2Max") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .vo2Max) else { return [] }
+            let unit = HKUnit.literUnit(with: .milli).unitDivided(by: HKUnit.gramUnit(with: .kilo).unitMultiplied(by: .minute()))
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: unit),
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getRespiratoryRate") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .respiratoryRate) else { return [] }
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: HKUnit(from: "count/min")),
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getOxygenSaturation") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation) else { return [] }
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: .percent()) * 100,
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getStandingHours") { (startMs: Double, endMs: Double) -> [[String: Any]] in
+            guard let ct = HKCategoryType.categoryType(forIdentifier: .appleStandHour) else { return [] }
+            return try await self.queryCategorySamples(type: ct, start: startMs, end: endMs) { sample in
+                ["value": sample.value == HKCategoryValueAppleStandHour.stood.rawValue ? 1 : 0,
+                 "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getMindfulMinutes") { (startMs: Double, endMs: Double) -> [[String: Any]] in
+            guard let ct = HKCategoryType.categoryType(forIdentifier: .mindfulSession) else { return [] }
+            return try await self.queryCategorySamples(type: ct, start: startMs, end: endMs) { sample in
+                let mins = sample.endDate.timeIntervalSince(sample.startDate) / 60.0
+                return ["value": mins, "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
+            }
+        }
+
+        AsyncFunction("getBasalEnergyBurned") { (startMs: Double, endMs: Double) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned) else { return [] }
+            return try await self.statisticsPerDay(type: qt, unit: .kilocalorie(), start: startMs, end: endMs)
+        }
+
+        AsyncFunction("getWorkouts") { (startMs: Double, endMs: Double) -> [[String: Any]] in
+            let (s, e) = self.dates(startMs, endMs)
+            let pred = HKQuery.predicateForSamples(withStart: s, end: e, options: .strictStartDate)
+            let sort = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: false)
+            return try await withCheckedThrowingContinuation { cont in
+                let q = HKSampleQuery(sampleType: .workoutType(), predicate: pred, limit: HKObjectQueryNoLimit, sortDescriptors: [sort]) { _, results, err in
+                    if let err { cont.resume(throwing: err); return }
+                    let workouts = (results as? [HKWorkout]) ?? []
+                    let mapped: [[String: Any]] = workouts.map { w in
+                        var entry: [String: Any] = [
+                            "activityType": Int(w.workoutActivityType.rawValue),
+                            "activityName": self.workoutName(w.workoutActivityType),
+                            "duration": w.duration / 60.0,
+                            "startDate": self.iso(w.startDate),
+                            "endDate": self.iso(w.endDate),
+                        ]
+                        if let cal = w.totalEnergyBurned?.doubleValue(for: .kilocalorie()) { entry["calories"] = cal }
+                        if let dist = w.totalDistance?.doubleValue(for: .mile()) { entry["distanceMiles"] = dist }
+                        return entry
+                    }
+                    cont.resume(returning: mapped)
+                }
+                self.store.execute(q)
+            }
         }
     }
 
@@ -79,8 +158,44 @@ public class ThalloHealthKitModule: Module {
             "ActiveEnergyBurned": HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!,
             "Workout": HKObjectType.workoutType(),
             "Weight": HKQuantityType.quantityType(forIdentifier: .bodyMass)!,
+            "HeartRateVariabilitySDNN": HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!,
+            "VO2Max": HKQuantityType.quantityType(forIdentifier: .vo2Max)!,
+            "RespiratoryRate": HKQuantityType.quantityType(forIdentifier: .respiratoryRate)!,
+            "OxygenSaturation": HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!,
+            "StandHour": HKCategoryType.categoryType(forIdentifier: .appleStandHour)!,
+            "MindfulSession": HKCategoryType.categoryType(forIdentifier: .mindfulSession)!,
+            "BasalEnergyBurned": HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned)!,
         ]
         return map[name]
+    }
+
+    private func workoutName(_ type: HKWorkoutActivityType) -> String {
+        switch type {
+        case .running: return "Running"
+        case .cycling: return "Cycling"
+        case .swimming: return "Swimming"
+        case .walking: return "Walking"
+        case .hiking: return "Hiking"
+        case .yoga: return "Yoga"
+        case .functionalStrengthTraining: return "Strength Training"
+        case .traditionalStrengthTraining: return "Weight Training"
+        case .highIntensityIntervalTraining: return "HIIT"
+        case .crossTraining: return "Cross Training"
+        case .elliptical: return "Elliptical"
+        case .rowing: return "Rowing"
+        case .stairClimbing: return "Stair Climbing"
+        case .pilates: return "Pilates"
+        case .dance: return "Dance"
+        case .cooldown: return "Cooldown"
+        case .coreTraining: return "Core Training"
+        case .flexibility: return "Flexibility"
+        case .mixedCardio: return "Mixed Cardio"
+        case .soccer: return "Soccer"
+        case .basketball: return "Basketball"
+        case .tennis: return "Tennis"
+        case .pickleball: return "Pickleball"
+        default: return "Workout"
+        }
     }
 
     private func iso(_ d: Date) -> String {
