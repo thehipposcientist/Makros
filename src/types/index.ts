@@ -678,14 +678,28 @@ export interface WorkoutDetail {
   distanceMiles?: number;
 }
 
+export type SleepScoreMode = 'mvp' | 'personalized';
+
+export interface SleepScorePillars {
+  duration: number;
+  efficiency: number;
+  hrv: number;
+  regularity?: number;
+  stageComposite: number;
+  healthFlags: number;
+}
+
 export interface SleepScore {
   score: number;
   rating: 'Excellent' | 'Good' | 'Fair' | 'Poor';
+  mode: SleepScoreMode;
   duration: number;
   stages: SleepStages;
   hrvAvg: number | null;
   respiratoryRate: number | null;
   oxygenSaturation: number | null;
+  efficiency: number | null;
+  pillars: SleepScorePillars;
   insights: string[];
 }
 

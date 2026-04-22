@@ -294,7 +294,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         const enabled = await isAppleHealthEnabled();
         setHealthEnabled(enabled);
         if (!enabled) return;
-        const fresh = await readHealthSummary();
+        const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
         if (fresh) {
           setHealthSummary(fresh);
           saveHealthSummary(fresh).catch(() => null);
@@ -302,7 +302,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       } catch {}
     })();
     computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
-  }, [userProfile.mealsPerDay]);
+  }, [userProfile.mealsPerDay, userProfile.physicalStats?.age]);
 
   // Compute nutrition score from plan data
   useEffect(() => {
@@ -1321,7 +1321,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               setHealthEnabled(true);
               try {
                 const granted = await requestHealthPermissions();
-                const fresh = await readHealthSummary();
+                const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
                 if (fresh) {
                   setHealthSummary(fresh);
                   saveHealthSummary(fresh).catch(() => null);

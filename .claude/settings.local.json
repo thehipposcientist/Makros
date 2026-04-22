@@ -179,7 +179,8 @@
       "Bash(eas build:view decdf316-7f94-4d08-b396-d1a956cbeb5f)",
       "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:$PATH\")",
       "Bash(npm --version)",
-      "Bash(npx expo-doctor@latest)"
+      "Bash(npx expo-doctor@latest)",
+      "Bash(node_modules/.bin/tsc --noEmit)"
     ]
   }
 }

@@ -1,5 +1,7 @@
 import { Platform } from 'react-native';
-import type { HealthSummary, SleepScore, SleepStages, WorkoutDetail } from '../types';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { HealthSummary, SleepScore, SleepStages } from '../types';
+import { scoreSleep, minutesFromMidnight } from './sleepScore';
 
 let _module: any = null;
 let _moduleChecked = false;
@@ -34,6 +36,9 @@ const READ_TYPES = [
   'MindfulSession',
   'BasalEnergyBurned',
 ];
+
+const SLEEP_HISTORY_KEY = 'sleepHistory_v1';
+const MAX_HISTORY_NIGHTS = 30;
 
 export function isHealthKitAvailable(): boolean {
   if (Platform.OS !== 'ios') return false;
@@ -80,15 +85,21 @@ export async function requestHealthPermissions(): Promise<boolean> {
   }
 }
 
-export async function readHealthSummary(): Promise<HealthSummary | null> {
+export interface ReadHealthOptions {
+  age?: number | null;
+}
+
+export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<HealthSummary | null> {
   const mod = getModule();
   if (!mod) return null;
 
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000);
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000);
   // Use 36h lookback for last-night data so we catch sleep that ended this morning
   const lastNightStart = new Date(now.getTime() - 36 * 3600000);
   const startMs = sevenDaysAgo.getTime();
+  const historyStartMs = thirtyDaysAgo.getTime();
   const endMs = now.getTime();
   const lastNightMs = lastNightStart.getTime();
 
@@ -97,6 +108,7 @@ export async function readHealthSummary(): Promise<HealthSummary | null> {
     hrvSamples, vo2Samples, respSamples, spo2Samples,
     standSamples, mindfulSamples, basalSamples,
     lastNightSleep, lastNightHRV, lastNightResp, lastNightSpo2,
+    historySleep, historyHRV,
   ] = await Promise.all([
     mod.getRestingHeartRate(startMs, endMs, 7).catch(() => []),
     mod.getDailySteps(startMs, endMs).catch(() => []),
@@ -113,12 +125,29 @@ export async function readHealthSummary(): Promise<HealthSummary | null> {
     mod.getHRV(lastNightMs, endMs, 20).catch(() => []),
     mod.getRespiratoryRate(lastNightMs, endMs, 5).catch(() => []),
     mod.getOxygenSaturation(lastNightMs, endMs, 5).catch(() => []),
+    mod.getSleepSamples(historyStartMs, endMs).catch(() => []),
+    mod.getHRV(historyStartMs, endMs, 200).catch(() => []),
   ]);
 
-  const sleepScore = buildSleepScore(lastNightSleep, lastNightHRV, lastNightResp, lastNightSpo2);
+  // Build and persist nightly history (for personalized score).
+  const history = buildNightlyHistory(historySleep as SleepSample[], historyHRV as any[]);
+  persistSleepHistory(history).catch(() => null);
+
+  // Compute last-night inBedMinutes for efficiency.
+  const lastNightStages = calcSleepStages(lastNightSleep as SleepSample[]);
+  const lastNightInBedMinutes = calcLastNightInBedMinutes(lastNightSleep as SleepSample[]);
+
+  const sleepScore = buildSleepScore({
+    stages: lastNightStages,
+    inBedMinutes: lastNightInBedMinutes,
+    hrvAvg: avgValue(lastNightHRV),
+    respRate: avgValue(lastNightResp),
+    spo2: avgValue(lastNightSpo2),
+    age: opts.age ?? null,
+    history,
+  });
 
   // Standing hours: only count samples where user actually stood (value=1 in our mapping)
-  // Return null if no samples at all so the UI hides the row
   const stoodCount = Array.isArray(standSamples) && standSamples.length > 0
     ? standSamples.filter((s: any) => s.value === 1).length
     : null;
@@ -132,7 +161,7 @@ export async function readHealthSummary(): Promise<HealthSummary | null> {
   return {
     restingHeartRate: avgValue(restingHR),
     avgSteps7d: avgValue(steps),
-    workouts7d: null, // no longer used in vitals display
+    workouts7d: null,
     avgSleepHours7d: calcAvgSleep(sleepSamples),
     lastNightSleepHours: calcLastNightSleep(sleepSamples),
     activeEnergy7d: avgActiveEnergy,
@@ -149,15 +178,45 @@ export async function readHealthSummary(): Promise<HealthSummary | null> {
   };
 }
 
+// ── Workout calorie lookup (Apple Watch override) ───────────────────────────
+//
+// Returns the Apple Health workout whose window overlaps the given range.
+// If the user wore their watch, use the watch's calorie total (more accurate
+// than our METs-based estimate). If not, caller falls back to the default.
+
+export async function getAppleWorkoutCaloriesForWindow(
+  startMs: number,
+  endMs: number,
+): Promise<number | null> {
+  const mod = getModule();
+  if (!mod || typeof mod.getWorkouts !== 'function') return null;
+  try {
+    // Widen the query by 30 min each side to catch misaligned timestamps.
+    const workouts = await mod.getWorkouts(startMs - 30 * 60_000, endMs + 30 * 60_000);
+    if (!Array.isArray(workouts) || !workouts.length) return null;
+    // Find the workout with the largest overlap with our window.
+    let best: any = null;
+    let bestOverlap = 0;
+    for (const w of workouts) {
+      const ws = new Date(w.startDate).getTime();
+      const we = new Date(w.endDate).getTime();
+      const overlap = Math.max(0, Math.min(endMs, we) - Math.max(startMs, ws));
+      if (overlap > bestOverlap) { best = w; bestOverlap = overlap; }
+    }
+    if (!best || bestOverlap < 60_000) return null; // <1 min overlap = not the same session
+    const cal = Number(best.calories);
+    return cal > 0 ? Math.round(cal) : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Sleep deduplication ──────────────────────────────────────────────────────
 //
-// Apple Health writes sleep from multiple simultaneous sources: iPhone
-// (whole-night CORE), Apple Watch (CORE/DEEP/REM stages), third-party apps.
-// Naively summing creates e.g. 11h core when actual sleep was 6h.
-//
-// Fix: for each minute in the sleep window, keep only the highest-priority
-// stage. Priority: DEEP > REM > CORE > ASLEEP > AWAKE > INBED.
-// This eliminates double-counting while preserving the richest stage data.
+// Apple Health writes sleep from multiple simultaneous sources: iPhone,
+// Apple Watch, third-party apps. Naively summing creates e.g. 11h core when
+// actual sleep was 6h. Fix: for each minute in the sleep window, keep only
+// the highest-priority stage. DEEP > REM > CORE > ASLEEP > AWAKE > INBED.
 
 const STAGE_PRIORITY: Record<string, number> = {
   DEEP: 5, REM: 4, CORE: 3, ASLEEP: 2, AWAKE: 1, INBED: 0,
@@ -185,8 +244,6 @@ function deduplicateSleepMinutes(samples: SleepSample[]): Map<number, string> {
 function calcSleepStages(samples: SleepSample[]): SleepStages | null {
   if (!samples?.length) return null;
 
-  // Group by night (key = end-date date string, e.g. "2024-04-22")
-  // A "night" groups all samples whose end falls on the same calendar day
   const nightMap = new Map<string, SleepSample[]>();
   for (const s of samples) {
     if (s.value === 'INBED') continue;
@@ -197,11 +254,9 @@ function calcSleepStages(samples: SleepSample[]): SleepStages | null {
   }
   if (!nightMap.size) return null;
 
-  // Pick the latest night
   const lastNight = [...nightMap.keys()].sort().pop()!;
   const deduped = deduplicateSleepMinutes(nightMap.get(lastNight)!);
 
-  // Count minutes per stage
   let coreMin = 0, deepMin = 0, remMin = 0, awakeMin = 0;
   for (const stage of deduped.values()) {
     switch (stage) {
@@ -223,103 +278,136 @@ function calcSleepStages(samples: SleepSample[]): SleepStages | null {
   return { core, deep, rem, awake, total };
 }
 
-// ── Sleep Score ──────────────────────────────────────────────────────────────
+// Total in-bed minutes for the last night (includes all stages + INBED).
+function calcLastNightInBedMinutes(samples: SleepSample[]): number | null {
+  if (!samples?.length) return null;
+  const nightMap = new Map<string, SleepSample[]>();
+  for (const s of samples) {
+    const key = s.endDate?.slice(0, 10);
+    if (!key) continue;
+    if (!nightMap.has(key)) nightMap.set(key, []);
+    nightMap.get(key)!.push(s);
+  }
+  if (!nightMap.size) return null;
+  const lastNight = [...nightMap.keys()].sort().pop()!;
+  // For in-bed, include INBED; priority still dedupes overlaps.
+  const deduped = deduplicateSleepMinutes(nightMap.get(lastNight)!);
+  return deduped.size > 0 ? deduped.size : null;
+}
 
-function buildSleepScore(
+// ── Sleep Score entry point ──────────────────────────────────────────────────
+
+interface BuildScoreArgs {
+  stages: SleepStages | null;
+  inBedMinutes: number | null;
+  hrvAvg: number | null;
+  respRate: number | null;
+  spo2: number | null;
+  age: number | null;
+  history: NightRecord[];
+}
+
+function buildSleepScore(a: BuildScoreArgs): SleepScore | null {
+  if (!a.stages || a.stages.total < 0.5) return null;
+  const hrvHistory = a.history.map((n) => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
+  const bedtimeHistory = a.history
+    .map((n) => n.bedtimeMinutes)
+    .filter((v): v is number => typeof v === 'number' && v >= 0 && v < 1440);
+
+  return scoreSleep({
+    totalSleepHours: a.stages.total,
+    inBedMinutes: a.inBedMinutes,
+    deepSleepHours: a.stages.deep,
+    remSleepHours: a.stages.rem,
+    hrvMs: a.hrvAvg,
+    spo2Percent: a.spo2,
+    respiratoryRate: a.respRate,
+    age: a.age,
+    stages: a.stages,
+    hrvHistory,
+    bedtimeHistory,
+  });
+}
+
+// ── Nightly history (for personalized score) ────────────────────────────────
+
+export interface NightRecord {
+  night: string;                 // YYYY-MM-DD (end-of-sleep date)
+  hrv: number | null;
+  sleepHours: number | null;
+  bedtimeMinutes: number | null; // minutes from midnight, local time
+}
+
+function buildNightlyHistory(
   sleepSamples: SleepSample[],
-  hrvSamples: any[],
-  respSamples: any[],
-  spo2Samples: any[],
-): SleepScore | null {
-  const stages = calcSleepStages(sleepSamples);
-  if (!stages || stages.total < 1) return null;
-
-  const hrvAvg = avgValue(hrvSamples);
-  const respRate = avgValue(respSamples);
-  const spo2 = avgValue(spo2Samples);
-  const insights: string[] = [];
-
-  // Duration (0-35)
-  let durationScore = 35;
-  if (stages.total >= 7 && stages.total <= 9) {
-    durationScore = 35;
-    insights.push('Great sleep duration');
-  } else if (stages.total >= 6) {
-    durationScore = 25;
-  } else if (stages.total >= 5) {
-    durationScore = 15;
-    insights.push('Sleep under 6 hours — aim for 7-9h');
-  } else {
-    durationScore = 5;
-    insights.push('Sleep under 5 hours — prioritise rest');
+  hrvSamples: Array<{ value: number; startDate: string; endDate?: string }>,
+): NightRecord[] {
+  // Group sleep samples by night (end date YYYY-MM-DD).
+  const nights = new Map<string, SleepSample[]>();
+  for (const s of sleepSamples ?? []) {
+    const key = s.endDate?.slice(0, 10);
+    if (!key) continue;
+    if (!nights.has(key)) nights.set(key, []);
+    nights.get(key)!.push(s);
   }
 
-  // Deep sleep (0-25): 1-2h is good for most adults
-  let deepScore = 0;
-  const deepPct = stages.total > 0 ? (stages.deep / stages.total) * 100 : 0;
-  const deepHrs = stages.deep;
-  if (deepHrs >= 1 && deepHrs <= 2.5) {
-    deepScore = 25;
-    if (deepHrs >= 1.5) insights.push(`Deep sleep ${deepHrs}h — excellent`);
-    else insights.push(`Deep sleep ${deepHrs}h — good`);
-  } else if (deepHrs >= 0.5 && deepHrs < 1) {
-    deepScore = 15;
-    insights.push(`Deep sleep ${deepHrs}h — aim for 1-2h`);
-  } else if (deepHrs > 2.5) {
-    deepScore = 20; // slightly too much, unusual
-  } else {
-    deepScore = 5;
-    insights.push('Very little deep sleep detected');
+  const out: NightRecord[] = [];
+  for (const [night, samples] of nights) {
+    const deduped = deduplicateSleepMinutes(samples);
+    let asleepMin = 0;
+    let firstAsleepMs: number | null = null;
+    // Find earliest asleep minute to use as bedtime / onset.
+    for (const s of samples) {
+      if (s.value === 'INBED' || s.value === 'AWAKE') continue;
+      const t = new Date(s.startDate).getTime();
+      if (firstAsleepMs == null || t < firstAsleepMs) firstAsleepMs = t;
+    }
+    for (const stage of deduped.values()) {
+      if (stage === 'DEEP' || stage === 'REM' || stage === 'CORE' || stage === 'ASLEEP') asleepMin++;
+    }
+    const sleepHours = asleepMin > 0 ? round1(asleepMin / 60) : null;
+    const bedtimeMinutes = firstAsleepMs != null ? minutesFromMidnight(new Date(firstAsleepMs)) : null;
+
+    // Nightly HRV: average of samples whose start falls within this night's window.
+    let nightHrv: number | null = null;
+    if (firstAsleepMs != null) {
+      const windowStart = firstAsleepMs;
+      const windowEnd = windowStart + 14 * 3600_000; // cap at +14h from onset
+      const vals: number[] = [];
+      for (const h of hrvSamples ?? []) {
+        const t = new Date(h.startDate).getTime();
+        if (t >= windowStart && t <= windowEnd && h.value > 0) vals.push(h.value);
+      }
+      if (vals.length) nightHrv = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+    }
+
+    if (sleepHours != null && sleepHours >= 1 && sleepHours < 14) {
+      out.push({ night, hrv: nightHrv, sleepHours, bedtimeMinutes });
+    }
   }
-  void deepPct; // suppress unused warning; we now use absolute hours
+  out.sort((a, b) => a.night.localeCompare(b.night));
+  return out.slice(-MAX_HISTORY_NIGHTS);
+}
 
-  // REM sleep (0-20): 1.5-2h typical target
-  let remScore = 0;
-  const remHrs = stages.rem;
-  if (remHrs >= 1.5 && remHrs <= 2.5) {
-    remScore = 20;
-  } else if (remHrs >= 1 && remHrs < 1.5) {
-    remScore = 14;
-  } else if (remHrs > 2.5) {
-    remScore = 16;
-  } else if (remHrs > 0) {
-    remScore = 6;
-    if (insights.length < 3) insights.push(`REM sleep ${remHrs}h — aim for 1.5-2h`);
-  }
+export async function loadSleepHistory(): Promise<NightRecord[]> {
+  try {
+    const raw = await AsyncStorage.getItem(SLEEP_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
 
-  // HRV (0-10)
-  let hrvScore = 0;
-  if (hrvAvg != null) {
-    if (hrvAvg >= 60) { hrvScore = 10; insights.push(`HRV ${hrvAvg}ms — strong recovery`); }
-    else if (hrvAvg >= 40) { hrvScore = 7; }
-    else if (hrvAvg >= 20) { hrvScore = 4; }
-    else { hrvScore = 2; insights.push(`Low HRV ${hrvAvg}ms — may indicate fatigue`); }
-  }
-
-  // SpO2 (0-5)
-  let spo2Score = 0;
-  if (spo2 != null) {
-    if (spo2 >= 96) spo2Score = 5;
-    else if (spo2 >= 94) spo2Score = 3;
-    else { spo2Score = 1; insights.push(`Blood oxygen ${spo2.toFixed(0)}% — below normal`); }
-  }
-
-  // Respiratory rate (0-5)
-  let respScore = 0;
-  if (respRate != null) {
-    if (respRate >= 12 && respRate <= 18) respScore = 5;
-    else if (respRate <= 22) respScore = 3;
-    else { respScore = 1; insights.push(`Elevated resp rate ${respRate.toFixed(0)} brpm`); }
-  }
-
-  const score = Math.min(100, durationScore + deepScore + remScore + hrvScore + spo2Score + respScore);
-  let rating: SleepScore['rating'];
-  if (score >= 80) rating = 'Excellent';
-  else if (score >= 65) rating = 'Good';
-  else if (score >= 45) rating = 'Fair';
-  else rating = 'Poor';
-
-  return { score, rating, duration: stages.total, stages, hrvAvg, respiratoryRate: respRate, oxygenSaturation: spo2, insights: insights.slice(0, 4) };
+async function persistSleepHistory(nights: NightRecord[]): Promise<void> {
+  try {
+    // Merge with existing so we don't lose nights outside the current window.
+    const existing = await loadSleepHistory();
+    const byNight = new Map<string, NightRecord>();
+    for (const n of existing) byNight.set(n.night, n);
+    for (const n of nights) byNight.set(n.night, n); // fresh data wins
+    const merged = [...byNight.values()].sort((a, b) => a.night.localeCompare(b.night)).slice(-MAX_HISTORY_NIGHTS);
+    await AsyncStorage.setItem(SLEEP_HISTORY_KEY, JSON.stringify(merged));
+  } catch {}
 }
 
 // ── Sleep avg helpers ────────────────────────────────────────────────────────
@@ -328,7 +416,6 @@ function groupSleepByNight(samples: SleepSample[] | null): Map<string, number> {
   const nightMap = new Map<string, number>();
   if (!samples?.length) return nightMap;
 
-  // Group by night key
   const byNight = new Map<string, SleepSample[]>();
   for (const s of samples) {
     if (s.value === 'INBED') continue;
@@ -338,7 +425,6 @@ function groupSleepByNight(samples: SleepSample[] | null): Map<string, number> {
     byNight.get(key)!.push(s);
   }
 
-  // For each night, deduplicate then sum asleep minutes
   for (const [night, nightSamples] of byNight) {
     const deduped = deduplicateSleepMinutes(nightSamples);
     let asleepMin = 0;

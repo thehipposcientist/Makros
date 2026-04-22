@@ -21,7 +21,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
-import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
+import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
@@ -1888,6 +1888,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           goal,
           weightLbs,
         });
+        // If the user wore an Apple Watch, prefer its calorie total — it's more
+        // accurate than our METs estimate. Fall back to the default otherwise.
+        try {
+          if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
+            const watchCal = await getAppleWorkoutCaloriesForWindow(
+              startTime.current,
+              now.getTime(),
+            );
+            if (watchCal != null && watchCal > 0) (s as any).caloriesBurned = watchCal;
+          }
+        } catch {}
         setSummaryData(s);
         // Persist summary so user can review it later in Progress.
         // Now includes the full per-exercise detail (name, equipment,
@@ -1927,7 +1938,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     try {
       const healthEnabled = await isAppleHealthEnabled();
       if (healthEnabled && isHealthKitAvailable()) {
-        const healthSummary = await readHealthSummary();
+        let profileAge: number | null = null;
+        try {
+          const r = await AsyncStorage.getItem('userProfile');
+          if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
+        } catch {}
+        const healthSummary = await readHealthSummary({ age: profileAge });
         if (healthSummary) {
           await saveHealthSummary(healthSummary);
           // Calculate score using in-app workout history
