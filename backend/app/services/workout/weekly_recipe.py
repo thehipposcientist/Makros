@@ -464,6 +464,34 @@ def _lifting_plus_cardio_recipe(
     # ── Step 3: Lifting fills the rest ──
     lift_days = days - recovery_days - cond_days
 
+    # Forced-even-lift-days rule for Upper/Lower. Odd lift_days on U/L
+    # guarantees a region imbalance (e.g. 3 lifts = 2 Upper + 1 Lower).
+    # Bump lift_days up by 1 so Upper/Lower balance is preserved. Steal
+    # the day from recovery first (user still has 2 cardio days on a
+    # 6-day fat-loss week), then from conditioning as a last resort.
+    # Only applies to U/L — PPL benefits from the 3-rotation and is
+    # handled by the PPL auto-switch above.
+    from .day_templates import SPLIT_UPPER_LOWER as _SPLIT_UL
+    if (
+        lifting_split == _SPLIT_UL
+        and lift_days >= 2
+        and lift_days % 2 == 1
+    ):
+        if recovery_days > 0:
+            recovery_days -= 1
+            lift_days += 1
+            logger.debug(
+                "[weekly_recipe] U/L force-even-lifts: "
+                "moved 1 recovery day → lift_days=%d", lift_days,
+            )
+        elif cond_days > 1:
+            cond_days -= 1
+            lift_days += 1
+            logger.debug(
+                "[weekly_recipe] U/L force-even-lifts: "
+                "moved 1 conditioning day → lift_days=%d", lift_days,
+            )
+
     if cond_days == 0 and recovery_days == 0:
         return _lifting_recipe(profile, lifting_split, days, priority_region=priority_region)
     # Split-compatibility fix: a 3-move PPL cycle on 4 lift days emits
@@ -539,10 +567,44 @@ def _lifting_plus_cardio_recipe(
     out.extend(recovery)
 
     assert len(out) == days, f"Recipe length {len(out)} != requested {days} days (lift={lift_days} cond={cond_days} recovery={recovery_days})"
-    return _repair_adjacent_duplicates(out)
+    return _repair_adjacent_duplicates(out, allowed_archetypes=profile.allowed_archetypes)
 
 
-def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype]:
+# ── Family-sibling substitution map ─────────────────────────────────
+# When adjacency repair via pure swaps is mathematically impossible
+# (e.g. a 5-day UL recipe rotated to start with the minority family
+# [Lower, Upper, Lower, Upper, Upper] — any swap leaves 1 dup because
+# counts are 3:2), we substitute one of the offending days with its
+# cross-family sibling of equivalent stimulus. That rebalances the
+# count to 2:3 and eliminates the structural adjacency. Used only as
+# a last resort AFTER tier A/B/C can't reduce dups further. Keyed by
+# the archetype to substitute AWAY from; value is the cross-family
+# sibling that preserves stimulus intent.
+_FAMILY_SIBLING_SWAPS: dict["DayArchetype", "DayArchetype"] = {
+    # U/L siblings (upper ↔ lower)
+    DayArchetype.LIFT_UPPER: DayArchetype.LIFT_LOWER,
+    DayArchetype.LIFT_LOWER: DayArchetype.LIFT_UPPER,
+    DayArchetype.LIFT_UPPER_HEAVY: DayArchetype.LIFT_LOWER_HEAVY,
+    DayArchetype.LIFT_LOWER_HEAVY: DayArchetype.LIFT_UPPER_HEAVY,
+    DayArchetype.LIFT_UPPER_HYPERTROPHY: DayArchetype.LIFT_LOWER_HYPERTROPHY,
+    DayArchetype.LIFT_LOWER_HYPERTROPHY: DayArchetype.LIFT_UPPER_HYPERTROPHY,
+    # PPL siblings (push ↔ pull; legs is deliberately not paired —
+    # swapping to legs would break split rotation and over-fatigue
+    # the lower body).
+    DayArchetype.LIFT_PUSH: DayArchetype.LIFT_PULL,
+    DayArchetype.LIFT_PULL: DayArchetype.LIFT_PUSH,
+    DayArchetype.LIFT_PUSH_HEAVY: DayArchetype.LIFT_PULL_HEAVY,
+    DayArchetype.LIFT_PULL_HEAVY: DayArchetype.LIFT_PUSH_HEAVY,
+    DayArchetype.LIFT_PUSH_VOLUME: DayArchetype.LIFT_PULL_VOLUME,
+    DayArchetype.LIFT_PULL_VOLUME: DayArchetype.LIFT_PUSH_VOLUME,
+}
+
+
+def _repair_adjacent_duplicates(
+    recipe: list[DayArchetype],
+    *,
+    allowed_archetypes: frozenset["DayArchetype"] | None = None,
+) -> list[DayArchetype]:
     """Deterministic sweep that swaps adjacent same-bucket days so
     the user never gets Push → Push or Legs → Legs back to back.
 
@@ -554,7 +616,7 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
          produces [Z2, Pull, Short, Legs, Push, Push] — reintroducing
          the adjacency that call #1 already cleaned up.
 
-    Repair strategy (three tiers, increasing aggressiveness):
+    Repair strategy (four tiers, increasing aggressiveness):
       Tier A — strict swap: swap a conflicting day with a later / earlier
                day whose family differs AND the swap introduces no new
                adjacency conflicts at either position.
@@ -568,6 +630,14 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
                creates a new conflict under tier A), pick the swap that
                minimises adjacency count; if none, pick the swap that
                at least breaks the 3-in-a-row.
+      Tier D — family-sibling substitution: when counts are imbalanced
+               (e.g. 5-day UL with rotation forcing minority-family
+               first → 3:2 split → structurally forces 1 adjacency),
+               substitute one offending day's archetype with its
+               cross-family sibling (Upper↔Lower, Push↔Pull) to
+               rebalance counts. Only fires when the sibling is in
+               `allowed_archetypes` (or allowed_archetypes is None).
+               Never introduced new adjacencies.
 
     The whole thing runs in a fixed-iteration loop (bounded, deterministic)
     until no improvement is possible. Stable plans stay stable — the
@@ -736,6 +806,47 @@ def _repair_adjacent_duplicates(recipe: list[DayArchetype]) -> list[DayArchetype
         if not _has_triple(out):
             break
         if not _force_triple_break(out):
+            break
+
+    # ── Tier D: family-sibling substitution ─────────────────────────
+    # For each remaining 2-adjacency that tier A/B couldn't resolve
+    # (structurally imbalanced counts), substitute one offending day
+    # with its cross-family sibling. The sibling preserves stimulus
+    # intent (heavy/volume/hypertrophy), just flips upper↔lower or
+    # push↔pull. Only applied when the sibling is permitted by the
+    # profile (or no profile is supplied). Runs at most len(out)
+    # times to keep total bounded.
+    for _ in range(len(out)):
+        if _total_dups(out) == 0:
+            break
+        substituted = False
+        for i in range(1, len(out)):
+            if _b(out[i]) != _b(out[i - 1]):
+                continue
+            # Try substituting either endpoint with its sibling.
+            for endpoint in (i, i - 1):
+                sibling = _FAMILY_SIBLING_SWAPS.get(out[endpoint])
+                if sibling is None:
+                    continue
+                if allowed_archetypes is not None and sibling not in allowed_archetypes:
+                    continue
+                test = list(out)
+                test[endpoint] = sibling
+                # Require the substitution to strictly reduce dups and
+                # not create a new adjacency at the substituted index.
+                new_dups = _total_dups(test)
+                if new_dups < _total_dups(out):
+                    logger.debug(
+                        f"[weekly_recipe] adjacency-repair tier-D: substituted "
+                        f"idx {endpoint} {out[endpoint].value} → {sibling.value} "
+                        f"(dups {_total_dups(out)}→{new_dups})"
+                    )
+                    out[endpoint] = sibling
+                    substituted = True
+                    break
+            if substituted:
+                break
+        if not substituted:
             break
 
     return out
@@ -1420,7 +1531,9 @@ def generate_weekly_recipe(
     if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain") and not skip_fatigue_rotation:
         recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
     # Rotation can reintroduce adjacent same-bucket duplicates.
-    recipe = _repair_adjacent_duplicates(recipe)
+    recipe = _repair_adjacent_duplicates(
+        recipe, allowed_archetypes=profile.allowed_archetypes,
+    )
     logger.info(
         f"[weekly_recipe] DIAG recipe_after_all_rotation={[a.value for a in recipe]}"
     )
@@ -1481,7 +1594,51 @@ def generate_weekly_recipe(
     # Intensity spacing can reintroduce focus-family adjacency (e.g.
     # swapping Legs with PushVolume to space intensity puts Push next
     # to PushVolume). One more adjacency sweep to catch this.
-    final = _repair_adjacent_duplicates(final)
+    final = _repair_adjacent_duplicates(
+        final, allowed_archetypes=profile.allowed_archetypes,
+    )
+
+    # Lift-priority rescue (runs LAST so intensity spacing can't
+    # shuffle a cardio back to day 0). If the user hasn't lifted in
+    # the last 36h (recent_focus_families contains only non-lift
+    # entries — mobility, cardio, recovery) but today's day 0 is
+    # cardio/mobility/recovery, swap it with the nearest lift day in
+    # the recipe. Rationale: a user whose last training stimulus was
+    # Mobility yesterday and no lifting for 3+ days should be getting
+    # under the bar today, not more conditioning. Only fires for
+    # recipes that actually contain a lift day later in the week —
+    # otherwise it's a no-op. Mode gate matches the rotation pass so
+    # anchored-order modes (endurance / athletic / mobility / recovery)
+    # keep their intentional layout.
+    _LIFT_FAMILIES = frozenset({"push", "pull", "legs", "upper", "lower", "full_body"})
+    _NON_LIFT_DAY0_CATEGORIES = frozenset({"cond", "mobility", "recovery"})
+    if (
+        len(final) >= 2
+        and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain")
+        and recent_focus_families
+        and not any(fam in _LIFT_FAMILIES for fam in recent_focus_families)
+        and ARCHETYPE_META[final[0]].category in _NON_LIFT_DAY0_CATEGORIES
+    ):
+        # Find the nearest lift day in the recipe (prefer earliest so
+        # today's session is a lift, not cardio).
+        swap_idx = next(
+            (j for j in range(1, len(final))
+             if ARCHETYPE_META[final[j]].category == "lift"),
+            None,
+        )
+        if swap_idx is not None:
+            logger.info(
+                f"[weekly_recipe] lift-priority rescue: recent_families="
+                f"{list(recent_focus_families)} has no lift; day0="
+                f"{final[0].value} ({ARCHETYPE_META[final[0]].category}), "
+                f"swapping with day {swap_idx} ({final[swap_idx].value})"
+            )
+            final[0], final[swap_idx] = final[swap_idx], final[0]
+            # The swap may have introduced adjacency at the new position
+            # of the former day 0 — re-run repair.
+            final = _repair_adjacent_duplicates(
+                final, allowed_archetypes=profile.allowed_archetypes,
+            )
 
     exposures = {"lift": 0, "cardio": 0, "mobility": 0, "recovery": 0, "hybrid": 0}
     for a in final:

@@ -919,7 +919,7 @@ export async function generateWorkoutDay(
     // rotation so single-day generation respects the split pattern.
     prev_focuses?: string[];
   },
-): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string; readiness_score?: number }> {
+): Promise<{ day: any; total_days_in_recipe: number; day_index: number; plan_name: string; readiness_score?: number; fatigue_notice?: string | null }> {
   return request('/workouts/generate-day', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },

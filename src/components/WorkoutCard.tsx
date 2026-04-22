@@ -236,6 +236,25 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
             soft={section.soft}
             text={section.text}
           />
+          {/* Muscle chip — driven off `primary_muscle` from the planner.
+              Humanized (chest → Chest, full_body → Full Body). Skipped
+              for mobility/systemic/cardio exercises where the muscle
+              label is already conveyed by the exercise name. */}
+          {(() => {
+            const pm = ((exercise as any).primary_muscle ?? '').toLowerCase().replace(/\s+/g, '_');
+            if (!pm || pm === 'mobility' || pm === 'systemic' || pm === 'cardio' || pm === 'full_body') return null;
+            const label = humanizeToken(pm);
+            if (!label) return null;
+            return (
+              <Chip
+                icon="body-outline"
+                label={label}
+                strong={section.strong}
+                soft={section.soft}
+                text={section.text}
+              />
+            );
+          })()}
           {onOpenVideo && (
             <Pressable
               style={({ pressed }) => [

@@ -1045,6 +1045,32 @@ def test_strength_plan_uses_lower_reps() -> None:
     _ok("primary compounds got 4-6 reps")
 
 
+def test_ul_forced_even_lift_days_fat_loss_6d() -> None:
+    """Fat-loss on 6d U/L split must produce EVEN lift days so Upper
+    and Lower are balanced. Pre-fix this produced 3 lift days
+    (2 Upper + 1 Lower). The `force-even-lift-days` rule in
+    `_lifting_plus_cardio_recipe` trades a recovery day for the 4th
+    lift."""
+    print("\n[test] U/L forced even lift days: fat_loss 6d → 4 lifts")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import ARCHETYPE_META
+    profile = goal_profile_for("fat_loss", "intermediate", 6, 60)
+    recipe = generate_weekly_recipe(
+        profile, 6, lifting_split="upper_lower", user_chose_split=True,
+    )
+    lift_days = sum(1 for a in recipe if ARCHETYPE_META[a].category == "lift")
+    assert lift_days % 2 == 0, (
+        f"expected even lift_days on 6d U/L fat_loss, got {lift_days} "
+        f"recipe={[a.value for a in recipe]}"
+    )
+    assert lift_days >= 4, (
+        f"fat_loss 6d should have >=4 lifts, got {lift_days} "
+        f"recipe={[a.value for a in recipe]}"
+    )
+    _ok(f"6d U/L fat_loss → {lift_days} lift days (even)")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
@@ -1095,6 +1121,8 @@ if __name__ == "__main__":
         test_progression_safety_override_on_pain,
         test_propagate_session_targets_walks_a_full_plan,
         test_propagate_session_targets_no_history_is_noop,
+        # U/L forced-even-lift-days rule (fat-loss 6d → 4 lifts)
+        test_ul_forced_even_lift_days_fat_loss_6d,
     ]
     failures = 0
     for case in cases:

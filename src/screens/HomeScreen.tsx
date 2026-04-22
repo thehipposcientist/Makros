@@ -1226,6 +1226,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Completion + skip state
   const [todayDone, setTodayDone]         = useState(false);
   const [completedDates, setCompletedDates] = useState<Set<string>>(new Set());
+  const [fatigueNotice, setFatigueNotice] = useState<string | null>(null);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
   // Dropped skips = user chose "skip entirely" (don't push to tomorrow).
   // get7DaySchedule advances the workout index for these dates.
@@ -1670,6 +1671,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
             await AsyncStorage.setItem(freshDayKey, '1').catch(() => {});
             console.log(`[loadPlans] fresh day generated & saved: ${freshDay.day.focus} (idx ${todayIdx})`);
+            // Surface backend's fatigue notice so the user knows WHY
+            // sets shrunk today instead of it happening silently. The
+            // notice only fires when fatigue >0.6 on a planned muscle
+            // and no explicit focus override is in play.
+            if (freshDay.fatigue_notice) {
+              setFatigueNotice(freshDay.fatigue_notice);
+            }
           }
         } catch (e) {
           console.log('[loadPlans] fresh day generation failed (using cached):', e);
@@ -3677,6 +3685,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
               <RecoveryCard data={readinessScore} themeName={userProfile.themePreference} compact />
+            )}
+
+            {/* Fatigue notice — shown when the backend auto-reduced
+                sets on today's workout for recovering muscles. Dismissable.
+                Only visible on the Plan sub-tab. */}
+            {workoutSubTab === 'plan' && fatigueNotice && (
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 12, borderRadius: 12, backgroundColor: '#F59E0B22', borderWidth: 1, borderColor: '#F59E0B88', marginBottom: 10 }}>
+                <Ionicons name="information-circle-outline" size={18} color="#B45309" style={{ marginTop: 1 }} />
+                <Text style={{ flex: 1, fontSize: 12, color: '#B45309', lineHeight: 16 }}>{fatigueNotice}</Text>
+                <TouchableOpacity onPress={() => setFatigueNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="close" size={16} color="#B45309" />
+                </TouchableOpacity>
+              </View>
             )}
 
             {/* Plan actions row — Why + Log + Edit */}
@@ -6409,10 +6430,12 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                 </Text>
               );
             }
-            // Lift days: group by `primary_muscle` straight from the
-            // planner so a Push day never picks up "Back" because some
-            // exercise name contains the word "pull". Only fall back to
-            // name inference when primary_muscle is missing.
+            // Lift days: group by `primary_muscle`. Hard-filter muscles
+            // that don't match the day's focus family — so a warm-up row
+            // (primary_muscle='back') inside a Push day can't show up
+            // as "Back" in the summary. Push day = chest/shoulders/
+            // triceps only. Pull = back/biceps. Legs = quads/hams/
+            // glutes/calves. Upper = upper family. Full = anything.
             const PRIMARY_TO_LABEL: Record<string, string> = {
               chest: 'Chest', back: 'Back', shoulders: 'Shoulders',
               biceps: 'Arms', triceps: 'Arms',
@@ -6420,12 +6443,25 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
               glutes: 'Glutes', core: 'Core', cardio: 'Cardio',
               full_body: 'Full Body',
             };
+            const pushFamily  = new Set(['chest', 'shoulders', 'triceps']);
+            const pullFamily  = new Set(['back', 'biceps']);
+            const legsFamily  = new Set(['quads', 'hamstrings', 'glutes', 'calves']);
+            const upperFamily = new Set([...pushFamily, ...pullFamily]);
+            const allowedForFocus: Set<string> | null =
+              /push/.test(focusLower) ? pushFamily :
+              /pull/.test(focusLower) ? pullFamily :
+              /legs|lower/.test(focusLower) ? legsFamily :
+              /upper/.test(focusLower) ? upperFamily :
+              /chest/.test(focusLower) ? new Set(['chest', 'triceps']) :
+              /back/.test(focusLower) ? new Set(['back', 'biceps']) :
+              /shoulder/.test(focusLower) ? new Set(['shoulders']) :
+              /arms?/.test(focusLower) ? new Set(['biceps', 'triceps']) :
+              null; // full body, unknown — allow everything
             const labels: string[] = [];
             for (const ex of item.workout!.exercises) {
               const key = (ex.primary_muscle ?? '').toLowerCase().replace(/\s+/g, '_');
-              // Skip mobility/systemic muscles inside lift days — they
-              // come from warm-up / accessory stretches, not the day focus.
               if (key === 'mobility' || key === 'systemic') continue;
+              if (allowedForFocus && !allowedForFocus.has(key)) continue;
               const label = PRIMARY_TO_LABEL[key] ?? (ex.primary_muscle ? humanizeToken(ex.primary_muscle) : null);
               if (label && label !== 'Other' && !labels.includes(label)) labels.push(label);
             }

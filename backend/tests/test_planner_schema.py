@@ -580,6 +580,145 @@ def test_generate_weekly_recipe_never_emits_three_adjacent_split_days() -> None:
     _ok(f"swept {checked} non-Bro configs, zero triple-in-a-row emitted")
 
 
+def test_repair_tier_d_substitutes_sibling_for_structural_adjacency() -> None:
+    """Tier D (family-sibling substitution) must eliminate 2-adjacency
+    that tier A/B/C can't resolve by pure swaps. Regression: 5-day U/L
+    recipes rotated to start with the minority family have a 3:2 count
+    imbalance — every swap leaves exactly 1 residual adjacency. Tier D
+    substitutes one offending archetype with its cross-family sibling
+    (Upper↔Lower) which rebalances the counts and kills the dup.
+
+    This was the user-reported 'back-to-back Push/Upper days after full-plan
+    regen' bug on muscle_gain 5d U/L with recent_focus_families=('upper',)."""
+    print("\n[test] tier-D sibling substitution kills structural adjacency")
+    from app.services.workout.weekly_recipe import _repair_adjacent_duplicates
+    from app.services.workout.archetypes import (
+        DayArchetype, archetype_to_focus_family,
+    )
+    from app.services.workout.goal_profiles import goal_profile_for
+    A = DayArchetype
+    profile = goal_profile_for("muscle_gain")
+
+    # Exact state produced by the rotation path for muscle_gain 5d U/L
+    # recent=('upper',): base = [U, L, U, L, U], rotated by 1 to put L
+    # first yields [L, U, L, U, U] — 1 structural 2-adjacency at the end.
+    recipe = [
+        A.LIFT_LOWER_HYPERTROPHY,
+        A.LIFT_UPPER_HYPERTROPHY,
+        A.LIFT_LOWER_HYPERTROPHY,
+        A.LIFT_UPPER_HYPERTROPHY,
+        A.LIFT_UPPER_HYPERTROPHY,
+    ]
+    repaired = _repair_adjacent_duplicates(
+        recipe, allowed_archetypes=profile.allowed_archetypes,
+    )
+    fams = [archetype_to_focus_family(a) for a in repaired]
+    dups = sum(1 for i in range(1, len(fams)) if fams[i] == fams[i - 1])
+    assert dups == 0, (
+        f"tier-D should have eliminated the 3:2 residual adjacency; "
+        f"fams={fams}"
+    )
+    _ok(f"structural adjacency eliminated: in={['lower','upper','lower','upper','upper']} out={fams}")
+
+
+def test_muscle_gain_5d_ul_recent_upper_has_no_adjacency_end_to_end() -> None:
+    """End-to-end regression for the user's wife's reported bug.
+    muscle_gain 5 days upper/lower with recent_focus_families=('upper',)
+    must NOT produce any same-family adjacency — tier D should
+    substitute the structural repeat."""
+    print("\n[test] muscle_gain 5d U/L recent=upper: no family adjacency")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    profile = goal_profile_for("muscle_gain")
+    recipe = generate_weekly_recipe(
+        profile, 5,
+        lifting_split="upper_lower",
+        recent_focus_families=("upper",),
+        user_chose_split=True,
+    )
+    fams = [archetype_to_focus_family(a) for a in recipe]
+    # Day 0 must not be upper (rotation).
+    assert fams[0] != "upper", f"day 0 should not be upper, got {fams[0]!r}"
+    # No fine-family adjacency anywhere.
+    for i in range(1, len(fams)):
+        assert fams[i] != fams[i - 1] or fams[i] not in (
+            "push", "pull", "legs", "upper", "lower",
+        ), (
+            f"adjacent same-family at {i - 1}-{i} ({fams[i]!r}); full fams={fams}"
+        )
+    _ok(f"fams={fams}")
+
+
+def test_lift_priority_rescue_swaps_cardio_day0_when_no_recent_lift() -> None:
+    """Regression for report 2: body_recomp user whose last 36h held
+    only Mobility (no lift) must NOT get day 0 = cardio/mobility. The
+    rescue pass swaps day 0 with the nearest lift day in the recipe.
+    Verified for every combination that previously produced NONLIFT
+    day 0 when recent_focus_families = ('mobility',), ('cardio',),
+    ('recovery',), etc."""
+    print("\n[test] lift-priority rescue: non-lift recent → lift on day 0")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import ARCHETYPE_META
+
+    goals = ("body_recomp", "fat_loss", "muscle_gain")
+    splits = ("ppl", "upper_lower", "full_body", "ppl_ul")
+    rfs = (
+        ("mobility",),
+        ("cardio",),
+        ("recovery",),
+        ("mobility", "cardio"),
+        ("cardio", "mobility"),
+    )
+    checked = 0
+    for goal in goals:
+        profile = goal_profile_for(goal)
+        for days in (4, 5, 6):
+            for split in splits:
+                for rf in rfs:
+                    recipe = generate_weekly_recipe(
+                        profile, days,
+                        lifting_split=split,
+                        recent_focus_families=rf,
+                        user_chose_split=True,
+                    )
+                    cat = ARCHETYPE_META[recipe[0]].category
+                    assert cat == "lift", (
+                        f"day 0 should be a lift when recent={rf} "
+                        f"(no lift family) — got {recipe[0].value} "
+                        f"(cat={cat}) for goal={goal} split={split} days={days}"
+                    )
+                    checked += 1
+    _ok(f"swept {checked} configs, all produce lift on day 0")
+
+
+def test_lift_priority_rescue_no_op_when_recent_includes_lift() -> None:
+    """The rescue pass must NOT fire when recent_focus_families contains
+    a lift family — the rotation pass already handled that case, and
+    overriding it would force consecutive same-family lifts."""
+    print("\n[test] lift-priority rescue is a no-op with a recent lift entry")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import ARCHETYPE_META, archetype_to_focus_family
+
+    profile = goal_profile_for("body_recomp")
+    # recent has BOTH mobility AND a lift family — rescue should not fire
+    # because the user lifted within 36h, we just happened to do mobility
+    # today. The rotation still must avoid repeating the lift family.
+    recipe = generate_weekly_recipe(
+        profile, 5,
+        lifting_split="ppl",
+        recent_focus_families=("mobility", "push"),
+        user_chose_split=True,
+    )
+    # Day 0 must avoid 'push' family (rotation intact).
+    day0_fam = archetype_to_focus_family(recipe[0])
+    assert day0_fam != "push", f"rotation broken: day 0 = {day0_fam}"
+    _ok(f"rescue no-op with lift in recent; day0={day0_fam}")
+
+
 # ── Runner ────────────────────────────────────────────────────────
 
 cases = [
@@ -599,6 +738,10 @@ cases = [
     test_brief_includes_user_preferred_split_and_skipped_days,
     test_repair_adjacent_duplicates_breaks_three_in_a_row,
     test_generate_weekly_recipe_never_emits_three_adjacent_split_days,
+    test_repair_tier_d_substitutes_sibling_for_structural_adjacency,
+    test_muscle_gain_5d_ul_recent_upper_has_no_adjacency_end_to_end,
+    test_lift_priority_rescue_swaps_cardio_day0_when_no_recent_lift,
+    test_lift_priority_rescue_no_op_when_recent_includes_lift,
 ]
 
 

@@ -518,10 +518,20 @@ def generate_single_day(
         # TIER 4 (≥0.6): proceed as planned — no changes
 
     # Mixed-day partial adaptation: reduce volume for fatigued muscles
-    # within a day while preserving fresh muscles
-    if fatigue_snapshot and day.get("exercises") and not day.get("_forced_recovery"):
+    # within a day while preserving fresh muscles. SKIPPED when the user
+    # explicitly overrode the focus — their choice wins over the
+    # auto-adapter. Emit a `fatigue_notice` with affected muscles so the
+    # client can surface why sets shrunk instead of it happening silently.
+    fatigue_notice = None
+    if (
+        fatigue_snapshot
+        and day.get("exercises")
+        and not day.get("_forced_recovery")
+        and not body.focus_override
+    ):
         mf_dict = fatigue_snapshot.muscle_fatigue.to_dict()
         adapted = []
+        reduced_muscles: list[str] = []
         for ex in day["exercises"]:
             primary = ex.get("_primary_muscle", "")
             fl = mf_dict.get(primary, 0.0)
@@ -530,11 +540,21 @@ def generate_single_day(
                 adapted.append(ex)
             elif fl > 0.8:
                 adapted.append({**ex, "sets": max(1, ex.get("sets", 3) - 2)})
+                if primary and primary not in reduced_muscles:
+                    reduced_muscles.append(primary)
             elif fl > 0.6:
                 adapted.append({**ex, "sets": max(2, ex.get("sets", 3) - 1)})
+                if primary and primary not in reduced_muscles:
+                    reduced_muscles.append(primary)
             else:
                 adapted.append(ex)
         day = {**day, "exercises": adapted}
+        if reduced_muscles:
+            human = ", ".join(m.replace("_", " ").title() for m in reduced_muscles[:3])
+            fatigue_notice = (
+                f"Reduced sets on {human} — those muscles are still recovering. "
+                f"You can always do full volume anyway."
+            )
 
     return {
         "day": day,
@@ -543,6 +563,7 @@ def generate_single_day(
         "plan_name": plan.get("workout_plan", {}).get("name", ""),
         "readiness_score": fatigue_readiness,
         "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
+        "fatigue_notice": fatigue_notice,
     }
 
 

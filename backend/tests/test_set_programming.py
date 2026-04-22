@@ -254,6 +254,47 @@ def test_missed_range_without_failure_holds_load():
     _ok("missed without failure → hold and retry")
 
 
+def test_severe_miss_at_failure_drops_proportionally():
+    """Regression: hitting 5 reps on a 12-15 rep target at failure should
+    trigger a proportional drop, not the default -5 lb. Otherwise the
+    next set grinds failure again at a weight that's far too heavy."""
+    print("\n[test] severe miss at failure → proportional drop")
+    planned = PlannedSet(
+        set_number=1, set_type="volume", target_reps="12-15",
+        target_rir=1.0, target_weight_lbs=100.0, progression_mode="reps_first",
+    )
+    rec = recommend_next_set(
+        exercise=_compound_bench(), planned_set=planned,
+        actual_reps=5, actual_weight_lbs=100.0, actual_rir=0.0,
+    )
+    # 5/12 = 0.42 — severe miss at failure → proportional drop (~40%)
+    assert rec.action == "reduce_load", rec.action
+    assert rec.next_set_weight_lbs is not None
+    # Should drop more than one increment since this is a severe miss
+    assert rec.next_set_weight_lbs < 95.0, (
+        f"severe miss should drop more than 1 increment, got {rec.next_set_weight_lbs}"
+    )
+    _ok(f"severe miss at failure → {rec.next_set_weight_lbs} lb")
+
+
+def test_missed_with_rir_in_reserve_always_holds():
+    """Regression: even a sizeable rep gap, if RIR > 0, means the user
+    wasn't actually at their limit. Holding and retrying is the right
+    call — dropping weight would be premature."""
+    print("\n[test] missed with RIR > 0, even sizeable gap → hold")
+    planned = PlannedSet(
+        set_number=1, set_type="volume", target_reps="12-15",
+        target_rir=1.0, target_weight_lbs=100.0, progression_mode="reps_first",
+    )
+    rec = recommend_next_set(
+        exercise=_compound_bench(), planned_set=planned,
+        actual_reps=8, actual_weight_lbs=100.0, actual_rir=2.0,
+    )
+    assert rec.action == "hold_load", rec.action
+    assert rec.next_set_weight_lbs == 100.0
+    _ok("missed with RIR > 0 → hold regardless of gap size")
+
+
 # ── recommend_next_session_load ────────────────────────────────────
 
 def test_next_session_all_sets_at_top_adds_load():
@@ -333,6 +374,8 @@ def _run_all() -> int:
         test_hit_range_holds_load,
         test_missed_range_at_failure_drops_load,
         test_missed_range_without_failure_holds_load,
+        test_severe_miss_at_failure_drops_proportionally,
+        test_missed_with_rir_in_reserve_always_holds,
         test_next_session_all_sets_at_top_adds_load,
         test_next_session_majority_missed_drops_load,
         test_next_session_partial_holds,
