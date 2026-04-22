@@ -55,7 +55,8 @@ public class ThalloHealthKitModule: Module {
                     default: val = "INBED"
                     }
                 } else {
-                    val = sample.value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue ? "ASLEEP" : "INBED"
+                    // Pre-iOS 16: asleep = 1, inBed = 0
+                    val = sample.value == 1 ? "ASLEEP" : "INBED"
                 }
                 return ["value": val, "startDate": self.iso(sample.startDate), "endDate": self.iso(sample.endDate)]
             }
