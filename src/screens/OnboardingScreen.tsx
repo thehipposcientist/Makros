@@ -775,6 +775,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             return (
               <TouchableOpacity
                 key={g.id}
+                testID={`goal-card-${g.id}`}
+                accessibilityLabel={`goal-card-${g.id}`}
                 style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
                 onPress={() => selectGoal(g.id)}
                 activeOpacity={0.75}
@@ -822,7 +824,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 { value: 'aggressive',   label: 'Aggressive', rate: 'Faster, tighter' },
               ];
           return (
-            <View style={{ marginTop: 16 }}>
+            <View
+              style={{ marginTop: 16 }}
+              testID="pace-picker-inline"
+              accessibilityLabel="pace-picker-inline"
+            >
               <Text style={styles.fieldLabel}>How fast?</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                 {opts.map(opt => {

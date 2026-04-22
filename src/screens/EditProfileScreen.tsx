@@ -1247,7 +1247,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Text style={styles.cancelText}>Cancel</Text>
           </TouchableOpacity>
           <Text style={styles.title}>{screenTitle}</Text>
-          <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <TouchableOpacity
+            onPress={handleSave}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            testID="edit-profile-save"
+            accessibilityLabel="edit-profile-save"
+          >
             <Text style={styles.saveText}>Save</Text>
           </TouchableOpacity>
         </View>

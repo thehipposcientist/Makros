@@ -54,11 +54,26 @@ Everything below is plain math + dict munging. The only AI call is step 1.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable, TYPE_CHECKING
 
 import openai
 from openai import OpenAI
+
+
+# ─── AI-free skeleton gate ────────────────────────────────────────────────────
+# When true (the default and shipping path), the skeleton stage bypasses
+# the OpenAI call entirely and uses `deterministic_skeleton.py` instead.
+# Flipping the env var `USE_DETERMINISTIC_SKELETON=0` re-enables the AI
+# path for side-by-side comparison / debugging — the rest of the pipeline
+# (validate_and_repair_skeletons → enrich → solve_portions → assemble)
+# is byte-for-byte identical in both modes.
+
+def _deterministic_skeleton_enabled() -> bool:
+    """Read the env flag every call so tests can flip it without reloads."""
+    raw = os.environ.get("USE_DETERMINISTIC_SKELETON", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 # Imports from `app.routers.ai` are lazy because that package's __init__
 # loads the full router chain, which itself imports this file — a direct
@@ -1339,12 +1354,15 @@ def assemble_nutrition_response(
             "nutrition_plans": plans_list,
         }
 
-    # Deterministic path for variety=1: skip the AI entirely and build the
-    # template from `_balanced_meal_fallback` so identical inputs produce
-    # identical output every regen. The AI is too inconsistent for the
-    # "same plan every day" use case, and its picks vary between calls
-    # even with temperature=0. variety>1 still goes through the AI for
-    # rotation diversity.
+    # Deterministic path for variety=1 remains untouched: it's been the
+    # shipping behavior for variety=1 for a while and produces identical
+    # regens, which is exactly what that use case wants.
+    #
+    # For variety>1 we now prefer the deterministic skeleton generator
+    # (`generate_deterministic_skeleton`) over the AI call. Toggle the
+    # env var `USE_DETERMINISTIC_SKELETON=0` to fall back to the AI path
+    # for side-by-side comparison / debug — the rest of the pipeline is
+    # unchanged either way.
     if variety_n == 1:
         print(
             f"[meal_assembler] deterministic variety=1 path — skipping skeleton AI, "
@@ -1353,6 +1371,23 @@ def assemble_nutrition_response(
         templates = [_build_deterministic_template(allowed_foods, generate_count)]
         note = ""
         supps = []
+    elif _deterministic_skeleton_enabled():
+        # Same mealsPerDay override trick as the AI path: the skeleton
+        # generator reads `req.mealsPerDay` to size each template, and
+        # we want it sized to the generated (non-routine) slot count.
+        from .deterministic_skeleton import generate_deterministic_skeleton
+        original_mpd = req.mealsPerDay
+        try:
+            req.mealsPerDay = generate_count
+            templates, note, supps = generate_deterministic_skeleton(
+                req, variety_n, allowed_foods, db=db, user_id=user_id,
+            )
+        finally:
+            req.mealsPerDay = original_mpd
+        print(
+            f"[meal_assembler] deterministic skeleton path — variety_n={variety_n}, "
+            f"generate_count={generate_count}, pantry={len(allowed_foods)} foods"
+        )
     else:
         # Temporarily override mealsPerDay on the request so the AI prompt +
         # parser both target `generate_count` meals instead of the user's

@@ -616,6 +616,17 @@ export interface WorkoutSession {
     caloriesBurned?: number;
     avgHeartRate?: number;
   };
+  /** PR achievements detected on this session's completion (Feature 2).
+   *  Persisted locally so the Progress screen can surface "🏆 PR" badges
+   *  in history view without re-querying the backend. */
+  prs?: Array<{
+    exercise_name: string;
+    kind: 'heaviest_weight' | 'estimated_1rm' | 'volume_record';
+    new_value: number;
+    old_value: number;
+    reps?: number | null;
+    weight_lbs?: number | null;
+  }>;
 }
 
 // ─── Post-workout feedback ────────────────────────────────────────────────────

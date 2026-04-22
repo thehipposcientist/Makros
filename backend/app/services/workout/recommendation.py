@@ -481,15 +481,12 @@ def apply_fatigue_override(
         confidence = "low"
 
     new_weight = _round_to_plate(weight_lbs * (1.0 - pct), increment=2.5)
-    label = (muscle_label or key).strip().title()
-    pct_int = int(round(pct * 100))
-    reason = (
-        f"{label} still recovering ({fatigue:.2f} fatigue) — starting "
-        f"~{pct_int}% lighter than last session"
-    )
+    # No reason text surfaced to the UI — users want just the weight.
+    # The `fatigue_override` flag is still emitted so the client can
+    # style the number if needed.
     return FatigueAdjustment(
         weight_lbs=new_weight,
         confidence=confidence,
-        reason=reason,
+        reason="",
         fatigue_override=True,
     )

@@ -998,6 +998,22 @@ export async function logWorkoutStarted(
   }, 10000);
 }
 
+export interface PRAchievement {
+  exercise_name: string;
+  kind: 'heaviest_weight' | 'estimated_1rm' | 'volume_record';
+  new_value: number;
+  old_value: number;
+  set_id?: number | null;
+  reps?: number | null;
+  weight_lbs?: number | null;
+}
+
+export interface WorkoutCompleteResponse {
+  ok: boolean;
+  structured_persisted?: boolean;
+  prs?: PRAchievement[];
+}
+
 export async function logWorkoutDone(
   token: string,
   workout_date: string,
@@ -1011,8 +1027,8 @@ export async function logWorkoutDone(
     source?: string;
     cardioStyle?: string;
   },
-) {
-  return request('/workouts/complete', {
+): Promise<WorkoutCompleteResponse> {
+  return request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({
@@ -1868,6 +1884,86 @@ export async function getMealInsights(token: string): Promise<{ insights: string
 
 export async function getCommonMeals(token: string): Promise<{ meals: Array<{ name: string; count: number; avg_calories: number; avg_protein_g: number; avg_carbs_g: number; avg_fat_g: number }> }> {
   return request('/meals/common', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ── Weekly digest (Feature 3) ──────────────────────────────────────────────
+
+export interface WeeklyDigest {
+  week_start: string;
+  week_end: string;
+  sessions: {
+    completed: number;
+    distinct_days: number;
+    planned: number;
+    adherence_pct: number;
+    focus_distribution: Record<string, number>;
+    stimulus_distribution: Record<string, number>;
+    duration_seconds: number;
+  };
+  volume: { total_sets: number; volume_load_lbs: number };
+  prs: PRAchievement[] & Array<{ session_date?: string }>;
+  pr_count: number;
+  nutrition: {
+    avg_calories: number;
+    avg_protein_g: number;
+    days_logged: number;
+    target_protein_g: number | null;
+    protein_hit_pct: number | null;
+  };
+  prior_week: {
+    completed: number;
+    distinct_days: number;
+    total_sets: number;
+    volume_load_lbs: number;
+    avg_calories: number;
+    avg_protein_g: number;
+  };
+  deltas: {
+    sessions: number;
+    distinct_days: number;
+    total_sets: number;
+    volume_load_lbs: number;
+    avg_calories: number;
+    avg_protein_g: number;
+  };
+}
+
+export async function getWeeklyDigest(token: string): Promise<WeeklyDigest> {
+  return request('/ai/weekly-digest', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ── Plateau detection (Feature 5) ──────────────────────────────────────────
+
+export interface PlateauEntry {
+  exercise_name: string;
+  current_1rm: number;
+  weeks_stuck: number;
+  suggestion: 'deload' | 'swap' | 'add_volume';
+  peak_by_week: number[];
+}
+
+export async function getPlateaus(token: string, windowWeeks = 4): Promise<{ plateaus: PlateauEntry[] }> {
+  return request(`/ai/plateaus?window_weeks=${windowWeeks}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ── Streak + consistency (Feature 8) ───────────────────────────────────────
+
+export interface StreakSummary {
+  current_streak: number;
+  longest_streak: number;
+  compliance_7d: number;
+  compliance_30d: number;
+  last_active_date: string | null;
+}
+
+export async function getStreak(token: string): Promise<StreakSummary> {
+  return request('/workouts/streak', {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

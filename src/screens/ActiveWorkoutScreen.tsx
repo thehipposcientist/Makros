@@ -22,7 +22,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { getTheme, radius } from '../constants/theme';
@@ -1800,12 +1800,49 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             rir: null,
           })),
         }));
-        await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
+        const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
           category: 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
         });
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
+
+        // PR toast + persist on session for Progress history to show "🏆 PR!"
+        const prs: PRAchievement[] = completeResp?.prs ?? [];
+        if (prs.length > 0) {
+          try {
+            // Stash on the saved summary so the Progress screen can render later.
+            session.prs = prs;
+            await saveWorkoutSession(session);
+          } catch {}
+          try {
+            import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+          } catch {}
+          // Dedupe kinds-per-exercise and prefer heaviest_weight when both fire.
+          const byExercise: Record<string, PRAchievement> = {};
+          const priority: Record<PRAchievement['kind'], number> = {
+            heaviest_weight: 3,
+            estimated_1rm: 2,
+            volume_record: 1,
+          };
+          for (const pr of prs) {
+            const cur = byExercise[pr.exercise_name];
+            if (!cur || priority[pr.kind] > priority[cur.kind]) {
+              byExercise[pr.exercise_name] = pr;
+            }
+          }
+          const top = Object.values(byExercise).slice(0, 5);
+          const lines = top.map((pr) => {
+            if (pr.kind === 'heaviest_weight') {
+              return `${pr.exercise_name} — ${pr.new_value} lb` + (pr.old_value > 0 ? ` (prev ${pr.old_value})` : '');
+            }
+            if (pr.kind === 'estimated_1rm') {
+              return `${pr.exercise_name} — est 1RM ${pr.new_value} lb`;
+            }
+            return `${pr.exercise_name} — set volume ${pr.new_value}`;
+          });
+          Alert.alert('🏆 New PR!', lines.join('\n'));
+        }
       }
     } catch (e) {
       console.warn('[workout] logWorkoutDone FAILED:', e);
@@ -2327,15 +2364,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     ) : null;
                   })()}
 
-                  {/* ── Pre-set coach hint (first set only, before anything is logged) ── */}
-                  {ex.sets.length === 0 && preSetHints[i] && (
-                    <View style={[styles.warmupNoteCard, { borderLeftWidth: 3, borderLeftColor: workoutPalette.strong }]}>
-                      <Text style={[styles.warmupNoteText, { fontWeight: '700' }]}>
-                        {preSetHints[i].intensityLabel.replace('_', ' ').toUpperCase()}
-                        {preSetHints[i].recommendedWeight ? ` · ~${Math.round(preSetHints[i].recommendedWeight!)} lb` : ''}
-                        {preSetHints[i].recommendedReps ? ` × ${preSetHints[i].recommendedReps}` : ''}
+                  {/* ── Pre-set coach hint (first set only, before
+                       anything is logged). Clean label + weight; no
+                       rationale text so it can't truncate. */}
+                  {ex.sets.length === 0 && preSetHints[i] && preSetHints[i].recommendedWeight != null && (
+                    <View style={{
+                      borderLeftWidth: 3,
+                      borderLeftColor: workoutPalette.strong,
+                      backgroundColor: workoutPalette.strong + '14',
+                      paddingHorizontal: 12, paddingVertical: 10,
+                      borderRadius: 8, marginTop: 8, marginBottom: 4,
+                    }}>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        Recommended weight
                       </Text>
-                      <Text style={styles.warmupNoteText}>{preSetHints[i].rationale}</Text>
+                      <Text style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
+                        {Math.round(preSetHints[i].recommendedWeight!)} lb
+                        {preSetHints[i].recommendedReps ? (
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary }}>
+                            {' '}× {preSetHints[i].recommendedReps}
+                          </Text>
+                        ) : null}
+                      </Text>
                     </View>
                   )}
 

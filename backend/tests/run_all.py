@@ -22,6 +22,8 @@ import traceback
 _TEST_MODULES = (
     "tests.test_calorie_calculator",
     "tests.test_meal_assembler",
+    # AI-free skeleton generator — replaces call_skeleton_ai by default.
+    "tests.test_deterministic_skeleton",
     "tests.test_workout_planner",
     "tests.test_workout_goals",
     "tests.test_workout_archetypes",
@@ -45,6 +47,15 @@ _TEST_MODULES = (
     # First-class NutritionPlan persistence: mirror of WorkoutPlan —
     # active-row bookkeeping, JSON round-trip, active-plan endpoint.
     "tests.test_nutrition_plan_persistence",
+    # PR detection: heaviest_weight / estimated_1rm / volume_record
+    # emitted from /workouts/complete after set rows are written.
+    "tests.test_pr_detection",
+    # Weekly digest: 7-day review with sessions/volume/PRs/nutrition.
+    "tests.test_weekly_digest",
+    # Plateau detection: 4-week flat 1RM → suggestion.
+    "tests.test_plateau_detection",
+    # Streak + compliance coaching.
+    "tests.test_streak",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
-  TextInput, Alert, Image, Linking,
+  TextInput, Alert, Image, Linking, Modal,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -123,6 +123,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // fresh users see "log a meal to start tracking" instead of nothing.
   const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+  const [plateaus, setPlateaus] = useState<import('../services/api').PlateauEntry[]>([]);
+  const [plateauModalVisible, setPlateauModalVisible] = useState(false);
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
@@ -170,6 +172,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           getOneRepMaxShowcase(authToken)
             .then(setOneRepMaxLifts)
             .catch(() => setOneRepMaxLifts([]))
+        );
+        // Plateau detection (Feature 5) — silent on error; empty list when API unreachable.
+        import('../services/api').then(({ getPlateaus }) =>
+          getPlateaus(authToken, 4)
+            .then(r => setPlateaus(r.plateaus || []))
+            .catch(() => setPlateaus([]))
         );
       }
     });
@@ -542,6 +550,35 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
 
           {/* Weight tracking moved to Body Check tab */}
+
+          {/* Plateaus — flag exercises stuck for 4+ weeks (Feature 5) */}
+          {plateaus.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setPlateauModalVisible(true)}
+              activeOpacity={0.7}
+              style={{
+                marginBottom: 16,
+                backgroundColor: tc.surfaceRaised,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: '#F59E0B55',
+                padding: 12,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+              }}>
+              <Ionicons name="alert-circle-outline" size={20} color="#F59E0B" />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                  {plateaus.length} exercise{plateaus.length === 1 ? '' : 's'} plateaued
+                </Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                  Tap for suggestions
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
+            </TouchableOpacity>
+          )}
 
           {/* Estimated 1RM showcase — deterministic Epley estimates
               from recent logged sessions for the main compound lifts.
@@ -1821,6 +1858,49 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
         }}
       />
+
+      {/* Plateau modal — listing each stuck exercise with a suggestion (Feature 5) */}
+      <Modal
+        visible={plateauModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPlateauModalVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 24 }}>
+          <View style={{ backgroundColor: tc.surface, borderRadius: 16, padding: 20, maxHeight: '80%' }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary }}>Plateaus</Text>
+              <TouchableOpacity onPress={() => setPlateauModalVisible(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={22} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView>
+              {plateaus.map((p, i) => {
+                const suggestionCopy =
+                  p.suggestion === 'deload'
+                    ? 'Try a deload week: cut volume by 30-40% and come back fresh next week.'
+                    : p.suggestion === 'swap'
+                    ? 'Swap this exercise for a variation — the current movement has run its course.'
+                    : 'Add volume: 1-2 extra sets or an additional day hitting this lift.';
+                return (
+                  <View
+                    key={`${p.exercise_name}-${i}`}
+                    style={{ marginBottom: 14, backgroundColor: tc.background, padding: 12, borderRadius: 10 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+                      {p.exercise_name}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
+                      est 1RM {Math.round(p.current_1rm)} lb · flat for {p.weeks_stuck} weeks
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textPrimary, marginTop: 6, lineHeight: 16 }}>
+                      {suggestionCopy}
+                    </Text>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

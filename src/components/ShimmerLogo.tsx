@@ -47,7 +47,11 @@ export default function ShimmerLogo({
   });
 
   return (
-    <Animated.View style={[{ width, height, overflow: 'hidden' }, style]}>
+    <Animated.View
+      testID="shimmer-logo"
+      accessibilityLabel="shimmer-logo"
+      style={[{ width, height, overflow: 'hidden' }, style]}
+    >
       <Image source={logoSource} style={{ width, height }} resizeMode="contain" />
       <Animated.View
         pointerEvents="none"

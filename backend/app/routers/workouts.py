@@ -839,7 +839,37 @@ def mark_workout_complete(
         .where(WorkoutCompletion.focus_label == body.focus_label)
     ).first()
     logger.info(f"[workouts/complete] VERIFY: row={'FOUND' if verify else 'MISSING'} resolved_fatigue={bool(verify.resolved_muscle_fatigue) if verify else 'N/A'}")
-    return {"ok": True, "structured_persisted": bool(session_rows_created)}
+
+    # ── PR detection ──
+    # After the session row is committed, compare each logged set to the
+    # user's all-time best for the same exercise. Best-effort: a failure
+    # here must never block a successful workout completion.
+    prs: list[dict] = []
+    if body.exercises and session_rows_created:
+        try:
+            from app.services.workout.pr_detection import detect_prs
+            session_row = db.exec(
+                select(WorkoutSession)
+                .where(WorkoutSession.user_id == current_user.id)
+                .where(WorkoutSession.workout_date == body.workout_date)
+                .where(WorkoutSession.focus == body.focus_label)
+            ).first()
+            if session_row is not None:
+                prs = detect_prs(current_user.id, session_row.id, db)
+                if prs:
+                    logger.info(
+                        f"[workouts/complete] PRs detected user={current_user.id} "
+                        f"session={session_row.id} count={len(prs)}"
+                    )
+        except Exception as e:
+            logger.info(f"[workouts/complete] PR detection failed (non-fatal): {e}")
+            prs = []
+
+    return {
+        "ok": True,
+        "structured_persisted": bool(session_rows_created),
+        "prs": prs,
+    }
 
 
 @router.get("/status", response_model=WorkoutStatusResponse)
@@ -964,11 +994,43 @@ def sync_in_progress_workout(
                 total_sets += 1
         db.commit()
         logger.info(f"[workouts/sync] user={current_user.id} date={body.workout_date} focus={body.focus_label} exercises={len(body.exercises)} sets={total_sets}")
-        return {"ok": True, "session_id": session_row.id, "exercises": len(body.exercises), "sets": total_sets}
+
+        # PR detection on mid-workout sync. Fire-and-forget from the
+        # client's POV — we still return the payload so a client that
+        # wants to show a toast right after a heavy set can.
+        prs: list[dict] = []
+        try:
+            from app.services.workout.pr_detection import detect_prs
+            prs = detect_prs(current_user.id, session_row.id, db)
+        except Exception as e:
+            logger.info(f"[workouts/sync] PR detection failed (non-fatal): {e}")
+            prs = []
+
+        return {
+            "ok": True,
+            "session_id": session_row.id,
+            "exercises": len(body.exercises),
+            "sets": total_sets,
+            "prs": prs,
+        }
     except Exception as e:
         db.rollback()
         logger.warning(f"[workouts/sync] FAILED user={current_user.id} date={body.workout_date} focus={body.focus_label}: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=f"Sync failed: {type(e).__name__}")
+
+
+@router.get("/streak")
+def get_streak(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return the user's training streak + compliance summary (Feature 8).
+
+    Deterministic — reads ``WorkoutCompletion`` + ``UserDayState`` and
+    rolls up current/longest streak plus 7/30-day compliance.
+    """
+    from app.services.workout.streak import compute_streak_summary
+    return compute_streak_summary(current_user.id, db=db)
 
 
 @router.get("/completions")

@@ -1,5 +1,5 @@
 .PHONY: start tunnel stop reset-db wait-backend test dev \
-        deploy deploy-backend deploy-ios smoke-prod
+        deploy deploy-backend deploy-ios smoke-prod smoke-mobile
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -161,6 +161,15 @@ deploy: deploy-backend deploy-ios
 	@echo ""
 	@echo "Full deploy kicked off. Backend is already live; iOS will appear"
 	@echo "in TestFlight once Apple finishes processing."
+
+# ── Smoke-test the mobile app via Maestro ────────────────────────────────────
+smoke-mobile:
+	@echo "Running Maestro smoke flow (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/signup-and-regen.yaml
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

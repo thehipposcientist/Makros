@@ -29,13 +29,19 @@ User Profile -> GoalProfile -> WeeklyRecipe -> DayArchetype -> Slots -> Exercise
 - `activity_impact.py` — 12-muscle-group fatigue model with decay, negative fatigue for recovery/mobility, derived readiness; includes Active activities (yard work, chopping wood, moving, gardening, cleaning, construction, shoveling, playing w/ kids, dancing) and expanded sports (pickleball, surfing, skiing)
 - `fitness_score.py` — 4-pillar composite fitness score (strength 30, cardio 30, consistency 25, recovery 15)
 - `cardio.py` — classifies exercises as intervals/steady/easy for conditioning days
-- `plan_review.py` — optional AI review of generated plans; `build_plan_brief` now includes `user_preferred_split` + `skipped_days_7d` so the reviewer prompt can reference them; `_rehydrate_derived_fields` rebuilds setScheme/targetWeightLbs/recommendation meta on any patched exercise (swap/add/sets_reps) so AI-touched exercises stay schema-canonical
+- `plan_review.py` — AI plan review is **PERMANENTLY DISABLED** (both workout and nutrition). The code paths remain for diagnostics (`build_plan_brief` still includes `user_preferred_split` + `skipped_days_7d`) but `routers/ai/plans.py` no longer invokes the reviewer. The deterministic planner output is shipped as-is — `PLAN_REVIEW_ENABLED` / `NUTRITION_REVIEW_ENABLED` env flags are no-ops
 - `plan_ai_regenerate.py` — AI-assisted plan modifications via coach chat; emits through `build_planner_exercise` too
+- `ai_first_time_weight.py` — AI starting-weight rec for first-time exercises when the layered transfer pipeline (substitution_group → pattern → muscle_bucket) finds nothing. Two paths: **has-history** (recent `primary_muscle` sessions shown to the model) and **no-history profile fallback** (experience + bodyweight + target rep range only). Returns weight only (rounded to 2.5 lb), stamped `weightRecommendationSource = 'ai_first_time'`. Any error → `None` so caller falls through to deterministic defaults
 
 ### Weekly Recipe Repair + Rotation
+- `PLANNER_VERSION` (weekly_recipe.py) — stamped on every `WorkoutPlan` row + returned to the client. Client-side `isPlanStale` compares its expected version; mismatch triggers silent background regen. Bump on archetype/slot/rep/rest/adjacency rule changes. Format `YYYY.MM.DD.nn`
 - `_repair_adjacent_duplicates` — three-tier sweep. Tier A: strict safe swap (no new conflicts). Tier B: net-reducing swap (may create a transient conflict elsewhere). Tier C: forced triple-break — guarantees no 3-in-a-row same family survives even in pathological rotations. Runs after interleaving cardio AND after recent-focus rotation, and again after intensity-spacing
 - Recent-focus rotation uses fine families (push/pull/legs) when available, coarse buckets otherwise (auto-detected)
 - U/L forced-even-lift-days rule: when `_lifting_plus_cardio_recipe` lands on an odd number of lift days with U/L split, it trades a recovery day (or one cardio day) for a lift so Upper/Lower stay balanced. Fat-loss 6-day example: 3 lifts + 2 cond + 1 recov → 4 lifts + 2 cond
+- **Body_recomp on U/L** = 2 heavy + 4 hypertrophy (no longer 4 heavy days) — protects recovery while preserving growth stimulus
+- **7-day allocation rule** — add cardio, do NOT steal recovery. A 7th day becomes a cardio/mobility day; the one guaranteed recovery day at 7d stays intact
+- **Mobility pinned to end of week** — the last-day-of-week sweep places MOBILITY_FLOW / RECOVERY_EASY at the tail so users end the week on a restorative note (`# ── Pin mobility / recovery to end of week ──`)
+- **Split-identity revert guards** — after every post-processing pass (adjacency repair, anchor swaps, intensity spacing) `_preserves_split_identity` checks the split still reads as its declared type (PPL / U/L / FB). If a swap broke split identity the recipe is reverted to pre-pass state
 
 ### Fatigue System (12 Muscle Groups)
 ```
@@ -67,14 +73,16 @@ chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, calves, core
 
 Coverage: lower_back, knee, shoulder, hip, hamstring, ankle, achilles, elbow, tennis_elbow, golfer_elbow, wrist, chest, neck. Body part picker (not free text) with pre-mapped muscle groups. `InjuryEntry` has: muscleGroups, severity, estimatedRecoveryDays, estimatedRecoveryDate, statusUpdatedAt.
 
-### Nutrition System (AI + Deterministic)
-- AI generates meal templates via structured JSON prompts (gpt-4o-mini)
+### Nutrition System (AI skeleton + Deterministic enrichment)
+- AI generates the **meal skeleton** via structured JSON prompts (gpt-4o-mini) — meal titles + item names + rough portions
+- USDA FoodData Central enriches each item post-skeleton (calories + macros from real food records, AI fallback)
 - Deterministic macro solver calculates targets from TDEE
-- USDA FoodData Central for food search (AI fallback)
+- `allergen_filter.py` runs AFTER AI generation as a hard safety net — scans each item name against keyword lists per category (dairy, gluten, tree_nut, peanut, egg, soy, shellfish, fish, sesame) and strips matches
 - Meal routines, preserved meals, per-day editing
 - `food_quality` classification: keyword-based client-side, category-based on backend plan enrichment
 - Meal edits auto-persist to AsyncStorage (survive app kill)
 - Saved meals no longer rejected by micros check on reload
+- AI plan review PERMANENTLY DISABLED on the nutrition side too — the generate-and-enrich path ships direct to the client
 
 ### Meal History System
 - `backend/app/services/nutrition/meal_history.py` — 6 functions: `log_meal_from_plan`, `get_meal_history`, `get_rolling_averages`, `get_common_meals`, `get_nutrition_patterns`, `get_meal_insights`
@@ -107,6 +115,21 @@ Coverage: lower_back, knee, shoulder, hip, hamstring, ankle, achilles, elbow, te
 ### History Plumbing
 - `prev_focuses` — raw focus labels from recent completions, surfaced on the single-day generator and threaded through the client. Normalized to `recent_focus_buckets` (coarse) and `recent_focus_families` (fine: push/pull/legs) which both feed `generate_weekly_recipe` — so a user who just hit push yesterday gets rotated away from push on day 0
 - History brief includes `user_preferred_split` + `skipped_days_7d` for reviewer context
+
+### Plan Persistence (DB = source of truth)
+- `WorkoutPlan` + `NutritionPlan` DB tables (models.py) — one row per user, stamped with `planner_version` and `created_at`. Every plan generation writes here FIRST, then mirrors to AsyncStorage
+- Hydration policy: client loads from DB via `/ai/plan` / `/ai/nutrition-plan` endpoints, then hot-caches in AsyncStorage (`aiWorkoutPlan`, `aiNutritionPlans`) for zero-flicker boot. On conflict, DB wins
+- AsyncStorage is a cache, not a source of truth — safe to wipe on regen
+- Staleness: `isPlanStale` (planCacheReset.ts) flags mismatched `planner_version` or plans older than 30d → background regen
+- Cross-device sync: two devices logged into the same account both pull the latest `WorkoutPlan` row on app-open, so regens propagate automatically
+- Test coverage: `test_workout_plan_persistence.py`, `test_nutrition_plan_persistence.py`
+
+### Scoped Cache Clear (planCacheReset.ts)
+- Three helpers: `clearWorkoutCache()`, `clearMealCache()`, `clearAllPlanCache()`
+- Substring-matched domain patterns (`workoutDayState_`, `mealPlan_`, `preservedMeal_`, ...) so per-date suffix keys are caught without enumeration
+- `PRESERVED_KEYS` safelist survives every wipe: auth tokens, userProfile, weightEntries, workoutHistory, themePreference, metaData_v1
+- Called by `applyPlanResult` BEFORE writing the new plan so a workout-only regen doesn't wipe meal state, and vice versa
+- Goal changes call `clearAllPlanCache()` (both scopes)
 
 ## File Structure
 ```
@@ -145,12 +168,15 @@ backend/
 
 ### UI Helpers + Conventions
 - `shouldHideWeight` / `shouldHideReps` (src/utils/exerciseDisplay.ts) — single source of truth for bodyweight + stretch exercise UI. Active workout, history, plan cards all call the same helper so columns hide consistently
-- Day card muscle chips: read `primary_muscle` directly from the exercise now (not re-classified). Mobility / recovery days collapse to a single "Mobility" or "Recovery" label instead of listing every muscle
-- Switch Day picker: every target focus is selectable; each shows a readiness chip and a conflict warning when current fatigue or skip history would make it a poor pick. The planner still swaps in the chosen focus and re-runs adjacency repair
+- Per-exercise muscle chips: `WorkoutCard` reads `primary_muscle` directly from the exercise payload (no re-classification). Day-card muscle-chip aggregation is **family-filtered to the day's focus** — a push day shows chest/shoulders/triceps, not every incidental muscle. Mobility / recovery days collapse to a single "Mobility" or "Recovery" label
+- Switch Day picker (allow-with-warnings): every target focus is selectable; each shows a readiness chip and a conflict warning when current fatigue or skip history would make it a poor pick. The planner still swaps in the chosen focus and re-runs adjacency repair on the whole week
+- Switch Exercise overlap meter (ActiveWorkoutScreen): replacements are ranked 0-100% by muscle overlap with the original exercise. Color tiers: >=80% green, >=60% amber, lower red. Logged sets carry over on swap
+- Regen overlays use `ShimmerLogo` for loading state — the Thallo logo shimmers while backend generates the new plan (no generic spinner)
 
 ### Onboarding / Goal Flow
-- ACID-style finalize: `user_username` and `LAST_USER_ID_KEY` writes are deferred to the end of the flow so a crash mid-onboarding won't leave the app in a half-registered state
+- ACID-style finalize: `authToken`, `user_username`, `LAST_USER_ID_KEY`, and profile writes are all deferred to the end of the flow so a crash mid-onboarding won't leave the app in a half-registered state
 - Pace picker lives on the goal step (conservative / moderate / aggressive) next to the goal chat input
+- **Target weight is required** for any weight-change goal (fat_loss / muscle_gain / body_recomp / toning). The Next button blocks until set, with message "Set a target weight — needed for your calorie target and ETA"
 - Auto-split reason: when the planner auto-picks a split, the UI shows the rationale (e.g. "4 days intermediate muscle_gain → Upper/Lower")
 - ETA normalization: `GOAL_TO_BUCKET` (src/utils/goalEstimate.ts) maps raw goal ids to the calorie/timeline bucket used for ETA math
 
@@ -178,7 +204,7 @@ docker compose build backend && docker compose up -d backend  # Rebuild
 npx expo start --clear                        # Start frontend
 docker compose logs -f backend                # Backend logs
 docker exec thallo-pg psql -U thallo -d thallo  # DB shell
-make test                                     # Run all backend tests (10 modules, 183 tests)
+make test                                     # Run all backend tests (18 modules, ~305 tests via run_all.py)
 ```
 
 ## Environment Variables (backend/.env)
@@ -189,8 +215,8 @@ USDA_FDC_API_KEY=<get free key from https://fdc.nal.usda.gov/api-key-signup>
 MODEL_CHAT=gpt-4o-mini
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
-PLAN_REVIEW_ENABLED=1
-NUTRITION_REVIEW_ENABLED=1
+PLAN_REVIEW_ENABLED=0        # no-op — AI plan review permanently disabled
+NUTRITION_REVIEW_ENABLED=0   # no-op — AI nutrition review permanently disabled
 ```
 
 ## Key Design Decisions
@@ -208,6 +234,10 @@ NUTRITION_REVIEW_ENABLED=1
 - Exercise dislikes persist and are excluded from future plan generation
 - Meal history auto-logged on check-off, powers rolling averages, common meals, and coaching insights
 - Plan generation loop: staleness check clears markers >5 min old; fresh day persisted to AsyncStorage
+- Plan persistence: `WorkoutPlan` + `NutritionPlan` DB tables are source of truth; AsyncStorage is a hot cache. `PLANNER_VERSION` mismatch auto-regens in background
+- Cache clear is scoped by domain (`clearWorkoutCache` / `clearMealCache` / `clearAllPlanCache`) so a workout regen doesn't wipe meal edits
+- AI plan review (workout + nutrition) is PERMANENTLY DISABLED — deterministic path ships direct to client
+- AI first-time weight rec returns weight only, with has-history + no-history profile fallbacks; any error drops through to deterministic tier-6/7 defaults
 
 ## Supported Goals
 fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, hyrox, toning, maintain, general_health, longevity, flexibility, stress_relief (longevity + healthy_aging + heart_health route to general_health profile via `_PROFILE_OVERRIDES` in `goal_profiles.py`; flexibility / stress_relief have dedicated mobility + recovery profiles)

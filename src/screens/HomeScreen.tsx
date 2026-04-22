@@ -39,6 +39,8 @@ import NutritionCard from '../components/NutritionCard';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
 import RecoveryCard from '../components/RecoveryCard';
+import WeeklyDigestCard from '../components/WeeklyDigestCard';
+import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
@@ -1239,6 +1241,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todayDone, setTodayDone]         = useState(false);
   const [completedDates, setCompletedDates] = useState<Set<string>>(new Set());
   const [fatigueNotice, setFatigueNotice] = useState<string | null>(null);
+  // In-progress workout detection — the ActiveWorkoutScreen persists
+  // `activeWorkoutSets` and `activeWorkoutStartTime` on every set log.
+  // If the user force-quits mid-workout, those keys survive. The resume
+  // banner below offers a direct path back into the workout instead of
+  // making them find today's day card and tap Start again.
+  const [resumeInfo, setResumeInfo] = useState<{
+    focus: string;
+    setsLogged: number;
+    startedAt: number;  // ms epoch
+  } | null>(null);
   const [skippedDates, setSkippedDates]   = useState<Set<string>>(new Set());
   // Dropped skips = user chose "skip entirely" (don't push to tomorrow).
   // get7DaySchedule advances the workout index for these dates.
@@ -1407,6 +1419,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Next-day unlogged-meals prompt. Fires once per calendar day when
   // yesterday had a plan with unchecked meals and the user hasn't dismissed
   // the prompt. Captures otherwise-lost data for rolling nutrition averages.
+  // Detect in-progress workout on mount so the resume banner can fire.
+  // `activeWorkoutSets` + `activeWorkoutStartTime` are written by
+  // ActiveWorkoutScreen on every set log and survive app force-close.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [rawSets, rawStart] = await Promise.all([
+          AsyncStorage.getItem('activeWorkoutSets'),
+          AsyncStorage.getItem('activeWorkoutStartTime'),
+        ]);
+        if (cancelled) return;
+        if (!rawSets || !rawStart) { setResumeInfo(null); return; }
+        const parsed: Array<{ name: string; sets: any[] }> = JSON.parse(rawSets);
+        const setsLogged = parsed.reduce((n, ex) => n + (ex.sets?.length ?? 0), 0);
+        if (setsLogged <= 0) { setResumeInfo(null); return; }
+        const startedAt = parseInt(rawStart, 10);
+        if (!Number.isFinite(startedAt)) { setResumeInfo(null); return; }
+        // Expire after 24h — beyond that it's almost certainly stale.
+        if (Date.now() - startedAt > 24 * 3600 * 1000) {
+          await AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+          await AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+          setResumeInfo(null);
+          return;
+        }
+        // Infer focus from today's plan — `schedule[0].workout.focus`.
+        const todayFocus = workoutPlan?.days?.[0]?.focus ?? 'workout';
+        setResumeInfo({ focus: todayFocus, setsLogged, startedAt });
+      } catch {
+        setResumeInfo(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [workoutPlan, planRefreshKey]);
+
   useEffect(() => {
     if (unloggedPromptCheckedRef.current) return;
     if (!userProfile || !authToken) return;
@@ -3751,6 +3798,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
+            {/* Streak + consistency widget (Feature 8) */}
+            {workoutSubTab === 'plan' && authToken && (
+              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.theme} />
+            )}
+
+            {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
+            {workoutSubTab === 'plan' && authToken && (
+              <WeeklyDigestCard authToken={authToken} themeName={userProfile.theme} />
+            )}
+
             {/* Weekly check-in countdown */}
             {workoutSubTab === 'plan' && daysUntilCheckin != null && (
               <TouchableOpacity
@@ -3798,6 +3855,65 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
               <RecoveryCard data={readinessScore} themeName={userProfile.themePreference} compact />
+            )}
+
+            {/* Resume workout banner — shown when the user force-quit
+                mid-workout. Jumps straight back into ActiveWorkoutScreen
+                with all logged sets intact. */}
+            {workoutSubTab === 'plan' && resumeInfo && workoutPlan?.days?.[0] && (
+              <TouchableOpacity
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 10,
+                  padding: 14, borderRadius: 12, marginBottom: 10,
+                  backgroundColor: workoutPalette.strong + '18',
+                  borderWidth: 1.5, borderColor: workoutPalette.strong + 'AA',
+                }}
+                onPress={() => {
+                  import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+                  if (workoutPlan?.days?.[0]) onStartWorkout(workoutPlan.days[0]);
+                }}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="play-circle" size={28} color={workoutPalette.strong} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '800', color: workoutPalette.strong }}>
+                    Resume {resumeInfo.focus}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textSecondary, marginTop: 2 }}>
+                    {resumeInfo.setsLogged} set{resumeInfo.setsLogged === 1 ? '' : 's'} logged
+                    {' · '}
+                    started {(() => {
+                      const mins = Math.max(0, Math.round((Date.now() - resumeInfo.startedAt) / 60000));
+                      if (mins < 60) return `${mins} min ago`;
+                      const hours = Math.floor(mins / 60);
+                      return `${hours}h ${mins % 60}m ago`;
+                    })()}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={async () => {
+                    Alert.alert(
+                      'Discard in-progress workout?',
+                      'Your logged sets for this session will be cleared.',
+                      [
+                        { text: 'Keep', style: 'cancel' },
+                        {
+                          text: 'Discard',
+                          style: 'destructive',
+                          onPress: async () => {
+                            await AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+                            await AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+                            setResumeInfo(null);
+                          },
+                        },
+                      ],
+                    );
+                  }}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Ionicons name="close" size={18} color={themeColors.textMuted} />
+                </TouchableOpacity>
+              </TouchableOpacity>
             )}
 
             {/* Fatigue notice — shown when the backend auto-reduced

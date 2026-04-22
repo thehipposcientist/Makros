@@ -1,0 +1,51 @@
+# Login helper flow.
+#
+# Usage:
+#   maestro test \
+#     -e TEST_EMAIL=you@example.com \
+#     -e TEST_PASSWORD=your-password \
+#     .maestro/flows/login.yaml
+#
+# Can also be invoked from another flow via runFlow:
+#   - runFlow:
+#       file: login.yaml
+#       env:
+#         TEST_EMAIL: existing@thallo.test
+#         TEST_PASSWORD: SmokeTest!2345
+#
+# If TEST_EMAIL / TEST_PASSWORD env vars are missing, the flow fails fast
+# instead of silently logging in as the wrong user.
+
+appId: com.thallo.app
+name: login
+tags:
+  - helper
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: false      # preserve any existing session first
+    clearKeychain: false
+
+# If AuthScreen is visible, run the login steps. Otherwise assume we're
+# already signed in and skip straight to asserting the home tab.
+- runFlow:
+    when:
+      visible: "Sign Up"
+    commands:
+      # AuthScreen default mode is login — no toggle needed.
+      - assertVisible: "Login"
+
+      # Inputs matched by placeholder on both iOS and Android.
+      - tapOn: "Email"
+      - inputText: ${TEST_EMAIL}
+
+      - tapOn:
+          text: "^Password$"
+      - inputText: ${TEST_PASSWORD}
+
+      - tapOn: "Login"
+
+- extendedWaitUntil:
+    visible: "Plan"
+    timeout: 30000

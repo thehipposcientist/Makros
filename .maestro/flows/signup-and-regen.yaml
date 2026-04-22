@@ -1,0 +1,193 @@
+# Thallo smoke flow — signup, onboarding, plan gen, regen.
+#
+# Target class of bugs this catches:
+#   - Backend returns the right plan but UI paints a stale one (cache staleness)
+#   - Goal-save double-confirm modal chain (pendingSave / "Update Plan?")
+#   - Missing inline pace picker on goal step
+#   - Missing target-weight required asterisk / direction rule bypass
+#   - Plan card not rendering a focus, or rendering back-to-back same-family focus
+#   - ShimmerLogo not showing during regen (i.e. silent blocking work)
+#   - Start Workout button not navigating to ActiveWorkoutScreen
+#
+# Runs against:
+#   - Expo Go dev (appId: host.exp.Exponent)  — flip appId below if using Expo Go
+#   - Dev client / release build (appId: com.thallo.app)
+#
+# Android: same bundle id convention; swap to com.thallo.app on both OSes.
+
+appId: com.thallo.app
+name: signup-and-regen
+tags:
+  - smoke
+  - critical
+
+# Generate a fresh email each run so signup doesn't collide with existing users.
+# Maestro supports JS expressions in ${...} via output.* / env.* — we use MAESTRO_RUN_ID
+# or current millis via a small JS block below.
+---
+- evalScript: |
+    var ts = Date.now().toString();
+    output.testEmail    = 'smoke+' + ts + '@thallo.test';
+    output.testUsername = 'smoke' + ts;
+    output.testPassword = 'SmokeTest!2345';
+
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# AuthScreen defaults to login mode — switch to Sign Up first.
+- assertVisible: "Sign Up"
+- tapOn: "Sign Up"
+
+# TextInputs are matched by their placeholder text on both iOS and Android.
+- tapOn: "Email"
+- inputText: ${output.testEmail}
+
+- tapOn: "Username"
+- inputText: ${output.testUsername}
+
+- tapOn:
+    text: "^Password$"   # avoid matching "Confirm password"
+- inputText: ${output.testPassword}
+
+- tapOn: "Confirm password"
+- inputText: ${output.testPassword}
+
+- hideKeyboard
+
+# AuthScreen uses "Get Started" as the submit label in signup mode (the
+# "Sign Up" label is only on the mode toggle above). This distinction matters
+# — tapping "Sign Up" a second time would just re-toggle the form.
+- tapOn: "Get Started"
+
+# ── Onboarding — goal step ────────────────────────────────────────────────────
+- assertVisible: "What's Your Goal?"
+
+# Tap the Lose Fat card via its semantic testID (stable across copy tweaks).
+- tapOn:
+    id: "goal-card-lose_fat"
+
+# Key assertion: inline pace picker appears on the same step when a
+# pace-aware goal is selected. If this disappears, ETA calc breaks silently.
+- assertVisible:
+    id: "pace-picker-inline"
+- assertVisible: "How fast?"
+
+# Target weight is required for lose_fat — asterisk + the "Required" hint.
+- assertVisible: "Target weight"
+- assertVisible: "Required — we need this to build your calorie target and ETA."
+
+# Direction rule: target weight must be LESS than current for fat loss.
+# Default current weight defaults aren't set yet, so pick a plausible low target
+# that will still pass the < current check on the physicalStats step.
+- tapOn:
+    text: "e.g. 175"
+- inputText: "160"
+- hideKeyboard
+
+# Pick moderate pace explicitly so the downstream calorie delta is deterministic.
+- tapOn: "Moderate"
+
+- tapOn: "Next"
+
+# ── Physical stats ────────────────────────────────────────────────────────────
+- assertVisible: "About You"
+# We keep this light — just advance. Defaults are plausible for a smoke test.
+# If physicalStats gains a hard-required field in the future, add taps here.
+- tapOn: "Next"
+
+# ── Training days ─────────────────────────────────────────────────────────────
+- assertVisible: "Training Schedule"
+# Pick 4 days — common case, triggers Upper/Lower or PPL depending on goal.
+# The "1..7" buttons all render as single digits, so match exact + use the
+# unique helper copy ("3–4 days is ideal for most people.") as the post-tap
+# assertion to confirm we actually hit 4 and not a duplicate.
+- tapOn:
+    text: "^4$"
+- assertVisible: "3–4 days is ideal for most people."
+- tapOn: "Next"
+
+# ── Equipment ─────────────────────────────────────────────────────────────────
+- assertVisible: "Your Equipment"
+# Pick a couple common items so the planner has something to work with.
+- tapOn: "Dumbbells"
+- tapOn: "Barbell"
+- tapOn: "Next"
+
+# ── Foods ─────────────────────────────────────────────────────────────────────
+- assertVisible: "Your Kitchen"
+# Foods step is optional — just finish.
+- tapOn: "Get Started"
+
+# ── Plan generation ───────────────────────────────────────────────────────────
+# Plan gen can take 30–90s. ShimmerLogo should be on screen during the wait.
+- extendedWaitUntil:
+    visible:
+      id: "shimmer-logo"
+    timeout: 15000
+
+# Wait for HomeScreen to settle. We anchor on a label that only the home
+# layout renders — the bottom nav "Plan" tab is a safe bet.
+- extendedWaitUntil:
+    visible: "Plan"
+    timeout: 120000
+
+# ── Assert plan card renders with a focus ─────────────────────────────────────
+# One of these focus words must be visible somewhere on the Plan tab.
+# (Upper/Lower/Push/Pull/Legs/Full are the common split labels.)
+- assertVisible:
+    text: "(?i)(Upper|Lower|Push|Pull|Legs|Full Body|Chest|Back|Recovery|Mobility|Conditioning)"
+
+# Heuristic guard against back-to-back same-family focuses.
+# If the UI ever renders "Push ... Push" on consecutive day cards, this fails.
+# We look for the literal double-label on the same line (rare false positive).
+- assertNotVisible:
+    text: "Push Push"
+- assertNotVisible:
+    text: "Pull Pull"
+- assertNotVisible:
+    text: "Legs Legs"
+
+# ── Regen via Settings → equipment toggle ─────────────────────────────────────
+- tapOn: "Settings"
+
+# Toggle one equipment item off/on to force a plan regen.
+# EditProfileScreen is rendered inline (noHeader) from the Settings tab,
+# so the Save button uses testID "edit-profile-save" only when noHeader=false.
+# When embedded, changes auto-save via parent's onSave on tab navigation —
+# but we want to explicitly trigger the regen modal, so we tap the Plan tab
+# which flushes pending changes through handleSaveProfile → pendingSave modal.
+- tapOn: "Dumbbells"   # deselect
+
+# Navigate away to trigger auto-save → confirm "Update Plan?" modal.
+- tapOn: "Plan"
+
+# If the parent gates the save behind a confirm modal (workout-only edit path):
+- runFlow:
+    when:
+      visible: "Regenerate Workout Plan?"
+    commands:
+      - tapOn: "Regenerate"
+
+# Assert the shimmer overlay appears during regen.
+- extendedWaitUntil:
+    visible:
+      id: "shimmer-logo"
+    timeout: 10000
+
+# Wait for regen to complete.
+- extendedWaitUntil:
+    visible: "Start Workout"
+    timeout: 120000
+
+# ── Start Workout → ActiveWorkoutScreen ───────────────────────────────────────
+- tapOn: "Start Workout"
+
+# ActiveWorkoutScreen shows a warmup acknowledgement "Start Workout" button too.
+# Confirm we actually navigated (exercise list, rest timer, or warmup copy visible).
+- extendedWaitUntil:
+    visible:
+      text: "(?i)(Warm[- ]?up|Exercise|Rest|Set)"
+    timeout: 15000
