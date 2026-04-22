@@ -19,8 +19,12 @@ falls back to the original deterministic plan.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Types ────────────────────────────────────────────────────────────
@@ -206,6 +210,149 @@ _REGEN_JSON_SCHEMA = {
         },
     },
 }
+
+
+# ── Post-assembly adjacency repair ───────────────────────────────────
+#
+# The deterministic planner has a four-tier adjacency repair sweep
+# inside `weekly_recipe._repair_adjacent_duplicates`, but it operates
+# on `DayArchetype` enums. AI-regenerated plans bypass that pipeline
+# entirely — the LLM emits free-form focus strings ("Push", "Upper",
+# "Back & Biceps") and the plan ships directly to the client. When the
+# AI puts two same-family days back to back (Push → Push, or Pull →
+# Upper for a U/L user), nothing downstream catches it.
+#
+# This helper re-implements adjacency repair at the focus-string
+# layer: it normalizes each day's focus to a focus family via
+# `normalize_focus_to_family`, expands to the coarse bucket via
+# `_FINE_TO_COARSE`, and swaps entire day dicts (preserving every
+# exercise) to break any same-family OR same-bucket adjacency. Each
+# swap preserves the exact exercises, set schemes, and load metadata —
+# only the position in the `days` list changes.
+#
+# Returns `(repaired_days, ok)` where `ok` is True iff the final
+# sequence has zero adjacency violations at both family and bucket
+# levels. Callers should fall back to the deterministic plan when
+# `ok=False`.
+
+
+def _repair_focus_adjacency(days: list[dict]) -> tuple[list[dict], bool]:
+    """Swap day positions to break same-family / same-bucket adjacencies.
+
+    Works on the AI-assembled day dicts directly — the exercises, set
+    schemes, and load metadata in each day are preserved; only the
+    ordering inside the `days` list changes.
+
+    Adjacency is checked at two granularities:
+      1. Focus family (push / pull / legs / upper / lower / full_body /
+         cardio / mobility / recovery) — catches Push → Push, Legs →
+         Legs, etc.
+      2. Coarse bucket (upper_body / lower_body / full_body / cardio /
+         mobility / recovery) — catches Pull → Upper for U/L users
+         where both collapse to `upper_body`.
+
+    Unknown focus labels (normalize returns None) are skipped for
+    adjacency purposes — we can't know what they are, and refusing to
+    place an unknown next to anything would over-constrain the solver.
+
+    Strategy mirrors the deterministic `_repair_adjacent_duplicates`
+    but simplified for free-form focus strings:
+      - Scan left-to-right for adjacent-violating pairs (i-1, i).
+      - Try swapping day `i` with every other position `j != i-1`; pick
+        the swap that strictly reduces the total violation count.
+      - If no improving swap exists, also try swapping position `i-1`.
+      - Bounded loop of at most `len(days)` iterations.
+
+    Returns (repaired_days, ok). `ok` is True iff zero violations remain.
+    """
+    from .focus_normalize import normalize_focus_to_family
+    from .weekly_recipe import _FINE_TO_COARSE
+
+    def _family(day: dict) -> Optional[str]:
+        return normalize_focus_to_family(day.get("focus") or "")
+
+    def _bucket(fam: Optional[str]) -> Optional[str]:
+        if fam is None:
+            return None
+        return _FINE_TO_COARSE.get(fam, fam)
+
+    # "Coarse" fine-family labels — these collapse a whole coarse bucket
+    # into a single day (Upper hits push AND pull; Lower hits legs).
+    # Adjacency between a coarse split label and any fine family in the
+    # same bucket is a violation (Pull → Upper means upper-body
+    # muscles trained two days in a row). A fine-to-fine coarse match
+    # inside PPL (Push → Pull) is NOT a violation — PPL legitimately
+    # alternates within the upper_body bucket.
+    _COARSE_SPLIT_FAMILIES = {"upper", "lower"}
+
+    def _is_violation(fa_prev: Optional[str], fa_curr: Optional[str]) -> bool:
+        if fa_prev is None or fa_curr is None:
+            return False
+        if fa_prev == fa_curr:
+            return True
+        bk_prev = _bucket(fa_prev)
+        bk_curr = _bucket(fa_curr)
+        if bk_prev is None or bk_prev != bk_curr:
+            return False
+        # Same coarse bucket, different fine families. Violation only
+        # when one side is a coarse split label (upper/lower) — Push →
+        # Pull inside PPL is deliberately allowed.
+        return (
+            fa_prev in _COARSE_SPLIT_FAMILIES
+            or fa_curr in _COARSE_SPLIT_FAMILIES
+        )
+
+    def _violations(lst: list[dict]) -> int:
+        total = 0
+        for i in range(1, len(lst)):
+            if _is_violation(_family(lst[i - 1]), _family(lst[i])):
+                total += 1
+        return total
+
+    out = list(days)
+    max_iters = len(out) + 2
+    for _ in range(max_iters):
+        start = _violations(out)
+        if start == 0:
+            break
+        progress = False
+        # Walk left-to-right, find first violating pair, try to repair.
+        for i in range(1, len(out)):
+            if not _is_violation(_family(out[i - 1]), _family(out[i])):
+                continue
+            # Try swapping either endpoint with every other position,
+            # pick the swap that most reduces the violation count.
+            best_swap: tuple[int, int] | None = None
+            best_count = start
+            for endpoint in (i, i - 1):
+                for j in range(len(out)):
+                    if j == endpoint:
+                        continue
+                    test = list(out)
+                    test[endpoint], test[j] = test[j], test[endpoint]
+                    nv = _violations(test)
+                    if nv < best_count:
+                        best_count = nv
+                        best_swap = (endpoint, j)
+            if best_swap is not None:
+                a, b = best_swap
+                out[a], out[b] = out[b], out[a]
+                logger.debug(
+                    "[plan_ai_regenerate] adjacency-repair: swapped day "
+                    "%d <-> %d (violations %d -> %d)",
+                    a, b, start, best_count,
+                )
+                progress = True
+                break
+        if not progress:
+            break
+
+    # Rewrite sequential `day` labels so the output reads Day 1..N
+    # regardless of which positions got swapped.
+    for idx, day in enumerate(out):
+        day["day"] = f"Day {idx + 1}"
+
+    return out, _violations(out) == 0
 
 
 def regenerate_plan_with_ai(
@@ -420,6 +567,33 @@ def regenerate_plan_with_ai(
             f"after catalog match (dropped {dropped} exercises)"
         )
         return None
+
+    # ── Post-assembly adjacency repair ─────────────────────────────
+    # The deterministic planner sweeps adjacent same-family days
+    # through `_repair_adjacent_duplicates`; this path bypasses it.
+    # Swap day dicts in place (preserving their exercises) to break
+    # any Push→Push, Legs→Legs, or Pull→Upper (coarse bucket)
+    # adjacency the AI emitted. If the repair can't resolve all
+    # violations (structurally bad AI output), bail out so the
+    # caller keeps the deterministic plan — logged as ERROR so prod
+    # telemetry picks it up.
+    ai_focus_sequence = [d.get("focus") or "" for d in valid_days]
+    valid_days, adjacency_ok = _repair_focus_adjacency(valid_days)
+    if not adjacency_ok:
+        logger.error(
+            "[plan_ai_regenerate] adjacency repair FAILED — falling back to "
+            "deterministic plan. AI focus sequence: %r; post-repair: %r",
+            ai_focus_sequence,
+            [d.get("focus") or "" for d in valid_days],
+        )
+        return None
+    if ai_focus_sequence != [d.get("focus") or "" for d in valid_days]:
+        logger.warning(
+            "[plan_ai_regenerate] adjacency repair reshuffled days. "
+            "AI focus sequence: %r; repaired: %r",
+            ai_focus_sequence,
+            [d.get("focus") or "" for d in valid_days],
+        )
 
     out_plan = {
         "workout_plan": {

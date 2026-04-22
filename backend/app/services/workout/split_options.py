@@ -351,11 +351,19 @@ def _is_lifting_goal(goal: str) -> bool:
 
     Checks planner mode FIRST because some goals (improve_flexibility)
     have a bucket that looks lifting-adjacent (body_recomp) in the goal
-    registry but a planner mode (mobility) that doesn't use splits."""
+    registry but a planner mode (mobility) that doesn't use splits.
+
+    Strength goals (planner_mode="strength") ARE lifting — users still
+    pick Upper/Lower / PPL / Full Body for strength programs. Same for
+    maintain (maintenance lifting). Only pure endurance / hyrox / athletic
+    / mobility / recovery skip the split picker."""
     try:
         from .goal_profiles import goal_profile_for
         profile = goal_profile_for(goal)
-        return profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
+        return profile.planner_mode in (
+            "lifting", "fat_loss_mix", "lifting_plus_cardio",
+            "strength", "maintain",
+        )
     except Exception:
         bucket = goal_bucket(goal)
         return bucket in _LIFTING_GOALS

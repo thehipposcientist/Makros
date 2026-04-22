@@ -36,6 +36,15 @@ _TEST_MODULES = (
     "tests.test_history_plumbing",
     # Fatigue overlay + AI first-time starting-weight branch.
     "tests.test_recommendation_fatigue_and_ai",
+    # Planner-integrity regression tests (UL priority, heavy PPL
+    # prescription, non-destructive validate_plan, split identity).
+    "tests.test_planner_integrity_fixes",
+    # First-class WorkoutPlan persistence: active-row bookkeeping on
+    # regen, PLANNER_VERSION stamping, active-plan endpoint.
+    "tests.test_workout_plan_persistence",
+    # First-class NutritionPlan persistence: mirror of WorkoutPlan —
+    # active-row bookkeeping, JSON round-trip, active-plan endpoint.
+    "tests.test_nutrition_plan_persistence",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

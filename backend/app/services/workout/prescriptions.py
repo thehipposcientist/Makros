@@ -78,6 +78,12 @@ def prescribe_for_slot(
         DayArchetype.LIFT_LOWER_HEAVY,
         DayArchetype.LIFT_LOWER_HYPERTROPHY,
         DayArchetype.LIFT_FULL_BODY_STRENGTH,
+        # Heavy PPL archetypes carry an explicit "strength" training_type
+        # and must route through the stimulus prescriber so a Push Heavy
+        # day ships 3-5 rep sets (not the goal-bucket fallback).
+        DayArchetype.LIFT_PUSH_HEAVY,
+        DayArchetype.LIFT_PULL_HEAVY,
+        DayArchetype.LIFT_LEGS_HEAVY,
     }
     if archetype in _STIMULUS_ARCHETYPES:
         return _prescribe_by_stimulus(training_type, slot, exercise)

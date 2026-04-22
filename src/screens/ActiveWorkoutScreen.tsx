@@ -2035,18 +2035,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [activeExIdx, authToken, coachInput, exercises]);
 
-  const filteredExerciseLibrary = (() => {
-    // Swap mode: rank the library by similarity to the exercise we're
-    // replacing. Score factors in primary + secondary muscles, compound
-    // vs isolation, movement pattern, and equipment class — so a
-    // heavy barbell row suggests t-bar row / dumbbell row / chest-
-    // supported row BEFORE suggesting a band pull-apart.
+  // Max raw score from _scoreSwapCandidate: 12 primary + 5 compound +
+  // 6 movement_pattern + 4 equipment = 27. Clamping to 100 scale so the
+  // overlap meter reads as a natural percentage.
+  const MAX_SWAP_SCORE = 27;
+  const filteredExerciseLibrary: Array<ExerciseLibraryItem & { _overlap?: number }> = (() => {
     if (swapTargetIdx != null) {
       const targetName = exercises[swapTargetIdx]?.name;
       const base = targetName ? exerciseLibrary.find(li => li.name === targetName) : undefined;
       const q = exerciseSearch.trim().toLowerCase();
       if (!base) {
-        // Fall through to plain text search if we can't find metadata.
         return exerciseLibrary.filter(item => {
           if (!q) return true;
           return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
@@ -2064,8 +2062,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         scored.push({ item, score: s });
       }
       scored.sort((a, b) => b.score - a.score);
-      // Cap to keep the list curated; everything below rank ~20 is noise.
-      return scored.slice(0, 20).map(s => s.item);
+      return scored.slice(0, 20).map(s => ({
+        ...s.item,
+        _overlap: Math.min(100, Math.round((s.score / MAX_SWAP_SCORE) * 100)),
+      }));
     }
     return exerciseLibrary.filter(item => {
       const q = exerciseSearch.trim().toLowerCase();
@@ -3498,18 +3498,37 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </TouchableOpacity>
                     )}
                   </>
-                ) : filteredExerciseLibrary.map((item) => (
-                  <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.addExerciseName}>{item.name}</Text>
-                      <Text style={styles.addExerciseMeta}>
-                        {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
-                        {item.is_compound != null ? (item.is_compound ? ' · Compound' : ' · Isolation') : ''}
-                      </Text>
-                    </View>
-                    <Text style={styles.addExerciseUse}>{swapTargetIdx != null ? 'Swap' : 'Add'}</Text>
-                  </TouchableOpacity>
-                ))}
+                ) : filteredExerciseLibrary.map((item) => {
+                  const overlap = (item as any)._overlap as number | undefined;
+                  // Green ≥80, amber 60-79, red <60 — matches the readiness
+                  // chip convention on Switch Day picker.
+                  const overlapColor = overlap == null ? undefined
+                    : overlap >= 80 ? '#22C55E'
+                    : overlap >= 60 ? '#F59E0B'
+                    : '#EF4444';
+                  return (
+                    <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <Text style={styles.addExerciseName}>{item.name}</Text>
+                          {overlap != null && overlapColor && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: overlapColor + '22', borderWidth: 1, borderColor: overlapColor + '88' }}>
+                              <View style={{ width: 28, height: 4, borderRadius: 2, backgroundColor: overlapColor + '33', overflow: 'hidden' }}>
+                                <View style={{ width: `${overlap}%`, height: '100%', backgroundColor: overlapColor }} />
+                              </View>
+                              <Text style={{ fontSize: 10, fontWeight: '800', color: overlapColor }}>{overlap}%</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={styles.addExerciseMeta}>
+                          {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
+                          {item.is_compound != null ? (item.is_compound ? ' · Compound' : ' · Isolation') : ''}
+                        </Text>
+                      </View>
+                      <Text style={styles.addExerciseUse}>{swapTargetIdx != null ? 'Swap' : 'Add'}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </ScrollView>
             )}
           </View>

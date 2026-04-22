@@ -126,14 +126,22 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         # anchored so every week has heavy squat, heavy bench/press,
         # and heavy deadlift/row days. Volume/hypertrophy variants are
         # allowed but never anchored — they appear as secondary days.
-        # No bro split, no push/pull split — upper/lower only so the
-        # big lifts get full attention with long rest periods.
+        # Supports Upper/Lower (default at 3-5 days), PPL (pick_split
+        # prefers PPL at 6 days for strength), and Full Body. Bro split
+        # is excluded — low frequency per muscle is the wrong shape
+        # for compound-strength progression.
         allowed_archetypes=frozenset({
             DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER,
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_LOWER_HEAVY,
             DayArchetype.LIFT_UPPER_HYPERTROPHY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
             DayArchetype.LIFT_FULL_BODY, DayArchetype.LIFT_FULL_BODY_STRENGTH,
-            DayArchetype.LIFT_LEGS_HEAVY,
+            # PPL archetypes: pick_split auto-chooses PPL for strength at
+            # 6 days (higher score than UL). The strength cycle must emit
+            # these rather than collapsing to UL, otherwise the user's
+            # split identity is silently broken.
+            DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
+            DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY, DayArchetype.LIFT_LEGS_HEAVY,
+            DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME, DayArchetype.LIFT_LEGS_VOLUME,
             DayArchetype.MOBILITY_FLOW,
         }),
         anchor_archetypes=(
@@ -144,7 +152,7 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         stable_lifts=True,
         notes=(
             "Compound Strength: heavy compounds dominate (squat/bench/deadlift/OHP). "
-            "Upper/Lower split only. 3-5 reps on primaries, 4 min rest. "
+            "Upper/Lower, PPL, or Full Body (not Bro). 3-5 reps on primaries, 4 min rest. "
             "5 working sets on main lifts. Fewer accessories than muscle gain."
         ),
     ),

@@ -580,6 +580,86 @@ def test_generate_weekly_recipe_never_emits_three_adjacent_split_days() -> None:
     _ok(f"swept {checked} non-Bro configs, zero triple-in-a-row emitted")
 
 
+def test_lifting_plus_cardio_never_emits_cardio_cardio_adjacency() -> None:
+    """Full-sweep regression: every lifting_plus_cardio configuration
+    (fat_loss / body_recomp / toning × 3-7 days × every split × every
+    recent-focus × every fatigue preset × every supported age) must
+    produce a recipe with zero cardio→cardio adjacency.
+
+    This is the regression guard for the user-reported plan
+    [Push, Zone2, Zone2, Upper, Legs] on 5-day PPL+UL. The prior
+    interleave appended leftover cardio days at the tail when lifts
+    were exhausted before conds (e.g. cond_days=2 + lift_days=3 on
+    PPL/PPL_UL at cycle_len=3 → [Push, Pull, Legs, Z2, IntShort]).
+    Even-distribution interleave in _lifting_plus_cardio_recipe
+    guarantees cardios land between lifts, not at the tail.
+
+    Cardio adjacency is OUTSIDE the scope of the existing
+    `*_three_adjacent_split_days` test (which only checks 3-in-a-row
+    for split families) and the tier-D fallback (no cardio sibling
+    exists) — hence the dedicated sweep here."""
+    print("\n[test] lifting_plus_cardio emits zero cardio→cardio adjacency")
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.day_templates import (
+        SPLIT_UPPER_LOWER, SPLIT_PPL, SPLIT_FULL_BODY, SPLIT_PPL_UL, SPLIT_BRO,
+    )
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    lpc_goals = ("fat_loss", "body_recomp", "toning")
+    splits = (SPLIT_UPPER_LOWER, SPLIT_PPL, SPLIT_FULL_BODY, SPLIT_PPL_UL, SPLIT_BRO)
+    recents = (
+        (), ("push",), ("pull",), ("legs",), ("upper",), ("lower",),
+        ("push", "pull"), ("upper", "upper"), ("cardio",), ("mobility",),
+        ("recovery",),
+    )
+    fatigue_cases = (
+        None,
+        {"chest": 0.7},
+        {"quads": 0.9, "hamstrings": 0.9, "glutes": 0.9},
+        {"chest": 0.8, "back": 0.3},
+    )
+    ages = (None, 35, 55, 65)
+
+    checked = 0
+    violations: list[str] = []
+    for goal in lpc_goals:
+        profile = goal_profile_for(goal)
+        for days in (3, 4, 5, 6, 7):
+            for split in splits:
+                for rfam in recents:
+                    for uchose in (True, False):
+                        for mf in fatigue_cases:
+                            for age in ages:
+                                try:
+                                    r = generate_weekly_recipe(
+                                        profile, days,
+                                        lifting_split=split,
+                                        user_chose_split=uchose,
+                                        recent_focus_families=rfam,
+                                        muscle_fatigue=mf,
+                                        user_age=age,
+                                    )
+                                except Exception:
+                                    continue
+                                checked += 1
+                                fams = [archetype_to_focus_family(a) for a in r]
+                                for i in range(1, len(fams)):
+                                    if fams[i] == "cardio" == fams[i - 1]:
+                                        violations.append(
+                                            f"goal={goal} days={days} split={split} "
+                                            f"rfam={rfam} uchose={uchose} mf={mf} "
+                                            f"age={age} → {[a.value for a in r]} "
+                                            f"at idx {i}"
+                                        )
+                                        break
+    assert not violations, (
+        f"{len(violations)} cardio→cardio adjacency violations. "
+        f"First: {violations[0]}"
+    )
+    _ok(f"swept {checked} lifting_plus_cardio configs, zero cardio→cardio emitted")
+
+
 def test_repair_tier_d_substitutes_sibling_for_structural_adjacency() -> None:
     """Tier D (family-sibling substitution) must eliminate 2-adjacency
     that tier A/B/C can't resolve by pure swaps. Regression: 5-day U/L
@@ -719,6 +799,390 @@ def test_lift_priority_rescue_no_op_when_recent_includes_lift() -> None:
     _ok(f"rescue no-op with lift in recent; day0={day0_fam}")
 
 
+# ── Safety-net regression tests ──────────────────────────────────────
+
+
+def test_active_recovery_injection_does_not_create_mobility_adjacency() -> None:
+    """The active-recovery injection at the end of generate_weekly_recipe
+    replaces / appends a MOBILITY_FLOW day. If the previous last day was
+    already mobility (e.g. from a prior recovery allocation), appending
+    a second mobility day creates mobility→mobility adjacency. Regression:
+    the post-injection repair must kill this."""
+    print("\n[test] active-recovery injection runs repair afterwards")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    # Sweep a handful of lifting goals that allow mobility — the
+    # recipes must NEVER emit back-to-back mobility families as a
+    # side effect of the injection pass.
+    for goal in ("muscle_gain", "body_recomp", "fat_loss", "strength", "toning"):
+        profile = goal_profile_for(goal)
+        for days in (6, 7):
+            for split in ("ppl", "upper_lower", "full_body", "bro", "ppl_ul"):
+                recipe = generate_weekly_recipe(
+                    profile, days,
+                    lifting_split=split,
+                    user_chose_split=True,
+                )
+                fams = [archetype_to_focus_family(a) for a in recipe]
+                for i in range(1, len(fams)):
+                    if fams[i] == "mobility" and fams[i - 1] == "mobility":
+                        raise AssertionError(
+                            f"mobility→mobility at {i-1}-{i} for "
+                            f"goal={goal} days={days} split={split}: fams={fams}"
+                        )
+    _ok("no mobility→mobility leakage after active-recovery injection")
+
+
+def test_final_safety_net_runs_repair_one_more_time() -> None:
+    """A final adjacency-repair pass is guaranteed at the end of
+    generate_weekly_recipe — regardless of which intermediate step
+    last mutated the recipe. This regression pins the invariant so
+    future refactors can't accidentally drop the final pass."""
+    print("\n[test] final-safety-net runs repair after every pipeline step")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    # Configs that historically stressed each pipeline stage:
+    #   - rotation + fatigue + tier-D  → muscle_gain 5d UL recent=upper
+    #   - intensity spacing swap       → strength 6d with heavy clustering
+    #   - age-55 lift→mobility swap    → muscle_gain 6d PPL age=60
+    #   - lift-priority rescue         → body_recomp 5d PPL recent=mobility
+    combos = [
+        ("muscle_gain", 5, "upper_lower", ("upper",), None, None, True),
+        ("strength", 6, "upper_lower", (), None, None, True),
+        ("muscle_gain", 6, "ppl", ("legs",), None, 60, True),
+        ("body_recomp", 5, "ppl", ("mobility",), None, None, False),
+        ("fat_loss", 7, "upper_lower", ("lower",), {"chest": 0.7}, 55, True),
+    ]
+    for goal, days, split, rfam, mf, age, uchose in combos:
+        profile = goal_profile_for(goal)
+        recipe = generate_weekly_recipe(
+            profile, days,
+            lifting_split=split,
+            user_chose_split=uchose,
+            recent_focus_families=rfam,
+            muscle_fatigue=mf,
+            user_age=age,
+        )
+        fams = [archetype_to_focus_family(a) for a in recipe]
+        for i in range(1, len(fams)):
+            a, b = fams[i - 1], fams[i]
+            if a == b and a in ("push", "pull", "legs", "upper", "lower"):
+                raise AssertionError(
+                    f"adjacency survived final repair for "
+                    f"goal={goal} days={days} split={split} rfam={rfam} "
+                    f"mf={mf} age={age}: fams={fams}"
+                )
+    _ok("final safety net holds across all stressor combinations")
+
+
+# ── Surgical-edit regression tests (weekly_recipe post-processing) ──
+
+
+def test_length_guarantee_always_matches_days_per_week() -> None:
+    """`generate_weekly_recipe` must always return exactly `days` days,
+    no matter which goal / split / recent-focus combo runs. Sweeps a
+    dense matrix of inputs and asserts `len(recipe) == days` every time."""
+    print("\n[test] length guarantee: len(recipe) == days for every combo")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+
+    goals = (
+        "fat_loss", "muscle_gain", "body_recomp", "strength",
+        "endurance", "athletic_performance", "hyrox", "toning",
+        "maintain", "general_health",
+    )
+    splits = ("ppl", "upper_lower", "full_body", "ppl_ul", "bro", None)
+    rfams = ((), ("push",), ("upper",), ("mobility",), ("push", "pull"))
+    mfs = (None, {"chest": 0.8, "quads": 0.2})
+    ages = (None, 30, 55)
+    checked = 0
+    for goal in goals:
+        profile = goal_profile_for(goal)
+        for days in (1, 2, 3, 4, 5, 6, 7):
+            for split in splits:
+                for rfam in rfams:
+                    for mf in mfs:
+                        for age in ages:
+                            recipe = generate_weekly_recipe(
+                                profile, days,
+                                lifting_split=split,
+                                user_chose_split=(split is not None),
+                                recent_focus_families=rfam,
+                                muscle_fatigue=mf,
+                                user_age=age,
+                            )
+                            assert len(recipe) == days, (
+                                f"len(recipe)={len(recipe)} != days={days} "
+                                f"(goal={goal} split={split} rfam={rfam} "
+                                f"mf={mf} age={age})"
+                            )
+                            checked += 1
+    _ok(f"swept {checked} configs, every result has len==days")
+
+
+def test_strict_ul_user_chose_preserves_alternation_end_to_end() -> None:
+    """Strict user-chosen UL with even lift_days must produce alternating
+    Upper/Lower across the LIFT days (cardio/mobility may interleave).
+    Regression for the split-identity guard: post-processing passes
+    can rearrange cardio/recovery but must never break the U↔L
+    alternation a strict-UL user explicitly chose."""
+    print("\n[test] strict UL user-chose: U↔L alternation preserved")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    # Even lift_days configurations only. Muscle_gain 4d UL, body_recomp
+    # 6d UL (with 1 cond → 5 lifts → odd → skip), strength 6d UL.
+    configs = [
+        ("muscle_gain", 4, None),
+        ("muscle_gain", 6, ("upper",)),
+        ("strength", 4, None),
+        ("strength", 6, ("lower",)),
+    ]
+    for goal, days, rfam in configs:
+        profile = goal_profile_for(goal)
+        recipe = generate_weekly_recipe(
+            profile, days,
+            lifting_split="upper_lower",
+            user_chose_split=True,
+            recent_focus_families=rfam or (),
+        )
+        fams = [archetype_to_focus_family(a) for a in recipe]
+        # Extract only upper/lower tokens
+        ul_tokens = [f for f in fams if f in ("upper", "lower")]
+        # Even-count UL must strictly alternate.
+        if len(ul_tokens) >= 2 and len(ul_tokens) % 2 == 0:
+            for i in range(len(ul_tokens) - 1):
+                assert ul_tokens[i] != ul_tokens[i + 1], (
+                    f"strict UL alternation broken for goal={goal} "
+                    f"days={days}: fams={fams}"
+                )
+    _ok("strict UL alternation preserved across configs")
+
+
+def test_ppl_cycle_integrity_preserved_through_all_passes() -> None:
+    """PPL / PPL_UL users must see a monotonic Push→Pull→Legs cycle
+    through the LIFT days, regardless of the post-processing passes.
+    Sweeps lifting-mode (muscle_gain) PPL and lifting_plus_cardio-mode
+    (body_recomp) PPL across a range of recent-focus inputs."""
+    print("\n[test] PPL cycle integrity across passes")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    configs = [
+        ("muscle_gain", 6, "ppl", ()),
+        ("muscle_gain", 6, "ppl", ("push",)),
+        ("muscle_gain", 6, "ppl", ("legs",)),
+        ("body_recomp", 6, "ppl", ()),
+        ("body_recomp", 6, "ppl", ("pull",)),
+        ("body_recomp", 6, "ppl", ("mobility",)),
+        ("strength", 6, "ppl", ()),
+    ]
+    for goal, days, split, rfam in configs:
+        profile = goal_profile_for(goal)
+        recipe = generate_weekly_recipe(
+            profile, days,
+            lifting_split=split,
+            user_chose_split=True,
+            recent_focus_families=rfam,
+        )
+        fams = [archetype_to_focus_family(a) for a in recipe]
+        lift_tokens = [f for f in fams if f in ("push", "pull", "legs")]
+        # Each transition in the lift token sequence must be a valid
+        # PPL successor (push→pull, pull→legs, legs→push).
+        successor = {"push": "pull", "pull": "legs", "legs": "push"}
+        for i in range(len(lift_tokens) - 1):
+            cur, nxt = lift_tokens[i], lift_tokens[i + 1]
+            assert successor.get(cur) == nxt, (
+                f"PPL cycle broken at lift idx {i} ({cur}→{nxt}) for "
+                f"goal={goal} days={days} rfam={rfam}: fams={fams}"
+            )
+    _ok("PPL cycle integrity preserved across all configs")
+
+
+def test_narrow_heavy_streak_body_recomp_no_triple_heavy_days() -> None:
+    """Fix #3: body_recomp (planner_mode=lifting_plus_cardio,
+    mix.strength<0.35) must NEVER get 3+ consecutive heavy days.
+    Prior behaviour with `planner_mode == "lifting"` clause allowed
+    heavy streaks for any lifting-mode goal regardless of strength
+    dial. Narrowed gate forces alternating heavy/volume for low-
+    strength lifting goals."""
+    print("\n[test] body_recomp never produces 3+ consecutive heavy days")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.weekly_recipe import _is_heavy
+
+    profile = goal_profile_for("body_recomp")
+    for days in (4, 5, 6, 7):
+        for split in ("ppl", "upper_lower", None):
+            recipe = generate_weekly_recipe(
+                profile, days,
+                lifting_split=split,
+                user_chose_split=(split is not None),
+            )
+            # Scan for any run of 3 heavy days.
+            run = 0
+            for a in recipe:
+                run = run + 1 if _is_heavy(a) else 0
+                assert run < 3, (
+                    f"body_recomp days={days} split={split} produced "
+                    f"3+ consecutive heavy days: "
+                    f"{[x.value for x in recipe]}"
+                )
+    _ok("body_recomp always spaces heavy days with narrowed gate")
+
+
+def test_lift_priority_rescue_uses_coarse_bucket_fallback() -> None:
+    """Fix #4: lift-priority rescue must also honour recent_focus_buckets
+    when recent_focus_families is empty. A user whose last session was
+    passed as coarse bucket ("upper_body",) with no fine families
+    should still be treated as having lifted recently — rescue must
+    NOT fire."""
+    print("\n[test] lift-priority rescue fallback uses coarse buckets")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    profile = goal_profile_for("body_recomp")
+
+    # Case A: fine families empty, coarse bucket = upper_body
+    # (represents a lift). Rescue must NOT rotate day 0 to force a
+    # lift if day 0 is already fine.
+    recipe_a = generate_weekly_recipe(
+        profile, 5,
+        lifting_split="ppl",
+        user_chose_split=True,
+        recent_focus_buckets=("upper_body",),
+    )
+    fam_a = archetype_to_focus_family(recipe_a[0])
+    # day 0 may legitimately be cardio/mobility/lift — the rescue
+    # just mustn't mistakenly think the user hasn't lifted.
+    # Verify the rescue is a no-op: with recent_buckets containing
+    # upper_body, has_lifted_recently() must return True.
+    from app.services.workout.weekly_recipe import _has_lifted_recently
+    assert _has_lifted_recently((), ("upper_body",)) is True
+    assert _has_lifted_recently((), ("cardio",)) is False
+
+    # Case B: fine families with only mobility → no lift anywhere →
+    # rescue must fire and day 0 must be a lift.
+    from app.services.workout.archetypes import ARCHETYPE_META
+    recipe_b = generate_weekly_recipe(
+        profile, 5,
+        lifting_split="ppl",
+        user_chose_split=True,
+        recent_focus_families=("mobility",),
+    )
+    assert ARCHETYPE_META[recipe_b[0]].category == "lift", (
+        f"rescue didn't swap day 0 to lift: {recipe_b[0].value}"
+    )
+    _ok(f"coarse-bucket fallback + fine-only paths both correct "
+        f"(day0_a={fam_a})")
+
+
+# ── AI regen post-assembly adjacency repair ───────────────────────
+
+def test_ai_regen_adjacency_repair_breaks_same_family_back_to_back() -> None:
+    """AI emits [Push, Push, Legs, Pull, Rest]. After the post-assembly
+    adjacency repair, no two adjacent days share the same focus family."""
+    print("\n[test] ai_regen adjacency repair: Push/Push/Legs/Pull/Rest")
+    from app.services.workout.plan_ai_regenerate import _repair_focus_adjacency
+    from app.services.workout.focus_normalize import normalize_focus_to_family
+
+    days = [
+        {"day": "Day 1", "focus": "Push", "exercises": [{"name": "Bench"}]},
+        {"day": "Day 2", "focus": "Push", "exercises": [{"name": "OHP"}]},
+        {"day": "Day 3", "focus": "Legs", "exercises": [{"name": "Squat"}]},
+        {"day": "Day 4", "focus": "Pull", "exercises": [{"name": "Row"}]},
+        {"day": "Day 5", "focus": "Rest", "exercises": [{"name": "Walk"}]},
+    ]
+    repaired, ok = _repair_focus_adjacency(days)
+    assert ok, f"repair reported unresolvable, got {[d['focus'] for d in repaired]}"
+    families = [normalize_focus_to_family(d["focus"]) for d in repaired]
+    for i in range(1, len(families)):
+        if families[i - 1] is None or families[i] is None:
+            continue
+        assert families[i - 1] != families[i], (
+            f"adjacent same-family days at {i-1},{i}: {families}"
+        )
+    # Every original exercise survived — no day was dropped.
+    assert len(repaired) == len(days)
+    assert all(d.get("exercises") for d in repaired)
+    _ok(f"repaired sequence: {[d['focus'] for d in repaired]}")
+
+
+def test_ai_regen_adjacency_repair_catches_pull_upper_coarse_bucket() -> None:
+    """Pull → Upper collapses to upper_body/upper_body at the coarse
+    bucket level. Even though 'pull' != 'upper' at the fine family
+    level, the bucket adjacency is a violation for U/L mixed plans."""
+    print("\n[test] ai_regen adjacency repair: Pull/Upper coarse bucket")
+    from app.services.workout.plan_ai_regenerate import _repair_focus_adjacency
+    from app.services.workout.focus_normalize import normalize_focus_to_family
+    from app.services.workout.weekly_recipe import _FINE_TO_COARSE
+
+    days = [
+        {"day": "Day 1", "focus": "Pull", "exercises": [{"name": "Row"}]},
+        {"day": "Day 2", "focus": "Upper", "exercises": [{"name": "Bench"}]},
+        {"day": "Day 3", "focus": "Lower", "exercises": [{"name": "Squat"}]},
+        {"day": "Day 4", "focus": "Cardio", "exercises": [{"name": "Bike"}]},
+    ]
+    repaired, ok = _repair_focus_adjacency(days)
+    assert ok, (
+        f"repair failed on Pull/Upper coarse adjacency, got "
+        f"{[d['focus'] for d in repaired]}"
+    )
+    # Check coarse buckets too — Pull and Upper both map to upper_body.
+    buckets: list = []
+    for d in repaired:
+        fam = normalize_focus_to_family(d["focus"])
+        buckets.append(_FINE_TO_COARSE.get(fam, fam) if fam else None)
+    for i in range(1, len(buckets)):
+        if buckets[i - 1] is None or buckets[i] is None:
+            continue
+        assert buckets[i - 1] != buckets[i], (
+            f"adjacent same-bucket at {i-1},{i}: {buckets}"
+        )
+    _ok(f"repaired sequence: {[d['focus'] for d in repaired]}")
+
+
+def test_ai_regen_adjacency_repair_reports_unresolvable_for_bad_ai() -> None:
+    """If the AI emits something structurally impossible to resolve
+    (e.g. all 5 days collapse to the same family), the repair reports
+    ok=False so the caller can fall back to the deterministic plan."""
+    print("\n[test] ai_regen adjacency repair: unresolvable bad AI output")
+    from app.services.workout.plan_ai_regenerate import _repair_focus_adjacency
+
+    days = [
+        {"day": f"Day {i + 1}", "focus": "Push", "exercises": [{"name": "Bench"}]}
+        for i in range(5)
+    ]
+    _, ok = _repair_focus_adjacency(days)
+    assert not ok, "unresolvable all-Push plan should report ok=False"
+    _ok("all-Push nonsense input correctly flagged unresolvable")
+
+
+def test_ai_regen_adjacency_clean_input_is_no_op() -> None:
+    """When the AI already produces a clean sequence, the repair
+    leaves it untouched — no reshuffling, no changes."""
+    print("\n[test] ai_regen adjacency repair: clean input is no-op")
+    from app.services.workout.plan_ai_regenerate import _repair_focus_adjacency
+
+    days = [
+        {"day": "Day 1", "focus": "Push", "exercises": [{"name": "Bench"}]},
+        {"day": "Day 2", "focus": "Pull", "exercises": [{"name": "Row"}]},
+        {"day": "Day 3", "focus": "Legs", "exercises": [{"name": "Squat"}]},
+        {"day": "Day 4", "focus": "Cardio", "exercises": [{"name": "Bike"}]},
+    ]
+    repaired, ok = _repair_focus_adjacency(days)
+    assert ok
+    assert [d["focus"] for d in repaired] == ["Push", "Pull", "Legs", "Cardio"]
+    _ok("clean sequence passed through unchanged")
+
+
 # ── Runner ────────────────────────────────────────────────────────
 
 cases = [
@@ -738,10 +1202,22 @@ cases = [
     test_brief_includes_user_preferred_split_and_skipped_days,
     test_repair_adjacent_duplicates_breaks_three_in_a_row,
     test_generate_weekly_recipe_never_emits_three_adjacent_split_days,
+    test_lifting_plus_cardio_never_emits_cardio_cardio_adjacency,
     test_repair_tier_d_substitutes_sibling_for_structural_adjacency,
     test_muscle_gain_5d_ul_recent_upper_has_no_adjacency_end_to_end,
     test_lift_priority_rescue_swaps_cardio_day0_when_no_recent_lift,
     test_lift_priority_rescue_no_op_when_recent_includes_lift,
+    test_active_recovery_injection_does_not_create_mobility_adjacency,
+    test_final_safety_net_runs_repair_one_more_time,
+    test_length_guarantee_always_matches_days_per_week,
+    test_strict_ul_user_chose_preserves_alternation_end_to_end,
+    test_ppl_cycle_integrity_preserved_through_all_passes,
+    test_narrow_heavy_streak_body_recomp_no_triple_heavy_days,
+    test_lift_priority_rescue_uses_coarse_bucket_fallback,
+    test_ai_regen_adjacency_repair_breaks_same_family_back_to_back,
+    test_ai_regen_adjacency_repair_catches_pull_upper_coarse_bucket,
+    test_ai_regen_adjacency_repair_reports_unresolvable_for_bad_ai,
+    test_ai_regen_adjacency_clean_input_is_no_op,
 ]
 
 

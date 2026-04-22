@@ -151,7 +151,17 @@
       "Bash(PYTHONPATH=. python3 -m tests.run_all)",
       "Bash(PYTHONPATH=. python3 -m tests.test_planner_schema)",
       "Bash(cat Makefile)",
-      "Bash(ls ../Makefile)"
+      "Bash(ls ../Makefile)",
+      "Bash(tee /tmp/test_output.log)",
+      "Bash(tee /tmp/test_output2.log)",
+      "Bash(tee /tmp/test_output3.log)",
+      "Bash(git -C /Users/sawyerhannel/Documents/GitHub/Makros status)",
+      "Bash(env)",
+      "Bash(make -C /Users/sawyerhannel/Documents/GitHub/Makros test)",
+      "Bash(/opt/homebrew/bin/node --version)",
+      "Bash(/usr/local/bin/node --version)",
+      "Bash(/opt/homebrew/bin/node --experimental-strip-types /Users/sawyerhannel/Documents/GitHub/Makros/src/utils/__tests__/planCacheReset.test.mjs)",
+      "Bash(/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit -p tsconfig.json)"
     ]
   }
 }

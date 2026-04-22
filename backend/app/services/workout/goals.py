@@ -105,7 +105,7 @@ _GOAL_REGISTRY: list[GoalDefinition] = [
         label="Build Strength",
         icon="trophy-outline",
         description="Increase your 1-rep maxes and raw power output",
-        notes="Low-rep heavy compounds, longer rest, PPL-UL hybrid at 5+ days.",
+        notes="Low-rep heavy compounds, longer rest. UL at 3-5 days, PPL at 6, Full Body allowed.",
     ),
     GoalDefinition(
         user_id="endurance",
@@ -243,6 +243,14 @@ _LEGACY_ALIASES: dict[str, str] = {
     "deka":                  "hyrox",
     "deka_fit":              "hyrox",
     "functional_fitness":    "hyrox",
+    # General-health / longevity synonyms — previously fell through
+    # the substring fallback and collapsed to body_recomp (pick_split
+    # then used the wrong mix for them). Route to the general_health
+    # profile bucket so pick_split and goal_profile_for agree.
+    "general_health":        "general_health",
+    "longevity":             "general_health",
+    "healthy_aging":         "general_health",
+    "heart_health":          "general_health",
 }
 
 
@@ -288,7 +296,18 @@ def resolve_goal(goal: Optional[str]) -> GoalDefinition:
 
 def goal_bucket(goal: Optional[str]) -> str:
     """Canonical planner bucket for `goal`. Single source of truth —
-    every planner branch should call this, never roll its own mapping."""
+    every planner branch should call this, never roll its own mapping.
+
+    Some aliases map directly to a bucket id that isn't itself a
+    registered goal (e.g. `general_health` — the bucket exists in
+    `goal_profiles._PROFILE_TABLE` but is not a user-facing goal in
+    the registry). For those we return the aliased bucket verbatim
+    so `pick_split` and `goal_profile_for` agree."""
+    if goal:
+        g = str(goal).strip().lower()
+        canonical = _LEGACY_ALIASES.get(g)
+        if canonical in {"general_health"}:
+            return canonical
     return resolve_goal(goal).bucket
 
 

@@ -271,6 +271,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
+import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -523,8 +524,27 @@ export default function Index() {
 
   /** Save the AI plan result to AsyncStorage + state. Factored out so
    *  every path (sync gen, resumed-from-queue, weekly refresh, chat update)
-   *  writes the same keys in the same order. */
+   *  writes the same keys in the same order.
+   *
+   *  The new plan result gets a FULL cache wipe first (`clearAllPlanCache`)
+   *  so no stale per-day state, fresh-day markers, nutritionist notes, or
+   *  legacy A/B/C nutrition keys leak from the previous plan. Safelist
+   *  lives in `planCacheReset.ts` — auth/profile/history/theme survive. */
   const applyPlanResult = async (aiPlans: any): Promise<void> => {
+    // Scope the wipe to what was actually regenerated:
+    //   workout_plan only → clear workout cache
+    //   nutrition_plans only → clear meal cache
+    //   BOTH (goal change / full regen) → clear both
+    // This preserves the un-changed side instead of nuking it.
+    const hasWorkout = !!aiPlans?.workout_plan;
+    const hasNutrition = Array.isArray(aiPlans?.nutrition_plans)
+      ? aiPlans.nutrition_plans.length > 0
+      : !!(aiPlans?.nutrition_plan_a || aiPlans?.nutrition_plan);
+    try {
+      if (hasWorkout && hasNutrition) await clearAllPlanCache();
+      else if (hasWorkout) await clearWorkoutCache();
+      else if (hasNutrition) await clearMealCache();
+    } catch {}
     if (aiPlans?.workout_plan) {
       await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
       // A fresh plan replaces today's slot too. Clear the once-per-day

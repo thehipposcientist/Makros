@@ -454,6 +454,20 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const validate = (): string | null => {
     switch (currentStepKey) {
+      case 'goal': {
+        // Target weight is required for any weight-change goal so the
+        // calorie delta + ETA calc has real inputs.
+        const weightChange = new Set([
+          'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
+          'build_muscle', 'lean_bulk', 'gain_weight',
+        ]);
+        if (weightChange.has(selectedGoal)) {
+          if (!targetWeight?.trim()) return 'Set a target weight — needed for your calorie target and ETA.';
+          const tw = parseFloat(targetWeight);
+          if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
+        }
+        return null;
+      }
       case 'goalRefine': {
         if (targetWeight) {
           const tw = parseFloat(targetWeight);
@@ -835,6 +849,48 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
                 Sets your weekly target rate. Used to estimate when you'll hit your goal.
               </Text>
+            </View>
+          );
+        })()}
+
+        {/* Target weight — required for any weight-change goal so the
+            calorie delta + ETA are real numbers, not guesses. */}
+        {(() => {
+          const weightChange = new Set([
+            'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
+            'build_muscle', 'lean_bulk', 'gain_weight',
+          ]);
+          if (!weightChange.has(selectedGoal)) return null;
+          const hasValue = !!targetWeight?.trim();
+          return (
+            <View style={{ marginTop: 16 }}>
+              <Text style={styles.fieldLabel}>
+                Target weight <Text style={{ color: colors.warning ?? '#DC2626' }}>*</Text>
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <TextInput
+                  style={{
+                    flex: 1,
+                    backgroundColor: colors.surface, borderRadius: 10,
+                    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15,
+                    color: colors.textPrimary,
+                    borderWidth: 1.5,
+                    borderColor: hasValue ? colors.border : (colors.warning ?? '#DC2626') + '88',
+                  }}
+                  placeholder="e.g. 175"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="numeric"
+                  value={targetWeight}
+                  onChangeText={setTargetWeight}
+                  returnKeyType="done"
+                />
+                <Text style={{ color: colors.textMuted, fontSize: 14 }}>lbs</Text>
+              </View>
+              {!hasValue && (
+                <Text style={{ fontSize: 11, color: colors.warning ?? '#DC2626', marginTop: 4 }}>
+                  Required — we need this to build your calorie target and ETA.
+                </Text>
+              )}
             </View>
           );
         })()}

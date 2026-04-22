@@ -1059,6 +1059,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     // an inconsistent plan.
     const cutGoals  = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting']);
     const bulkGoals = new Set(['build_muscle', 'lean_bulk', 'gain_weight']);
+    const weightGoals = new Set([...cutGoals, ...bulkGoals]);
+    // Require target weight for ANY weight-change goal. Without it the
+    // calorie/protein calc is a guess and the ETA on Progress is blank.
+    if (weightGoals.has(selectedGoal) && !targetWeight) {
+      Alert.alert(
+        'Target weight required',
+        `This goal needs a target weight so we can build your calorie deficit/surplus and track progress. Tap to set it below.`,
+      );
+      return;
+    }
     if (targetWeight) {
       const tw = parseFloat(targetWeight);
       const cw = currentWeight ? parseFloat(currentWeight) : profile.physicalStats?.weightLbs;
@@ -1247,7 +1257,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'goal' && (
         <>
-        {/* ── Goal ── */}
+        {/* ── Goal ── Matches onboarding: inline descriptions on every
+            card, selected card grows to full width with smooth layout
+            animation, full description visible when active. No modal. */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Goal</Text>
           <View style={[styles.goalGrid, { marginBottom: 6 }]}>
@@ -1257,12 +1269,35 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               return (
                 <TouchableOpacity
                   key={g.id}
-                  style={[styles.goalCard, active && styles.goalCardActive]}
-                  onPress={() => setGoalPreviewId(g.id)}
+                  style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
+                  onPress={() => {
+                    // Smooth grow when card takes full width + reveals description.
+                    LayoutAnimation.configureNext({
+                      duration: 280,
+                      create: { type: 'easeInEaseOut', property: 'opacity' },
+                      update: { type: 'easeInEaseOut' },
+                      delete: { type: 'easeInEaseOut', property: 'opacity' },
+                    });
+                    setSelectedGoal(g.id);
+                    setSelectedModifiers([]);
+                    setPace('moderate');
+                  }}
                   activeOpacity={0.75}>
-                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={24} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 4 }} />
+                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 6 }} />
                   <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
-                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>Tap for details</Text>
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      color: active ? tc.textSecondary : tc.textMuted,
+                      marginTop: 6,
+                      lineHeight: 15,
+                      textAlign: active ? 'left' : 'center',
+                      width: '100%',
+                    }}
+                    numberOfLines={active ? undefined : 3}
+                  >
+                    {g.description}
+                  </Text>
                 </TouchableOpacity>
               );
             })}

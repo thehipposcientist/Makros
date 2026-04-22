@@ -1561,12 +1561,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     );
                   })()}
                 </View>
-                {/* Goal progress */}
+                {/* Goal progress — only render Target / Remaining / ETA
+                    when the user's goal actually has a target-weight axis.
+                    Strength / endurance / athletic / mobility goals don't
+                    track weight toward a number, so those columns (and the
+                    ETA derived from them) are meaningless for them. */}
                 {(() => {
-                  const target = userProfile.goalDetails?.targetWeightLbs;
+                  const GOAL_HAS_TARGET_WEIGHT = new Set([
+                    'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
+                    'build_muscle', 'lean_bulk', 'gain_weight',
+                    'body_recomp', 'tone', 'get_toned',
+                  ]);
+                  const isTargetGoal = GOAL_HAS_TARGET_WEIGHT.has(userProfile.goal);
+                  const target = isTargetGoal ? userProfile.goalDetails?.targetWeightLbs : null;
                   const start = userProfile.goalDetails?.startWeightLbs ?? weightEntries[0]?.weightLbs;
                   const curr = weightEntries[weightEntries.length - 1]?.weightLbs ?? currentWeight;
                   const remaining = target ? Math.abs(target - curr) : null;
+                  const showEstimate = isTargetGoal && !!estimate;
                   return (
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, paddingVertical: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
                       {start != null && (
@@ -1591,7 +1602,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{remaining.toFixed(1)}</Text>
                         </View>
                       )}
-                      {estimate && (
+                      {showEstimate && estimate && (
                         <View style={{ alignItems: 'center' }}>
                           <Text style={{ fontSize: 11, color: tc.textMuted }}>ETA</Text>
                           <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{estimate.label}</Text>

@@ -1091,6 +1091,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   /** True while `loadPlans` is mid-flight. Prevents concurrent plan reads
       from clobbering each other if an effect re-fires rapidly. */
   const loadPlansInFlightRef = useRef(false);
+  /** Set when a trigger arrives while `loadPlans` is already running.
+      On finish we check this flag and fire once more so the final state
+      reflects the MOST RECENT trigger, not the one that happened to be
+      mid-flight when the regen wrote new data. Without this, a
+      goal-change regen (which bumps `planRefreshKey` after the first
+      load has already started with stale cache) gets swallowed by the
+      early-return guard and the UI sticks on the old plan. */
+  const loadPlansRerunPendingRef = useRef(false);
+  /** Latest profile seen by the effect. The post-finish rerun uses
+      this so it always operates on the newest profile snapshot, even
+      if several triggers queued up. */
+  const loadPlansLatestProfileRef = useRef<UserProfile | null>(null);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
   // Shown as a full-screen overlay while the "Switch Day" flow regenerates
@@ -1567,11 +1579,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   };
 
   const loadPlans = async (profile: UserProfile) => {
-    // Drop concurrent / duplicate calls. Without this guard, rapid effect
-    // re-fires (e.g. during hot-reload or prop churn) can race against each
-    // other and leave state in an inconsistent half-loaded shape.
+    // Track the latest profile so a post-finish rerun (triggered when an
+    // effect fired during our in-flight run) always sees the newest snapshot.
+    loadPlansLatestProfileRef.current = profile;
+    // Drop concurrent / duplicate calls, but remember that one arrived so
+    // we re-fire after the current run finishes. Without this, a
+    // goal-change regen that bumps `planRefreshKey` mid-load gets
+    // swallowed by the early-return guard and the UI stays on the
+    // stale plan.
     if (loadPlansInFlightRef.current) {
-      console.log('[loadPlans] already in flight — skipping duplicate call');
+      loadPlansRerunPendingRef.current = true;
+      console.log('[loadPlans] already in flight — queuing rerun');
       return;
     }
     loadPlansInFlightRef.current = true;
@@ -1583,7 +1601,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // (a) syncing aiWorkoutPlan across sign-out/sign-in, and (b) passing
     // focus_override to the fresh-day generator below so a PPL plan can't
     // get a foreign day spliced in.
-    const aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
+    let aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
+
+    // Backend is the source of truth — ask it for the active WorkoutPlan
+    // row and compare its `planner_version` to what we have cached. When
+    // they match AND a cache exists, we keep the cache for zero-flicker
+    // render. When they differ (or cache is missing), we overwrite from
+    // the backend. On 404 or any network hiccup we silently fall back to
+    // the AsyncStorage-only path — legacy users with no persisted plan
+    // row still get served their cached plan.
+    // Backend is ALWAYS the source of truth. On every load we fetch the
+    // active plan and overwrite the cache if the backend has one. The
+    // cache is a zero-flicker write-through only — we never prefer it
+    // over a live backend read, even on version match. The only time
+    // cache is used is when the backend is unreachable (network hiccup
+    // / offline / 404 legacy user with no DB row).
+    if (authToken) {
+      try {
+        const { getActiveWorkoutPlan } = await import('../services/api');
+        const active = await getActiveWorkoutPlan(authToken);
+        if (active?.plan_json) {
+          const backendVersion = active.plan_json?._plannerVersion ?? active.planner_version ?? 'unknown';
+          const serialized = JSON.stringify(active.plan_json);
+          await AsyncStorage.setItem('aiWorkoutPlan', serialized).catch(() => {});
+          aiWorkoutRaw = serialized;
+          console.log(`[loadPlans] hydrated from backend (version=${backendVersion}) — cache overwritten`);
+        } else {
+          console.log('[loadPlans] backend returned no active plan — using AsyncStorage cache fallback');
+        }
+      } catch (e) {
+        console.log('[loadPlans] active-plan fetch failed (using cache):', e);
+      }
+    }
+
     if (!aiWorkoutRaw) {
       console.warn('[loadPlans] no saved aiWorkoutPlan — using local fallback');
     }
@@ -1692,6 +1742,49 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // chosen meal variety). Legacy A/B/C keys are read as a fallback so
     // users who haven't regenerated since the migration still see their
     // plan.
+    //
+    // Backend is the source of truth — ask it for the active
+    // `NutritionPlan` row and compare its `planner_version` to what we
+    // have cached. Mismatch or missing cache ⇒ overwrite from backend.
+    // Version match AND cache exists ⇒ keep cache for zero-flicker
+    // render. 404 / network hiccup ⇒ silently fall back to the
+    // AsyncStorage path (legacy user with no persisted row). Mirrors the
+    // workout-plan hydration block above.
+    // Same policy as workout: backend is source of truth. Always overwrite
+    // cache when backend returns a plan. Cache is a fallback ONLY for
+    // network failure / 404 legacy users.
+    if (authToken) {
+      try {
+        const { getActiveNutritionPlan } = await import('../services/api');
+        const active = await getActiveNutritionPlan(authToken);
+        if (active?.plans_json?.length) {
+          const backendVersion =
+            active.plans_json[0]?._plannerVersion ?? active.planner_version ?? 'unknown';
+          await AsyncStorage.setItem('aiNutritionPlans', JSON.stringify(active.plans_json)).catch(() => {});
+          // Keep legacy A/B/C mirrors in sync.
+          await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(active.plans_json[0] ?? null)).catch(() => {});
+          if (active.plans_json[1]) {
+            await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(active.plans_json[1])).catch(() => {});
+          } else {
+            await AsyncStorage.removeItem('aiNutritionPlanB').catch(() => {});
+          }
+          if (active.plans_json[2]) {
+            await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(active.plans_json[2])).catch(() => {});
+          } else {
+            await AsyncStorage.removeItem('aiNutritionPlanC').catch(() => {});
+          }
+          if (active.trainer_note) {
+            await AsyncStorage.setItem('nutritionistNote', active.trainer_note).catch(() => {});
+          }
+          console.log(`[loadPlans] nutrition hydrated from backend (version=${backendVersion}) — cache overwritten`);
+        } else {
+          console.log('[loadPlans] backend returned no active nutrition plan — using AsyncStorage fallback');
+        }
+      } catch (e) {
+        console.log('[loadPlans] active-nutrition fetch failed (using cache):', e);
+      }
+    }
+
     const rawPlans = await AsyncStorage.getItem('aiNutritionPlans');
     let rotatingTemplates: DailyNutritionPlan[] = [];
     if (rawPlans) {
@@ -1936,6 +2029,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     } finally {
       loadPlansInFlightRef.current = false;
+    }
+    // If a trigger arrived while we were running (e.g. goal-change
+    // regen bumped `planRefreshKey` mid-load), run once more against the
+    // latest profile so the UI reflects the most recent plan write.
+    if (loadPlansRerunPendingRef.current) {
+      loadPlansRerunPendingRef.current = false;
+      const latest = loadPlansLatestProfileRef.current;
+      if (latest) {
+        console.log('[loadPlans] rerunning with latest profile (queued during previous run)');
+        // Fire and forget — exceptions surface via internal try/catch.
+        loadPlans(latest).catch(() => {});
+      }
     }
   };
 
@@ -3253,10 +3358,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {(isWorkoutUpdating && isNutritionUpdating) ? (
         <View style={[styles.planLoadingOverlay, { backgroundColor: themeColors.background }]}>
           <FadeInView delay={0}>
-            <Image
-              source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
-              style={{ width: 240, height: 54, alignSelf: 'center', marginBottom: 24 }}
-              resizeMode="contain"
+            <ShimmerLogo
+              logoSource={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+              width={320}
+              height={72}
+              shimmerWidth={160}
+              style={{ alignSelf: 'center', marginBottom: 28 }}
             />
           </FadeInView>
           <FadeInView delay={200}>
@@ -3341,7 +3448,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         {activeTab === 'workout' ? (
           (isWorkoutUpdating && !isNutritionUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
-              <ActivityIndicator size="large" color={workoutPalette.strong} />
+              <ShimmerLogo
+                logoSource={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+                width={260}
+                height={58}
+                shimmerWidth={130}
+                style={{ alignSelf: 'center', marginBottom: 16 }}
+              />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your workout plan</Text>
               <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
                 {planStep || 'This usually takes 30–60 seconds.'}
@@ -3959,7 +4072,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // nutrition plan is rebuilding. Workout tab stays usable.
           (isNutritionUpdating && !isWorkoutUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
-              <ActivityIndicator size="large" color={mealPalette.strong} />
+              <ShimmerLogo
+                logoSource={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
+                width={260}
+                height={58}
+                shimmerWidth={130}
+                style={{ alignSelf: 'center', marginBottom: 16 }}
+              />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your meal plan</Text>
               <Text style={[styles.planLoadingSubtitle, { color: themeColors.textSecondary }]}>
                 {planStep || 'This usually takes 30–60 seconds.'}

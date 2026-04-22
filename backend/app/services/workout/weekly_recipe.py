@@ -38,6 +38,23 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+
+# ── Planner version ─────────────────────────────────────────────────
+#
+# Stamped on every `WorkoutPlan` row and returned to the client alongside
+# the plan itself. Bumped when planner logic changes meaningfully — the
+# client treats anything older than `PLANNER_VERSION` as stale and auto-
+# regenerates in the background. Date format is `YYYY.MM.DD.nn` so two
+# bumps on the same day sort correctly (`.01`, `.02`, ...).
+#
+# When to bump:
+#   - New archetype introduced / existing archetype reshaped
+#   - Slot density, rep ranges, or rest prescriptions change
+#   - Adjacency / rotation rules change
+#   - Injury-pattern block list or dislike filter changes
+# Cosmetic copy / logging tweaks don't need a bump.
+PLANNER_VERSION = "2026.04.22.05"
+
 logger = logging.getLogger(__name__)
 
 from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family
@@ -117,15 +134,21 @@ def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
     first N entries of the 6-day sequence; for 3 we use one rotation at
     the goal's middle stimulus.
 
-    Goal dial:
+    Goal dial (6-day totals — same ratios at lower day-counts):
       strength                 → 4 heavy + 2 hypertrophy
-      muscle_gain              → 3 heavy + 3 volume (legacy default)
+      muscle_gain              → 3 heavy + 3 volume
       body_recomp              → 2 heavy + 2 hypertrophy + 2 volume
       athletic_performance     → 3 heavy + 3 hypertrophy (no 15-rep sets)
       hyrox                    → 2 heavy + 4 hypertrophy (muscle endurance)
       toning                   → 3 hypertrophy + 3 volume (no heavy)
       fat_loss                 → 2 hypertrophy + 4 volume
       default (unknown / other)→ 3 hypertrophy + 3 volume
+
+    Ordering rule: sequences INTERLEAVE heavy and volume/hypertrophy
+    days rather than stacking all heavies at the start. This avoids
+    3+ adjacent heavy days (a CNS overload pattern the intensity-
+    spacing pass would otherwise have to repair at the cost of
+    family balance — see split-identity revert).
     """
     # Sequences in Push/Pull/Legs order for each stimulus type.
     H = (DayArchetype.LIFT_PUSH_HEAVY,  DayArchetype.LIFT_PULL_HEAVY,  DayArchetype.LIFT_LEGS_HEAVY)
@@ -143,21 +166,31 @@ def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
     # the stimulus intensity). 5-day sequences give 2P + 1Pu + 2L.
     # 4-day sequences give 1P + 1Pu + 2L (still prioritizing legs).
     if goal_lower == "strength":
-        six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]        # 4H + 2M
-        five_day = [H[0], H[1], H[2], H[0], M[2]]             # 4H + 1M, 2/1/2
-        four_day = [H[0], H[1], H[2], M[2]]                   # 3H + 1M, 1/1/2
+        # 4H + 2M, interleaved so at most 2 adjacent heavies.
+        # Strength goal permits adjacent heavy on different muscles (P/Pu)
+        # but never 3 in a row. Day-4 M[1] (Pull hypertrophy) gives the
+        # CNS a break before the second heavy-Push cycle.
+        six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]        # 4H + 2M (P/Pu adj OK for strength)
+        five_day = [H[0], H[1], H[2], M[0], M[2]]             # 3H + 2M, 2/1/2
+        four_day = [H[0], H[1], M[0], M[2]]                   # 2H + 2M (was 3H+1M — too CNS-heavy at 4d)
     elif goal_lower == "muscle_gain":
-        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]        # 3H + 3V
-        five_day = [H[0], H[1], H[2], V[0], V[2]]             # 3H + 2V, 2/1/2
-        four_day = [H[0], H[1], H[2], V[2]]                   # 3H + 1V, 1/1/2
+        # 3H + 3V — alternated so no two heavies are adjacent.
+        # Previous [H,H,H,V,V,V] yielded 3 consecutive heavies,
+        # which the intensity-spacing pass tried to break but was
+        # reverted by split-identity preservation (Push→Pull→Legs
+        # block). Interleaving satisfies both invariants.
+        six_day = [H[0], V[1], H[2], V[0], H[1], V[2]]        # 3H + 3V (HVHVHV)
+        five_day = [H[0], V[1], H[2], V[0], V[2]]             # 2H + 3V, 2/1/2 (was 3H+2V)
+        four_day = [H[0], V[1], H[2], V[2]]                   # 2H + 2V (was 3H+1V)
     elif goal_lower == "body_recomp":
         six_day = [H[0], M[1], H[2], V[0], M[1], V[2]]        # balanced 2+2+2
         five_day = [H[0], M[1], H[2], V[0], V[2]]             # 2/1/2
         four_day = [H[0], M[1], H[2], V[2]]                   # 1/1/2
     elif goal_lower == "athletic_performance":
-        six_day = [H[0], H[1], H[2], M[0], M[1], M[2]]        # 3H + 3M
-        five_day = [H[0], H[1], H[2], M[0], M[2]]             # 3H + 2M, 2/1/2
-        four_day = [H[0], H[1], H[2], M[2]]                   # 3H + 1M, 1/1/2
+        # 3H + 3M, interleaved (no 3 adjacent heavies).
+        six_day = [H[0], M[1], H[2], M[0], H[1], M[2]]        # 3H + 3M (HMHMHM)
+        five_day = [H[0], M[1], H[2], M[0], M[2]]             # 2H + 3M, 2/1/2
+        four_day = [H[0], M[1], H[2], M[2]]                   # 2H + 2M
     elif goal_lower == "hyrox":
         six_day = [H[0], M[1], H[2], M[0], M[1], M[2]]        # 2H + 4M
         five_day = [H[0], M[1], H[2], M[0], M[2]]             # 2H + 3M, 2/1/2
@@ -172,10 +205,10 @@ def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
         four_day = [M[0], V[1], M[2], V[2]]                   # 2M + 2V, 1/1/2
     else:
         # Unknown / general_health / maintain / endurance lifting day:
-        # default to the legacy 3H + 3V mix.
-        six_day = [H[0], H[1], H[2], V[0], V[1], V[2]]
-        five_day = [H[0], H[1], H[2], V[0], V[2]]
-        four_day = [H[0], H[1], H[2], V[2]]
+        # default to 3H + 3V, interleaved to avoid 3 adjacent heavies.
+        six_day = [H[0], V[1], H[2], V[0], H[1], V[2]]
+        five_day = [H[0], V[1], H[2], V[0], V[2]]
+        four_day = [H[0], V[1], H[2], V[2]]
 
     if days >= 6:
         return six_day[:days]
@@ -225,20 +258,24 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
             # heavy; toning/fat_loss avoid pure-heavy; body_recomp balances.
             goal_lower = (profile.bucket or "").lower()
             if goal_lower in ("strength", "athletic_performance"):
-                # Lead with two heavy days per region, then hypertrophy.
-                # 4-day plan = pure heavy; 5-6 day plan adds hypertrophy.
+                # Heavy-biased alternation. 4d wraps to 2H+2Hy;
+                # 6d wraps to 4H+2Hy (upper/lower heavy back-to-back
+                # is acceptable for strength — different muscle groups).
+                # Changed from 3-heavy-in-4 (too CNS-dense at 4d) to
+                # clean 2H+2Hy at 4d while keeping 4H+2Hy at 6d via
+                # the odd-day override below.
                 if priority_region == "lower_body":
                     stimulus_cycle = [
                         DayArchetype.LIFT_LOWER_HEAVY,
                         DayArchetype.LIFT_UPPER_HEAVY,
-                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
                         DayArchetype.LIFT_UPPER_HYPERTROPHY,
                     ]
                 else:
                     stimulus_cycle = [
                         DayArchetype.LIFT_UPPER_HEAVY,
                         DayArchetype.LIFT_LOWER_HEAVY,
-                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
                         DayArchetype.LIFT_LOWER_HYPERTROPHY,
                     ]
             elif goal_lower in ("toning", "fat_loss"):
@@ -258,12 +295,17 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
                         DayArchetype.LIFT_UPPER_HYPERTROPHY,
                         DayArchetype.LIFT_LOWER_HEAVY,
                     ]
-            else:
-                # muscle_gain / body_recomp / hyrox / unknown → balanced
-                # (legacy default: alternating heavy / hypertrophy)
+            elif goal_lower == "body_recomp":
+                # Body recomp is primarily hypertrophy with a dash of
+                # strength maintenance — NOT 4 heavy days. UL has no
+                # dedicated VOLUME archetype, so we give 2 heavy per
+                # region and fill the rest with hypertrophy. At 6 lifts
+                # this yields 2H + 4Hy (was 4H + 2Hy).
                 if priority_region == "lower_body":
                     stimulus_cycle = [
                         DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
                         DayArchetype.LIFT_UPPER_HEAVY,
                         DayArchetype.LIFT_LOWER_HYPERTROPHY,
                         DayArchetype.LIFT_UPPER_HYPERTROPHY,
@@ -271,15 +313,52 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
                 else:
                     stimulus_cycle = [
                         DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                    ]
+            else:
+                # muscle_gain / hyrox / unknown → hypertrophy-biased.
+                # Previous 4-day [H,H,Hy,Hy] cycle wrapped to 4H+2Hy at
+                # 6 days — too CNS-dense for muscle_gain (which prefers
+                # 2H+4Hy or 3H+3Hy). Use a 6-slot cycle with one heavy
+                # per region and 4 hypertrophy days. At 4d wraps to
+                # 1H+3Hy + heavy-lower via odd-day override; at 6d
+                # yields the intended 2H+4Hy.
+                if priority_region == "lower_body":
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_LOWER_HEAVY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+                    ]
+                else:
+                    stimulus_cycle = [
+                        DayArchetype.LIFT_UPPER_HEAVY,
+                        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+                        DayArchetype.LIFT_UPPER_HYPERTROPHY,
                         DayArchetype.LIFT_LOWER_HEAVY,
                         DayArchetype.LIFT_UPPER_HYPERTROPHY,
                         DayArchetype.LIFT_LOWER_HYPERTROPHY,
                     ]
             result = [stimulus_cycle[i % len(stimulus_cycle)] for i in range(days)]
-            # Odd day: repeat an extra upper or lower hypertrophy day
-            # instead of breaking the split with full body
+            # Odd day: repeat an extra session of the PRIORITY region
+            # (an extra lower day for lower_body priority, an extra upper
+            # day for upper_body priority). Balanced keeps the default
+            # last-entry emphasis (upper hypertrophy) rather than flipping
+            # it — this is intentional so balanced users still see mixed
+            # stimulus coverage and we don't bias toward either region.
             if days % 2 == 1:
-                result[-1] = DayArchetype.LIFT_UPPER_HYPERTROPHY if priority_region != "upper_body" else DayArchetype.LIFT_LOWER_HYPERTROPHY
+                if priority_region == "lower_body":
+                    result[-1] = DayArchetype.LIFT_LOWER_HYPERTROPHY
+                elif priority_region == "upper_body":
+                    result[-1] = DayArchetype.LIFT_UPPER_HYPERTROPHY
+                else:
+                    result[-1] = DayArchetype.LIFT_UPPER_HYPERTROPHY
             return result
         if priority_region == "lower_body":
             cycle = [DayArchetype.LIFT_LOWER, DayArchetype.LIFT_UPPER]
@@ -416,9 +495,13 @@ def _lifting_plus_cardio_recipe(
     amounts of cardio without needing separate recipe functions:
 
         conditioning fraction ≥ 0.30  (fat_loss territory)
-            → 1 cardio day at 3 days/week, 2 at 5+, 3 at 6+
+            → 1 cardio day at 3-4 days/week, 2 at 5+ (cap at 2)
         conditioning fraction 0.10–0.29  (body_recomp, recomp-lite)
-            → 0 cardio days at 1-3 days, 1 at 4-5, 2 at 6+
+            → 0 cardio days at 1-3 days, 1 at 4+ (cap at 1)
+            (stays strictly below fat_loss's cardio count at every
+            day-count so the goal mix stays differentiated, and
+            preserves 6d PPL split balance — 2 cardio at 6d would
+            force lift_days=4 and trigger the PPL→UL auto-convert)
         conditioning fraction < 0.10
             → falls back to pure lifting (no conditioning days)
 
@@ -443,13 +526,17 @@ def _lifting_plus_cardio_recipe(
     if conditioning_frac < 0.10:
         cond_days = 0
     elif conditioning_frac < 0.30:
-        # Body-recomp band
+        # Body-recomp band — capped at 1 true cardio day so fat_loss's
+        # stronger conditioning emphasis (cap 2) stays strictly above
+        # body_recomp at every day-count. Bumping body_recomp to 2 at
+        # 6d would also force lift_days=4, which triggers the PPL→UL
+        # auto-convert and breaks 6d PPL split balance.
         if available_for_training <= 3:
             cond_days = 0
         elif available_for_training <= 5:
             cond_days = 1
         else:
-            cond_days = 1  # cap at 1 true conditioning day
+            cond_days = 1  # cap at 1 (see comment)
     else:
         # Fat-loss / endurance band
         if available_for_training <= 2:
@@ -469,15 +556,39 @@ def _lifting_plus_cardio_recipe(
     # Bump lift_days up by 1 so Upper/Lower balance is preserved. Steal
     # the day from recovery first (user still has 2 cardio days on a
     # 6-day fat-loss week), then from conditioning as a last resort.
-    # Only applies to U/L — PPL benefits from the 3-rotation and is
-    # handled by the PPL auto-switch above.
-    from .day_templates import SPLIT_UPPER_LOWER as _SPLIT_UL
+    # Only applies to U/L — PPL has its own multiple-of-3 rule below.
+    from .day_templates import (
+        SPLIT_UPPER_LOWER as _SPLIT_UL,
+        SPLIT_PPL as _SPLIT_PPL,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL,
+    )
     if (
         lifting_split == _SPLIT_UL
         and lift_days >= 2
         and lift_days % 2 == 1
     ):
-        if recovery_days > 0:
+        # At 7 days we preserve BOTH recovery AND at least one cardio
+        # day. If lift_days is odd (typical: 5 lifts + 1 cond + 1 rec),
+        # instead of stealing cardio or recovery, we DROP one lift and
+        # ADD a cardio day. Result: 4 lifts + 2 cardio + 1 recovery —
+        # even lifts, cardio preserved, CNS decompression preserved.
+        # At ≤6 days the user already has natural off-days so the old
+        # "steal recovery" rule still applies (matches existing tests).
+        #
+        # Gated by `conditioning_frac >= 0.30` — fat_loss / endurance band
+        # genuinely wants 2 cardio at 7d. body_recomp (0.10–0.29 band)
+        # caps at 1 cardio per the docstring contract, so we fall through
+        # to the legacy "steal recovery" branch instead of breaking the
+        # cardio cap.
+        if days >= 7 and conditioning_frac >= 0.30:
+            lift_days -= 1
+            cond_days += 1
+            logger.debug(
+                "[weekly_recipe] U/L force-even-lifts (7d): "
+                "traded 1 lift for 1 cardio → %d lifts, %d cond, %d rec",
+                lift_days, cond_days, recovery_days,
+            )
+        elif recovery_days > 0:
             recovery_days -= 1
             lift_days += 1
             logger.debug(
@@ -492,23 +603,92 @@ def _lifting_plus_cardio_recipe(
                 "moved 1 conditioning day → lift_days=%d", lift_days,
             )
 
+    # Forced-multiple-of-3-lift-days rule for PPL (and PPL_UL hybrid,
+    # which is PPL-first). A non-mult-of-3 lift_days on PPL guarantees
+    # family imbalance — e.g. 5 lifts emits [Push, Pull, Legs, Push,
+    # Pull] = 2P/2Pu/1L, under-prescribing Legs (or Pull after
+    # rotation). Bump lift_days up to the next multiple of 3 so each
+    # family gets equal reps. Steal recovery first, then conditioning
+    # (PPL balance is a bigger win than 1 cardio day on a ≥6-day week).
+    # Loop up to 2 iterations since the gap is at most 2.
+    #
+    # Skip lift_days == 4 — that case is already handled by the
+    # PPL→UL auto-convert below (which emits 2 Upper / 2 Lower +
+    # cardio, a better shape than 6 PPL lifts with no conditioning).
+    needs_mult_of_3_lifts = lifting_split in (_SPLIT_PPL, _SPLIT_PPL_UL)
+    while (
+        needs_mult_of_3_lifts
+        and lift_days >= 5
+        and lift_days % 3 != 0
+        and days >= 6
+    ):
+        # At 7 days preserve BOTH recovery AND ≥1 cardio. Drop a lift
+        # and ADD a cardio instead of stealing (same rule as U/L above).
+        # For PPL mult-of-3 at 7d: 5 lifts + 1 cond + 1 rec → 3 lifts +
+        # 3 cond + 1 rec. That's lots of cardio — but PPL needs mult of
+        # 3 lifts, and at 7 days we keep rest + cardio. Alternative would
+        # be 6 lifts stealing from cond/rec, which is what we're avoiding.
+        # Step lift_days down to the nearest mult of 3 and convert the
+        # freed slots to cardio.
+        #
+        # Gated by `conditioning_frac >= 0.30` (same as U/L branch) —
+        # body_recomp (0.10–0.29 band) caps at 1 cardio per the
+        # docstring contract, so for body_recomp 7d PPL we fall through
+        # to the steal-recovery branch instead of manufacturing 2 extra
+        # cardio days.
+        if days >= 7 and conditioning_frac >= 0.30:
+            target_lifts = (lift_days // 3) * 3   # nearest multiple of 3 below
+            delta = lift_days - target_lifts
+            lift_days = target_lifts
+            cond_days += delta
+            logger.debug(
+                "[weekly_recipe] PPL force-mult-of-3-lifts (7d): "
+                "traded %d lifts for %d cardio → %d lifts, %d cond, %d rec",
+                delta, delta, lift_days, cond_days, recovery_days,
+            )
+            break
+        elif recovery_days > 0:
+            recovery_days -= 1
+            lift_days += 1
+            logger.debug(
+                "[weekly_recipe] PPL force-mult-of-3-lifts: "
+                "moved 1 recovery day → lift_days=%d", lift_days,
+            )
+        elif cond_days > 0:
+            cond_days -= 1
+            lift_days += 1
+            logger.debug(
+                "[weekly_recipe] PPL force-mult-of-3-lifts: "
+                "moved 1 conditioning day → lift_days=%d", lift_days,
+            )
+        else:
+            # Can't satisfy (e.g. no recovery/cond left to donate —
+            # 3d PPL with no slack, or full-lift weeks). Fall through;
+            # downstream rotation/repair will cope with the imbalance.
+            break
+
     if cond_days == 0 and recovery_days == 0:
         return _lifting_recipe(profile, lifting_split, days, priority_region=priority_region)
-    # Split-compatibility fix: a 3-move PPL cycle on 4 lift days emits
+    # ── Intentional PPL→UL compatibility fix (mixed-mode only) ──
+    # A 3-move PPL cycle on exactly 4 lift days emits
     # [Push, Pull, Legs, Push] — which creates two Pushes that can
     # never be fully spaced once you add cardio + run rotation for
     # recent-focus avoidance. For those cases, transparently use an
     # Upper/Lower split so the 4 lift days divide evenly into
-    # [Upper, Lower, Upper, Lower]. Only kicks in for ppl-ish splits
-    # where this specific pathology exists.
+    # [Upper, Lower, Upper, Lower].
+    #
+    # IMPORTANT: this only fires when the user did NOT explicitly pick
+    # PPL (user_chose_split is False). A user-chosen PPL split is always
+    # honored; duplicate-repair + intensity spacing handle overlap for
+    # that case. Do NOT generalize this auto-convert to other lift_day
+    # counts without revisiting split_identity tests and the UL priority
+    # scoring path.
     from .day_templates import SPLIT_PPL, SPLIT_UPPER_LOWER
     effective_split = lifting_split
-    # Only auto-convert PPL→UL at 4 lift days when the user did NOT
-    # explicitly choose PPL. If they picked it, respect the choice and
-    # let the duplicate-repair + intensity spacing handle any overlap.
     if lift_days == 4 and lifting_split == SPLIT_PPL and not user_chose_split:
-        logger.debug(
-            "[weekly_recipe] lift_days=4 on PPL (auto) → switching to upper_lower "
+        logger.info(
+            "[weekly_recipe] PPL→UL auto-convert (intentional compatibility fix): "
+            "lift_days=4 on PPL without user_chose_split → switching to upper_lower "
             "to avoid duplicate Push/Pull/Legs day"
         )
         effective_split = SPLIT_UPPER_LOWER
@@ -550,16 +730,80 @@ def _lifting_plus_cardio_recipe(
     else:
         cycle_len = 3  # default
 
-    out: list[DayArchetype] = []
-    li = ci = 0
-    since_last_cond = 0
-    while li < len(lifting) or ci < len(cond):
-        if li < len(lifting):
-            out.append(lifting[li]); li += 1; since_last_cond += 1
-            if ci < len(cond) and since_last_cond >= cycle_len:
-                out.append(cond[ci]); ci += 1; since_last_cond = 0
-        elif ci < len(cond):
-            out.append(cond[ci]); ci += 1
+    # Even-distribution interleave. Previous approach ran a paired
+    # counter (insert a cardio after every `cycle_len` lifts, drain
+    # any leftover cardios at the tail) — on short recipes with few
+    # lifts, the "tail drain" step emitted consecutive cardio days
+    # (e.g. 3 lifts + 2 cardio at cycle=3 produced
+    # [Push, Pull, Legs, Zone2, IntervalsShort]). A downstream
+    # adjacency-repair pass caught most of it, but the structural
+    # emission of cardio→cardio in the interleave is a latent bug
+    # whenever len(cond) + leftover > available non-cardio positions
+    # at the tail. Fix: compute the cardio insertion positions
+    # up-front across the WHOLE `total` span so each cardio lands
+    # between lifts, not after the last lift. Positions are chosen
+    # so at least one lift (or recovery, below) sits between cardios
+    # whenever mathematically possible.
+    total = len(lifting) + len(cond)
+    out: list[DayArchetype] = [None] * total  # type: ignore[list-item]
+    if len(cond) == 0:
+        cond_positions: list[int] = []
+    elif total <= 1:
+        cond_positions = [0] if len(cond) else []
+    else:
+        # Evenly-spaced indices in [0, total-1]. For 5 days with 2
+        # cardios: positions 1 and 3 → lift/cond/lift/cond/lift.
+        # For 3 days with 1 cardio: position 1 → lift/cond/lift.
+        # For 6 days with 2 cardios: positions 1, 4 → L/C/L/L/C/L.
+        # Prefer the first cardio at position 1 so day 0 stays a
+        # lift (users expect Monday to be lifting, not cardio).
+        if len(cond) == 1:
+            cond_positions = [total // 2]
+        else:
+            # Spread across [1, total-1] to keep day 0 as a lift.
+            span = total - 1
+            step = span / len(cond)
+            cond_positions = [
+                min(total - 1, int(round(1 + step * i)))
+                for i in range(len(cond))
+            ]
+            # Deduplicate / guarantee strictly increasing, non-adjacent.
+            used: set[int] = set()
+            fixed: list[int] = []
+            for p in cond_positions:
+                q = p
+                while q in used or (fixed and q - fixed[-1] < 2):
+                    q += 1
+                    if q >= total:
+                        # Walk backward if we've run off the end.
+                        q = p
+                        while q in used or (fixed and abs(q - fixed[-1]) < 2):
+                            q -= 1
+                            if q < 0:
+                                q = p
+                                break
+                        break
+                if 0 <= q < total:
+                    used.add(q)
+                    fixed.append(q)
+            cond_positions = sorted(fixed) if fixed else cond_positions
+    cond_pos_set = set(cond_positions)
+    ci = 0
+    li = 0
+    for i in range(total):
+        if i in cond_pos_set and ci < len(cond):
+            out[i] = cond[ci]
+            ci += 1
+        elif li < len(lifting):
+            out[i] = lifting[li]
+            li += 1
+    # Backfill any Nones (shouldn't happen, but be defensive).
+    for i in range(total):
+        if out[i] is None:
+            if li < len(lifting):
+                out[i] = lifting[li]; li += 1
+            elif ci < len(cond):
+                out[i] = cond[ci]; ci += 1
 
     # Recovery day(s) go at the END of the week. Placing them last
     # means the user's final training day before the weekend (or the
@@ -567,7 +811,12 @@ def _lifting_plus_cardio_recipe(
     out.extend(recovery)
 
     assert len(out) == days, f"Recipe length {len(out)} != requested {days} days (lift={lift_days} cond={cond_days} recovery={recovery_days})"
-    return _repair_adjacent_duplicates(out, allowed_archetypes=profile.allowed_archetypes)
+    return _repair_adjacent_duplicates(
+        out,
+        allowed_archetypes=profile.allowed_archetypes,
+        lifting_split=lifting_split,
+        user_chose_split=user_chose_split,
+    )
 
 
 # ── Family-sibling substitution map ─────────────────────────────────
@@ -604,6 +853,8 @@ def _repair_adjacent_duplicates(
     recipe: list[DayArchetype],
     *,
     allowed_archetypes: frozenset["DayArchetype"] | None = None,
+    lifting_split: str | None = None,
+    user_chose_split: bool = False,
 ) -> list[DayArchetype]:
     """Deterministic sweep that swaps adjacent same-bucket days so
     the user never gets Push → Push or Legs → Legs back to back.
@@ -816,7 +1067,22 @@ def _repair_adjacent_duplicates(
     # push↔pull. Only applied when the sibling is permitted by the
     # profile (or no profile is supplied). Runs at most len(out)
     # times to keep total bounded.
-    for _ in range(len(out)):
+    #
+    # Skip tier D for user-chosen PPL / PPL_UL — substituting Push→Pull
+    # would break the Push→Pull→Legs cycle the user explicitly selected,
+    # and `_preserves_split_identity` would revert the substitution
+    # anyway. Skipping here avoids wasted work + log spam. UL is NOT
+    # skipped because sibling substitution (Upper↔Lower) RESTORES the
+    # strict alternation that defines UL's split identity, so the guard
+    # happily accepts it. Auto / None split also runs tier D normally.
+    from .day_templates import (
+        SPLIT_PPL as _SPLIT_PPL_TD,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL_TD,
+    )
+    _skip_tier_d = bool(user_chose_split) and lifting_split in (
+        _SPLIT_PPL_TD, _SPLIT_PPL_UL_TD,
+    )
+    for _ in range(0 if _skip_tier_d else len(out)):
         if _total_dups(out) == 0:
             break
         substituted = False
@@ -1067,7 +1333,14 @@ def _space_high_intensity_days(
 
     out = list(recipe)
     max_heavy_streak = 3 if goal_allows_heavy_streaks else 2
-    fatigue_threshold = 1.8 if goal_allows_heavy_streaks else 1.5
+    # Threshold for the rolling 3-day fatigue window. 2.10 allows one
+    # heavy (0.75 upper / 0.85 legs) plus two adjacent lift-hypertrophy
+    # days (0.55 upper / 0.65 legs, max 1.30) without triggering a
+    # downgrade — otherwise UL hypertrophy-biased weeks for
+    # muscle_gain / body_recomp lose every heavy day to this pass.
+    # Strength goals get 2.20 so UH + LH + Hy (2.15) survives but UH +
+    # LH + LH (2.45) doesn't (Pass 1 handles 3-heavy streaks anyway).
+    fatigue_threshold = 2.20 if goal_allows_heavy_streaks else 2.10
 
     def _cost(a: DayArchetype) -> int:
         return ARCHETYPE_META[a].intensity_cost
@@ -1155,13 +1428,23 @@ def _space_high_intensity_days(
                 out[worst_idx], out[swap_idx] = out[swap_idx], out[worst_idx]
 
     # ── Pass 3: Heavy legs after accumulated fatigue ─────────────────
+    # Threshold (prev 2 days' cumulative fatigue) above which heavy
+    # legs on day i gets downgraded. Previously 0.9 — too aggressive:
+    # a single upper-heavy (0.75) + any lift triggered the downgrade,
+    # which stripped the week's second heavy day from hypertrophy-
+    # biased plans (muscle_gain, body_recomp at 5-6 lifts on UL).
+    # 1.4 allows UH + Hy (1.30) before a heavy-legs session but still
+    # blocks UH + UH (1.50) or LH + Hy (1.40 → still blocked as
+    # consecutive heavies). Strength goals get 1.7 so their
+    # heavy-upper + heavy-lower pairs don't strip the follow-on heavy.
+    heavy_legs_prev_fatigue_threshold = 1.7 if goal_allows_heavy_streaks else 1.4
     for i in range(2, len(out)):
         if out[i] not in _LEGS_ARCHETYPES:
             continue
         if not _is_heavy(out[i]):
             continue
         prev_fatigue = sum(_fatigue_cost(out[j]) for j in range(max(0, i - 2), i))
-        if prev_fatigue < 0.9:
+        if prev_fatigue < heavy_legs_prev_fatigue_threshold:
             continue
         if _downgrade(i):
             logger.debug(f"[intensity] heavy legs at day {i} after fatigue {prev_fatigue:.2f}, downgraded")
@@ -1194,6 +1477,40 @@ def _space_high_intensity_days(
                 f"({out[swap_idx].value}, cost={_cost(out[swap_idx])})"
             )
             out[i], out[swap_idx] = out[swap_idx], out[i]
+
+    # ── Pass 6: Heavy-pair cooldown ─────────────────────────────────
+    # After two consecutive heavy sessions (e.g. Upper_Heavy →
+    # Lower_Heavy for strength goals), day N+2 should NOT also be
+    # heavy — the CNS needs one decompression day of cardio /
+    # mobility / hypertrophy / volume. If we find a `heavy → heavy
+    # → heavy` triple that Pass 1 left intact (e.g. because the
+    # streak limit was 3 for strength), demote OR swap the third
+    # heavy day. Deterministic: prefer swapping with the nearest
+    # non-heavy day later in the recipe, fall back to downgrade.
+    # Only triggers on the third consecutive heavy; two-in-a-row is
+    # already handled by Pass 1 for non-strength goals.
+    for i in range(2, len(out)):
+        if not (_is_heavy(out[i - 2]) and _is_heavy(out[i - 1]) and _is_heavy(out[i])):
+            continue
+        # Try to swap with the nearest non-heavy day AFTER the pair
+        # (keep the pair intact — demoting day i preserves the CNS
+        # rhythm; swapping shifts the 3rd heavy to a different part
+        # of the week). Search forward first, then backward.
+        swap_idx = None
+        for j in list(range(i + 1, len(out))) + list(range(0, i - 2)):
+            if _is_heavy(out[j]):
+                continue
+            swap_idx = j
+            break
+        if swap_idx is not None:
+            logger.debug(
+                f"[intensity] heavy-pair cooldown: day {i} "
+                f"({out[i].value}) follows heavy pair {i-2}-{i-1}; "
+                f"swapping with day {swap_idx} ({out[swap_idx].value})"
+            )
+            out[i], out[swap_idx] = out[swap_idx], out[i]
+        else:
+            _downgrade(i)
 
     return out
 
@@ -1247,6 +1564,252 @@ def _count_adjacent_duplicates(recipe: list[DayArchetype]) -> int:
 
 _COARSE_BUCKETS = {"upper_body", "lower_body", "full_body", "cardio", "mobility", "recovery"}
 _FINE_FAMILIES = {"push", "pull", "legs", "upper", "lower", "full_body", "cardio", "mobility", "recovery"}
+
+# Fine focus family → coarse bucket. Used by rotation + lift-priority
+# rescue when the caller passes fine families but we also want to fall
+# back to coarse-bucket awareness. Mirrors
+# `focus_normalize.BUCKET_TO_FAMILIES` inverted so everything stays
+# consistent with the rest of the codebase.
+_FINE_TO_COARSE: dict[str, str] = {
+    "push": "upper_body",
+    "pull": "upper_body",
+    "upper": "upper_body",
+    "legs": "lower_body",
+    "lower": "lower_body",
+    "full_body": "full_body",
+    "cardio": "cardio",
+    "mobility": "mobility",
+    "recovery": "recovery",
+}
+
+
+def _has_lifted_recently(
+    recent_focus_families: tuple[str, ...] | list[str] | None,
+    recent_focus_buckets: tuple[str, ...] | list[str] | None,
+) -> bool:
+    """Return True iff the user's recent focus history shows at least
+    one lifting session (any push/pull/legs/upper/lower/full_body
+    family OR any upper_body/lower_body/full_body coarse bucket).
+    Centralized so rotation and lift-priority rescue agree on the
+    definition of "has the user lifted recently?"."""
+    _LIFT_FAMILIES = {"push", "pull", "legs", "upper", "lower", "full_body"}
+    _LIFT_COARSE = {"upper_body", "lower_body", "full_body"}
+    fams = list(recent_focus_families or ())
+    if any(fam in _LIFT_FAMILIES for fam in fams):
+        return True
+    # Fine→coarse expansion: if fine families were passed (e.g. ("pull",))
+    # their coarse equivalents ("upper_body",) count too. Redundant for
+    # pure lift families (already covered above), but explicit for
+    # clarity + future coarse-only lifting tokens.
+    expanded_coarse = {_FINE_TO_COARSE.get(fam) for fam in fams if fam}
+    if any(b in _LIFT_COARSE for b in expanded_coarse if b):
+        return True
+    # Fall back to explicit recent_focus_buckets when families is empty.
+    if not fams:
+        for b in (recent_focus_buckets or ()):
+            if b in _LIFT_COARSE:
+                return True
+    return False
+
+
+def _lift_tokens_of(recipe: list[DayArchetype]) -> list[str]:
+    """Ordered list of lift-family tokens in `recipe`, skipping cardio /
+    mobility / recovery insertions."""
+    out: list[str] = []
+    for a in recipe:
+        try:
+            fam = archetype_to_focus_family(a)
+        except KeyError:
+            continue
+        if fam in ("push", "pull", "legs", "upper", "lower", "full_body"):
+            out.append(fam)
+    return out
+
+
+def _ppl_cycle_breaks(lift_tokens: list[str], hybrid: bool) -> int:
+    """Count transitions in `lift_tokens` that violate the PPL cycle
+    (push→pull→legs→push…). Compared CIRCULARLY — the last token's
+    successor must match the first — so a rotation of a valid cycle
+    also scores 0. For PPL_UL (`hybrid=True`), also accept legs→upper,
+    upper→lower, lower→push."""
+    strict = {"push": "pull", "pull": "legs", "legs": "push"}
+    hybrid_map = {
+        "push": {"pull"},
+        "pull": {"legs"},
+        "legs": {"push", "upper"},
+        "upper": {"lower"},
+        "lower": {"push"},
+    }
+    if not lift_tokens:
+        return 0
+    breaks = 0
+    n = len(lift_tokens)
+    # Circular: i pairs with (i+1) mod n. Means a simple rotation of a
+    # well-formed cycle scores the same as the original — rotation
+    # passes don't trip the guard by construction.
+    for i in range(n):
+        cur = lift_tokens[i]
+        nxt = lift_tokens[(i + 1) % n]
+        if hybrid:
+            expected = hybrid_map.get(cur)
+            if expected is None or nxt not in expected:
+                breaks += 1
+        else:
+            expected = strict.get(cur)
+            if expected is None or nxt != expected:
+                breaks += 1
+    return breaks
+
+
+def _ul_alt_breaks(lift_tokens: list[str]) -> int:
+    """Count adjacent same-family transitions among the strict-UL
+    lift tokens (upper/lower only — other families are ignored).
+    Circular: a rotation of a strictly-alternating sequence with
+    EVEN length scores 0; odd length inherently has at least one
+    wraparound repeat."""
+    ul_only = [t for t in lift_tokens if t in ("upper", "lower")]
+    if len(ul_only) < 2:
+        return 0
+    breaks = 0
+    n = len(ul_only)
+    for i in range(n):
+        cur = ul_only[i]
+        nxt = ul_only[(i + 1) % n]
+        if cur == nxt:
+            breaks += 1
+    return breaks
+
+
+def _preserves_split_identity(
+    recipe: list[DayArchetype],
+    lifting_split: Optional[str],
+    user_chose_split: bool,
+    *,
+    baseline: list[DayArchetype] | None = None,
+) -> bool:
+    """Guard used after every post-processing pass that may reorder
+    archetypes. Returns True when split identity hasn't gotten WORSE
+    than `baseline` (if supplied) or is fully intact (if baseline is
+    None).
+
+    Split checks:
+      - PPL / PPL_UL: lift-family cycle follows P→Pu→L (PPL_UL also
+        accepts …→L→U→L→P). Non-lift days (cardio/mobility/recovery)
+        are stripped before comparison.
+      - Strict Upper/Lower (user_chose_split=True): no two consecutive
+        upper or lower lift days. Stripped of non-lift days.
+      - Full Body / unknown / user_chose_split=False on UL: always True.
+
+    Passing `baseline` lets callers compare identity-breakage before
+    vs after a pass — a pass that doesn't introduce NEW breakage is
+    considered identity-preserving even when the recipe was already
+    imperfect (e.g. odd-day UL strict has one unavoidable repeat)."""
+    from .day_templates import (
+        SPLIT_PPL as _SPLIT_PPL_GUARD,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL_GUARD,
+        SPLIT_UPPER_LOWER as _SPLIT_UL_GUARD,
+    )
+
+    if not recipe:
+        return True
+
+    tokens_now = _lift_tokens_of(recipe)
+
+    if lifting_split in (_SPLIT_PPL_GUARD, _SPLIT_PPL_UL_GUARD):
+        hybrid = (
+            lifting_split == _SPLIT_PPL_UL_GUARD
+            and any(t in ("upper", "lower") for t in tokens_now)
+        )
+        now_breaks = _ppl_cycle_breaks(tokens_now, hybrid=hybrid)
+        if baseline is not None:
+            base_tokens = _lift_tokens_of(baseline)
+            base_hybrid = (
+                lifting_split == _SPLIT_PPL_UL_GUARD
+                and any(t in ("upper", "lower") for t in base_tokens)
+            )
+            base_breaks = _ppl_cycle_breaks(base_tokens, hybrid=base_hybrid)
+            return now_breaks <= base_breaks
+        return now_breaks == 0
+
+    if lifting_split == _SPLIT_UL_GUARD and user_chose_split:
+        now_breaks = _ul_alt_breaks(tokens_now)
+        if baseline is not None:
+            base_breaks = _ul_alt_breaks(_lift_tokens_of(baseline))
+            return now_breaks <= base_breaks
+        return now_breaks == 0
+
+    # Full body / unknown / non-user-chosen UL: no identity to preserve.
+    return True
+
+
+def _next_in_split_rotation(
+    last_family: str | None,
+    lifting_split: str | None,
+) -> str | None:
+    """Return the family that SHOULD be day 0 given the user's last
+    completed lift family and the active split.
+
+    - PPL / PPL_UL: Push → Pull → Legs → Push. Upper/Lower (hybrid
+      residuals) fall through to None so the caller defers to the
+      broader rotation pass.
+    - Upper/Lower: strict alternation.
+    - Full Body / Bro / None / unknown: no anchor.
+    - Non-lift last families (cardio / mobility / recovery / None) also
+      return None so cardio/mobility days don't force a rotation."""
+    from .day_templates import (
+        SPLIT_PPL as _SPLIT_PPL_NXT,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL_NXT,
+        SPLIT_UPPER_LOWER as _SPLIT_UL_NXT,
+    )
+    if not last_family:
+        return None
+    if lifting_split in (_SPLIT_PPL_NXT, _SPLIT_PPL_UL_NXT):
+        ppl_next = {"push": "pull", "pull": "legs", "legs": "push"}
+        return ppl_next.get(last_family)
+    if lifting_split == _SPLIT_UL_NXT:
+        ul_next = {"upper": "lower", "lower": "upper"}
+        return ul_next.get(last_family)
+    return None
+
+
+def _anchor_recipe_to_split_next(
+    recipe: list[DayArchetype],
+    recent_focus_families: tuple[str, ...] | list[str],
+    lifting_split: str | None,
+) -> list[DayArchetype]:
+    """Rotate `recipe` so day 0 is the EXPECTED next family in the
+    split rotation from the user's last completed lift. If no anchor
+    can be determined (non-PPL/UL split, no recent lift family, or the
+    recipe offers no matching day 0), return the recipe unchanged so
+    downstream rotation passes still run."""
+    if not recent_focus_families or len(recipe) < 2:
+        return recipe
+    lift_families = ("push", "pull", "legs", "upper", "lower", "full_body")
+    last_lift_family = next(
+        (f for f in recent_focus_families if f in lift_families),
+        None,
+    )
+    if last_lift_family is None or last_lift_family == "full_body":
+        return recipe
+    expected = _next_in_split_rotation(last_lift_family, lifting_split)
+    if expected is None:
+        return recipe
+    # Find the first rotation whose day 0 family matches `expected`.
+    for shift in range(len(recipe)):
+        cand = recipe[shift:] + recipe[:shift]
+        try:
+            fam = archetype_to_focus_family(cand[0])
+        except KeyError:
+            continue
+        if fam == expected:
+            if shift != 0:
+                logger.info(
+                    f"[weekly_recipe] split-anchor: last_lift={last_lift_family} "
+                    f"split={lifting_split} expected_day0={expected} "
+                    f"shift={shift}"
+                )
+            return cand
+    return recipe
 
 
 def _rotate_recipe_to_avoid_recent(
@@ -1435,10 +1998,15 @@ def generate_weekly_recipe(
     _modes_skip_recovery = {"mobility", "recovery", "maintain"}
 
     if mode == "strength":
-        # Compound Strength: always upper/lower, heavy variants dominate.
-        # Alternates heavy and lighter (hypertrophy) days for the same
-        # split so the user hits each major lift pattern heavy once per
-        # week with a lighter volume day as backup.
+        # Compound Strength: heavy compound variants dominate. The cycle
+        # honors the caller-supplied `lifting_split` so a user whose
+        # split auto-picked PPL (strength + 6 days) or who explicitly
+        # chose PPL/UL/Full Body gets a recipe with strict split
+        # identity — PPL → exactly balanced Push/Pull/Legs, UL →
+        # alternating upper/lower, Full Body → every day full-body.
+        # Prior behavior silently emitted an Upper/Lower-dominated
+        # cycle regardless of split choice, producing mis-balanced
+        # weeks (e.g. 3 Legs + 2 Push + 1 Pull for a 6-day PPL user).
         recovery_days = _derive_recovery_days(
             days, profile.bucket,
             getattr(profile.mix, "recovery", 0.0),
@@ -1446,18 +2014,65 @@ def generate_weekly_recipe(
         )
         lift_days = days - recovery_days
         _A = DayArchetype
-        if lift_days <= 3:
-            # 3d: Heavy Upper, Heavy Lower, Full Body Strength
-            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH]
-        elif lift_days == 4:
-            # 4d: Heavy Upper, Heavy Lower, Volume Upper, Volume Lower
-            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
-        elif lift_days == 5:
-            # 5d: Heavy Upper, Heavy Lower, Full Body Strength, Volume Upper, Volume Lower
-            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
+        from .day_templates import (
+            SPLIT_UPPER_LOWER as _SPLIT_UL_STR,
+            SPLIT_PPL_UL as _SPLIT_PPL_UL_STR,
+            SPLIT_PPL as _SPLIT_PPL_STR,
+            SPLIT_FULL_BODY as _SPLIT_FB_STR,
+        )
+        # Classify the effective split family: PPL, UL, or Full Body.
+        # A missing split argument falls through to UL (historical default).
+        _is_ppl = lifting_split in (_SPLIT_PPL_STR, _SPLIT_PPL_UL_STR)
+        _is_fb = lifting_split == _SPLIT_FB_STR
+        _is_ul = lifting_split == _SPLIT_UL_STR
+
+        # ── PPL strength cycle ────────────────────────────────────
+        # Strict Push → Pull → Legs rotation so the week is always
+        # split-balanced. Heavy variants first, then volume variants
+        # so each family gets one heavy + one volume day at 6 lift
+        # days (PPL's sweet spot). Lower lift_days trim from the end.
+        if _is_ppl:
+            _ppl_cycle_full = [
+                _A.LIFT_PUSH_HEAVY, _A.LIFT_PULL_HEAVY, _A.LIFT_LEGS_HEAVY,
+                _A.LIFT_PUSH_VOLUME, _A.LIFT_PULL_VOLUME, _A.LIFT_LEGS_VOLUME,
+            ]
+            if lift_days <= 6:
+                _str_cycle = _ppl_cycle_full[:lift_days]
+            else:
+                # 7 lift days on PPL: wrap with an extra Push heavy so
+                # week is 3 Push / 2 Pull / 2 Legs — no same-family
+                # adjacency across the wrap (Legs_volume → Push_heavy).
+                _str_cycle = _ppl_cycle_full + [_A.LIFT_PUSH_HEAVY]
+        # ── Full Body strength cycle ───────────────────────────────
+        # Alternate Full Body Strength (heavy compound) with Full Body
+        # (volume) so every day is full-body but intensity varies.
+        elif _is_fb:
+            _fb_pattern = [_A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_FULL_BODY]
+            _str_cycle = [_fb_pattern[i % 2] for i in range(lift_days)]
+        # ── Upper/Lower strength cycle (default) ──────────────────
+        # Keeps historical behavior for UL and the no-split-argument
+        # case. `_ul_strict` mirrors the previous `_ul_only` — when
+        # the user explicitly picked UL we drop Full Body fillers so
+        # the week is strictly U/L.
         else:
-            # 6d: Heavy Upper, Heavy Lower, Full Body Strength, Volume Upper, Volume Lower, Full Body
-            _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY, _A.LIFT_FULL_BODY]
+            _ul_strict = user_chose_split and _is_ul
+            if lift_days <= 3:
+                if _ul_strict:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY]
+                else:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH]
+            elif lift_days == 4:
+                _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
+            elif lift_days == 5:
+                if _ul_strict:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY, _A.LIFT_UPPER_HYPERTROPHY]
+                else:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY]
+            else:
+                if _ul_strict:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY, _A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HYPERTROPHY]
+                else:
+                    _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_UPPER_HYPERTROPHY, _A.LIFT_LOWER_HYPERTROPHY, _A.LIFT_FULL_BODY]
         recipe = _str_cycle[:lift_days]
         for _ in range(recovery_days):
             recipe.append(_pick_recovery_archetype(profile))
@@ -1511,12 +2126,48 @@ def generate_weekly_recipe(
         f"rotation_using={'families' if recent_focus_families else 'buckets'} "
         f"recipe_before={pre_rotation}"
     )
+    # Split-aware anchor: for PPL / UL users, force day 0 to be the
+    # EXPLICIT next family in the split rotation from the user's last
+    # completed lift (Push→Pull→Legs→Push / Upper↔Lower). Runs before
+    # the generic rotation pass so the subsequent `_rotate_recipe_to_
+    # avoid_recent` + repair + rescue are no-ops on an already-anchored
+    # recipe. Non-PPL/UL splits, missing recent data, or cardio/mobility
+    # last families fall through and let the existing rotation decide.
+    _pre_anchor = list(recipe)
+    recipe = _anchor_recipe_to_split_next(
+        recipe, recent_focus_families, lifting_split,
+    )
+    if not _preserves_split_identity(
+        recipe, lifting_split, user_chose_split, baseline=_pre_anchor
+    ):
+        logger.info(
+            f"[weekly_recipe] split-anchor broke split identity — reverting"
+        )
+        recipe = _pre_anchor
+
     # Avoid scheduling the same focus the user just completed on day 1
     # of the new week. Runs before the allowed-archetype filter so a
     # rotated day still passes through the safety check.
+    # Split-identity guard: for PPL / strict-UL users, revert the
+    # rotation if it scrambled the Push→Pull→Legs (or U↔L) cycle. The
+    # rotation pass is cycle-preserving in the common case (it just
+    # picks a shift), but active-recovery inserts or odd day-counts
+    # can make a shift break the cycle — in that case we keep the
+    # original layout rather than ship a scrambled split.
+    _pre_rotate_recent = list(recipe)
     recipe = _rotate_recipe_to_avoid_recent(
         recipe, rotation_recent, mode=mode,
     )
+    if not _preserves_split_identity(
+        recipe, lifting_split, user_chose_split, baseline=_pre_rotate_recent
+    ):
+        logger.info(
+            f"[weekly_recipe] rotation broke split identity "
+            f"(split={lifting_split} user_chose_split={user_chose_split}) "
+            f"— reverting {[a.value for a in recipe]} → "
+            f"{[a.value for a in _pre_rotate_recent]}"
+        )
+        recipe = _pre_rotate_recent
     # Fatigue-aware rotation: if user has real muscle fatigue data,
     # prefer starting the week with the freshest focus.
     #
@@ -1529,11 +2180,30 @@ def generate_weekly_recipe(
     from .day_templates import SPLIT_PPL, SPLIT_PPL_UL
     skip_fatigue_rotation = lifting_split in (SPLIT_PPL, SPLIT_PPL_UL)
     if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain") and not skip_fatigue_rotation:
+        _pre_fatigue = list(recipe)
         recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
+        if not _preserves_split_identity(
+            recipe, lifting_split, user_chose_split, baseline=_pre_fatigue
+        ):
+            logger.info(
+                f"[weekly_recipe] fatigue rotation broke split identity "
+                f"— reverting"
+            )
+            recipe = _pre_fatigue
     # Rotation can reintroduce adjacent same-bucket duplicates.
+    _pre_repair1 = list(recipe)
     recipe = _repair_adjacent_duplicates(
         recipe, allowed_archetypes=profile.allowed_archetypes,
+        lifting_split=lifting_split, user_chose_split=user_chose_split,
     )
+    if not _preserves_split_identity(
+        recipe, lifting_split, user_chose_split, baseline=_pre_repair1
+    ):
+        logger.info(
+            f"[weekly_recipe] adjacency repair broke split identity "
+            f"— reverting"
+        )
+        recipe = _pre_repair1
     logger.info(
         f"[weekly_recipe] DIAG recipe_after_all_rotation={[a.value for a in recipe]}"
     )
@@ -1555,25 +2225,60 @@ def generate_weekly_recipe(
     if days >= 7 and all_lift and has_mobility and len(recipe) == days:
         recipe[-1] = DayArchetype.MOBILITY_FLOW
         logger.debug(f"[weekly_recipe] replaced day {days} with active recovery")
+    # Re-run adjacency repair after active-recovery injection. Appending
+    # MOBILITY_FLOW next to an existing mobility/recovery last day would
+    # otherwise create a persistent mobility→mobility pair that no
+    # downstream step catches.
+    _pre_repair2 = list(recipe)
+    recipe = _repair_adjacent_duplicates(
+        recipe, allowed_archetypes=profile.allowed_archetypes,
+        lifting_split=lifting_split, user_chose_split=user_chose_split,
+    )
+    if not _preserves_split_identity(
+        recipe, lifting_split, user_chose_split, baseline=_pre_repair2
+    ):
+        logger.info(
+            f"[weekly_recipe] adjacency repair (post-injection) broke split "
+            f"identity — reverting"
+        )
+        recipe = _pre_repair2
 
     # Defensive: every archetype must be in the profile's allowed set.
     fallback = profile.anchor_archetypes[0] if profile.anchor_archetypes else DayArchetype.LIFT_FULL_BODY
     final = [a if a in profile.allowed_archetypes else fallback for a in recipe]
 
     # Intensity-cost spacing: prevent back-to-back high-intensity days.
-    # Strength-dominant goals (mix.strength >= 0.5) get slightly more
-    # allowance for consecutive heavy days; all others bias toward
-    # alternating heavy/volume for better recovery.
-    # Age override: 50+ users always get alternating-heavy rules regardless
-    # of goal, because slower recovery makes consecutive heavy days a
-    # disproportionate injury/overtraining risk.
-    goal_allows_heavy = profile.mix.strength >= 0.5 or profile.planner_mode == "lifting"
+    # ONLY strength-dominant goals (mix.strength >= 0.5) and pure
+    # `strength` planner mode get the heavy-streak allowance. Every
+    # other goal — muscle_gain, body_recomp, athletic_performance,
+    # hyrox, toning, fat_loss — falls under the stricter rule where
+    # 3+ consecutive heavies get downgraded and heavy pairs require
+    # a cooldown day. Dropped the previous `lifting + strength >= 0.35`
+    # clause: it allowed heavy clustering for goals whose design
+    # intent actually forbids it (hypertrophy blocks were interpreted
+    # too literally).
+    # Age override: 50+ users always get alternating-heavy rules
+    # regardless of goal — slower recovery makes consecutive heavy
+    # days a disproportionate injury/overtraining risk.
+    goal_allows_heavy = (
+        profile.mix.strength >= 0.5
+        or profile.planner_mode == "strength"
+    )
     if user_age is not None and user_age >= 50:
         goal_allows_heavy = False
         logger.info(
             f"[weekly_recipe] age={user_age}: forcing non-streak heavy-day spacing"
         )
+    _pre_intensity = list(final)
     final = _space_high_intensity_days(final, goal_allows_heavy_streaks=goal_allows_heavy)
+    if not _preserves_split_identity(
+        final, lifting_split, user_chose_split, baseline=_pre_intensity
+    ):
+        logger.info(
+            f"[weekly_recipe] intensity spacing broke split identity "
+            f"— reverting"
+        )
+        final = _pre_intensity
 
     # Extra-recovery injection for older lifters. Masters athletes (50+)
     # benefit from an additional mobility/recovery day per week when the
@@ -1594,29 +2299,44 @@ def generate_weekly_recipe(
     # Intensity spacing can reintroduce focus-family adjacency (e.g.
     # swapping Legs with PushVolume to space intensity puts Push next
     # to PushVolume). One more adjacency sweep to catch this.
+    _pre_repair3 = list(final)
     final = _repair_adjacent_duplicates(
         final, allowed_archetypes=profile.allowed_archetypes,
+        lifting_split=lifting_split, user_chose_split=user_chose_split,
     )
+    if not _preserves_split_identity(
+        final, lifting_split, user_chose_split, baseline=_pre_repair3
+    ):
+        logger.info(
+            f"[weekly_recipe] adjacency repair (post-intensity) broke split "
+            f"identity — reverting"
+        )
+        final = _pre_repair3
 
     # Lift-priority rescue (runs LAST so intensity spacing can't
     # shuffle a cardio back to day 0). If the user hasn't lifted in
-    # the last 36h (recent_focus_families contains only non-lift
-    # entries — mobility, cardio, recovery) but today's day 0 is
-    # cardio/mobility/recovery, swap it with the nearest lift day in
-    # the recipe. Rationale: a user whose last training stimulus was
-    # Mobility yesterday and no lifting for 3+ days should be getting
-    # under the bar today, not more conditioning. Only fires for
-    # recipes that actually contain a lift day later in the week —
+    # the last 36h (recent_focus_families + recent_focus_buckets
+    # contain no lift entries — mobility, cardio, recovery) but today's
+    # day 0 is cardio/mobility/recovery, swap it with the nearest lift
+    # day in the recipe. Rationale: a user whose last training stimulus
+    # was Mobility yesterday and no lifting for 3+ days should be
+    # getting under the bar today, not more conditioning. Only fires
+    # for recipes that actually contain a lift day later in the week —
     # otherwise it's a no-op. Mode gate matches the rotation pass so
     # anchored-order modes (endurance / athletic / mobility / recovery)
     # keep their intentional layout.
-    _LIFT_FAMILIES = frozenset({"push", "pull", "legs", "upper", "lower", "full_body"})
+    #
+    # "Has the user lifted recently?" is centralised in
+    # `_has_lifted_recently` — same fine→coarse expansion the rotation
+    # pass relies on, with recent_focus_buckets as a fallback when
+    # families is empty.
     _NON_LIFT_DAY0_CATEGORIES = frozenset({"cond", "mobility", "recovery"})
+    _any_recent = bool(recent_focus_families) or bool(recent_focus_buckets)
     if (
         len(final) >= 2
         and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain")
-        and recent_focus_families
-        and not any(fam in _LIFT_FAMILIES for fam in recent_focus_families)
+        and _any_recent
+        and not _has_lifted_recently(recent_focus_families, recent_focus_buckets)
         and ARCHETYPE_META[final[0]].category in _NON_LIFT_DAY0_CATEGORIES
     ):
         # Find the nearest lift day in the recipe (prefer earliest so
@@ -1629,16 +2349,155 @@ def generate_weekly_recipe(
         if swap_idx is not None:
             logger.info(
                 f"[weekly_recipe] lift-priority rescue: recent_families="
-                f"{list(recent_focus_families)} has no lift; day0="
+                f"{list(recent_focus_families)} recent_buckets="
+                f"{list(recent_focus_buckets)} has no lift; day0="
                 f"{final[0].value} ({ARCHETYPE_META[final[0]].category}), "
                 f"swapping with day {swap_idx} ({final[swap_idx].value})"
             )
+            _pre_rescue = list(final)
             final[0], final[swap_idx] = final[swap_idx], final[0]
             # The swap may have introduced adjacency at the new position
             # of the former day 0 — re-run repair.
             final = _repair_adjacent_duplicates(
                 final, allowed_archetypes=profile.allowed_archetypes,
+                lifting_split=lifting_split, user_chose_split=user_chose_split,
             )
+            if not _preserves_split_identity(
+                final, lifting_split, user_chose_split, baseline=_pre_rescue
+            ):
+                logger.info(
+                    f"[weekly_recipe] lift-priority rescue broke split "
+                    f"identity — reverting"
+                )
+                final = _pre_rescue
+
+    # Final safety net: one last 4-tier repair pass after every pipeline
+    # step has had its chance to mutate the recipe (rotation, intensity
+    # spacing, age swap, lift-priority rescue, active-recovery injection).
+    # Previous repair calls are retained at each step so the logs point
+    # at the offending pipeline stage — this final pass is a belt-and-
+    # suspenders guarantee. If any family adjacency survives ALL tiers
+    # we emit a WARNING with the full recipe + inputs for triage.
+    # Full-body adjacency is the one allowed repeat (every day is
+    # full_body on some goal profiles) so it's excluded from the check.
+    _pre_final_repair = list(final)
+    final = _repair_adjacent_duplicates(
+        final, allowed_archetypes=profile.allowed_archetypes,
+        lifting_split=lifting_split, user_chose_split=user_chose_split,
+    )
+    if not _preserves_split_identity(
+        final, lifting_split, user_chose_split, baseline=_pre_final_repair
+    ):
+        logger.info(
+            f"[weekly_recipe] final safety-net repair broke split identity "
+            f"— reverting"
+        )
+        final = _pre_final_repair
+    # Modes whose recipes are intentionally same-family-dominant
+    # (endurance = every day cardio, maintain/recovery = mostly low-stress).
+    # Suppress the residual-adjacency warning for these — their design
+    # calls for consecutive same-family days.
+    _INTENTIONAL_SAME_FAMILY_MODES = {"endurance", "maintain", "recovery"}
+    # Modes where full_body adjacency IS a violation (unless the user
+    # actually picked a Full Body split — then every day is full_body
+    # by design). For PPL/UL/PPL_UL on lifting/strength/etc., two
+    # LIFT_FULL_BODY days in a row means a filler leaked into a
+    # structured split — warn so we see it.
+    from .day_templates import SPLIT_FULL_BODY as _SPLIT_FB_WARN
+    _fb_violates = (
+        mode in ("lifting", "strength", "lifting_plus_cardio", "athletic", "hyrox")
+        and lifting_split != _SPLIT_FB_WARN
+    )
+    if mode not in _INTENTIONAL_SAME_FAMILY_MODES:
+        _residual_dups: list[tuple[int, str]] = []
+        for _i in range(1, len(final)):
+            try:
+                _a = archetype_to_focus_family(final[_i - 1])
+                _b = archetype_to_focus_family(final[_i])
+            except KeyError:
+                continue
+            if _a != _b or _a is None:
+                continue
+            if _a == "full_body" and not _fb_violates:
+                continue
+            _residual_dups.append((_i, _a))
+        if _residual_dups:
+            logger.warning(
+                "[weekly_recipe] PERSISTENT ADJACENCY after all repair tiers: "
+                "goal=%s mode=%s days=%d split=%s user_chose_split=%s "
+                "recent_families=%s recent_buckets=%s muscle_fatigue=%s "
+                "user_age=%s recipe=%s residual_dups=%s",
+                profile.bucket, mode, days, lifting_split, user_chose_split,
+                list(recent_focus_families) if recent_focus_families else [],
+                list(recent_focus_buckets) if recent_focus_buckets else [],
+                muscle_fatigue, user_age,
+                [a.value for a in final], _residual_dups,
+            )
+
+    # ── Pin mobility / recovery to end of week ────────────────────
+    # Rotation passes are cyclic and can shift MOBILITY_FLOW /
+    # RECOVERY_EASY to mid-week (e.g. "Pull, Legs, Push, Pull, Legs,
+    # Mobility, Push" — user reported this). Mobility belongs at the
+    # END so it's the natural decompression slot before the next week
+    # resets, not a mid-week interruption between hard lifts. Guarded
+    # by split-identity check to avoid scrambling PPL rotation.
+    _EASY_ARCHETYPES = {DayArchetype.MOBILITY_FLOW, DayArchetype.RECOVERY_EASY, DayArchetype.STRESS_RELIEF_EASY}
+    _pre_pin = list(final)
+    # Extract easy days (preserve order among themselves), append to end
+    easy = [a for a in final if a in _EASY_ARCHETYPES]
+    non_easy = [a for a in final if a not in _EASY_ARCHETYPES]
+    if easy and non_easy:
+        candidate = non_easy + easy
+        if _preserves_split_identity(
+            candidate, lifting_split, user_chose_split, baseline=_pre_pin,
+        ):
+            if candidate != final:
+                logger.debug(
+                    "[weekly_recipe] pinned mobility/recovery to end of week"
+                )
+            final = candidate
+        # If pinning would break split identity, leave as-is — the
+        # adjacency repair already ran, so the recipe is at least legal.
+
+    # ── Length guarantee ───────────────────────────────────────────
+    # Every upstream pass SHOULD preserve length, but rotation
+    # reverts, active-recovery injection, and safety filters can all
+    # drift len(final) away from `days`. Explicit pad/truncate here
+    # is cheap insurance. Padding prefers MOBILITY_FLOW, falls back to
+    # RECOVERY_EASY, then the profile's first anchor, then
+    # LIFT_FULL_BODY as a universal last resort.
+    if len(final) < days:
+        pad_prefs: list[DayArchetype] = []
+        if DayArchetype.MOBILITY_FLOW in profile.allowed_archetypes:
+            pad_prefs.append(DayArchetype.MOBILITY_FLOW)
+        if DayArchetype.RECOVERY_EASY in profile.allowed_archetypes:
+            pad_prefs.append(DayArchetype.RECOVERY_EASY)
+        if profile.anchor_archetypes:
+            pad_prefs.append(profile.anchor_archetypes[0])
+        # Last-resort: any allowed archetype (sort by .value for
+        # deterministic pick), then LIFT_FULL_BODY as a universal floor
+        # (kept last so profiles that DON'T allow it — e.g. pure
+        # endurance — still land on something sensible above).
+        if profile.allowed_archetypes:
+            pad_prefs.append(sorted(profile.allowed_archetypes, key=lambda a: a.value)[0])
+        pad_prefs.append(DayArchetype.LIFT_FULL_BODY)
+        pad = pad_prefs[0]
+        while len(final) < days:
+            logger.info(
+                f"[weekly_recipe] length pad: len(final)={len(final)} < "
+                f"days={days}; appending {pad.value}"
+            )
+            final.append(pad)
+    elif len(final) > days:
+        logger.info(
+            f"[weekly_recipe] length truncate: len(final)={len(final)} > "
+            f"days={days}; trimming"
+        )
+        final = final[:days]
+    assert len(final) == days, (
+        f"Recipe length {len(final)} != {days} after all passes "
+        f"(mode={mode} split={lifting_split})"
+    )
 
     exposures = {"lift": 0, "cardio": 0, "mobility": 0, "recovery": 0, "hybrid": 0}
     for a in final:

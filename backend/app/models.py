@@ -236,6 +236,62 @@ class PlanJob(SQLModel, table=True):
     completed_at: datetime | None = Field(default=None)
 
 
+class WorkoutPlan(SQLModel, table=True):
+    """First-class persisted workout plan. One `is_active=True` row per user
+    at a time — the authoritative source of truth for their current plan.
+    Regeneration flips the old row to `is_active=False` (with a reason +
+    timestamp) and inserts a fresh row with the new plan JSON. The client
+    uses `AsyncStorage['aiWorkoutPlan']` as a zero-flicker hot cache that
+    mirrors this row; cross-device sync pulls from here.
+
+    `planner_version` is stamped on write from the constant in
+    `services/workout/weekly_recipe.py`. When that constant bumps, older
+    plans are considered stale and the client auto-regenerates.
+    """
+    __tablename__ = "workout_plans"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    planner_version: str                                # e.g. "2026.04.22.01" — bump on code change
+    goal: str
+    days_per_week: int
+    preferred_split: str | None = Field(default=None)
+    plan_json: dict = Field(default_factory=dict, sa_column=Column(JSON))  # full plan dict
+    is_active: bool = Field(default=True, index=True)   # one active per user
+    deactivated_at: datetime | None = Field(default=None)
+    deactivation_reason: str | None = Field(default=None)  # "regen" | "goal_change" | "manual"
+
+
+class NutritionPlan(SQLModel, table=True):
+    """First-class persisted nutrition plan. Mirrors `WorkoutPlan` — one
+    `is_active=True` row per user at a time, holding the serialized list
+    of daily nutrition templates the client rotates through. Regeneration
+    flips the old row to `is_active=False` with a reason + timestamp and
+    inserts a fresh active row. The client's
+    `AsyncStorage['aiNutritionPlans']` is a zero-flicker hot cache mirror
+    of `plans_json` here; cross-device sync pulls from this row.
+
+    `planner_version` is stamped from the same shared constant as
+    `WorkoutPlan` so version staleness can be detected uniformly — a
+    single planner bump invalidates both sides at once.
+    """
+    __tablename__ = "nutrition_plans"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    planner_version: str                                # same semantics as WorkoutPlan.planner_version
+    goal: str
+    days_per_week: int
+    # JSON-serialized list of daily nutrition templates (client's
+    # `aiNutritionPlans` array). Stored as a string so the payload is
+    # opaque to the DB — shape can evolve without schema churn.
+    plans_json: str
+    trainer_note: str | None = Field(default=None)      # nutritionistNote
+    is_active: bool = Field(default=True, index=True)   # one active per user
+    deactivated_at: datetime | None = Field(default=None)
+    deactivation_reason: str | None = Field(default=None)  # "regen" | "goal_change" | "manual"
+
+
 class AIDecision(SQLModel, table=True):
     """Structured record of every AI coaching decision. Replaces prose chat history in payloads."""
     __tablename__ = "ai_decisions"

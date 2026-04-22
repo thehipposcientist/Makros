@@ -1190,9 +1190,14 @@ def generate_workout_plan(
     # their archetype sequence directly in `generate_weekly_recipe`.
     # focused_muscle feeds FocusProfile.split_bias into the auto-pick;
     # explicit user choice still wins inside pick_split.
+    # `strength` mode's recipe branch also consumes `lifting_split` to
+    # pick the PPL / UL / Full Body cycle. Excluding it from this gate
+    # meant a user with goal=strength + preferred_split=ppl got the
+    # fallback UL cycle ([Upper, Mobility, Full Body, Lower, ...])
+    # instead of balanced PPL — matched the "broken output" report.
     lifting_split = (
         pick_split(inputs, focused_muscle=inputs.focused_muscle)
-        if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio")
+        if profile.planner_mode in ("lifting", "fat_loss_mix", "lifting_plus_cardio", "strength")
         else None
     )
     _user_chose_split = bool(
@@ -1211,12 +1216,14 @@ def generate_workout_plan(
         muscle_fatigue=inputs.muscle_fatigue,
         user_age=inputs.user_age,
     )
-    logger.debug(
-        f"[workout_planner] mode={profile.planner_mode} "
+    _recipe_families = [
+        (archetype_to_focus_family(a) or "?") for a in recipe
+    ]
+    logger.info(
+        f"[workout_planner] DIAG stage=after_recipe mode={profile.planner_mode} "
         f"days={inputs.days_per_week} "
         f"split={lifting_split} (user_chose={_user_chose_split}) "
-        f"recipe=[" +
-        ", ".join(a.value for a in recipe) + "]"
+        f"families={_recipe_families}"
     )
     # Build a concrete (name, slots, archetype) sequence from the recipe.
     # Density trimming is now archetype-aware: the `category` argument
@@ -1683,6 +1690,12 @@ def generate_workout_plan(
         "workout_plan": workout_plan_block,
     }
     plan = validate_plan(plan, inputs, recipe)
+    _out_focuses = [
+        (d.get("focus") or "?") for d in plan.get("workout_plan", {}).get("days", [])
+    ]
+    logger.info(
+        f"[workout_planner] DIAG stage=return_plan focuses={_out_focuses}"
+    )
     return plan
 
 
@@ -1740,43 +1753,79 @@ def validate_plan(
 
     # ── Check 3: adjacent same-focus-family days ────────────────────
     _SKIP_FAMILIES = {"cardio", "mobility", "recovery"}
+
+    def _fam_of(day_dict: dict) -> str | None:
+        """Return the focus family for a day, or None if missing/invalid."""
+        a = day_dict.get("archetype")
+        if not a:
+            return None
+        try:
+            return archetype_to_focus_family(DayArchetype(a))
+        except (KeyError, ValueError):
+            return None
+
+    def _swap_is_safe(idx_i: int, idx_j: int) -> bool:
+        """Only permit a swap if it does not introduce a new same-family
+        adjacency at EITHER affected position after the swap. We check
+        the neighbors (i-1 <-> j's new pos i, i+1 <-> j's new pos i,
+        j-1 <-> i's new pos j, j+1 <-> i's new pos j) while skipping
+        cardio/mobility/recovery since those are always safe neighbors.
+        """
+        fam_at_i_after = _fam_of(days[idx_j])
+        fam_at_j_after = _fam_of(days[idx_i])
+        # Left neighbor of position i
+        if idx_i - 1 >= 0:
+            left = _fam_of(days[idx_i - 1])
+            if (
+                left and fam_at_i_after
+                and left == fam_at_i_after
+                and left not in _SKIP_FAMILIES
+            ):
+                return False
+        # Right neighbor of position i (skip if it is j itself — j will move)
+        if idx_i + 1 < len(days) and idx_i + 1 != idx_j:
+            right = _fam_of(days[idx_i + 1])
+            if (
+                right and fam_at_i_after
+                and right == fam_at_i_after
+                and right not in _SKIP_FAMILIES
+            ):
+                return False
+        # Left neighbor of position j (skip if it is i itself — i will move)
+        if idx_j - 1 >= 0 and idx_j - 1 != idx_i:
+            left_j = _fam_of(days[idx_j - 1])
+            if (
+                left_j and fam_at_j_after
+                and left_j == fam_at_j_after
+                and left_j not in _SKIP_FAMILIES
+            ):
+                return False
+        # Right neighbor of position j
+        if idx_j + 1 < len(days):
+            right_j = _fam_of(days[idx_j + 1])
+            if (
+                right_j and fam_at_j_after
+                and right_j == fam_at_j_after
+                and right_j not in _SKIP_FAMILIES
+            ):
+                return False
+        return True
+
     for i in range(1, len(days)):
-        fam_a = None
-        fam_b = None
-        arch_a = days[i - 1].get("archetype")
-        arch_b = days[i].get("archetype")
-        try:
-            if arch_a:
-                fam_a = archetype_to_focus_family(DayArchetype(arch_a))
-        except (KeyError, ValueError):
-            pass
-        try:
-            if arch_b:
-                fam_b = archetype_to_focus_family(DayArchetype(arch_b))
-        except (KeyError, ValueError):
-            pass
+        fam_a = _fam_of(days[i - 1])
+        fam_b = _fam_of(days[i])
         if (
             fam_a and fam_b
             and fam_a == fam_b
             and fam_a not in _SKIP_FAMILIES
         ):
-            # Try to swap day[i] with a later non-adjacent day.
+            # Try to swap day[i] with a later non-adjacent day — but only
+            # if the swap doesn't create a new same-family adjacency at
+            # either affected position.
             swapped = False
             for j in range(i + 1, len(days)):
-                fam_j = None
-                arch_j = days[j].get("archetype")
-                try:
-                    if arch_j:
-                        fam_j = archetype_to_focus_family(DayArchetype(arch_j))
-                except (KeyError, ValueError):
-                    pass
-                # Check that swapping doesn't create a new adjacency problem.
-                prev_ok = (i - 1 < 0) or True  # already checked above
-                if fam_j and fam_j != fam_a:
-                    # Also check that day[j] won't conflict with day[i-1]
-                    if i > 0 and fam_j == fam_a:
-                        continue
-                    # And day[i+1] won't conflict with original day[j] if j==i+1
+                fam_j = _fam_of(days[j])
+                if fam_j and fam_j != fam_a and _swap_is_safe(i, j):
                     days[i], days[j] = days[j], days[i]
                     logger.debug(
                         f"[validate_plan] REPAIR: swapped Day {i} ↔ Day {j} "
@@ -1787,10 +1836,18 @@ def validate_plan(
             if not swapped:
                 logger.debug(
                     f"[validate_plan] WARNING: adjacent same-family days "
-                    f"{i - 1}↔{i} (both {fam_a!r}) — no swap available"
+                    f"{i - 1}↔{i} (both {fam_a!r}) — no safe swap available"
                 )
 
     # ── Check 4: compound exercises on wrong-family days ────────────
+    # Protective-only: we never drop primary/secondary exercises here.
+    # This function does not have a safe in-place replacement path for
+    # compounds, and hollowing out a day after generation is worse than
+    # leaving a slightly off-family compound in the plan. The upstream
+    # filter_candidates step is responsible for enforcing family-muscle
+    # constraints; this is a belt-and-suspenders warning log only.
+    # Isolation / core / accessory rows can still be pruned because they
+    # are safe to drop without leaving a compound hole in the day.
     for i, day in enumerate(days):
         arch_str = day.get("archetype")
         if not arch_str:
@@ -1802,20 +1859,17 @@ def validate_plan(
         allowed = _FOCUS_FAMILY_MUSCLES.get(fam)
         if allowed is None:
             continue  # full_body / cardio / mobility / recovery — no restriction
-        cleaned: list[dict] = []
         for ex in day.get("exercises", []):
             role = ex.get("_role", "isolation")
-            if role in ("primary", "secondary"):
-                pm = ex.get("_primary_muscle", "")
-                if pm and pm not in allowed:
-                    logger.debug(
-                        f"[validate_plan] REPAIR: dropping '{ex.get('name')}' "
-                        f"(primary_muscle={pm}) from Day {i} "
-                        f"(focus_family={fam}, allowed={sorted(allowed)})"
-                    )
-                    continue
-            cleaned.append(ex)
-        day["exercises"] = cleaned
+            pm = ex.get("_primary_muscle", "")
+            if role in ("primary", "secondary") and pm and pm not in allowed:
+                logger.warning(
+                    f"[validate_plan] WARNING: keeping wrong-family "
+                    f"compound '{ex.get('name')}' (primary_muscle={pm}) "
+                    f"on Day {i} (focus_family={fam}, "
+                    f"allowed={sorted(allowed)}) — no safe in-place "
+                    f"replacement, validator is non-destructive for compounds"
+                )
 
     # ── Check 5: split identity preserved ───────────────────────────
     if recipe:

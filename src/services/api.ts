@@ -455,6 +455,64 @@ export interface SplitOption {
   region_warning: string | null;
 }
 
+/** Shape returned by `GET /ai/plans/active-workout`. `plan_json` is the
+ *  same dict that goes into `AsyncStorage['aiWorkoutPlan']`. */
+export interface ActiveWorkoutPlan {
+  id: number;
+  planner_version: string;
+  goal: string;
+  days_per_week: number;
+  preferred_split: string | null;
+  created_at: string | null;
+  plan_json: any;  // full workout plan dict; see WorkoutPlan.plan_json
+}
+
+/** Fetch the user's active workout plan from the backend. Returns null
+ *  on 404 (no plan yet / legacy user) so callers can fall back cleanly
+ *  to the AsyncStorage path. Any other network/server error bubbles. */
+export async function getActiveWorkoutPlan(token: string): Promise<ActiveWorkoutPlan | null> {
+  try {
+    return await request<ActiveWorkoutPlan>('/ai/plans/active-workout', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (e: any) {
+    // 404 → no active plan; treat as "use local cache". Any message
+    // containing "no active" matches the backend detail string.
+    const msg = String(e?.message ?? '');
+    if (msg.includes('no active') || msg.includes('404')) return null;
+    throw e;
+  }
+}
+
+/** Shape returned by `GET /ai/plans/active-nutrition`. `plans_json` is
+ *  the parsed list of daily nutrition templates the client rotates
+ *  through — the same array that goes into `AsyncStorage['aiNutritionPlans']`. */
+export interface ActiveNutritionPlan {
+  id: number;
+  planner_version: string;
+  goal: string;
+  days_per_week: number;
+  trainer_note: string | null;
+  created_at: string | null;
+  plans_json: any[];
+}
+
+/** Fetch the user's active nutrition plan from the backend. Returns
+ *  null on 404 (no plan yet / legacy user / malformed row) so callers
+ *  can fall back cleanly to the AsyncStorage path. Other
+ *  network/server errors bubble. Mirrors `getActiveWorkoutPlan`. */
+export async function getActiveNutritionPlan(token: string): Promise<ActiveNutritionPlan | null> {
+  try {
+    return await request<ActiveNutritionPlan>('/ai/plans/active-nutrition', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (e: any) {
+    const msg = String(e?.message ?? '');
+    if (msg.includes('no active') || msg.includes('unreadable') || msg.includes('404')) return null;
+    throw e;
+  }
+}
+
 export async function getSplitOptions(
   token: string,
   params: { goal: string; daysPerWeek: number; experienceLevel?: string; priorityRegion?: string },

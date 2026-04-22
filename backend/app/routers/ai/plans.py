@@ -320,6 +320,163 @@ class _PlanReviewDisabled(Exception):
     so the deterministic plan ships unchanged. Not a real error."""
 
 
+def _persist_active_workout_plan(
+    db: Session,
+    user_id: int,
+    plan_json: dict,
+    *,
+    req: PlanRequest,
+    reason: str = "regen",
+) -> None:
+    """Write the freshly generated plan into the `workout_plans` table as
+    the new active row and mark the previous active row (if any) as
+    deactivated. Also nulls out any per-day workout overlays in
+    `UserDayState` for today onward so cross-device sync doesn't replay
+    stale workouts against the new plan.
+
+    Safe to call multiple times — each call just appends a new active row
+    and deactivates all others. No-op when `db` or `user_id` is missing
+    (e.g. legacy sync callers that didn't thread them through).
+
+    Kept small + defensive: the outer write path never fails a plan
+    generation just because the DB hiccupped on the audit write."""
+    if db is None or user_id is None:
+        return
+    try:
+        from app.models import WorkoutPlan, UserDayState
+        from app.services.workout.weekly_recipe import PLANNER_VERSION
+        from datetime import date as _date
+
+        now = datetime.now(timezone.utc)
+        # Deactivate any currently-active plans for this user.
+        active_rows = db.exec(
+            select(WorkoutPlan).where(
+                WorkoutPlan.user_id == user_id,
+                WorkoutPlan.is_active == True,  # noqa: E712
+            )
+        ).all()
+        for row in active_rows:
+            row.is_active = False
+            row.deactivated_at = now
+            row.deactivation_reason = reason
+            db.add(row)
+
+        # Insert the new active row.
+        new_row = WorkoutPlan(
+            user_id=user_id,
+            planner_version=PLANNER_VERSION,
+            goal=str(getattr(req, "goal", "") or ""),
+            days_per_week=int(getattr(req, "daysPerWeek", 0) or 0),
+            preferred_split=getattr(req, "preferredSplit", None) or None,
+            plan_json=plan_json or {},
+            is_active=True,
+        )
+        db.add(new_row)
+
+        # Null out any stale day-state workout overlays for future dates.
+        # `UserDayState` today has no `workout_json` column — we still
+        # walk future rows here so if a column is added later this code
+        # already clears it. For now we only defensively drop the
+        # `nutrition_plan` hold, which is otherwise cleared inside the
+        # job worker only for kind==nutrition/full.
+        today = _date.today()
+        future_rows = db.exec(
+            select(UserDayState).where(
+                UserDayState.user_id == user_id,
+                UserDayState.day_key >= today,
+            )
+        ).all()
+        cleared = 0
+        for dr in future_rows:
+            wj = getattr(dr, "workout_json", None)
+            if wj is not None:
+                # Present on schemas that have a workout_json column.
+                try:
+                    setattr(dr, "workout_json", None)
+                    db.add(dr)
+                    cleared += 1
+                except AttributeError:
+                    # Column really doesn't exist — skip silently.
+                    pass
+        db.commit()
+        print(
+            f"[workout-plan] persisted active plan for user={user_id} "
+            f"version={PLANNER_VERSION} reason={reason} future_day_rows_cleared={cleared}"
+        )
+    except Exception as exc:
+        # Non-fatal — the plan still ships via the job queue's result_json.
+        # This table is a convenience for cross-device sync + version
+        # staleness detection, not the primary delivery path.
+        print(f"[workout-plan] persist FAILED (non-fatal): {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _persist_active_nutrition_plan(
+    db: Session,
+    user_id: int,
+    plans_list: list[dict],
+    *,
+    req: PlanRequest,
+    trainer_note: str | None = None,
+    reason: str = "regen",
+) -> None:
+    """Nutrition analogue of `_persist_active_workout_plan`. Marks any
+    prior active `NutritionPlan` row inactive with a reason + timestamp
+    and inserts a fresh active row carrying the serialized list of daily
+    templates. `plans_list` is the exact array the client rotates
+    through (`aiNutritionPlans`); stored as JSON text so the shape can
+    evolve without schema churn.
+
+    No-op when db/user_id is missing (legacy callers), and any DB error
+    is logged but non-fatal — the primary delivery path is still the
+    job queue's `result_json`. This table is a convenience for
+    cross-device hydration + version staleness detection."""
+    if db is None or user_id is None:
+        return
+    try:
+        from app.models import NutritionPlan
+        from app.services.workout.weekly_recipe import PLANNER_VERSION
+
+        now = datetime.now(timezone.utc)
+        active_rows = db.exec(
+            select(NutritionPlan).where(
+                NutritionPlan.user_id == user_id,
+                NutritionPlan.is_active == True,  # noqa: E712
+            )
+        ).all()
+        for row in active_rows:
+            row.is_active = False
+            row.deactivated_at = now
+            row.deactivation_reason = reason
+            db.add(row)
+
+        new_row = NutritionPlan(
+            user_id=user_id,
+            planner_version=PLANNER_VERSION,
+            goal=str(getattr(req, "goal", "") or ""),
+            days_per_week=int(getattr(req, "daysPerWeek", 0) or 0),
+            plans_json=json.dumps(plans_list or []),
+            trainer_note=trainer_note or None,
+            is_active=True,
+        )
+        db.add(new_row)
+        db.commit()
+        print(
+            f"[nutrition-plan] persisted active plan for user={user_id} "
+            f"version={PLANNER_VERSION} reason={reason} templates={len(plans_list or [])}"
+        )
+    except Exception as exc:
+        # Non-fatal — the plan still ships via the job queue's result_json.
+        print(f"[nutrition-plan] persist FAILED (non-fatal): {exc}")
+        try:
+            db.rollback()
+        except Exception as rb_exc:
+            print(f"[nutrition-plan] rollback also failed: {rb_exc}")
+
+
 def _build_deterministic_workout(
     req: PlanRequest,
     db: Session | None,
@@ -687,15 +844,15 @@ def _build_deterministic_workout(
             print(f"[plan-gen workout] skip query failed (non-fatal): {e}")
     plan["_skipped_days"] = skipped_days
 
-    # ── AI plan review (final QA pass) — GATED BY ENV VAR ───────────
-    # Disabled by default; set `PLAN_REVIEW_ENABLED=1` in the backend
-    # env to re-enable. When enabled, the review call + AI regenerate
-    # fallback run against the same `recent_completed_rows` computed
-    # above. When disabled, only the deterministic plan ships.
-    import os as _os
-    _plan_review_enabled = _os.getenv("PLAN_REVIEW_ENABLED", "0") == "1"
-    if not _plan_review_enabled:
-        print("[plan-gen workout] AI plan review DISABLED (set PLAN_REVIEW_ENABLED=1 to re-enable)")
+    # ── AI plan review — PERMANENTLY DISABLED ───────────────────────
+    # The deterministic planner + adjacency repair + validate_plan do
+    # all the QA we need. The AI reviewer added latency, cost, and
+    # occasional incorrect patches without measurable plan quality
+    # gain. If you want to re-enable it, restore the env-var gate AND
+    # the try block below — the review functions still exist in
+    # plan_review.py and pass their tests.
+    _plan_review_enabled = False
+    print("[plan-gen workout] plan ships deterministic — AI review disabled")
 
     try:
         if not _plan_review_enabled:
@@ -2066,15 +2223,16 @@ async def run_full_plan_generation(
     # the meals back UP and undo the routine subtraction. The full target is
     # still used for the `targets` field on each template so the UI shows
     # the user's actual daily goal.
-    # ── AI nutrition-plan review (runs BEFORE normalization) ──
-    # Gated by NUTRITION_REVIEW_ENABLED. Catches per-item macro
-    # nonsense (e.g. "50 cal ribeye 8oz") so the numbers the user
-    # sees reflect reality. Fixes propagate through normalization.
-    import os as _os_n
-    _nutrition_review_enabled = _os_n.getenv("NUTRITION_REVIEW_ENABLED", "0") == "1"
+    # ── AI nutrition-plan review — PERMANENTLY DISABLED ──
+    # Same reasoning as the workout review: the skeleton AI + USDA
+    # enrichment + `validate_and_repair_skeletons` already catch per-
+    # item macro nonsense. Review rarely made a meaningful patch.
+    # Review functions remain in nutrition/plan_review.py with tests.
+    _nutrition_review_enabled = False
     _nutrition_review_summary: list[dict] = []
+    print("[plan-gen nutrition] plan ships deterministic — AI review disabled")
     if not _nutrition_review_enabled:
-        print("[plan-gen nutrition] AI nutrition review DISABLED (set NUTRITION_REVIEW_ENABLED=1 to re-enable)")
+        pass
     else:
         try:
             from app.services.nutrition.plan_review import (
@@ -2179,6 +2337,17 @@ async def run_full_plan_generation(
         print(f"[plan-gen] grounded nutritionist note FAILED: {exc}")
         traceback.print_exc()
 
+    # Stamp the current planner version onto the workout plan dict so
+    # clients can detect staleness directly off the returned payload.
+    from app.services.workout.weekly_recipe import PLANNER_VERSION
+    workout_data["workout_plan"]["_plannerVersion"] = PLANNER_VERSION
+    # Stamp each nutrition template with the same version so the client's
+    # staleness check (mirror of the workout path) can detect mismatches
+    # without a DB round-trip.
+    for _np in plans_list:
+        if isinstance(_np, dict):
+            _np["_plannerVersion"] = PLANNER_VERSION
+
     result = {
         "trainerNote":      workout_data.get("trainerNote", ""),
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
@@ -2191,6 +2360,17 @@ async def run_full_plan_generation(
     if "_debug" in workout_data:
         result["_debug"] = workout_data["_debug"]
     _validate_plans(result, req)   # raises ValueError
+
+    # Persist the active plan + wipe future-date DayState workout overlays.
+    # Happens before the final return so a persistence hiccup is visible
+    # in logs even if downstream enrichment then fails.
+    _persist_active_workout_plan(
+        db, user_id, result["workout_plan"], req=req, reason="regen",
+    )
+    _persist_active_nutrition_plan(
+        db, user_id, plans_list, req=req,
+        trainer_note=result.get("nutritionistNote") or None, reason="regen",
+    )
 
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
     if custom_foods:
@@ -2305,6 +2485,88 @@ async def run_full_plan_generation(
 
     print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
+
+
+@router.get("/plans/active-workout")
+def get_active_workout_plan(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return the user's currently active `WorkoutPlan.plan_json`.
+
+    Returns the parsed plan dict plus version + timestamps. 404 when no
+    active plan exists yet (brand-new user before first generation, or
+    legacy user whose plan only lives in AsyncStorage).
+
+    Client uses this as the source of truth — AsyncStorage is a hot
+    cache. When the client's cached `_plannerVersion` matches the
+    returned `planner_version` AND a cache exists, the client keeps the
+    cache for zero-flicker render; otherwise it overwrites from here.
+    """
+    from app.models import WorkoutPlan
+    row = db.exec(
+        select(WorkoutPlan)
+        .where(
+            WorkoutPlan.user_id == current_user.id,
+            WorkoutPlan.is_active == True,  # noqa: E712
+        )
+        .order_by(WorkoutPlan.created_at.desc())
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="no active workout plan")
+    return {
+        "id":               row.id,
+        "planner_version":  row.planner_version,
+        "goal":             row.goal,
+        "days_per_week":    row.days_per_week,
+        "preferred_split":  row.preferred_split,
+        "created_at":       row.created_at.isoformat() if row.created_at else None,
+        "plan_json":        row.plan_json or {},
+    }
+
+
+@router.get("/plans/active-nutrition")
+def get_active_nutrition_plan(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return the user's currently active `NutritionPlan.plans_json`
+    (parsed into a list) plus the trainer note + planner version.
+
+    Mirror of `GET /ai/plans/active-workout` — the client uses this as
+    the source of truth for nutrition templates. `AsyncStorage['aiNutritionPlans']`
+    is a hot cache that gets overwritten when the version drifts. 404
+    when no active plan exists yet (brand-new user before first
+    generation, or legacy user whose plan only lives in AsyncStorage).
+    """
+    from app.models import NutritionPlan
+    row = db.exec(
+        select(NutritionPlan)
+        .where(
+            NutritionPlan.user_id == current_user.id,
+            NutritionPlan.is_active == True,  # noqa: E712
+        )
+        .order_by(NutritionPlan.created_at.desc())
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="no active nutrition plan")
+    try:
+        plans_parsed = json.loads(row.plans_json) if row.plans_json else []
+    except (TypeError, ValueError) as exc:
+        # Malformed JSON in the DB is effectively "no plan" — return 404
+        # so the client falls back to its AsyncStorage cache instead of
+        # crashing on an unparseable payload.
+        print(f"[nutrition-plan] malformed plans_json for user={current_user.id}: {exc}")
+        raise HTTPException(status_code=404, detail="nutrition plan unreadable")
+    return {
+        "id":               row.id,
+        "planner_version":  row.planner_version,
+        "goal":             row.goal,
+        "days_per_week":    row.days_per_week,
+        "trainer_note":     row.trainer_note,
+        "created_at":       row.created_at.isoformat() if row.created_at else None,
+        "plans_json":       plans_parsed,
+    }
 
 
 @router.get("/plans/split-options")
@@ -2428,6 +2690,11 @@ async def run_workout_only_generation(
             _generate_trainer_note, client, plan_req, workout_data, model_plan_update(),
         )
     workout_data["trainerNote"] = note
+    # Stamp the current planner version onto the plan itself so clients
+    # can detect staleness without a DB round-trip. Mirrors the row we
+    # write below into `workout_plans`.
+    from app.services.workout.weekly_recipe import PLANNER_VERSION
+    workout_data["workout_plan"]["_plannerVersion"] = PLANNER_VERSION
     out = {
         "trainerNote":  workout_data.get("trainerNote", ""),
         "workout_plan": workout_data["workout_plan"],
@@ -2437,6 +2704,11 @@ async def run_workout_only_generation(
     # the reviewer actually ran.
     if "_debug" in workout_data:
         out["_debug"] = workout_data["_debug"]
+    # Persist the active plan + wipe future-date DayState overlays.
+    # No-op when db/user_id aren't threaded through (legacy callers).
+    _persist_active_workout_plan(
+        db, user_id, out["workout_plan"], req=plan_req, reason="regen",
+    )
     return out
 
 
@@ -2540,6 +2812,14 @@ async def run_nutrition_only_generation(
     except Exception as exc:
         print(f"[plan-gen nutrition] grounded note skipped: {exc}")
 
+    # Stamp each template with the current planner version so the client
+    # can detect staleness off the returned payload — mirrors the
+    # workout-plan staleness check written by `run_workout_only_generation`.
+    from app.services.workout.weekly_recipe import PLANNER_VERSION
+    for _np in plans_list:
+        if isinstance(_np, dict):
+            _np["_plannerVersion"] = PLANNER_VERSION
+
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
@@ -2548,6 +2828,14 @@ async def run_nutrition_only_generation(
     custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
+
+    # Persist as the new active nutrition plan — mirrors what the full
+    # plan + workout-only paths do. Safe no-op when db/user_id aren't
+    # threaded through (legacy callers).
+    _persist_active_nutrition_plan(
+        db, user_id, plans_list, req=plan_req,
+        trainer_note=result.get("nutritionistNote") or None, reason="regen",
+    )
 
     # Post-assembly micro enrichment (same as full plan gen path)
     try:
