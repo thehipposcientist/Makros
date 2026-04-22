@@ -3965,15 +3965,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
             {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
-              <View style={[styles.insightCard, { borderColor: plannerPalette.strong + '55', backgroundColor: plannerPalette.soft }] }>
-                <Text style={[styles.insightTitle, { color: themeColors.textPrimary }]}>Muscle Focus</Text>
-                <View style={styles.insightChips}>
-                  {availabilityItems.map(item => (
-                    <View key={item.label} style={[styles.insightChip, { borderColor: plannerPalette.strong + '55', backgroundColor: themeColors.surfaceRaised }]}>
-                      <Text style={[styles.insightChipText, { color: plannerPalette.text }]}>{item.label} {item.pct}%</Text>
-                    </View>
-                  ))}
-                </View>
+              <View style={{
+                flexDirection: 'row', alignItems: 'center', gap: 6,
+                paddingHorizontal: 2, marginBottom: 8,
+                flexWrap: 'wrap',
+              }}>
+                <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>
+                  This week
+                </Text>
+                {availabilityItems.slice(0, 3).map(item => (
+                  <View key={item.label} style={{
+                    paddingHorizontal: 8, paddingVertical: 3,
+                    borderRadius: 10,
+                    borderWidth: 1, borderColor: themeColors.border,
+                    backgroundColor: themeColors.surface,
+                  }}>
+                    <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '600' }}>
+                      {item.label}
+                    </Text>
+                  </View>
+                ))}
               </View>
             )}
             {workoutSubTab === 'plan' && (() => {

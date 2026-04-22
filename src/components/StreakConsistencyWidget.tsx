@@ -59,31 +59,46 @@ export default function StreakConsistencyWidget({ authToken, themeName }: Props)
 
   return (
     <View style={{
-      backgroundColor: tc.surface,
-      borderRadius: radius.lg,
-      padding: 12,
-      marginBottom: 10,
-      borderWidth: 1,
-      borderColor: workoutPalette.strong + '55',
+      borderRadius: radius.md,
+      paddingHorizontal: 10, paddingVertical: 6,
+      marginBottom: 8,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
+      gap: 8,
     }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <Ionicons name="flame" size={20} color="#F59E0B" />
-        <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
+      {/* Primary streak chip — small, tinted by theme border so it
+          doesn't dominate the screen. */}
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', gap: 4,
+        paddingHorizontal: 8, paddingVertical: 4,
+        borderRadius: 12,
+        backgroundColor: tc.surface,
+        borderWidth: 1, borderColor: tc.border,
+      }}>
+        <Ionicons name="flame" size={12} color="#F59E0B" />
+        <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
           {data.current_streak}
         </Text>
-        <Text style={{ fontSize: 12, color: tc.textSecondary, fontWeight: '600' }}>
-          day streak
+        <Text style={{ fontSize: 10, color: tc.textSecondary }}>
+          day{data.current_streak === 1 ? '' : 's'}
         </Text>
       </View>
-      <Text style={{ fontSize: 12, color: tc.textMuted }}>·</Text>
-      <Text style={{ fontSize: 12, color: tc.textPrimary, fontWeight: '600' }}>
-        {data.compliance_7d}% this week
-      </Text>
-      <View style={{ flex: 1 }} />
-      <Text style={{ fontSize: 11, color: tc.textSecondary, flexShrink: 1, textAlign: 'right', maxWidth: '55%' }} numberOfLines={2}>
+      {/* Secondary compliance chip — muted. */}
+      <View style={{
+        paddingHorizontal: 8, paddingVertical: 4,
+        borderRadius: 12,
+        backgroundColor: tc.surface,
+        borderWidth: 1, borderColor: tc.border,
+      }}>
+        <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+          {data.compliance_7d}% wk
+        </Text>
+      </View>
+      {/* Coaching copy — plain text, wraps if needed. */}
+      <Text
+        style={{ flex: 1, fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}
+        numberOfLines={2}
+      >
         {copy}
       </Text>
     </View>
