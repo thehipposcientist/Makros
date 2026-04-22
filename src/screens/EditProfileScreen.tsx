@@ -1327,13 +1327,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   key={g.id}
                   style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
                   onPress={() => {
-                    // Smooth grow when card takes full width + reveals description.
-                    LayoutAnimation.configureNext({
-                      duration: 280,
-                      create: { type: 'easeInEaseOut', property: 'opacity' },
-                      update: { type: 'easeInEaseOut' },
-                      delete: { type: 'easeInEaseOut', property: 'opacity' },
-                    });
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     setSelectedGoal(g.id);
                     setSelectedModifiers([]);
                     setPace('moderate');

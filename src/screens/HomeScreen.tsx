@@ -11,7 +11,6 @@ import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
-import RecoveryQuestionModal from '../components/RecoveryQuestionModal';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
@@ -1117,41 +1116,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
-  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
-  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
-  useEffect(() => {
-    if (!authToken) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const dismissed = await AsyncStorage.getItem('recovery_prompt_dismissed');
-        if (dismissed) {
-          const ts = parseInt(dismissed, 10);
-          if (Date.now() - ts < 14 * 24 * 60 * 60 * 1000) return;
-        }
-        const me: any = await getMe(authToken);
-        if (cancelled) return;
-        if (me?.has_recovery_question) return;
-        if (me?.created_at) {
-          const created = new Date(me.created_at);
-          const age = Date.now() - created.getTime();
-          if (age < 24 * 60 * 60 * 1000) return;
-        }
-        setShowRecoveryBanner(true);
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, [authToken]);
-  const dismissRecoveryBanner = useCallback(async () => {
-    setShowRecoveryBanner(false);
-    try { await AsyncStorage.setItem('recovery_prompt_dismissed', String(Date.now())); } catch {}
-  }, []);
-  const handleRecoveryDone = useCallback(async () => {
-    setShowRecoveryModal(false);
-    setShowRecoveryBanner(false);
-    try { await AsyncStorage.removeItem('recovery_prompt_dismissed'); } catch {}
-  }, []);
-
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [newEmail, setNewEmail] = useState('');
@@ -4080,24 +4044,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            {workoutSubTab === 'plan' && showRecoveryBanner && (
-              <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.primary + '44' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Ionicons name="shield-checkmark-outline" size={16} color={themeColors.primary} />
-                  <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary, flex: 1 }}>
-                    Set up a recovery question so you can reset your password if you forget it
-                  </Text>
-                  <TouchableOpacity onPress={dismissRecoveryBanner} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                    <Ionicons name="close" size={16} color={themeColors.textMuted} />
-                  </TouchableOpacity>
-                </View>
-                <TouchableOpacity
-                  style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8, backgroundColor: themeColors.primary }}
-                  onPress={() => setShowRecoveryModal(true)}>
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Set Up</Text>
-                </TouchableOpacity>
-              </View>
-            )}
 
             {/* Readiness badge — tap to expand full muscle breakdown */}
             {workoutSubTab === 'plan' && readinessScore && (
@@ -5173,37 +5119,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
-            {/* Apple Health diagnostic — shown only on iOS. Prints the
-                full init/permission/entitlement state so pilot users
-                can paste the output back when HealthKit silently fails. */}
-            {Platform.OS === 'ios' && (
-              <TouchableOpacity
-                style={[styles.profileMenuItem, { borderTopWidth: 1, borderTopColor: themeColors.border }]}
-                onPress={async () => {
-                  try {
-                    const { diagnoseHealthKit } = await import('../services/appleHealth');
-                    const report = await diagnoseHealthKit();
-                    Alert.alert(
-                      'Apple Health diagnosis',
-                      report,
-                      [
-                        { text: 'Share', onPress: async () => {
-                          try {
-                            const { Share } = await import('react-native');
-                            await Share.share({ message: report, title: 'Thallo HealthKit diagnosis' });
-                          } catch {}
-                        }},
-                        { text: 'OK', style: 'default' },
-                      ],
-                    );
-                  } catch (e: any) {
-                    Alert.alert('Diagnostic failed', String(e?.message ?? e));
-                  }
-                }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health Diagnostic</Text>
-                <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-              </TouchableOpacity>
-            )}
           </View>
 
           <TouchableOpacity
@@ -6682,7 +6597,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* AI Coach button moved to the header (top right) — see the
           header block above where the hamburger used to live. */}
 
-      <RecoveryQuestionModal visible={showRecoveryModal} authToken={authToken} onDone={handleRecoveryDone} />
 
       <Modal visible={showEmailModal} transparent animationType="slide" onRequestClose={() => setShowEmailModal(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>

@@ -1607,11 +1607,16 @@ function AccountInfoModal({
   const [accountData, setAccountData] = useState<{ email: string; username: string } | null>(null);
   const [loading, setLoading]         = useState(true);
   const [healthEnabled, setHealthEnabled] = useState(false);
+  const [hasRecoveryQuestion, setHasRecoveryQuestion] = useState(false);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
   const showHealthToggle = Platform.OS === 'ios';
 
   useEffect(() => {
     getMe(token)
-      .then((data: any) => setAccountData({ email: data.email, username: data.username }))
+      .then((data: any) => {
+        setAccountData({ email: data.email, username: data.username });
+        setHasRecoveryQuestion(!!data.has_recovery_question);
+      })
       .catch(() => setAccountData(null))
       .finally(() => setLoading(false));
     isAppleHealthEnabled().then(setHealthEnabled);
@@ -1648,6 +1653,30 @@ function AccountInfoModal({
               <Row label="Age"    value={String(profile.physicalStats.age)} />
             </View>
           )}
+
+          <TouchableOpacity
+            style={am.securityRow}
+            onPress={() => setShowRecoveryModal(true)}>
+            <View style={{ flex: 1 }}>
+              <Text style={am.securityLabel}>Recovery Question</Text>
+              <Text style={am.securityDesc}>
+                {hasRecoveryQuestion ? 'Set — tap to change' : 'Not set — lets you reset your password without email'}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              {hasRecoveryQuestion
+                ? <Text style={{ fontSize: 12, color: '#22C55E', fontWeight: '700' }}>✓</Text>
+                : <Text style={{ fontSize: 12, color: tc.primary, fontWeight: '700' }}>Set up</Text>
+              }
+              <Text style={am.chevron}>›</Text>
+            </View>
+          </TouchableOpacity>
+
+          <RecoveryQuestionModal
+            visible={showRecoveryModal}
+            authToken={token}
+            onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
+          />
 
           {showHealthToggle && (
             <View style={am.healthToggleRow}>
@@ -1725,6 +1754,15 @@ function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return Style
   rowValue: { fontSize: 14, color: c.textPrimary,   fontWeight: '600', textTransform: 'capitalize' },
 
   errorText: { fontSize: 13, color: c.error, padding: 16 },
+
+  securityRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: c.surfaceRaised, borderRadius: radius.md,
+    padding: 16, borderWidth: 1, borderColor: c.border,
+  },
+  securityLabel: { fontSize: 14, fontWeight: '700', color: c.textPrimary, marginBottom: 3 },
+  securityDesc: { fontSize: 11, color: c.textSecondary, lineHeight: 16 },
+  chevron: { fontSize: 20, color: c.textMuted },
 
   healthToggleRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
