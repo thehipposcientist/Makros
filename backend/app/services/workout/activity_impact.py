@@ -5,18 +5,31 @@ Derived readiness: computed per focus-type from the muscle buckets.
 
 Architecture:
   1. Exercises contribute fatigue to specific muscles via primary/secondary
-  2. Fatigue decays over time (50% at 24h, 25% at 48h, 10% at 72h,
-     5% at 96h, 2% at 120h — days 4-5 apply to systemic only)
+  2. Fatigue decays over time. Hour-based with a 48 h half-life — a
+     workout finished last night still reads ~71% fatigued the next
+     morning, not 50%. See `_decay_for_hours` below.
   3. The planner derives readiness for any focus type from the muscle state
   4. Decisions are graduated (proceed / downgrade / swap / recover), not binary
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+# Legacy daily decay — kept as a fallback when a completion row lacks
+# `completed_at` (old records written before we stored wall-clock time).
 _DECAY = {0: 1.0, 1: 0.50, 2: 0.25, 3: 0.10}
+
+# Hour-based decay. Half-life of 48 h so the next-day-morning read still
+# respects how sore the user actually feels; approaches the legacy curve
+# by day 3. Bounded below 120 h (5 days) — anything older rolls off.
+def _decay_for_hours(hours: float) -> float:
+    if hours < 0:
+        return 1.0
+    if hours >= 120:
+        return 0.0
+    return 0.5 ** (hours / 48.0)
 
 # The 12 fatigue dimensions. Matches MuscleGroup enum minus the
 # ultra-granular ones (traps→back, forearms→biceps, adductors→quads).
@@ -398,6 +411,10 @@ def compute_rolling_fatigue(
     # This prevents stacking 5 saunas to wipe out a heavy leg day.
 
     parsed: list[tuple[date, float, dict, dict]] = []  # (wd, decay, resolved, raw_completion)
+    # Anchor "now" to local end-of-day so decay is stable across a single
+    # read (not ticking mid-request). If the caller passed a `today` date,
+    # anchor the hour computation to that day's 11:59 local.
+    now_utc = datetime.now(timezone.utc)
     for c in completions:
         wd = c.get("workout_date")
         if isinstance(wd, str):
@@ -408,9 +425,18 @@ def compute_rolling_fatigue(
         if not isinstance(wd, date):
             continue
         days_ago = (today - wd).days
-        if days_ago < 0 or days_ago > 3:
+        if days_ago < 0 or days_ago > 5:
             continue
-        decay = _DECAY.get(days_ago, 0.0)
+        # Prefer hour-based decay via completed_at. Fall back to legacy
+        # day-based decay when the completion row predates the new column.
+        completed_at = c.get("completed_at")
+        if isinstance(completed_at, datetime):
+            # Normalize to UTC so the delta math is timezone-safe.
+            ts = completed_at if completed_at.tzinfo else completed_at.replace(tzinfo=timezone.utc)
+            hours_ago = max(0.0, (now_utc - ts).total_seconds() / 3600.0)
+            decay = _decay_for_hours(hours_ago)
+        else:
+            decay = _DECAY.get(days_ago, 0.0)
         resolved = c.get("resolved_muscle_fatigue")
         if not resolved or not isinstance(resolved, dict):
             dur = max(1, (c.get("duration_seconds") or 0) // 60)

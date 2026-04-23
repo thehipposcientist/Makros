@@ -267,6 +267,31 @@ class GenerateDayRequest(BaseModel):
     prev_focuses: list[str] = []
 
 
+class GenerateWeekRequest(BaseModel):
+    """Generate the full N-day rotation using one coherent recipe.
+
+    Built so the Switch-Day flow can rebuild the whole week around a user's
+    pick (e.g. "change day 2 to Legs") while still respecting every normal
+    plan rule — split, session minutes, training days, injuries, dislikes,
+    recent completions (pulled server-side), and muscle fatigue.
+    """
+    goal: str
+    days_per_week: int = 4
+    session_minutes: int = 60
+    experience: str = "intermediate"
+    equipment: list[str] = []
+    preferred_split: str | None = None
+    priority_region: str = "balanced"
+    injuries: list[str] = []
+    disliked_exercises: list[str] = []
+    # Optional pin — the planner builds a coherent split, then the day at
+    # this index is relabeled/regenerated to the requested focus. All
+    # other days rotate away from the pinned focus automatically via
+    # prev_focuses injection.
+    pin_day_index: int | None = None
+    pin_focus: str | None = None
+
+
 @router.post("/generate-day")
 def generate_single_day(
     body: GenerateDayRequest,
@@ -564,6 +589,176 @@ def generate_single_day(
         "readiness_score": fatigue_readiness,
         "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
         "fatigue_notice": fatigue_notice,
+    }
+
+
+# ─── Per-week workout generation (Switch-Day flow) ────────────────────────────
+
+@router.post("/generate-week")
+def generate_full_week(
+    body: GenerateWeekRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Build the full N-day rotation in a single coherent recipe. Used by
+    Switch-Day — the client pins one day and every other day rotates around
+    it. Respects split / session_minutes / recent completions / muscle
+    fatigue / injuries / dislikes — same rules as any fresh plan gen."""
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.services.workout.history import (
+        build_history_familiarity, most_recent_completed_focus,
+        recent_exercise_slugs_by_muscle,
+    )
+    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+
+    owned_slugs = _resolve_owned_equipment_slugs(body.equipment)
+
+    recent_focus_buckets: tuple[str, ...] = ()
+    recent_focus_families: tuple[str, ...] = ()
+    try:
+        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
+        recent_focus_buckets = tuple(buckets)
+        recent_focus_families = tuple(families)
+    except Exception:
+        logger.exception("[generate-week] most_recent_completed_focus failed")
+
+    # Pin injection: prepend the user's chosen focus so the rotator treats
+    # it as if they just did that focus. The pinned day keeps its chosen
+    # focus below; all other days rotate to avoid it.
+    if body.pin_focus:
+        try:
+            from app.services.workout.focus_normalize import (
+                normalize_focus_to_bucket, normalize_focus_to_family,
+            )
+            pb = normalize_focus_to_bucket(body.pin_focus)
+            pf = normalize_focus_to_family(body.pin_focus)
+            if pb:
+                recent_focus_buckets = (pb,) + recent_focus_buckets
+            if pf:
+                recent_focus_families = (pf,) + recent_focus_families
+        except Exception:
+            logger.exception("[generate-week] pin focus normalize failed")
+
+    try:
+        history_familiarity = build_history_familiarity(current_user.id, db)
+    except Exception:
+        history_familiarity = {}
+    try:
+        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
+    except Exception:
+        recent_muscle_exercises = {}
+
+    fatigue_snapshot = None
+    try:
+        from app.services.workout.history import get_recent_completions_for_fatigue
+        from app.services.workout.activity_impact import compute_rolling_fatigue
+        completions = get_recent_completions_for_fatigue(current_user.id, db)
+        if completions:
+            fatigue_snapshot = compute_rolling_fatigue(completions)
+            from app.services.workout.planner import injury_muscle_fatigue_boost
+            injury_boosts = injury_muscle_fatigue_boost(tuple(body.injuries))
+            for muscle, boost in injury_boosts.items():
+                current = fatigue_snapshot.muscle_fatigue.get(muscle)
+                if current < boost:
+                    fatigue_snapshot.muscle_fatigue.add(muscle, boost - current)
+            if injury_boosts:
+                from app.services.workout.activity_impact import recompute_readiness
+                fatigue_snapshot.readiness_score, fatigue_snapshot.focus_readiness = recompute_readiness(fatigue_snapshot.muscle_fatigue)
+    except Exception as e:
+        logger.debug(f"[generate-week] fatigue check failed: {e}")
+
+    user_age: int | None = None
+    try:
+        from app.models import UserProfile as UserProfileModel
+        prof_row = db.exec(
+            select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
+        ).first()
+        user_age = prof_row.age if prof_row else None
+    except Exception:
+        user_age = None
+
+    inputs = PlannerInputs(
+        goal=body.goal,
+        days_per_week=body.days_per_week,
+        session_minutes=body.session_minutes,
+        experience=body.experience.lower(),
+        equipment_slugs=tuple(sorted(owned_slugs)),
+        preferred_split=body.preferred_split,
+        priority_region=body.priority_region,
+        injuries=tuple(body.injuries),
+        disliked_exercises=tuple(body.disliked_exercises),
+        rng_seed=current_user.id,  # stable across the week (not per-day)
+        recent_focus_buckets=recent_focus_buckets,
+        recent_focus_families=recent_focus_families,
+        muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
+        user_age=user_age,
+    )
+
+    plan = generate_workout_plan(
+        inputs, SEED_EXERCISES,
+        history_familiarity=history_familiarity,
+        recent_muscle_exercises=recent_muscle_exercises,
+    )
+    days = plan.get("workout_plan", {}).get("days", [])
+    if not days:
+        raise HTTPException(status_code=500, detail="Planner produced no days")
+
+    # Image enrichment — mirrors generate-day.
+    try:
+        from app.models import Exercise as ExModel
+        ex_names: set[str] = set()
+        for d in days:
+            for ex in d.get("exercises", []):
+                ex_names.add(ex.get("name", ""))
+        if ex_names:
+            img_rows = db.exec(
+                select(ExModel.name, ExModel.image_url)
+                .where(ExModel.name.in_(ex_names))
+                .where(ExModel.image_url != None)
+            ).all()
+            img_map = {r[0]: r[1] for r in img_rows}
+            for d in days:
+                for ex in d.get("exercises", []):
+                    url = img_map.get(ex.get("name"))
+                    if url:
+                        ex["image_url"] = url
+    except Exception:
+        pass
+
+    # Pin resolution — find the recipe day matching the chosen focus and
+    # MOVE it to the pinned index. Moving (instead of relabeling) preserves
+    # the exercise selection the planner built for that focus. Generated
+    # Recovery/Mobility/Cardio days stand in when there's no matching day.
+    if body.pin_day_index is not None and body.pin_focus:
+        target_idx = max(0, min(len(days) - 1, int(body.pin_day_index)))
+        override_lower = body.pin_focus.lower().strip()
+        pin_day = None
+        if override_lower in ("recovery", "active recovery"):
+            from app.services.workout.planner import generate_recovery_day
+            pin_day = generate_recovery_day(body.session_minutes or 45)
+        elif override_lower in ("mobility", "stretching"):
+            from app.services.workout.planner import generate_mobility_day
+            pin_day = generate_mobility_day(body.session_minutes or 45)
+        elif override_lower == "cardio":
+            from app.services.workout.planner import generate_cardio_day
+            pin_day = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
+        else:
+            for alt_idx, alt_day in enumerate(days):
+                if (alt_day.get("focus") or "").lower().strip() == override_lower:
+                    if alt_idx != target_idx:
+                        days[alt_idx], days[target_idx] = days[target_idx], days[alt_idx]
+                    break
+            else:
+                days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
+        if pin_day is not None:
+            days[target_idx] = pin_day
+
+    return {
+        "days": days,
+        "total_days_in_recipe": len(days),
+        "plan_name": plan.get("workout_plan", {}).get("name", ""),
+        "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
     }
 
 

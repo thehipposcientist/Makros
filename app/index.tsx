@@ -1639,6 +1639,7 @@ function AccountInfoModal({
   const [healthEnabled, setHealthEnabled] = useState(false);
   const [hasRecoveryQuestion, setHasRecoveryQuestion] = useState(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [showTierInfo, setShowTierInfo] = useState(false);
   const showHealthToggle = Platform.OS === 'ios';
 
   useEffect(() => {
@@ -1708,6 +1709,96 @@ function AccountInfoModal({
             onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
           />
 
+          {/* Pro vs Free feature comparison modal */}
+          <Modal visible={showTierInfo} transparent animationType="fade" onRequestClose={() => setShowTierInfo(false)}>
+            <TouchableOpacity
+              style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 }}
+              activeOpacity={1}
+              onPress={() => setShowTierInfo(false)}
+            >
+              <TouchableOpacity
+                activeOpacity={1}
+                onPress={() => {}}
+                style={{
+                  backgroundColor: tc.surface, borderRadius: 18, padding: 20,
+                  width: '100%', maxWidth: 440, maxHeight: '80%',
+                  borderWidth: 1, borderColor: tc.border,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
+                  <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, flex: 1 }}>
+                    What's in each tier
+                  </Text>
+                  <TouchableOpacity onPress={() => setShowTierInfo(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Text style={{ fontSize: 22, color: tc.textMuted }}>×</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  {/* Two-column header */}
+                  <View style={{ flexDirection: 'row', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border }}>
+                    <View style={{ flex: 2 }} />
+                    <View style={{ flex: 1, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6 }}>FREE</Text>
+                    </View>
+                    <View style={{ flex: 1, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.6 }}>PRO</Text>
+                    </View>
+                  </View>
+
+                  {([
+                    ['Manual workout logging',     true,  true],
+                    ['Manual meal logging',        true,  true],
+                    ['Weight + body tracking',     true,  true],
+                    ['Recovery + fatigue tracking',true,  true],
+                    ['Charts & adherence trends',  true,  true],
+                    ['Apple Health sync',          true,  true],
+                    ['AI workout plan generation', false, true],
+                    ['AI meal plan generation',    false, true],
+                    ['AI coach chat',              false, true],
+                    ['Food photo scanning',        false, true],
+                    ['Form analysis (photo/video)',false, true],
+                    ['Smart starting-weight recs', false, true],
+                    ['Switch Day week regen',      false, true],
+                    ['In-workout AI feedback',     false, true],
+                  ] as const).map(([label, inFree, inPro], i, arr) => (
+                    <View
+                      key={String(label)}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center',
+                        paddingVertical: 10,
+                        borderBottomWidth: i === arr.length - 1 ? 0 : 1,
+                        borderBottomColor: tc.border + '44',
+                      }}
+                    >
+                      <Text style={{ flex: 2, fontSize: 13, color: tc.textPrimary }}>{label}</Text>
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 18, color: inFree ? tc.success : tc.textMuted }}>
+                          {inFree ? '✓' : '—'}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 18, color: inPro ? tc.success : tc.textMuted }}>
+                          {inPro ? '✓' : '—'}
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
+                </ScrollView>
+
+                <TouchableOpacity
+                  onPress={() => setShowTierInfo(false)}
+                  style={{
+                    marginTop: 14, paddingVertical: 12, borderRadius: 10,
+                    backgroundColor: tc.primary, alignItems: 'center',
+                  }}
+                >
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.background }}>Got it</Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            </TouchableOpacity>
+          </Modal>
+
           {showHealthToggle && (
             <View style={am.healthToggleRow}>
               <View style={{ flex: 1 }}>
@@ -1751,9 +1842,14 @@ function AccountInfoModal({
             marginHorizontal: 20, marginTop: 16, padding: 14, borderRadius: 12,
             backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
           }}>
-            <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, marginBottom: 8 }}>
-              DEVELOPER · SUBSCRIPTION TIER
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, flex: 1 }}>
+                DEVELOPER · SUBSCRIPTION TIER
+              </Text>
+              <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
+              </TouchableOpacity>
+            </View>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               {(['free', 'pro'] as const).map(t => {
                 const active = (profile.subscriptionTier ?? 'pro') === t;

@@ -286,7 +286,18 @@ def gut_health_signals(
             "fiber_per_1000_kcal": today_row.fiber_per_1000_kcal,
             "distinct_plant_foods": today_row.distinct_plant_foods,
             "fermented_servings": today_row.fermented_servings,
+            "probiotic_servings": getattr(today_row, "probiotic_servings", 0) or 0,
             "omega3_servings": today_row.omega3_servings,
+            "plant_protein_g": getattr(today_row, "plant_protein_g", 0) or 0,
+            "animal_protein_g": getattr(today_row, "animal_protein_g", 0) or 0,
+            "plant_protein_pct": (
+                round(100 * (getattr(today_row, "plant_protein_g", 0) or 0) /
+                      max(1e-6, (getattr(today_row, "plant_protein_g", 0) or 0)
+                             + (getattr(today_row, "animal_protein_g", 0) or 0)))
+                if ((getattr(today_row, "plant_protein_g", 0) or 0)
+                    + (getattr(today_row, "animal_protein_g", 0) or 0)) > 0
+                else 0
+            ),
             "processing_counts": today_row.processing_counts or {},
             "saturated_fat_g": today_row.saturated_fat_g,
             "gut_support_score": today_row.gut_support_score,

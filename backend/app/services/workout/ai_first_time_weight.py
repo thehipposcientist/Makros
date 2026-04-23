@@ -49,15 +49,25 @@ class AIFirstTimeRecommendation:
 _PROMPT_TEMPLATE = (
     "User is about to do {exercise_name} for the first time "
     "(target: {target_reps}).\n"
-    "Recent {primary_muscle} sessions:\n"
+    "Recent sessions that hit {primary_muscle} — each tagged with how "
+    "strong a calibration signal it is:\n"
     "{session_lines}\n"
     "User experience: {experience}. Bodyweight: {weight_lbs} lb.\n"
     "Recommend a sensible starting weight (lb) for {exercise_name}.\n"
-    "Consider:\n"
-    "- Biomechanical similarity between the target exercise and recent "
-    "exercises.\n"
-    "- Target rep range suggests lower weight if higher reps, vice versa.\n"
-    "- Be conservative — first-time rec, user can add weight next set.\n"
+    "Signal-weighting rules (apply in order):\n"
+    "1. `[primary compound]` lifts are the strongest anchor — e.g. a user\n"
+    "   bench-pressing 225 for 5 should NOT start skull crushers at 30 lb.\n"
+    "2. `[secondary compound]` lifts still carry real load-capacity info —\n"
+    "   bench press numbers are meaningful for a first-time skull crusher.\n"
+    "3. `[primary isolation]` lifts give you the most-direct movement\n"
+    "   analog when compounds aren't available.\n"
+    "4. `[secondary isolation]` lifts are the weakest — use only to set\n"
+    "   a floor, not a target.\n"
+    "Further considerations:\n"
+    "- Biomechanical similarity between target and reference exercises.\n"
+    "- Target rep range → lower weight at higher reps and vice versa.\n"
+    "- Isolation lifts need ~30–50% of the compound's load at same reps.\n"
+    "- Be conservative — the user can add weight next set.\n"
     'Respond as JSON: {{"weight_lbs": int}}.'
 )
 
@@ -101,6 +111,14 @@ _SCHEMA = {
 }
 
 
+_RELATION_LABEL = {
+    "primary_compound":   "[primary compound — strongest signal]",
+    "secondary_compound": "[secondary muscle, compound lift — good proxy]",
+    "primary_isolation":  "[primary muscle, isolation]",
+    "secondary_isolation":"[secondary muscle, isolation — weakest signal]",
+}
+
+
 def _format_session_line(s: dict) -> str:
     name = s.get("exercise_name") or s.get("exercise_slug") or "?"
     equip = s.get("equipment") or "bodyweight"
@@ -110,9 +128,10 @@ def _format_session_line(s: dict) -> str:
     # Prefer the per-set rep breakdown if present, otherwise the
     # aggregate "set_count × top_reps" line.
     rep_part = reps_logged or f"{set_count}x{int(s.get('top_reps') or 0)}"
+    relation = _RELATION_LABEL.get(str(s.get("relation") or ""), "")
     return (
         f"- {name} ({equip}) — {set_count} sets x {rep_part}, "
-        f"top weight {top_weight:g} lb"
+        f"top weight {top_weight:g} lb {relation}".rstrip()
     )
 
 

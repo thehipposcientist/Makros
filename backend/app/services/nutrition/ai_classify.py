@@ -160,7 +160,7 @@ def get_or_create_metadata(
             likely_plant_foods=[], plant_count_value=0,
             fermented_flag=False, omega3_flag=False,
             processing_bucket="unknown", confidence=0.0, source="unknown",
-            notes="empty name",
+            notes="empty name", protein_source="unknown", probiotic_flag=False,
         )
 
     existing = db.exec(
@@ -191,6 +191,8 @@ def get_or_create_metadata(
         confidence=cls.confidence,
         source=cls.source,
         notes=cls.notes,
+        protein_source=cls.protein_source,
+        probiotic_flag=cls.probiotic_flag,
     )
     db.add(row)
     try:

@@ -298,11 +298,17 @@ def most_recent_sessions_for_muscle(
     days: int = 60,
 ) -> list[dict]:
     """Return up to `limit` recent completed sessions for exercises that
-    share the given `primary_muscle`. Used by the AI starting-weight
-    branch: when the user has NO direct history for the target exercise
-    but DOES have history for the same muscle family, we want to show
-    the AI the user's recent lifts so it can calibrate a sensible
-    starting weight.
+    hit the given `primary_muscle`. Used by the AI starting-weight branch
+    when the user has no direct history for the target exercise.
+
+    Selection priority (strongest → weakest calibration signal):
+      1. Compound lifts with `primary_muscle == target` (e.g. bench press
+         for chest).
+      2. Compound lifts where the target muscle is in `secondary_muscles`
+         — these carry meaningful load signal for the target muscle
+         (e.g. bench press for triceps when starting skull crushers).
+      3. Isolation lifts with `primary_muscle == target`.
+      4. Isolation lifts where the target muscle is secondary.
 
     Each entry carries:
         - exercise_name, exercise_slug
@@ -310,12 +316,16 @@ def most_recent_sessions_for_muscle(
         - top_weight_lbs, top_reps, set_count
         - reps_logged (the reps across logged sets, e.g. "8,8,7,6")
         - completed_on (ISO date)
+        - relation: "primary_compound" | "secondary_compound" |
+                    "primary_isolation" | "secondary_isolation"
+        - tier: 1 (strongest) - 4 (weakest) — lets callers prefer better
+          signals when truncating the list.
 
-    Sorted newest-first. Returns [] when the user has no matching
-    history inside the lookback window.
+    Results are sorted tier-asc then newest-first within each tier.
     """
     if not primary_muscle:
         return []
+    from sqlalchemy import or_, cast, String
     from sqlmodel import select
     from app.models import (
         Exercise as ExModel,
@@ -325,14 +335,20 @@ def most_recent_sessions_for_muscle(
     )
 
     cutoff = date.today() - timedelta(days=days)
-    # Pull the most recent N workout_exercises (one per session/exercise
-    # pair) whose linked Exercise.primary_muscle matches. Ordering by
-    # session.completed_at desc gives newest-first semantics.
+    # Match either primary_muscle OR any entry of secondary_muscles
+    # containing the target. `secondary_muscles` is a JSON list; we cast to
+    # text and substring-match on the quoted muscle slug. This is pragmatic
+    # — the set of muscle slugs is small and fixed, so false positives are
+    # vanishingly rare.
+    secondary_token = f'"{primary_muscle}"'
     rows = db_session.exec(
         select(
             ExModel.slug,
             ExModel.name,
             ExModel.equipment,
+            ExModel.primary_muscle,
+            ExModel.secondary_muscles,
+            ExModel.is_compound,
             WorkoutExercise.id,
             WorkoutSession.workout_date,
             WorkoutSession.completed_at,
@@ -342,18 +358,33 @@ def most_recent_sessions_for_muscle(
         .where(WorkoutSession.user_id == user_id)
         .where(WorkoutSession.completed_at.is_not(None))
         .where(WorkoutSession.workout_date >= cutoff)
-        .where(ExModel.primary_muscle == primary_muscle)
+        .where(
+            or_(
+                ExModel.primary_muscle == primary_muscle,
+                cast(ExModel.secondary_muscles, String).like(f"%{secondary_token}%"),
+            )
+        )
         .order_by(WorkoutSession.completed_at.desc())
-        .limit(max(limit, 1) * 4)  # over-fetch to tolerate empty-set rows
+        .limit(max(limit, 1) * 10)  # over-fetch — we'll tier + dedupe below
     ).all()
 
-    sessions: list[dict] = []
+    def tier_for(pm: str, secs: list, is_comp: bool) -> tuple[int, str]:
+        pm_match = pm == primary_muscle
+        sec_match = primary_muscle in (secs or [])
+        if pm_match and is_comp:
+            return 1, "primary_compound"
+        if (not pm_match) and sec_match and is_comp:
+            return 2, "secondary_compound"
+        if pm_match and not is_comp:
+            return 3, "primary_isolation"
+        return 4, "secondary_isolation"
+
+    staged: list[tuple[int, dict]] = []
     seen_ex_ids: set[int] = set()
-    for slug, name, equipment, we_id, workout_date, completed_at in rows:
+    for slug, name, equipment, pm, secs, is_comp, we_id, workout_date, completed_at in rows:
         if we_id is None or we_id in seen_ex_ids:
             continue
         seen_ex_ids.add(we_id)
-        # Pull the completed sets for this workout_exercise row.
         sets = db_session.exec(
             select(ExerciseSet)
             .where(ExerciseSet.workout_exercise_id == we_id)
@@ -365,7 +396,8 @@ def most_recent_sessions_for_muscle(
         top_weight = max((s.actual_weight_lbs or 0.0) for s in sets)
         reps_list = [int(s.actual_reps or 0) for s in sets if s.actual_reps]
         top_reps = max(reps_list) if reps_list else 0
-        sessions.append({
+        tier, relation = tier_for(pm, secs or [], bool(is_comp))
+        staged.append((tier, {
             "exercise_slug": slug,
             "exercise_name": name,
             "equipment": (equipment.value if hasattr(equipment, "value") else str(equipment or "")).lower(),
@@ -374,10 +406,12 @@ def most_recent_sessions_for_muscle(
             "top_reps": int(top_reps),
             "reps_logged": ",".join(str(r) for r in reps_list),
             "completed_on": workout_date.isoformat() if workout_date else None,
-        })
-        if len(sessions) >= limit:
-            break
-    return sessions
+            "relation": relation,
+            "tier": tier,
+        }))
+
+    staged.sort(key=lambda t: (t[0], -len(staged)))  # tier asc; natural order preserves newest-first
+    return [s for _, s in staged[:limit]]
 
 
 def get_recent_completions_for_fatigue(
@@ -404,6 +438,10 @@ def get_recent_completions_for_fatigue(
     return [
         {
             "workout_date": row.workout_date,
+            # Wall-clock finish time. When present, the fatigue engine
+            # uses this for hour-based decay so an evening workout isn't
+            # already 50% recovered by the next morning.
+            "completed_at": getattr(row, "completed_at", None),
             "focus_label": row.focus_label,
             "duration_seconds": row.duration_seconds,
             "stimulus": row.stimulus,

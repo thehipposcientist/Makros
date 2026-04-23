@@ -263,8 +263,26 @@ def recommend_weight(
     response so the client can show the user *why* a weight was picked."""
     try:
         planned_set_count = body.targetSets if body.targetSets and body.targetSets > 0 else max(1, body.nextSetNumber)
+        # Forward the plan's per-exercise rep target onto every planned set
+        # so the progression engine honors the plan's intent instead of
+        # defaulting to goal-based ranges. Also promote heavy ranges to
+        # TOP_SET so RIR thresholds match a heavy-top prescription.
+        plan_rep_target = (body.targetReps or "").strip() or None
+        inferred_set_type = SetType.STRAIGHT
+        if plan_rep_target:
+            try:
+                parts = plan_rep_target.split("-", 1)
+                hi = int(parts[-1])
+                if hi <= 6:
+                    inferred_set_type = SetType.TOP_SET
+            except ValueError:
+                pass
         planned_sets = [
-            PlannedSet(set_number=idx + 1, set_type=SetType.STRAIGHT)
+            PlannedSet(
+                set_number=idx + 1,
+                set_type=inferred_set_type,
+                target_reps_override=plan_rep_target,
+            )
             for idx in range(planned_set_count)
         ]
 
@@ -1232,6 +1250,28 @@ def pre_set_recommendation(
 
     prior = body.priorSetsThisSession or []
     last_session = body.lastSessionSets or []
+
+    # DB-side fallback: the client's name-based `lastSessionSets` lookup
+    # misses when the generated plan exercise name differs from the logged
+    # history name (e.g. "Back Squat" vs "Barbell Back Squat"). Before we
+    # fall through to the AI first-time branch, ask the DB directly via
+    # slug — this is what the /recommend-weight endpoint does and keeps the
+    # two endpoints consistent.
+    if not last_session:
+        try:
+            from app.services.workout.history import db_history_lookup
+            slug = _resolve_exercise_slug(db, body.exerciseName, body.exerciseSlug)
+            if slug:
+                hist = db_history_lookup(current_user.id, db)(slug)
+                if hist:
+                    last_session = [
+                        {"reps": int(s.reps or 0), "weightLbs": float(s.weight_lbs or 0.0)}
+                        for s in hist
+                        if (s.weight_lbs or 0) > 0
+                    ]
+        except Exception:
+            logger.exception("[pre-set] DB history lookup failed (non-fatal)")
+
     is_first_session = not last_session
     is_first_set = len(prior) == 0
 

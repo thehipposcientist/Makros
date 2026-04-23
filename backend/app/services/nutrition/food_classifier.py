@@ -18,10 +18,11 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 1
+CLASSIFIER_VERSION = 2   # bumped when protein_source + probiotic_flag were added
 
 Source = Literal["deterministic", "heuristic", "ai", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]
+ProteinSource = Literal["plant", "animal", "mixed", "none", "unknown"]
 
 
 @dataclass
@@ -36,6 +37,16 @@ class FoodClassification:
     confidence: float               # 0..1
     source: Source
     notes: str | None = None
+    # Dominant protein source in the item. Drives the plant-vs-animal
+    # protein ratio on the longevity card. "mixed" for composite items
+    # that clearly contain both (e.g. "chicken caesar salad"). "none" for
+    # items with negligible protein (fruit, vegetables on their own).
+    protein_source: ProteinSource = "unknown"
+    # Subset of `fermented_flag` — true only for items where live probiotic
+    # cultures are reliably present in the consumer form (yogurt, kefir,
+    # kimchi, sauerkraut, kombucha, natto). Excludes tempeh + miso which
+    # are typically heat-treated before consumption.
+    probiotic_flag: bool = False
 
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -166,6 +177,63 @@ _FERMENTED_FRAGMENTS = [
 # Things that have "cheese" in the name but aren't meaningfully fermented:
 _FERMENTED_NEGATIVES = ["cheese flavor", "cheese puff", "cheez"]
 
+# Live-culture probiotic foods. Strict subset of _FERMENTED_FRAGMENTS — we
+# drop tempeh + miso because they're typically cooked/heated before eating
+# and lose probiotic viability. "Pasteurized" on the label also kills
+# cultures; users can't detect that from a food name so we accept some
+# false positives on things like commercial sauerkraut.
+_PROBIOTIC_FRAGMENTS = [
+    "yogurt", "kefir", "kimchi", "sauerkraut", "kombucha", "natto",
+    "skyr", "kvass", "cultured buttermilk", "cultured cottage cheese",
+    "probiotic",
+]
+
+
+# ── Protein source ───────────────────────────────────────────────────────────
+# Classifier for plant vs animal protein sources. Used for the longevity
+# card's plant-to-animal protein ratio. Keeps pure-carb / fat-only items
+# as "none" so they don't skew the ratio.
+
+_ANIMAL_PROTEIN_FRAGMENTS = [
+    # Meat
+    "chicken", "beef", "pork", "lamb", "bison", "veal", "venison",
+    "turkey", "duck", "goose", "bacon", "ham", "sausage", "steak",
+    "brisket", "ribs", "meatball", "burger",
+    # Fish / seafood
+    "salmon", "tuna", "cod", "tilapia", "halibut", "sardine", "anchovy",
+    "mackerel", "herring", "trout", "bass", "snapper", "flounder",
+    "shrimp", "prawn", "crab", "lobster", "scallop", "mussel", "clam",
+    "oyster", "octopus", "squid",
+    # Dairy / eggs
+    "egg", "eggs", "whey", "casein", "milk", "greek yogurt", "yogurt",
+    "kefir", "cottage cheese", "ricotta", "cheddar", "mozzarella",
+    "parmesan", "feta", "cheese",
+]
+
+_PLANT_PROTEIN_FRAGMENTS = [
+    "tofu", "tempeh", "seitan", "edamame", "lentil", "chickpea", "garbanzo",
+    "black bean", "kidney bean", "pinto bean", "navy bean", "white bean",
+    "cannellini", "split pea", "pea protein", "soy protein", "soy milk",
+    "oat milk", "almond milk", "almond", "peanut", "peanut butter",
+    "cashew", "walnut", "pistachio", "pecan", "hemp seed", "hemp heart",
+    "chia", "flax", "flaxseed", "pumpkin seed", "sunflower seed",
+    "quinoa", "farro", "bulgur", "nutritional yeast",
+]
+
+# Items that usually pair plant + animal protein in one line (composite
+# dishes). Detected via "X with Y" or joint keywords.
+_MIXED_PROTEIN_COMPOSITES = [
+    "chicken caesar", "tuna salad", "egg salad", "chef salad",
+    "chicken salad", "protein bowl", "buddha bowl",
+]
+
+# Exclusions — items that MIGHT look like protein but aren't meaningful
+# protein sources on their own.
+_LOW_PROTEIN_CARBS_OR_FATS = {
+    "oil", "butter", "sauce", "syrup", "honey", "sugar", "jam", "juice",
+    "soda", "coffee", "tea", "water",
+}
+
 
 # ── Omega-3 rich foods ───────────────────────────────────────────────────────
 # Whole foods + supplements we can confidently flag. Plant-based omega-3 (ALA)
@@ -222,13 +290,15 @@ def classify_food(raw_name: str) -> FoodClassification:
             normalized_name=normalized, display_name=raw_name, likely_plant_foods=[],
             plant_count_value=0, fermented_flag=False, omega3_flag=False,
             processing_bucket="unknown", confidence=0.0, source="unknown",
-            notes="empty or too short",
+            notes="empty or too short", protein_source="unknown", probiotic_flag=False,
         )
 
     plants = _detect_plants(normalized)
     fermented = _detect_fermented(normalized)
     omega3 = _detect_omega3(normalized)
     bucket = _detect_processing(normalized, plants=plants, fermented=fermented)
+    protein_source = _detect_protein_source(normalized)
+    probiotic = _detect_probiotic(normalized)
     source, confidence, notes = _score_source(normalized, plants, fermented, omega3, bucket)
 
     return FoodClassification(
@@ -242,7 +312,41 @@ def classify_food(raw_name: str) -> FoodClassification:
         confidence=confidence,
         source=source,
         notes=notes,
+        protein_source=protein_source,
+        probiotic_flag=probiotic,
     )
+
+
+def _detect_probiotic(n: str) -> bool:
+    # Same negative list as fermented — "cheese puff" etc.
+    for neg in _FERMENTED_NEGATIVES:
+        if neg in n:
+            return False
+    return any(frag in n for frag in _PROBIOTIC_FRAGMENTS)
+
+
+def _detect_protein_source(n: str) -> ProteinSource:
+    """Classify the dominant protein source. Prefers exact composite
+    matches first, then looks for animal + plant tokens. "mixed" when both
+    appear without a composite label. "none" for clearly non-protein
+    items (oils, sauces, sugary drinks)."""
+    for comp in _MIXED_PROTEIN_COMPOSITES:
+        if comp in n:
+            return "mixed"
+    # Strip out the low-protein-only items first — a single token like
+    # "butter" shouldn't inherit "animal" just because butter is dairy.
+    tokens = set(n.split())
+    if tokens and tokens.issubset(_LOW_PROTEIN_CARBS_OR_FATS):
+        return "none"
+    has_animal = any(frag in n for frag in _ANIMAL_PROTEIN_FRAGMENTS)
+    has_plant = any(frag in n for frag in _PLANT_PROTEIN_FRAGMENTS)
+    if has_animal and has_plant:
+        return "mixed"
+    if has_animal:
+        return "animal"
+    if has_plant:
+        return "plant"
+    return "unknown"
 
 
 def _detect_plants(n: str) -> list[str]:

@@ -494,6 +494,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       sets: [],
       aiRecommendation: undefined,
       image_url: (ex as any).image_url,
+      // Preserve planner-propagated targets + slug so weight-rec calls can
+      // use them as anchors (tier 2 in the backend's layered pipeline).
+      targetWeightLbs: (ex as any).targetWeightLbs ?? null,
+      slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
+      primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? null,
     }));
   });
   // Debounced backend sync of the in-progress workout. Fires 1.5s after the
@@ -613,6 +618,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }));
         const rec = await getPreSetRecommendation(authToken, {
           exerciseName: ex.name,
+          exerciseSlug: ex.slug ?? undefined,
           plannedSetNumber: 1,
           plannedSets,
           priorSetsThisSession: [],
@@ -647,6 +653,46 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // focus. Memo'd once — React's createAnimatedComponent returns a
   // new class each call, so we don't want to rebuild on every render.
   const AnimatedTextInput = useMemo(() => Animated.createAnimatedComponent(TextInput), []);
+
+  // Stored scale values + ref-tracked "was-logged" flags so the set badge
+  // can spring-pop specifically on the false→true transition (not every
+  // re-render where `isLogged` happens to be true).
+  const setBadgeScales = useRef<Record<string, Animated.Value>>({}).current;
+  const setBadgeWasLogged = useRef<Record<string, boolean>>({}).current;
+  const getSetBadgeScale = (key: string): Animated.Value => {
+    if (!setBadgeScales[key]) setBadgeScales[key] = new Animated.Value(1);
+    return setBadgeScales[key];
+  };
+  const popSetBadge = (key: string) => {
+    const v = getSetBadgeScale(key);
+    v.stopAnimation();
+    v.setValue(0.5);
+    Animated.spring(v, {
+      toValue: 1,
+      friction: 4,
+      tension: 140,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  // Exercise-complete animation: fires once when the Nth and final set
+  // lands. Drives a big check stamp that bounces in above the exercise
+  // name. Keyed by exercise index.
+  const exerciseCompleteScales = useRef<Record<number, Animated.Value>>({}).current;
+  const exerciseCompleteWasDone = useRef<Record<number, boolean>>({}).current;
+  const getExerciseCompleteScale = (idx: number): Animated.Value => {
+    if (!exerciseCompleteScales[idx]) exerciseCompleteScales[idx] = new Animated.Value(0);
+    return exerciseCompleteScales[idx];
+  };
+  const playExerciseCompleteStamp = (idx: number) => {
+    const v = getExerciseCompleteScale(idx);
+    v.stopAnimation();
+    v.setValue(0);
+    Animated.sequence([
+      Animated.spring(v, { toValue: 1.15, friction: 5, tension: 120, useNativeDriver: true }),
+      Animated.spring(v, { toValue: 1.0,  friction: 8, tension: 140, useNativeDriver: true }),
+    ]).start();
+  };
   // Pulse animation values keyed by "exIdx-setSlot". Drives the green
   // flash-fade that runs when a set is successfully logged. We lazily
   // allocate an Animated.Value per row and reuse it across re-renders.
@@ -1024,11 +1070,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               phase: 'accumulation',
               workoutFocus: workout.focus,
               weekNumber: 1,
-              incrementLbs: 5,
+              incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
               allTimeBestWeightLbs: bests?.allTime?.weightLbs,
               allTimeBestReps: bests?.allTime?.reps,
               lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
               lastSessionBestReps: bests?.lastSession?.reps,
+              plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+              exerciseSlug: ex.slug ?? undefined,
+              equipment: ex.equipment,
+              primaryMuscle: ex.primaryMuscle ?? undefined,
             }).then(rec => {
               const tip = `Set ${updatedSets.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
               setExercises(prev => prev.map((e, idx) => idx === exIdx ? { ...e, aiRecommendation: tip } : e));
@@ -1198,11 +1248,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           phase: 'accumulation',
           workoutFocus: workout.focus,
           weekNumber: 1,
-          incrementLbs: 5,
+          incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
           allTimeBestWeightLbs: bests?.allTime?.weightLbs,
           allTimeBestReps: bests?.allTime?.reps,
           lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
           lastSessionBestReps: bests?.lastSession?.reps,
+          plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+          exerciseSlug: ex.slug ?? undefined,
+          equipment: ex.equipment,
+          primaryMuscle: ex.primaryMuscle ?? undefined,
         });
         const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
         setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
@@ -1659,6 +1713,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     setAiLoadingIdx(exIdx);
     try {
+      const bests = await getExerciseBests(ex.name).catch(() => null);
       const rec = await getWeightRecommendation(authToken, ex.name, goal, setsForExercise, setsForExercise.length + 1, {
         targetSets: ex.targetSets,
         targetReps: ex.targetReps,
@@ -1668,7 +1723,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         phase: 'accumulation',
         workoutFocus: workout.focus,
         weekNumber: 1,
-        incrementLbs: 5,
+        incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
+        allTimeBestWeightLbs: bests?.allTime?.weightLbs,
+        allTimeBestReps: bests?.allTime?.reps,
+        lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
+        lastSessionBestReps: bests?.lastSession?.reps,
+        plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+        exerciseSlug: ex.slug ?? undefined,
+        equipment: ex.equipment,
+        primaryMuscle: ex.primaryMuscle ?? undefined,
       });
       const tip = `Set ${setsForExercise.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
       setRestNextTarget(`Set ${setsForExercise.length + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
@@ -2370,6 +2433,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const rawTotal        = targetSetCount + (extraSetCounts[i] ?? 0) - (removedSetCounts[i] ?? 0);
           const totalSetCount   = Math.max(ex.sets.length, rawTotal);
           const isDone          = ex.sets.length >= totalSetCount;
+          // Fire the big check-stamp once on the false→true transition.
+          // Ref flag per-index prevents replays on every re-render.
+          if (isDone && !exerciseCompleteWasDone[i]) {
+            exerciseCompleteWasDone[i] = true;
+            playExerciseCompleteStamp(i);
+          } else if (!isDone && exerciseCompleteWasDone[i]) {
+            exerciseCompleteWasDone[i] = false;
+            getExerciseCompleteScale(i).setValue(0);
+          }
           const isActive        = activeExIdx === i;
           const isAiLoading     = aiLoadingIdx === i;
           const isAiError       = aiErrorIdx === i;
@@ -2417,6 +2489,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {`${ex.sets.length}/${totalSetCount}`}
                   </Text>
                 </View>
+                {/* Exercise-complete stamp — big check that bounces in when
+                    the final set lands. Layered over the row so it's hard to
+                    miss even when the user is scrolled down focused on the
+                    inputs. Only rendered while done so scales stay cheap. */}
+                {isDone && (
+                  <Animated.View
+                    pointerEvents="none"
+                    style={{
+                      position: 'absolute',
+                      right: 8,
+                      top: '50%',
+                      marginTop: -14,
+                      transform: [{ scale: getExerciseCompleteScale(i) }],
+                    }}
+                  >
+                    <View style={{
+                      width: 28, height: 28, borderRadius: 14,
+                      backgroundColor: themeColors.success,
+                      alignItems: 'center', justifyContent: 'center',
+                      shadowColor: themeColors.success,
+                      shadowOpacity: 0.6,
+                      shadowRadius: 8,
+                      shadowOffset: { width: 0, height: 0 },
+                    }}>
+                      <Ionicons name="checkmark" size={18} color={themeColors.background} />
+                    </View>
+                  </Animated.View>
+                )}
                 {/* Swap — replace with a similar exercise (same muscle) */}
                 {!isDone && (
                   <TouchableOpacity
@@ -2906,17 +3006,38 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 />
                               )}
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
-                              <TouchableOpacity
-                                style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
-                                onPress={() => {
-                                  if (!isLogged) { handleLogSetInline(i, slot, false); }
-                                }}
-                                accessibilityRole="button"
-                                accessibilityLabel={isLogged ? `Set ${slot + 1} logged` : `Log set ${slot + 1}`}>
-                                <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
-                                  {isLogged ? <Ionicons name="checkmark" size={14} color="#fff" /> : <Ionicons name="radio-button-off" size={14} />}
-                                </Text>
-                              </TouchableOpacity>
+                              {(() => {
+                                // Spring-pop the badge on the first render
+                                // after `isLogged` flips true. Flag is
+                                // per-set-key so re-renders don't retrigger.
+                                const badgeKey = `${i}-${slot}`;
+                                const badgeScale = getSetBadgeScale(badgeKey);
+                                if (isLogged && !setBadgeWasLogged[badgeKey]) {
+                                  setBadgeWasLogged[badgeKey] = true;
+                                  popSetBadge(badgeKey);
+                                } else if (!isLogged && setBadgeWasLogged[badgeKey]) {
+                                  setBadgeWasLogged[badgeKey] = false;
+                                  badgeScale.setValue(1);
+                                }
+                                return (
+                                  <TouchableOpacity
+                                    style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
+                                    onPress={() => {
+                                      if (!isLogged) { handleLogSetInline(i, slot, false); }
+                                    }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={isLogged ? `Set ${slot + 1} logged` : `Log set ${slot + 1}`}
+                                  >
+                                    <Animated.View style={{ transform: [{ scale: badgeScale }] }}>
+                                      <Text style={[styles.inlineLoggedBadgeText, !isLogged && { color: themeColors.textMuted }]}>
+                                        {isLogged
+                                          ? <Ionicons name="checkmark" size={14} color={themeColors.background} />
+                                          : <Ionicons name="radio-button-off" size={14} />}
+                                      </Text>
+                                    </Animated.View>
+                                  </TouchableOpacity>
+                                );
+                              })()}
                               {isLastSlot && (
                                 <TouchableOpacity
                                   style={styles.inlineDeleteBtn}

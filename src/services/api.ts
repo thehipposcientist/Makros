@@ -3,6 +3,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const LOCAL_BACKEND_IP = '192.168.1.220'; // your dev machine's LAN IP
 
+/** Exported for callers that need to hit the API outside the `request`
+ *  helper (e.g. direct `fetch` for endpoints that return binary/large
+ *  payloads). Same resolution logic — dev override → LAN IP → prod URL. */
+export function getApiBaseUrl(): string {
+  return getBaseUrl();
+}
+
 function getBaseUrl(): string {
   // Production / TestFlight build: read from app config extras. Set this
   // via `app.json` → `expo.extra.apiBaseUrl` (or via EAS build secrets).
@@ -728,6 +735,17 @@ export async function getWeightRecommendation(
     allTimeBestReps?: number;
     lastSessionBestWeightLbs?: number;
     lastSessionBestReps?: number;
+    /** Planner-propagated anchor (already history-aware). Tier 2 in the
+     *  backend pipeline — beats all client-side bests when present. */
+    plannedTargetWeightLbs?: number;
+    /** Canonical slug — lets the backend skip name-based lookup. */
+    exerciseSlug?: string;
+    /** Equipment the exercise is performed with (e.g. "barbell").
+     *  Biases the progression increment (barbell +5 vs dumbbell +2.5). */
+    equipment?: string;
+    /** Primary muscle slug — used as a transfer target when the exact
+     *  exercise has no direct history. */
+    primaryMuscle?: string;
   },
 ): Promise<{ weightLbs: number; reps: number; tip: string }> {
   return request('/ai/recommend-weight', {
@@ -982,6 +1000,36 @@ export type LoggedExercisePayload = {
 
 /** Generate one day's workout using the deterministic planner with history.
  *  Returns fresh exercises that vary from recent sessions. */
+export async function generateWorkoutWeek(
+  token: string,
+  payload: {
+    goal: string;
+    days_per_week: number;
+    session_minutes?: number;
+    experience?: string;
+    equipment?: string[];
+    preferred_split?: string;
+    priority_region?: string;
+    injuries?: string[];
+    disliked_exercises?: string[];
+    /** Pin day + focus. When set, the planner builds a coherent rotation
+     *  around that choice. All other days rotate away from the pinned focus. */
+    pin_day_index?: number | null;
+    pin_focus?: string | null;
+  },
+): Promise<{
+  days: any[];
+  total_days_in_recipe: number;
+  plan_name: string;
+  focus_readiness: Record<string, number>;
+}> {
+  return request('/workouts/generate-week', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function generateWorkoutDay(
   token: string,
   params: {
@@ -1914,7 +1962,11 @@ export interface GutHealthToday {
   fiber_per_1000_kcal: number;
   distinct_plant_foods: number;
   fermented_servings: number;
+  probiotic_servings: number;
   omega3_servings: number;
+  plant_protein_g: number;
+  animal_protein_g: number;
+  plant_protein_pct: number;   // 0-100
   processing_counts: Record<string, number>;
   saturated_fat_g: number;
   gut_support_score: number;
@@ -1932,7 +1984,11 @@ export interface GutHealthWindow {
   pct_days_fiber_target: number;
   distinct_plant_foods_week: number;
   fermented_servings: number;
+  probiotic_servings: number;
   omega3_servings: number;
+  plant_protein_g: number;
+  animal_protein_g: number;
+  plant_protein_pct: number;
   processing_counts: Record<string, number>;
   avg_gut_support_score: number;
   avg_food_quality_score: number;

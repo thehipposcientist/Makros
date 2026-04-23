@@ -648,6 +648,14 @@ class FoodMetadata(SQLModel, table=True):
     # deterministic | heuristic | ai | unknown
     source: str = Field(default="unknown")
     notes: str | None = Field(default=None)
+    # Dominant protein source: plant | animal | mixed | none | unknown.
+    # Drives the plant-vs-animal protein ratio on the longevity card.
+    protein_source: str = Field(default="unknown")
+    # Subset of fermented_flag — true only for foods with live probiotic
+    # cultures in their consumer form (yogurt, kefir, kimchi, sauerkraut,
+    # kombucha, natto). Tempeh + miso excluded because they're usually
+    # cooked before consumption.
+    probiotic_flag: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -671,7 +679,13 @@ class DailyNutritionMetrics(SQLModel, table=True):
     fiber_per_1000_kcal: float = Field(default=0)
     distinct_plant_foods: int = Field(default=0)
     fermented_servings: float = Field(default=0)
+    # Live-culture probiotic subset of fermented servings.
+    probiotic_servings: float = Field(default=0)
     omega3_servings: float = Field(default=0)
+    # Protein sourced from plant vs animal vs mixed-composite items.
+    # Mixed items contribute half to each pool — rough but honest.
+    plant_protein_g: float = Field(default=0)
+    animal_protein_g: float = Field(default=0)
     # Processing mix (counts of items by bucket):
     processing_counts: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     saturated_fat_g: float = Field(default=0)

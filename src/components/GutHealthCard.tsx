@@ -114,6 +114,7 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
             ['Fiber',           `${today.fiber_total_g}g`, `${today.fiber_per_1000_kcal} per 1000 kcal`],
             ['Plant diversity', `${today.distinct_plant_foods} today`, week ? `${week.distinct_plant_foods_week} this week` : ''],
             ['Fermented',       `${today.fermented_servings} today`, week ? `${week.fermented_servings} this week` : ''],
+            ['Probiotic (live)',`${today.probiotic_servings ?? 0} today`, week ? `${week.probiotic_servings ?? 0} this week` : ''],
             ['Omega-3 foods',   `${today.omega3_servings} today`, week ? `${week.omega3_servings} this week` : ''],
           ].map(([label, main, detail]) => (
             <View key={label as string} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -122,6 +123,44 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
               <Text style={{ fontSize: 10, color: tc.textMuted }}>{detail as string}</Text>
             </View>
           ))}
+
+          {/* Plant-vs-animal protein — rendered as a stacked bar so the
+              ratio is immediately legible. Targets ~30%+ plant protein
+              for most longevity-style diets; no hard target because it's
+              goal-dependent. */}
+          {(today.plant_protein_g + today.animal_protein_g) > 0 && (() => {
+            const total = today.plant_protein_g + today.animal_protein_g;
+            const plantPct = Math.round((today.plant_protein_g / total) * 100);
+            return (
+              <View style={{ marginTop: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
+                    Protein source
+                  </Text>
+                  <Text style={{ flex: 1, fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>
+                    {today.plant_protein_g}g plant · {today.animal_protein_g}g animal
+                  </Text>
+                </View>
+                <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: tc.border }}>
+                  {today.plant_protein_g > 0 && (
+                    <View style={{ width: `${plantPct}%` as any, backgroundColor: tc.success }} />
+                  )}
+                  {today.animal_protein_g > 0 && (
+                    <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: tc.primary }} />
+                  )}
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                  <Text style={{ fontSize: 10, color: tc.success, fontWeight: '700' }}>{plantPct}% plant</Text>
+                  <Text style={{ fontSize: 10, color: tc.primary, fontWeight: '700' }}>{100 - plantPct}% animal</Text>
+                </View>
+                {week && week.plant_protein_pct != null && (
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
+                    Weekly mix: {week.plant_protein_pct}% plant
+                  </Text>
+                )}
+              </View>
+            );
+          })()}
           {today.processing_counts && Object.keys(today.processing_counts).length > 0 && (
             <View style={{ marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
               <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>

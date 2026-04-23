@@ -601,6 +601,17 @@ export interface SessionExercise {
   sets: CompletedSet[];
   aiRecommendation?: string;
   image_url?: string;
+  /** Anchor target weight emitted by the deterministic planner (already
+   *  history-aware). Forwarded to the weight-recommendation endpoint as
+   *  `plannedTargetWeightLbs` so recs stay grounded in the session plan. */
+  targetWeightLbs?: number | null;
+  /** Canonical slug for this exercise (when known). Lets the weight-rec
+   *  endpoint skip the name-based lookup and run the performance-profile
+   *  pipeline directly. */
+  slug?: string | null;
+  /** Primary muscle slug from the exercise library. Used to bias weight
+   *  recs when the exact exercise has no direct history. */
+  primaryMuscle?: string | null;
 }
 
 export interface WorkoutSession {

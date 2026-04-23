@@ -185,15 +185,40 @@ class BarcodeLookupRequest(_PydanticBaseModel):
 
 # ─── Exercise form video lookup ──────────────────────────────────────────────
 
+import json as _json
 import re as _re
 import urllib.parse as _urlparse
 import urllib.request as _urlreq
+from concurrent.futures import ThreadPoolExecutor as _TPE
 
-_VIDEO_CACHE: dict[str, str] = {}  # exercise_name → video_id
+# Cache by exercise_name → list[dict] so we don't re-probe every request.
+_VIDEO_CACHE: dict[str, list[dict]] = {}
 
 
 class ExerciseVideoRequest(_PydanticBaseModel):
     exercise_name: str
+
+
+def _oembed_probe(vid: str) -> dict | None:
+    """Probe YouTube oEmbed for a video ID. Returns `{video_id, title,
+    thumbnail_url, author_name}` if embeddable, None otherwise. oEmbed
+    returns 200 only when the video allows embedding; 401/403/404 for
+    disabled/removed. Cheap enough to run on 20 candidates concurrently."""
+    try:
+        oembed = f"https://www.youtube.com/oembed?url=https%3A//www.youtube.com/watch%3Fv%3D{vid}&format=json"
+        oreq = _urlreq.Request(oembed, headers={"User-Agent": "Mozilla/5.0"})
+        with _urlreq.urlopen(oreq, timeout=4) as r:
+            if r.status != 200:
+                return None
+            data = _json.loads(r.read().decode("utf-8", errors="ignore"))
+            return {
+                "video_id": vid,
+                "title": str(data.get("title") or "").strip(),
+                "thumbnail_url": str(data.get("thumbnail_url") or "").strip(),
+                "author_name": str(data.get("author_name") or "").strip(),
+            }
+    except Exception:
+        return None
 
 
 @router.post("/exercise-video")
@@ -201,11 +226,21 @@ def exercise_video_lookup(
     body: ExerciseVideoRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Resolve an exercise name to a YouTube video ID for the top form
-    tutorial result. Results are cached in-process so repeat lookups
-    don't hit YouTube. Returns `{ video_id, search_url }`. Client can
-    embed via `https://www.youtube.com/embed/<video_id>` and offer the
-    search_url for "Search more" links."""
+    """Return a list of embeddable YouTube options for an exercise form
+    tutorial. Scans the top 20 search results + shorts feed, probes each
+    for embeddability via oEmbed (concurrent), and returns up to 10 with
+    title + thumbnail. Client renders these as a tappable grid so the user
+    picks which video to watch.
+
+    Response shape:
+        {
+          "video_id": <primary embeddable id>,
+          "options": [ { video_id, title, thumbnail_url, author_name, is_short } ],
+          "search_url": <youtube search url for fallback>,
+          "cached": bool,
+          "curated": bool (optional)
+        }
+    """
     name = body.exercise_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Exercise name required")
@@ -213,88 +248,123 @@ def exercise_video_lookup(
     query = f"{name} proper form tutorial"
     search_url = f"https://www.youtube.com/results?search_query={_urlparse.quote(query)}"
 
-    # 1. Curated mapping wins — if we've manually vetted a video ID for
-    # this exercise, return it immediately. YouTube's oEmbed API is not a
-    # reliable embeddability check; manual curation is the only durable fix.
+    # 1. Curated mapping wins — manually-vetted video IDs bypass the probe.
     try:
         from app.data.exercise_videos import lookup_curated
         curated = lookup_curated(name)
     except Exception:
         curated = None
     if curated:
-        return {"video_id": curated, "candidates": [curated], "search_url": search_url, "cached": False, "curated": True}
+        opt = _oembed_probe(curated) or {
+            "video_id": curated, "title": name, "thumbnail_url": "", "author_name": "",
+        }
+        opt["is_short"] = False
+        return {
+            "video_id": curated,
+            "options": [opt],
+            "search_url": search_url,
+            "cached": False,
+            "curated": True,
+        }
 
     cache_key = name.lower()
     if cache_key in _VIDEO_CACHE:
-        return {"video_id": _VIDEO_CACHE[cache_key], "candidates": [_VIDEO_CACHE[cache_key]], "search_url": search_url, "cached": True}
+        opts = _VIDEO_CACHE[cache_key]
+        return {
+            "video_id": (opts[0]["video_id"] if opts else None),
+            "options": opts,
+            "search_url": search_url,
+            "cached": True,
+        }
 
-    try:
-        req = _urlreq.Request(
-            search_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        )
-        with _urlreq.urlopen(req, timeout=8) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"YouTube fetch failed: {type(e).__name__}")
+    # Fetch search HTML (regular results) + shorts-filtered HTML in parallel
+    # so a single user-click → two round trips instead of sequential.
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
-    # Extract candidate IDs from the search HTML. Prefer full videoRenderer
-    # results (horizontal feed) over anything else — these are the top search
-    # hits and also tend to be embeddable long-form tutorials rather than
-    # shorts/compilations.
-    ids: list[str] = _re.findall(r'"videoRenderer":\{"videoId":"([a-zA-Z0-9_-]{11})"', html)
-    if not ids:
-        ids = _re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
-    if not ids:
-        raise HTTPException(status_code=404, detail="No video found")
-    # Dedupe while preserving order.
-    seen_ids: set[str] = set()
-    unique_ids: list[str] = []
-    for i in ids:
-        if i not in seen_ids:
-            seen_ids.add(i)
-            unique_ids.append(i)
-
-    def _is_embeddable(vid: str) -> bool:
-        """YouTube oEmbed returns 200 for embeddable videos and 401/403 for
-        ones with embedding disabled. Cheap HEAD probe to filter out duds."""
+    def _fetch(url: str) -> str:
         try:
-            oembed = f"https://www.youtube.com/oembed?url=https%3A//www.youtube.com/watch%3Fv%3D{vid}&format=json"
-            oreq = _urlreq.Request(oembed, headers={"User-Agent": "Mozilla/5.0"})
-            with _urlreq.urlopen(oreq, timeout=4) as r:
-                return r.status == 200
+            with _urlreq.urlopen(_urlreq.Request(url, headers=headers), timeout=8) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
         except Exception:
-            return False
+            return ""
 
-    # Try up to 5 candidates and pick the first that's embeddable. Everything
-    # unexplored falls through to the client as a fallback list.
-    candidates = unique_ids[:5]
-    chosen: str | None = None
-    for vid in candidates:
-        if _is_embeddable(vid):
-            chosen = vid
-            break
+    # Shorts-scoped search: YouTube's `sp=EgIYAQ%253D%253D` filter limits
+    # the result feed to Shorts only. Combined with the regular feed this
+    # gives us a healthy mix of longer tutorials + quick-form shorts.
+    shorts_url = f"{search_url}&sp=EgIYAQ%253D%253D"
+    with _TPE(max_workers=2) as pool:
+        regular_html, shorts_html = pool.map(_fetch, [search_url, shorts_url])
 
-    if not chosen:
-        # None embeddable — surface the first ID anyway so the client can
-        # offer an "Open on YouTube" fallback, plus the candidate list.
-        chosen = candidates[0]
-        print(f"[exercise-video] no embeddable video for '{name}' — using first candidate as non-embeddable fallback")
+    def _extract_ids(html: str) -> list[str]:
+        ids = _re.findall(r'"videoRenderer":\{"videoId":"([a-zA-Z0-9_-]{11})"', html)
+        if not ids:
+            # Shorts pages use reelItemRenderer or shortsLockupViewModel
+            ids = _re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+        return ids
 
-    _VIDEO_CACHE[cache_key] = chosen
+    regular_ids = _extract_ids(regular_html)
+    shorts_ids = _extract_ids(shorts_html)
+
+    # Dedupe while preserving the interleaved order: regular first (meatier
+    # tutorials), then shorts (quick-form refreshers).
+    shorts_set = set(shorts_ids)
+    seen: set[str] = set()
+    candidates: list[tuple[str, bool]] = []   # (video_id, is_short)
+    for vid in regular_ids[:20]:
+        if vid in seen:
+            continue
+        seen.add(vid)
+        candidates.append((vid, vid in shorts_set))
+    for vid in shorts_ids[:10]:
+        if vid in seen:
+            continue
+        seen.add(vid)
+        candidates.append((vid, True))
+    # Cap probe count at 20 to stay within a reasonable request budget.
+    candidates = candidates[:20]
+
+    if not candidates:
+        raise HTTPException(status_code=404, detail="No video found")
+
+    # Probe concurrently. 8 workers keeps oEmbed happy without overwhelming
+    # it with a burst from a single server.
+    with _TPE(max_workers=8) as pool:
+        probes = list(pool.map(lambda c: _oembed_probe(c[0]), candidates))
+
+    options: list[dict] = []
+    for (vid, is_short), probe in zip(candidates, probes):
+        if not probe:
+            continue
+        probe["is_short"] = bool(is_short)
+        options.append(probe)
+
+    # Cap the returned list so the client's grid doesn't get enormous.
+    options = options[:10]
+
+    if not options:
+        # Nothing embeddable — surface the first raw candidate so the UI can
+        # at least render an "Open on YouTube" button for it.
+        fallback_vid = candidates[0][0]
+        options = [{
+            "video_id": fallback_vid,
+            "title": name,
+            "thumbnail_url": f"https://i.ytimg.com/vi/{fallback_vid}/hqdefault.jpg",
+            "author_name": "",
+            "is_short": candidates[0][1],
+        }]
+        print(f"[exercise-video] no embeddable video for '{name}' — using raw fallback")
+
+    _VIDEO_CACHE[cache_key] = options
     if len(_VIDEO_CACHE) > 500:
         for k in list(_VIDEO_CACHE.keys())[:100]:
             _VIDEO_CACHE.pop(k, None)
 
-    # `candidates` gives the client extra IDs to try if the primary still
-    # errors out client-side (some videos pass oEmbed but still trip 152/153
-    # in specific WebView contexts).
     return {
-        "video_id": chosen,
-        "candidates": candidates,
+        "video_id": options[0]["video_id"],
+        "options": options,
         "search_url": search_url,
         "cached": False,
     }

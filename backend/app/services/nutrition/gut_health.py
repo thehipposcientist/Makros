@@ -28,7 +28,7 @@ from app.models import Meal, MealItem, Food, FoodNutrition, FoodMetadata, DailyN
 from app.services.nutrition.ai_classify import get_or_create_metadata
 from app.services.nutrition.food_classifier import CLASSIFIER_VERSION, PLANT_CATEGORY
 
-METRICS_VERSION = 1
+METRICS_VERSION = 2   # bumped when plant/animal protein + probiotic split landed
 
 
 # ── Targets / defaults ───────────────────────────────────────────────────────
@@ -45,9 +45,12 @@ class DailyRawSignals:
     fiber_per_1000_kcal: float
     distinct_plant_foods: int
     fermented_servings: float
+    probiotic_servings: float
     omega3_servings: float
     processing_counts: dict[str, int]
     saturated_fat_g: float
+    plant_protein_g: float
+    animal_protein_g: float
     plant_slugs: list[str]
     item_count: int
     classified_item_count: int
@@ -87,7 +90,10 @@ def compute_daily_metrics(
     row.fiber_per_1000_kcal = raw.fiber_per_1000_kcal
     row.distinct_plant_foods = raw.distinct_plant_foods
     row.fermented_servings = raw.fermented_servings
+    row.probiotic_servings = raw.probiotic_servings
     row.omega3_servings = raw.omega3_servings
+    row.plant_protein_g = raw.plant_protein_g
+    row.animal_protein_g = raw.animal_protein_g
     row.processing_counts = raw.processing_counts
     row.saturated_fat_g = raw.saturated_fat_g
     row.gut_support_score = scores["gut_support"]
@@ -121,7 +127,9 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
             "avg_fiber_g": 0.0, "avg_fiber_per_1000_kcal": 0.0,
             "pct_days_fiber_target": 0.0,
             "distinct_plant_foods_week": 0,
-            "fermented_servings": 0.0, "omega3_servings": 0.0,
+            "fermented_servings": 0.0, "probiotic_servings": 0.0, "omega3_servings": 0.0,
+            "plant_protein_g": 0.0, "animal_protein_g": 0.0,
+            "plant_protein_pct": 0,
             "processing_counts": {},
             "avg_gut_support_score": 0.0, "avg_food_quality_score": 0.0,
             "avg_longevity_signals_score": 0.0,
@@ -143,6 +151,10 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
     def _avg(field: str) -> float:
         return round(sum(getattr(r, field) for r in rows) / n, 1)
 
+    plant_p_sum = sum(getattr(r, "plant_protein_g", 0) or 0 for r in rows)
+    animal_p_sum = sum(getattr(r, "animal_protein_g", 0) or 0 for r in rows)
+    total_p = plant_p_sum + animal_p_sum
+    plant_protein_pct = round(100 * plant_p_sum / total_p) if total_p > 0 else 0
     return {
         "days_with_data": n, "window_days": days,
         "avg_fiber_g": _avg("fiber_total_g"),
@@ -150,7 +162,11 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
         "pct_days_fiber_target": round(100 * days_hitting_fiber / n, 0),
         "distinct_plant_foods_week": len(weekly_slugs),
         "fermented_servings": round(sum(r.fermented_servings for r in rows), 1),
+        "probiotic_servings": round(sum(getattr(r, "probiotic_servings", 0) or 0 for r in rows), 1),
         "omega3_servings": round(sum(r.omega3_servings for r in rows), 1),
+        "plant_protein_g": round(plant_p_sum, 1),
+        "animal_protein_g": round(animal_p_sum, 1),
+        "plant_protein_pct": plant_protein_pct,   # 0-100
         "processing_counts": proc_totals,
         "avg_gut_support_score": _avg("gut_support_score"),
         "avg_food_quality_score": _avg("food_quality_score"),
@@ -172,17 +188,19 @@ def _gather_raw_signals(
     if not meal_ids:
         return DailyRawSignals(
             calories_total=0, fiber_total_g=0, fiber_per_1000_kcal=0,
-            distinct_plant_foods=0, fermented_servings=0, omega3_servings=0,
-            processing_counts={}, saturated_fat_g=0, plant_slugs=[],
-            item_count=0, classified_item_count=0,
+            distinct_plant_foods=0, fermented_servings=0, probiotic_servings=0,
+            omega3_servings=0, processing_counts={}, saturated_fat_g=0,
+            plant_protein_g=0, animal_protein_g=0,
+            plant_slugs=[], item_count=0, classified_item_count=0,
         )
     items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all()
     if not items:
         return DailyRawSignals(
             calories_total=0, fiber_total_g=0, fiber_per_1000_kcal=0,
-            distinct_plant_foods=0, fermented_servings=0, omega3_servings=0,
-            processing_counts={}, saturated_fat_g=0, plant_slugs=[],
-            item_count=0, classified_item_count=0,
+            distinct_plant_foods=0, fermented_servings=0, probiotic_servings=0,
+            omega3_servings=0, processing_counts={}, saturated_fat_g=0,
+            plant_protein_g=0, animal_protein_g=0,
+            plant_slugs=[], item_count=0, classified_item_count=0,
         )
 
     # Bulk-load FoodNutrition for items that link to a library food.
@@ -196,7 +214,10 @@ def _gather_raw_signals(
     fiber_total_g = 0.0
     saturated_fat_g = 0.0
     fermented_servings = 0.0
+    probiotic_servings = 0.0
     omega3_servings = 0.0
+    plant_protein_g = 0.0
+    animal_protein_g = 0.0
     processing_counts: dict[str, int] = {}
     plant_slugs: set[str] = set()
     classified_count = 0
@@ -223,8 +244,23 @@ def _gather_raw_signals(
 
         if meta.fermented_flag:
             fermented_servings += 1.0
+        if getattr(meta, "probiotic_flag", False):
+            probiotic_servings += 1.0
         if meta.omega3_flag:
             omega3_servings += 1.0
+
+        # Split item protein into plant / animal pools via classification.
+        # `mixed` composites split 50/50. `none` / `unknown` don't contribute.
+        item_protein = float(item.protein_g or 0)
+        ps = getattr(meta, "protein_source", "unknown") or "unknown"
+        if item_protein > 0:
+            if ps == "plant":
+                plant_protein_g += item_protein
+            elif ps == "animal":
+                animal_protein_g += item_protein
+            elif ps == "mixed":
+                plant_protein_g += item_protein * 0.5
+                animal_protein_g += item_protein * 0.5
 
         bucket = meta.processing_bucket or "unknown"
         processing_counts[bucket] = processing_counts.get(bucket, 0) + 1
@@ -242,9 +278,12 @@ def _gather_raw_signals(
         fiber_per_1000_kcal=round(fiber_per_1000, 1),
         distinct_plant_foods=len(plant_slugs),
         fermented_servings=fermented_servings,
+        probiotic_servings=probiotic_servings,
         omega3_servings=omega3_servings,
         processing_counts=processing_counts,
         saturated_fat_g=round(saturated_fat_g, 1),
+        plant_protein_g=round(plant_protein_g, 1),
+        animal_protein_g=round(animal_protein_g, 1),
         plant_slugs=sorted(plant_slugs),
         item_count=len(items),
         classified_item_count=classified_count,

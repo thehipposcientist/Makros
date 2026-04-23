@@ -112,6 +112,12 @@ class WorkoutContext:
 class PlannedSet:
     set_number: int
     set_type: SetType
+    # Optional rep-range override from the plan, e.g. "3-5" for a heavy top
+    # set. When present, the progression engine honors this instead of
+    # deriving the range from the user's primary goal + exercise category.
+    # This is what keeps "heavy 3-5" on a hypertrophy-goal user from being
+    # misclassified as "missed the 6-8 target".
+    target_reps_override: Optional[str] = None
 
 
 @dataclass
@@ -250,7 +256,17 @@ class WorkoutProgressionEngine:
         set_number: int,
     ) -> SetTarget:
         planned = self.get_planned_set(prescription.planned_sets, set_number)
-        rep_min, rep_max = self._base_rep_range(profile.primary_goal, prescription.category, planned.set_type)
+
+        # Prefer the plan's explicit rep range when present. The workout
+        # planner emits per-set target_reps like "3-5" for heavy top sets,
+        # "8-12" for volume, etc. Ignoring these in favor of goal-based
+        # defaults was misclassifying correct sets (e.g. 225×5 on target 3-5
+        # was being compared to hypertrophy's 6-8 and flagged as a miss).
+        override_range = self._parse_rep_range_override(planned.target_reps_override)
+        if override_range is not None:
+            rep_min, rep_max = override_range
+        else:
+            rep_min, rep_max = self._base_rep_range(profile.primary_goal, prescription.category, planned.set_type)
         rir_min, rir_max = self._base_rir_range(profile.primary_goal, prescription.category, planned.set_type)
 
         rep_min, rep_max, rir_min, rir_max = self._apply_phase_adjustment(
@@ -260,7 +276,10 @@ class WorkoutProgressionEngine:
             rir_max,
             workout.phase,
         )
-        rep_min, rep_max = self._apply_focus_adjustment(rep_min, rep_max, workout.focus, prescription.category)
+        # Focus adjustment skipped when an explicit override is present —
+        # the plan already accounted for focus when it emitted the range.
+        if override_range is None:
+            rep_min, rep_max = self._apply_focus_adjustment(rep_min, rep_max, workout.focus, prescription.category)
 
         return SetTarget(
             set_number=set_number,
@@ -270,6 +289,27 @@ class WorkoutProgressionEngine:
             rir_min=rir_min,
             rir_max=rir_max,
         )
+
+    @staticmethod
+    def _parse_rep_range_override(raw: Optional[str]) -> Optional[tuple[int, int]]:
+        """Parse a plan-supplied rep-target string (e.g. "3-5", "8", "6-8").
+        Returns None when the string is empty / non-numeric / reversed."""
+        if not raw:
+            return None
+        s = str(raw).strip().replace(" ", "")
+        if not s:
+            return None
+        try:
+            if "-" in s:
+                lo_str, hi_str = s.split("-", 1)
+                lo, hi = int(lo_str), int(hi_str)
+            else:
+                lo = hi = int(s)
+        except ValueError:
+            return None
+        if lo <= 0 or hi <= 0 or hi < lo:
+            return None
+        return lo, hi
 
     def _base_rep_range(self, goal: GoalType, category: ExerciseCategory, set_type: SetType) -> tuple[int, int]:
         if goal == GoalType.STRENGTH:

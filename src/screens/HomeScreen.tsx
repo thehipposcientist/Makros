@@ -1210,6 +1210,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // deterministic planner call is in flight. Stored as a Set so future multi-
   // day flows (e.g. "regen all") work without a refactor.
   const [regeneratingDayIdxs, setRegeneratingDayIdxs] = useState<Set<number>>(new Set());
+  // Focus the user just picked in Switch Day. Surfaced in the full-screen
+  // regen overlay so they see "Rebuilding week around Push" while waiting.
+  const [regenSelectedFocus, setRegenSelectedFocus] = useState<string | null>(null);
   // Shown as a full-screen overlay while the "Switch Day" flow regenerates
   // the whole week (chosen day + ripple-sweep on conflicting neighbors).
   // Kept separate from isWorkoutUpdating so the big plan-gen overlay
@@ -1598,28 +1601,51 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const yesterdayDate = new Date(Date.now() - 86400000);
     const yesterdayStr = `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getDate()).padStart(2, '0')}`;
     const plan = nutritionPlansByDate[yesterdayStr];
-    if (!plan || !plan.meals?.length) return;
     const checks = checkedMealsByDate[yesterdayStr] ?? {};
-    const unchecked = plan.meals
-      .map((meal, idx) => ({ mealType: `meal_${idx}`, meal }))
-      .filter(it => !checks[it.mealType]);
-    if (unchecked.length === 0) {
+
+    // Pro path — compare yesterday's plan meals to checks.
+    if (plan?.meals?.length) {
+      const unchecked = plan.meals
+        .map((meal, idx) => ({ mealType: `meal_${idx}`, meal }))
+        .filter(it => !checks[it.mealType]);
+      if (unchecked.length === 0) {
+        unloggedPromptCheckedRef.current = true;
+        return;
+      }
       unloggedPromptCheckedRef.current = true;
+      (async () => {
+        const flagKey = `unloggedMealsPromptShown_${yesterdayStr}`;
+        const seen = await AsyncStorage.getItem(flagKey).catch(() => null);
+        if (seen) return;
+        const chosen: Record<string, boolean> = {};
+        for (const it of unchecked) chosen[it.mealType] = true;
+        setUnloggedPrompt({ date: yesterdayStr, items: unchecked, chosen });
+      })();
       return;
     }
-    // Mark as checked synchronously so a rapid re-render (before the
-    // AsyncStorage read finishes) can't double-fire this branch.
-    unloggedPromptCheckedRef.current = true;
-    (async () => {
-      const flagKey = `unloggedMealsPromptShown_${yesterdayStr}`;
-      const seen = await AsyncStorage.getItem(flagKey).catch(() => null);
-      if (seen) return;
-      // Default each meal to "Ate" (pre-selected as checked) — user can
-      // toggle any to Skip before confirming.
-      const chosen: Record<string, boolean> = {};
-      for (const it of unchecked) chosen[it.mealType] = true;
-      setUnloggedPrompt({ date: yesterdayStr, items: unchecked, chosen });
-    })();
+
+    // Free-tier path — no generated plan, but we can still compare the
+    // user's daily meal target (`mealsPerDay`) against the number of
+    // meals they actually checked off yesterday. If they're below target,
+    // nudge them to add more via the simpler "catch-up" prompt.
+    const isFree = (userProfile.subscriptionTier ?? 'pro') === 'free';
+    if (isFree) {
+      const target = Math.max(1, userProfile.mealsPerDay ?? 3);
+      const loggedCount = Object.values(checks).filter(Boolean).length;
+      if (loggedCount >= target) {
+        unloggedPromptCheckedRef.current = true;
+        return;
+      }
+      unloggedPromptCheckedRef.current = true;
+      (async () => {
+        const flagKey = `unloggedMealsPromptShown_${yesterdayStr}`;
+        const seen = await AsyncStorage.getItem(flagKey).catch(() => null);
+        if (seen) return;
+        // Free branch: no item list, just a CTA. Items stays empty so the
+        // render path shows the simplified free-tier copy.
+        setUnloggedPrompt({ date: yesterdayStr, items: [], chosen: {} });
+      })();
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userProfile, authToken, nutritionPlansByDate, checkedMealsByDate]);
 
@@ -3653,19 +3679,45 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </Animated.View>
       ) : null}
 
-      {/* Chat-triggered plan update OR per-day switch regen — slim inline
-          banner. Same visual vocabulary whether the regen is AI-driven from
-          the coach chat or deterministic from the Switch Day picker, so the
-          user always sees a consistent "plan is updating" signal. */}
-      {(isChatPlanUpdating || regeneratingDayIdxs.size > 0) && !isWorkoutUpdating && !isNutritionUpdating ? (
+      {/* Switch Day full-week regen overlay — centered, prominent spinner
+          with the user's chosen focus displayed. Keeps the plan visible
+          underneath so there's visual continuity while each day rebuilds. */}
+      {regeneratingDayIdxs.size > 0 && !isWorkoutUpdating && !isNutritionUpdating ? (
+        <View style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: themeColors.background + 'E6',
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 50,
+        }}>
+          <View style={{
+            padding: 28, borderRadius: 20, alignItems: 'center',
+            backgroundColor: themeColors.surface,
+            borderWidth: 1, borderColor: themeColors.border,
+            shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, shadowOffset: { width: 0, height: 8 },
+            minWidth: 240,
+          }}>
+            <ActivityIndicator size="large" color={themeColors.primary} />
+            <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary, marginTop: 14 }}>
+              Rebuilding your week
+            </Text>
+            {regenSelectedFocus && (
+              <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 4 }}>
+                around <Text style={{ color: themeColors.primary, fontWeight: '700' }}>{regenSelectedFocus}</Text>
+              </Text>
+            )}
+            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 10 }}>
+              {regeneratingDayIdxs.size} day{regeneratingDayIdxs.size === 1 ? '' : 's'} left
+            </Text>
+          </View>
+        </View>
+      ) : null}
+
+      {/* Chat-triggered plan update — slim inline banner. */}
+      {isChatPlanUpdating && !isWorkoutUpdating && !isNutritionUpdating ? (
         <View style={[styles.chatPlanUpdateBanner, { backgroundColor: themeColors.primary + '18', borderBottomColor: themeColors.primary + '33' }]}>
           <ActivityIndicator size="small" color={themeColors.primary} />
           <Text style={[styles.chatPlanUpdateText, { color: themeColors.primary }]}>
-            {regeneratingDayIdxs.size > 1
-              ? `Rebuilding week · ${regeneratingDayIdxs.size} days left…`
-              : regeneratingDayIdxs.size === 1
-                ? 'Finishing up…'
-                : 'Applying plan updates…'}
+            Applying plan updates…
           </Text>
         </View>
       ) : null}
@@ -4430,19 +4482,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       return;
                     }
 
-                    // Full-week regen around the user's pick. Philosophy:
-                    // switching today from "push" to "legs" makes the rest of
-                    // the week's split distribution stale, so we rebuild
-                    // every day from dayIdx onward. The chosen focus is
-                    // pinned on the target day via focus_override; subsequent
-                    // days are generated with prev_focuses reflecting the
-                    // new reality so the rotation stays coherent.
+                    // Full-week regen. Switching a single day invalidates the
+                    // whole split (recovery spacing, push/pull/legs rotation,
+                    // adjacency), so we rebuild every entry in
+                    // workoutPlan.days. The target day pins the user's
+                    // chosen focus via focus_override; all other days get
+                    // planner-picked focuses with prev_focuses reflecting
+                    // the pinned choice so rotation stays coherent.
                     //
-                    // Completed / historical days (< dayIdx) are never
-                    // touched — we only regen forward.
-                    const daysToRegen: number[] = [];
-                    for (let k = dayIdx; k < workoutPlan.days.length; k += 1) {
-                      daysToRegen.push(k);
+                    // Walk order: target day first (lock in the pin), then
+                    // the rest in original order. This means subsequent days
+                    // see the pinned focus in prev_focuses before they
+                    // generate.
+                    const total = workoutPlan.days.length;
+                    const daysToRegen: number[] = [dayIdx];
+                    for (let k = 0; k < total; k += 1) {
+                      if (k !== dayIdx) daysToRegen.push(k);
                     }
                     // Flag every day-to-regen at once so all their cards
                     // show the overlay + the slim banner fires immediately.
@@ -4452,71 +4507,55 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       return next;
                     });
 
+                    // Stamp the target day's new focus + name immediately so
+                    // the user sees their pick on the card the moment it's
+                    // tapped, even before the regen returns.
+                    setWorkoutPlan({
+                      ...workoutPlan,
+                      days: workoutPlan.days.map((d, k) =>
+                        k === dayIdx ? { ...d, focus: newFocus } : d,
+                      ),
+                    });
+                    setRegenSelectedFocus(newFocus);
+
                     if (authToken) {
                       try {
-                        const { generateWorkoutDay } = await import('../services/api');
+                        // Single backend call builds the whole week
+                        // coherently. Backend respects every normal plan
+                        // rule (split, session minutes, recent completions,
+                        // muscle fatigue, injuries, dislikes) and pins the
+                        // target day to the chosen focus.
+                        const { generateWorkoutWeek } = await import('../services/api');
                         const injuries = (userProfile.injuryEntries ?? [])
                           .filter(i => i.status !== 'resolved')
                           .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
-
-                        const updatedDays = [...workoutPlan.days];
-                        const runningPrevFocuses: string[] = [];
-                        for (let k = 0; k < dayIdx; k += 1) {
-                          const f = workoutPlan.days[k]?.focus;
-                          if (f) runningPrevFocuses.push(String(f));
+                        const res = await generateWorkoutWeek(authToken, {
+                          goal: userProfile.goal,
+                          days_per_week: userProfile.daysPerWeek,
+                          session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                          experience: userProfile.experienceLevel ?? 'intermediate',
+                          equipment: userProfile.equipment ?? [],
+                          preferred_split: userProfile.preferredSplit,
+                          priority_region: userProfile.priorityRegion ?? 'balanced',
+                          injuries,
+                          disliked_exercises: userProfile.dislikedExercises ?? [],
+                          pin_day_index: dayIdx,
+                          pin_focus: newFocus,
+                        });
+                        if (res?.days?.length) {
+                          const updatedPlan = { ...workoutPlan, days: res.days };
+                          setWorkoutPlan(updatedPlan);
+                          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+                          await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
+                          setRegeneratingDayIdxs(new Set());
+                          setRegenSelectedFocus(null);
+                          return;
                         }
-
-                        // Sequentially walk forward. Sequential (not parallel)
-                        // because each call needs the prior day's focus in
-                        // prev_focuses to avoid back-to-back duplicates.
-                        for (const k of daysToRegen) {
-                          const isTargetDay = k === dayIdx;
-                          const fresh = await generateWorkoutDay(authToken, {
-                            goal: userProfile.goal,
-                            day_index: k,
-                            days_per_week: userProfile.daysPerWeek,
-                            session_minutes: userProfile.workoutDurationMinutes ?? 60,
-                            experience: userProfile.experienceLevel ?? 'intermediate',
-                            equipment: userProfile.equipment ?? [],
-                            preferred_split: userProfile.preferredSplit,
-                            priority_region: userProfile.priorityRegion ?? 'balanced',
-                            injuries,
-                            disliked_exercises: userProfile.dislikedExercises ?? [],
-                            focus_override: isTargetDay ? newFocus : undefined,
-                            prev_focuses: [...runningPrevFocuses],
-                          });
-                          if (fresh?.day) {
-                            const resolvedFocus = isTargetDay
-                              ? newFocus
-                              : String(fresh.day.focus ?? updatedDays[k]?.focus ?? '');
-                            updatedDays[k] = { ...fresh.day, focus: resolvedFocus };
-                            runningPrevFocuses.push(resolvedFocus);
-                            // Commit incrementally so the UI reveals each
-                            // regenerated day as it lands (cards flip out of
-                            // the regenerating state one at a time).
-                            setWorkoutPlan({ ...workoutPlan, days: [...updatedDays] });
-                            setRegeneratingDayIdxs(prev => {
-                              const next = new Set(prev); next.delete(k); return next;
-                            });
-                          } else {
-                            // Fallback for this day: at least flip the focus
-                            // so the rotation context is sane going forward.
-                            const fallbackFocus = isTargetDay ? newFocus : String(updatedDays[k]?.focus ?? '');
-                            updatedDays[k] = { ...updatedDays[k], focus: fallbackFocus };
-                            runningPrevFocuses.push(fallbackFocus);
-                          }
-                        }
-
-                        const updatedPlan = { ...workoutPlan, days: updatedDays };
-                        setWorkoutPlan(updatedPlan);
-                        await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-                        await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
-                        setRegeneratingDayIdxs(new Set());
-                        return;
                       } catch (e) {
                         console.log('[onChangeFocus] full-week regen failed, falling back to focus-only swap:', e);
                       } finally {
                         setRegeneratingDayIdxs(new Set());
+                        setRegenSelectedFocus(null);
                       }
                     }
                     // Fallback (no token or regen failed): swap focus label only.
@@ -5496,9 +5535,45 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
                         <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment) || 'Bodyweight'}</Text>
-                        <TouchableOpacity style={[styles.detailVideoBtn, { backgroundColor: workoutPalette.strong }]} onPress={() => openExerciseVideo(selectedExercise.name)}>
-                          <Text style={styles.detailVideoBtnText}>▶  Watch Form Video</Text>
-                        </TouchableOpacity>
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                          <TouchableOpacity style={[styles.detailVideoBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => openExerciseVideo(selectedExercise.name)}>
+                            <Text style={styles.detailVideoBtnText}>▶  Watch Form Video</Text>
+                          </TouchableOpacity>
+                          {/* Dislike / re-like toggle — excludes this exercise
+                              from future AI-generated plans. Mirrors the
+                              ActiveWorkoutScreen "thumbs-down" pattern so
+                              users don't have to be mid-workout to opt out
+                              of an exercise they hate. */}
+                          {(() => {
+                            const disliked = (userProfile.dislikedExercises ?? []).some(
+                              d => d.toLowerCase() === selectedExercise.name.toLowerCase(),
+                            );
+                            return (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  const existing = userProfile.dislikedExercises ?? [];
+                                  const next = disliked
+                                    ? existing.filter(d => d.toLowerCase() !== selectedExercise.name.toLowerCase())
+                                    : [...existing, selectedExercise.name];
+                                  onProfileUpdate?.({ dislikedExercises: next } as any, true);
+                                }}
+                                style={{
+                                  paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10,
+                                  backgroundColor: disliked ? themeColors.error + '22' : themeColors.surfaceRaised,
+                                  borderWidth: 1,
+                                  borderColor: disliked ? themeColors.error : themeColors.border,
+                                  alignItems: 'center', justifyContent: 'center',
+                                }}
+                              >
+                                <Ionicons
+                                  name={disliked ? 'thumbs-down' : 'thumbs-down-outline'}
+                                  size={16}
+                                  color={disliked ? themeColors.error : themeColors.textSecondary}
+                                />
+                              </TouchableOpacity>
+                            );
+                          })()}
+                        </View>
                       </View>
 
                       <View style={styles.detailSection}>
@@ -6192,7 +6267,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       </Modal>
 
-      {/* Next-day unlogged-meals prompt */}
+      {/* Next-day unlogged-meals prompt — full-height modal with hero header.
+          Shown once on first app-open of the day when yesterday had meals that
+          weren't checked off. Dedupe key includes the yesterday date so the
+          prompt re-appears the next morning for new gaps. */}
       <Modal
         visible={!!unloggedPrompt}
         transparent
@@ -6203,14 +6281,83 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           setUnloggedPrompt(null);
         }}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' }}>
           {unloggedPrompt && (
-            <View style={{ backgroundColor: themeColors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: themeColors.border, maxHeight: '85%' }}>
-              <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 34 }} showsVerticalScrollIndicator={false}>
-                <Text style={{ fontSize: 20, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 4 }}>Yesterday's meals</Text>
-                <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginBottom: 16 }}>
-                  You had {unloggedPrompt.items.length} unlogged meal{unloggedPrompt.items.length === 1 ? '' : 's'}. Mark what you ate — we'll skip the rest.
+            <View style={{
+              backgroundColor: themeColors.surface,
+              borderTopLeftRadius: 24, borderTopRightRadius: 24,
+              borderTopWidth: 1, borderTopColor: themeColors.border,
+              height: '92%',
+            }}>
+              {/* Handle */}
+              <View style={{ alignItems: 'center', paddingTop: 10 }}>
+                <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: themeColors.border }} />
+              </View>
+              {/* Hero header */}
+              <View style={{ alignItems: 'center', paddingTop: 16, paddingHorizontal: 22, paddingBottom: 8 }}>
+                <View style={{
+                  width: 54, height: 54, borderRadius: 27,
+                  backgroundColor: themeColors.primary + '22',
+                  alignItems: 'center', justifyContent: 'center',
+                  marginBottom: 10,
+                }}>
+                  <Ionicons name="restaurant" size={24} color={themeColors.primary} />
+                </View>
+                <Text style={{ fontSize: 22, fontWeight: '900', color: themeColors.textPrimary, textAlign: 'center' }}>
+                  Catch up on yesterday
                 </Text>
+                <Text style={{ fontSize: 13, color: themeColors.textSecondary, textAlign: 'center', marginTop: 6, lineHeight: 18 }}>
+                  {unloggedPrompt.items.length === 0
+                    ? 'You logged fewer meals than your daily target yesterday. Add anything you ate that didn\'t get tracked.'
+                    : `${unloggedPrompt.items.length} meal${unloggedPrompt.items.length === 1 ? ' wasn\'t' : 's weren\'t'} logged. Mark what you ate, edit anything that changed, or skip the rest.`}
+                </Text>
+              </View>
+              <ScrollView contentContainerStyle={{ paddingHorizontal: 22, paddingBottom: 24, paddingTop: 14 }} showsVerticalScrollIndicator={false}>
+                {/* Free-tier branch — no item list (there's no plan to list).
+                    Offer a direct CTA to the Foods tab for manual logging. */}
+                {unloggedPrompt.items.length === 0 && (
+                  <View>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={async () => {
+                        if (unloggedPrompt) {
+                          await AsyncStorage.setItem(`unloggedMealsPromptShown_${unloggedPrompt.date}`, '1').catch(() => {});
+                        }
+                        setUnloggedPrompt(null);
+                        setActiveTab('meals');
+                        setMealsSubTab('foods' as any);
+                      }}
+                      style={{
+                        padding: 18, borderRadius: 14,
+                        backgroundColor: themeColors.surfaceRaised,
+                        borderWidth: 1, borderColor: themeColors.primary + '66',
+                        alignItems: 'center', marginBottom: 10,
+                      }}
+                    >
+                      <Ionicons name="add-circle-outline" size={32} color={themeColors.primary} />
+                      <Text style={{ fontSize: 15, fontWeight: '800', color: themeColors.textPrimary, marginTop: 8 }}>
+                        Add a meal
+                      </Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 4, textAlign: 'center' }}>
+                        Opens the Foods tab so you can log what you actually ate.
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={async () => {
+                        if (unloggedPrompt) {
+                          await AsyncStorage.setItem(`unloggedMealsPromptShown_${unloggedPrompt.date}`, '1').catch(() => {});
+                        }
+                        setUnloggedPrompt(null);
+                      }}
+                      style={{ alignSelf: 'center', padding: 12 }}
+                    >
+                      <Text style={{ fontSize: 12, color: themeColors.textMuted }}>Skip for now</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                {unloggedPrompt.items.length > 0 && (<>
+
 
                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
                   <TouchableOpacity
@@ -6238,40 +6385,71 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {unloggedPrompt.items.map(it => {
                   const ate = !!unloggedPrompt.chosen[it.mealType];
                   return (
-                    <TouchableOpacity
+                    <View
                       key={it.mealType}
-                      activeOpacity={0.8}
-                      onPress={() => {
-                        setUnloggedPrompt(prev => prev ? {
-                          ...prev,
-                          chosen: { ...prev.chosen, [it.mealType]: !ate },
-                        } : prev);
-                      }}
                       style={{
-                        flexDirection: 'row', alignItems: 'center', gap: 10,
-                        padding: 12, marginBottom: 8,
+                        padding: 12, marginBottom: 10,
                         backgroundColor: themeColors.surfaceRaised, borderRadius: 12,
                         borderWidth: 1, borderColor: ate ? themeColors.primary + '77' : themeColors.border,
                       }}>
-                      <View style={{
-                        width: 24, height: 24, borderRadius: 12,
-                        alignItems: 'center', justifyContent: 'center',
-                        borderWidth: 2,
-                        borderColor: ate ? themeColors.primary : themeColors.border,
-                        backgroundColor: ate ? themeColors.primary : 'transparent',
-                      }}>
-                        {ate && <Ionicons name="checkmark" size={14} color="#fff" />}
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary }}>{it.meal.meal}</Text>
-                        <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
-                          {Math.round(it.meal.calories ?? 0)} cal · {Math.round(it.meal.protein ?? 0)}g P
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          setUnloggedPrompt(prev => prev ? {
+                            ...prev,
+                            chosen: { ...prev.chosen, [it.mealType]: !ate },
+                          } : prev);
+                        }}
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <View style={{
+                          width: 24, height: 24, borderRadius: 12,
+                          alignItems: 'center', justifyContent: 'center',
+                          borderWidth: 2,
+                          borderColor: ate ? themeColors.primary : themeColors.border,
+                          backgroundColor: ate ? themeColors.primary : 'transparent',
+                        }}>
+                          {ate && <Ionicons name="checkmark" size={14} color={themeColors.background} />}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary }}>{it.meal.meal}</Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                            {Math.round(it.meal.calories ?? 0)} cal · {Math.round(it.meal.protein ?? 0)}g P
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: ate ? themeColors.primary : themeColors.textMuted }}>
+                          {ate ? 'ATE' : 'SKIP'}
                         </Text>
-                      </View>
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: ate ? themeColors.primary : themeColors.textMuted }}>
-                        {ate ? 'ATE' : 'SKIP'}
-                      </Text>
-                    </TouchableOpacity>
+                      </TouchableOpacity>
+                      {/* Per-item Edit — opens MealEditModal on yesterday's
+                          meal so the user can tweak macros/items if they
+                          actually ate something different. Dismisses this
+                          prompt while editing so the edit modal isn't
+                          stacked on top of a darkened backdrop. */}
+                      <TouchableOpacity
+                        activeOpacity={0.7}
+                        onPress={async () => {
+                          // Persist dismissal so we don't re-prompt on the
+                          // next app-open after the user finishes editing.
+                          await AsyncStorage.setItem(`unloggedMealsPromptShown_${unloggedPrompt.date}`, '1').catch(() => {});
+                          setUnloggedPrompt(null);
+                          setEditingMeal({ dateKey: unloggedPrompt.date, type: it.mealType, meal: it.meal });
+                          setActiveTab('meals');
+                        }}
+                        style={{
+                          marginTop: 10, alignSelf: 'flex-start',
+                          paddingHorizontal: 10, paddingVertical: 5,
+                          borderRadius: 6,
+                          backgroundColor: themeColors.surface,
+                          borderWidth: 1, borderColor: themeColors.border,
+                        }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="pencil-outline" size={11} color={themeColors.textSecondary} />
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textSecondary }}>
+                            Edit this meal
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    </View>
                   );
                 })}
 
@@ -6302,9 +6480,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       await AsyncStorage.setItem(`unloggedMealsPromptShown_${snapshot.date}`, '1').catch(() => {});
                       setUnloggedPrompt(null);
                     }}>
-                    <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>Save</Text>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.background }}>Save</Text>
                   </TouchableOpacity>
                 </View>
+                </>)}
               </ScrollView>
             </View>
           )}

@@ -163,6 +163,14 @@ class WeightRecommendRequest(BaseModel):
     # recommend-weight endpoint skip a `Exercise.name.ilike` lookup and
     # run the layered performance profile / transfer pipeline directly.
     exerciseSlug: str | None = None
+    # Equipment the exercise is performed with (e.g. "barbell",
+    # "dumbbell"). Biases the progression increment (barbell +5 lbs vs
+    # dumbbell +2.5 lbs per side) when the client hasn't set incrementLbs
+    # explicitly.
+    equipment: str | None = None
+    # Primary muscle slug from the exercise library — used as a transfer
+    # target when the exact exercise has no direct history.
+    primaryMuscle: str | None = None
 
 
 class TrainerQuestionRequest(BaseModel):
