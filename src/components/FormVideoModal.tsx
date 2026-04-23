@@ -12,8 +12,6 @@ import { AppThemeName } from '../types';
 interface Props {
   visible: boolean;
   exerciseName: string;
-  /** Required now — we call the backend /ai/exercise-video to get a list
-   *  of embeddable options (top 20 + shorts filtered to embeddable only). */
   authToken?: string | null;
   themeName?: AppThemeName;
   onClose: () => void;
@@ -38,7 +36,7 @@ export default function FormVideoModal({
 }: Props) {
   const colors = getTheme(themeName).colors;
   const [options, setOptions] = useState<VideoOption[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeVideo, setActiveVideo] = useState<VideoOption | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,7 +45,7 @@ export default function FormVideoModal({
     setLoading(true);
     setError(null);
     setOptions([]);
-    setSelectedId(null);
+    setActiveVideo(null);
     try {
       const { getApiBaseUrl } = await import('../services/api');
       const baseUrl = getApiBaseUrl();
@@ -63,7 +61,6 @@ export default function FormVideoModal({
       const data = await res.json();
       const opts: VideoOption[] = Array.isArray(data?.options) ? data.options : [];
       setOptions(opts);
-      setSelectedId(opts[0]?.video_id ?? null);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -73,11 +70,12 @@ export default function FormVideoModal({
 
   useEffect(() => {
     if (visible) load();
+    if (!visible) setActiveVideo(null);
   }, [visible, load]);
 
-  // Entrance animation — spring the sheet up from 0.9 → 1.0.
   const scale = useRef(new Animated.Value(0.9)).current;
   const sheetOpacity = useRef(new Animated.Value(0)).current;
+  const playerSlide = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     if (visible) {
       scale.setValue(0.9);
@@ -89,10 +87,22 @@ export default function FormVideoModal({
     }
   }, [visible, scale, sheetOpacity]);
 
+  useEffect(() => {
+    Animated.spring(playerSlide, {
+      toValue: activeVideo ? 1 : 0,
+      useNativeDriver: true,
+      friction: 8,
+      tension: 65,
+    }).start();
+  }, [activeVideo, playerSlide]);
+
   const searchUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' proper form')}`;
 
+  const handleBack = () => setActiveVideo(null);
+  const handleClose = () => { setActiveVideo(null); onClose(); };
+
   return (
-    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={handleClose}>
       <View style={styles.backdrop}>
         <Animated.View
           style={[
@@ -100,130 +110,154 @@ export default function FormVideoModal({
             { backgroundColor: colors.surface, borderColor: colors.border, opacity: sheetOpacity, transform: [{ scale }] },
           ]}
         >
+          {/* Header */}
           <View style={styles.header}>
+            {activeVideo ? (
+              <TouchableOpacity
+                onPress={handleBack}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginRight: 8 }}>
+                <Ionicons name="arrow-back" size={20} color={colors.primary} />
+              </TouchableOpacity>
+            ) : null}
             <View style={{ flex: 1 }}>
               <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-                Form Videos
+                {activeVideo ? activeVideo.title : 'Form Videos'}
               </Text>
               <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {exerciseName}
+                {activeVideo ? activeVideo.author_name : exerciseName}
               </Text>
             </View>
-            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Ionicons name="close" size={22} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
 
-          {/* Primary player — plays whichever option the user selected. */}
-          {selectedId ? (
-            <View style={[styles.playerWrap, { backgroundColor: '#000' }]}>
-              <WebView
-                key={`player-${selectedId}`}
-                style={{ flex: 1, backgroundColor: '#000' }}
-                source={{ uri: `https://www.youtube.com/embed/${selectedId}?playsinline=1&rel=0&modestbranding=1` }}
-                javaScriptEnabled
-                domStorageEnabled
-                allowsFullscreenVideo
-                originWhitelist={['*']}
-              />
-            </View>
+          {/* Active video player — shown when a video is selected */}
+          {activeVideo ? (
+            <Animated.View style={{ opacity: playerSlide }}>
+              <View style={[styles.playerWrap, { backgroundColor: '#000' }]}>
+                <WebView
+                  key={`player-${activeVideo.video_id}`}
+                  style={{ flex: 1, backgroundColor: '#000' }}
+                  source={{
+                    html: `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>*{margin:0;padding:0}body{background:#000}iframe{width:100%;height:100%;border:0}</style></head><body><iframe src="https://www.youtube-nocookie.com/embed/${activeVideo.video_id}?playsinline=1&rel=0&modestbranding=1&autoplay=1&origin=https://www.youtube-nocookie.com" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe></body></html>`,
+                    baseUrl: 'https://www.youtube-nocookie.com',
+                  }}
+                  javaScriptEnabled
+                  domStorageEnabled
+                  allowsFullscreenVideo
+                  allowsInlineMediaPlayback
+                  mediaPlaybackRequiresUserAction={false}
+                  originWhitelist={['*']}
+                />
+              </View>
+              <View style={styles.actions}>
+                <TouchableOpacity
+                  onPress={handleBack}
+                  style={[styles.secondaryBtn, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="arrow-back" size={14} color={colors.textSecondary} />
+                  <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>All Videos</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(`https://www.youtube.com/watch?v=${activeVideo.video_id}`)}
+                  style={[styles.secondaryBtn, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="open-outline" size={14} color={colors.textSecondary} />
+                  <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>YouTube</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleClose}
+                  style={[styles.primaryBtn, { backgroundColor: colors.primary }]}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.primaryBtnText, { color: colors.background }]}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            </Animated.View>
           ) : (
-            <View style={[styles.playerWrap, { backgroundColor: colors.surfaceRaised, alignItems: 'center', justifyContent: 'center' }]}>
-              {loading ? (
-                <ActivityIndicator color={colors.primary} />
-              ) : error ? (
-                <View style={{ padding: 12, alignItems: 'center' }}>
+            /* Video selection grid — default view */
+            <>
+              {loading && options.length === 0 && (
+                <View style={{ alignItems: 'center', paddingVertical: 30 }}>
+                  <ActivityIndicator color={colors.primary} />
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 8 }}>
+                    Finding form videos…
+                  </Text>
+                </View>
+              )}
+              {error && options.length === 0 && (
+                <View style={{ alignItems: 'center', paddingVertical: 20 }}>
                   <Text style={{ fontSize: 12, color: colors.textMuted, textAlign: 'center' }}>
                     Couldn't load videos: {error}
                   </Text>
                 </View>
-              ) : (
-                <Text style={{ fontSize: 12, color: colors.textMuted }}>No videos found</Text>
               )}
-            </View>
-          )}
-
-          {/* Thumbnail grid — all returned options are embeddable. Tap to
-              swap the main player to that video. Shorts tagged visually. */}
-          <ScrollView style={{ marginTop: 12, maxHeight: 320 }} showsVerticalScrollIndicator={false}>
-            <View style={styles.grid}>
-              {options.map(opt => {
-                const isSelected = opt.video_id === selectedId;
-                return (
-                  <TouchableOpacity
-                    key={opt.video_id}
-                    activeOpacity={0.8}
-                    onPress={() => setSelectedId(opt.video_id)}
-                    style={[
-                      styles.thumbCard,
-                      {
-                        backgroundColor: colors.surfaceRaised,
-                        borderColor: isSelected ? colors.primary : colors.border,
-                        borderWidth: isSelected ? 2 : 1,
-                      },
-                    ]}
-                  >
-                    <View style={{ width: THUMB_W - 2, height: THUMB_H, backgroundColor: '#000', borderTopLeftRadius: radius.md, borderTopRightRadius: radius.md, overflow: 'hidden' }}>
-                      {opt.thumbnail_url ? (
-                        <Image source={{ uri: opt.thumbnail_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                      ) : null}
-                      {opt.is_short ? (
-                        <View style={[styles.shortBadge, { backgroundColor: colors.primary }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: colors.background, letterSpacing: 0.6 }}>
-                            SHORT
-                          </Text>
-                        </View>
-                      ) : null}
-                      {isSelected && (
-                        <View style={styles.selectedOverlay}>
-                          <Ionicons name="play-circle" size={36} color="#fff" />
-                        </View>
-                      )}
-                    </View>
-                    <View style={{ padding: 8 }}>
-                      <Text
-                        numberOfLines={2}
-                        style={{ fontSize: 11, fontWeight: '600', color: colors.textPrimary, lineHeight: 15 }}
+              <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+                <View style={styles.grid}>
+                  {options.map((opt) => (
+                    <Animated.View
+                      key={opt.video_id}
+                      style={{ opacity: 1, transform: [{ translateY: 0 }] }}
+                    >
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => setActiveVideo(opt)}
+                        style={[
+                          styles.thumbCard,
+                          { backgroundColor: colors.surfaceRaised, borderColor: colors.border },
+                        ]}
                       >
-                        {opt.title || 'Untitled'}
-                      </Text>
-                      {opt.author_name ? (
-                        <Text numberOfLines={1} style={{ fontSize: 10, color: colors.textMuted, marginTop: 2 }}>
-                          {opt.author_name}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-              {loading && options.length === 0 && (
-                <View style={{ flex: 1, alignItems: 'center', padding: 20 }}>
-                  <ActivityIndicator color={colors.primary} />
-                  <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 8 }}>
-                    Finding embeddable videos…
-                  </Text>
+                        <View style={{ width: THUMB_W - 2, height: THUMB_H, backgroundColor: '#000', borderTopLeftRadius: radius.md, borderTopRightRadius: radius.md, overflow: 'hidden' }}>
+                          {opt.thumbnail_url ? (
+                            <Image source={{ uri: opt.thumbnail_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                          ) : null}
+                          {opt.is_short ? (
+                            <View style={[styles.shortBadge, { backgroundColor: colors.primary }]}>
+                              <Text style={{ fontSize: 9, fontWeight: '800', color: colors.background, letterSpacing: 0.6 }}>SHORT</Text>
+                            </View>
+                          ) : null}
+                          <View style={styles.playOverlay}>
+                            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' }}>
+                              <Ionicons name="play" size={18} color="#fff" style={{ marginLeft: 2 }} />
+                            </View>
+                          </View>
+                        </View>
+                        <View style={{ padding: 8 }}>
+                          <Text numberOfLines={2} style={{ fontSize: 11, fontWeight: '600', color: colors.textPrimary, lineHeight: 15 }}>
+                            {opt.title || 'Untitled'}
+                          </Text>
+                          {opt.author_name ? (
+                            <Text numberOfLines={1} style={{ fontSize: 10, color: colors.textMuted, marginTop: 2 }}>{opt.author_name}</Text>
+                          ) : null}
+                        </View>
+                      </TouchableOpacity>
+                    </Animated.View>
+                  ))}
                 </View>
-              )}
-            </View>
-          </ScrollView>
-
-          <View style={styles.actions}>
-            <TouchableOpacity
-              onPress={() => Linking.openURL(searchUrl)}
-              style={[styles.secondaryBtn, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="open-outline" size={14} color={colors.textSecondary} />
-              <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>More on YouTube</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={onClose}
-              style={[styles.primaryBtn, { backgroundColor: colors.primary }]}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.primaryBtnText, { color: colors.background }]}>Done</Text>
-            </TouchableOpacity>
-          </View>
+              </ScrollView>
+              <View style={styles.actions}>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(searchUrl)}
+                  style={[styles.secondaryBtn, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="open-outline" size={14} color={colors.textSecondary} />
+                  <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>More on YouTube</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleClose}
+                  style={[styles.primaryBtn, { backgroundColor: colors.primary }]}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.primaryBtnText, { color: colors.background }]}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
         </Animated.View>
       </View>
     </Modal>
@@ -251,19 +285,19 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     overflow: 'hidden',
     marginBottom: 8,
+    borderWidth: 1,
   },
   shortBadge: {
     position: 'absolute', top: 6, right: 6,
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
   },
-  selectedOverlay: {
+  playOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.35)',
   },
   actions: { flexDirection: 'row', gap: 8, marginTop: 14 },
   secondaryBtn: {
-    flex: 1.4, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
     paddingVertical: 11, borderRadius: radius.md, borderWidth: 1,
   },
   secondaryBtnText: { fontSize: 12, fontWeight: '700' },

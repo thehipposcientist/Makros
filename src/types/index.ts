@@ -422,6 +422,11 @@ export interface MealItem {
   baseFat?: number;
   micronutrients?: Record<string, number>;
   food_quality?: 'whole' | 'processed' | 'unknown';
+  protein_source?: 'plant' | 'animal' | 'mixed' | 'none' | 'unknown';
+  fermented?: boolean;
+  probiotic?: boolean;
+  omega3_rich?: boolean;
+  plant_count?: number;
 }
 
 export interface MealSuggestion {

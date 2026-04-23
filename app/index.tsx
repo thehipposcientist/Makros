@@ -1063,9 +1063,10 @@ export default function Index() {
     setIsEditing(false);
     setEditMode('goal');
     // Sync to backend so the edit is available on other devices.
-    if (authToken) pushUserStateToBackend(authToken).catch(() => null);
+    // Await the sync so the backend has the latest profile before plan generation.
     if (authToken) {
-      syncOnboarding(authToken, stamped).catch(() => null);
+      await pushUserStateToBackend(authToken).catch(() => null);
+      await syncOnboarding(authToken, stamped).catch(() => null);
 
       // Regen strictly by edit mode. Workout edits NEVER touch
       // nutrition and vice versa. Goal edits regenerate both only if
@@ -1516,10 +1517,17 @@ export default function Index() {
                 </Text>
                 <TouchableOpacity
                   style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
-                  onPress={() => {
+                  onPress={async () => {
                     const saved = pendingSave;
                     setPendingSave(null);
-                    _doSaveProfile(saved.profile, saved.mode as any);
+                    try {
+                      await _doSaveProfile(saved.profile, saved.mode as any);
+                    } catch (err: any) {
+                      console.error('[_doSaveProfile] error:', err);
+                      Alert.alert('Save failed', err?.message ?? 'Something went wrong. Please try again.');
+                      setIsWorkoutUpdating(false);
+                      setIsNutritionUpdating(false);
+                    }
                   }}>
                   <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
                     {isGoal ? 'Update Plan' : 'Regenerate'}

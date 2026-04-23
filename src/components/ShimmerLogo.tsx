@@ -7,9 +7,20 @@ interface Props {
   width?: number;
   height?: number;
   shimmerWidth?: number;
-  /** Shimmer color as rgb() / rgba() string. Defaults to teal brand. */
+  /** Shimmer color as "R,G,B" string or "#RRGGBB" hex. Defaults to teal brand. */
   shimmerColor?: string;
   style?: StyleProp<ViewStyle>;
+}
+
+function toRgbStr(color: string): string {
+  if (color.startsWith('#')) {
+    const hex = color.slice(1);
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `${r},${g},${b}`;
+  }
+  return color;
 }
 
 /**
@@ -46,6 +57,8 @@ export default function ShimmerLogo({
     outputRange: [-shimmerWidth, width],
   });
 
+  const rgb = toRgbStr(shimmerColor);
+
   return (
     <Animated.View
       testID="shimmer-logo"
@@ -65,7 +78,7 @@ export default function ShimmerLogo({
         }}
       >
         <LinearGradient
-          colors={[`rgba(${shimmerColor},0)`, `rgba(${shimmerColor},0.35)`, `rgba(${shimmerColor},0)`]}
+          colors={[`rgba(${rgb},0)`, `rgba(${rgb},0.35)`, `rgba(${rgb},0)`]}
           start={{ x: 0, y: 0.5 }}
           end={{ x: 1, y: 0.5 }}
           style={{ flex: 1 }}

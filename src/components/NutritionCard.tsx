@@ -9,11 +9,10 @@ import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } 
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
-import { classifyFood, computeNutritionScore } from '../utils/nutritionScore';
+import { classifyFood, computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
 import NutritionInsightCard from './NutritionInsightCard';
 import SwipeableRow, { SwipeAction } from './SwipeableRow';
 import AnimatedNumber from './AnimatedNumber';
-import type { GutHealthToday } from '../services/api';
 
 interface NutritionCardProps {
   title?: string;
@@ -37,7 +36,6 @@ interface NutritionCardProps {
    *  Shuffles ingredients within the same nutrient envelope. */
   onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
   goal?: string;
-  gutHealthToday?: GutHealthToday | null;
 }
 
 export default function NutritionCard({
@@ -57,7 +55,6 @@ export default function NutritionCard({
   onMoveMeal,
   onShuffleMeal,
   goal,
-  gutHealthToday,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
@@ -137,6 +134,11 @@ export default function NutritionCard({
     }, 0));
   }
   const hasMicros = microFieldSpec.some(s => dailyMicros[s.out] > 0);
+
+  const gutHealth = useMemo(
+    () => computePlanGutHealth(allVisible.map(v => v.meal), dailyMicros, actual.calories),
+    [allVisible, dailyMicros, actual.calories],
+  );
 
   return (
     <View style={styles.card}>
@@ -265,93 +267,7 @@ export default function NutritionCard({
                   );
                 })()}
 
-                {/* ── Section 2: Gut & Longevity ── */}
-                {gutHealthToday && gutHealthToday.item_count > 0 && (() => {
-                  const fiberDisplay = gutHealthToday.fiber_total_g > 0 ? gutHealthToday.fiber_total_g : (dailyMicros.fiber || 0);
-                  const fiberPer1k = gutHealthToday.fiber_per_1000_kcal > 0 ? gutHealthToday.fiber_per_1000_kcal : (actual.calories > 0 ? Math.round((dailyMicros.fiber || 0) / actual.calories * 1000 * 10) / 10 : 0);
-                  return (
-                    <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                        <Ionicons name="leaf-outline" size={16} color={colors.primary} />
-                        <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut & Longevity</Text>
-                      </View>
-                      <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
-                        {[
-                          { label: 'Gut Support', value: gutHealthToday.gut_support_score },
-                          { label: 'Food Quality', value: gutHealthToday.food_quality_score },
-                          { label: 'Longevity', value: gutHealthToday.longevity_signals_score },
-                        ].map(s => {
-                          const c = s.value >= 75 ? '#22C55E' : s.value >= 55 ? colors.primary : s.value >= 35 ? '#F59E0B' : '#EF4444';
-                          return (
-                            <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: c + '12', borderRadius: 10, paddingVertical: 8 }}>
-                              <Text style={{ fontSize: 18, fontWeight: '900', color: c }}>{Math.round(s.value)}</Text>
-                              <Text style={{ fontSize: 9, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>{s.label}</Text>
-                            </View>
-                          );
-                        })}
-                      </View>
-                      {[
-                        { label: 'Fiber', value: `${Math.round(fiberDisplay)}g`, detail: `${fiberPer1k} per 1k cal` },
-                        { label: 'Plants', value: `${gutHealthToday.distinct_plant_foods}`, detail: 'distinct today' },
-                        { label: 'Fermented', value: `${gutHealthToday.fermented_servings}`, detail: 'servings' },
-                        { label: 'Probiotic', value: `${gutHealthToday.probiotic_servings ?? 0}`, detail: 'servings' },
-                        { label: 'Omega-3', value: `${gutHealthToday.omega3_servings}`, detail: 'foods' },
-                      ].map(row => (
-                        <View key={row.label} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: colors.border + '33' }}>
-                          <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>{row.label}</Text>
-                          <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textPrimary }}>{row.value}</Text>
-                          <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 6 }}>{row.detail}</Text>
-                        </View>
-                      ))}
-                      {(gutHealthToday.plant_protein_g + gutHealthToday.animal_protein_g) > 0 && (() => {
-                        const total = gutHealthToday.plant_protein_g + gutHealthToday.animal_protein_g;
-                        const plantPct = Math.round((gutHealthToday.plant_protein_g / total) * 100);
-                        return (
-                          <View style={{ marginTop: 10 }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                              <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>Protein</Text>
-                              <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textPrimary }}>
-                                {gutHealthToday.plant_protein_g}g plant · {gutHealthToday.animal_protein_g}g animal
-                              </Text>
-                            </View>
-                            <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: colors.border }}>
-                              {gutHealthToday.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />}
-                              {gutHealthToday.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: colors.primary }} />}
-                            </View>
-                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 3 }}>
-                              <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>{plantPct}% plant</Text>
-                              <Text style={{ fontSize: 9, color: colors.primary, fontWeight: '700' }}>{100 - plantPct}% animal</Text>
-                            </View>
-                          </View>
-                        );
-                      })()}
-                      {gutHealthToday.processing_counts && Object.keys(gutHealthToday.processing_counts).length > 0 && (
-                        <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border + '33' }}>
-                          <Text style={{ fontSize: 9, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>PROCESSING MIX</Text>
-                          {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map(b => {
-                            const count = gutHealthToday.processing_counts[b] ?? 0;
-                            if (count === 0) return null;
-                            const itemTotal = gutHealthToday.item_count || 1;
-                            const pct = Math.round(100 * count / itemTotal);
-                            const barColor = b === 'minimally_processed' ? '#22C55E' : b === 'processed' ? '#F59E0B' : b === 'ultra_processed' ? '#EF4444' : colors.textMuted;
-                            return (
-                              <View key={b} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                                <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: barColor }} />
-                                <Text style={{ width: 110, fontSize: 10, color: colors.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
-                                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: colors.border }}>
-                                  <View style={{ width: `${Math.max(3, pct)}%` as any, height: 5, borderRadius: 3, backgroundColor: barColor }} />
-                                </View>
-                                <Text style={{ width: 42, fontSize: 10, fontWeight: '600', color: colors.textSecondary, textAlign: 'right' }}>{pct}%</Text>
-                              </View>
-                            );
-                          })}
-                        </View>
-                      )}
-                    </Animated.View>
-                  );
-                })()}
-
-                {/* ── Section 3: Macros ── */}
+                {/* ── Section 2: Macros ── */}
                 <View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}>
                   <View style={styles.modalMacroRow}>
                     <View style={[styles.modalMacroItem, { backgroundColor: colors.background }]}>
@@ -372,6 +288,88 @@ export default function NutritionCard({
                     </View>
                   </View>
                 </View>
+
+                {/* ── Section 3: Gut & Longevity (plan-based) ── */}
+                {gutHealth.item_count > 0 && (
+                  <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <Ionicons name="leaf-outline" size={16} color={colors.primary} />
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut & Longevity</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+                      {[
+                        { label: 'Gut Support', value: gutHealth.gut_support_score },
+                        { label: 'Food Quality', value: gutHealth.food_quality_score },
+                        { label: 'Longevity', value: gutHealth.longevity_score },
+                      ].map(s => {
+                        const c = s.value >= 75 ? '#22C55E' : s.value >= 55 ? colors.primary : s.value >= 35 ? '#F59E0B' : '#EF4444';
+                        return (
+                          <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: c + '12', borderRadius: 10, paddingVertical: 8 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '900', color: c }}>{Math.round(s.value)}</Text>
+                            <Text style={{ fontSize: 9, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>{s.label}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                    {[
+                      { label: 'Fiber', value: `${Math.round(gutHealth.fiber_g)}g`, detail: `${gutHealth.fiber_per_1000_kcal} per 1k cal` },
+                      { label: 'Plants', value: `${gutHealth.distinct_plant_foods}`, detail: 'distinct in plan' },
+                      { label: 'Fermented', value: `${gutHealth.fermented_servings}`, detail: 'servings' },
+                      { label: 'Probiotic', value: `${gutHealth.probiotic_servings}`, detail: 'servings' },
+                      { label: 'Omega-3', value: gutHealth.omega3_mg > 0 ? `${Math.round(gutHealth.omega3_mg)}mg` : '0', detail: gutHealth.omega3_mg >= 1600 ? 'on target' : 'target 1600mg' },
+                    ].map(row => (
+                      <View key={row.label} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: colors.border + '33' }}>
+                        <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>{row.label}</Text>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textPrimary }}>{row.value}</Text>
+                        <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 6 }}>{row.detail}</Text>
+                      </View>
+                    ))}
+                    {(gutHealth.plant_protein_g + gutHealth.animal_protein_g) > 0 && (() => {
+                      const total = gutHealth.plant_protein_g + gutHealth.animal_protein_g;
+                      const plantPct = Math.round((gutHealth.plant_protein_g / total) * 100);
+                      return (
+                        <View style={{ marginTop: 10 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                            <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>Protein</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textPrimary }}>
+                              {gutHealth.plant_protein_g}g plant · {gutHealth.animal_protein_g}g animal
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: colors.border }}>
+                            {gutHealth.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />}
+                            {gutHealth.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: colors.primary }} />}
+                          </View>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 3 }}>
+                            <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>{plantPct}% plant</Text>
+                            <Text style={{ fontSize: 9, color: colors.primary, fontWeight: '700' }}>{100 - plantPct}% animal</Text>
+                          </View>
+                        </View>
+                      );
+                    })()}
+                    {Object.values(gutHealth.processing_counts).some(v => v > 0) && (
+                      <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border + '33' }}>
+                        <Text style={{ fontSize: 9, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>PROCESSING MIX</Text>
+                        {['minimally_processed', 'processed', 'unknown'].map(b => {
+                          const count = gutHealth.processing_counts[b] ?? 0;
+                          if (count === 0) return null;
+                          const itemTotal = gutHealth.item_count || 1;
+                          const pct = Math.round(100 * count / itemTotal);
+                          const barColor = b === 'minimally_processed' ? '#22C55E' : b === 'processed' ? '#EF4444' : colors.textMuted;
+                          return (
+                            <View key={b} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: barColor }} />
+                              <Text style={{ width: 110, fontSize: 10, color: colors.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
+                              <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: colors.border }}>
+                                <View style={{ width: `${Math.max(3, pct)}%` as any, height: 5, borderRadius: 3, backgroundColor: barColor }} />
+                              </View>
+                              <Text style={{ width: 42, fontSize: 10, fontWeight: '600', color: colors.textSecondary, textAlign: 'right' }}>{pct}%</Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </Animated.View>
+                )}
 
                 {/* ── Section 4: Key Gaps ── */}
                 {(() => {

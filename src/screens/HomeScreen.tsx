@@ -1122,7 +1122,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
-  const [gutHealthToday, setGutHealthToday] = useState<import('../services/api').GutHealthToday | null>(null);
+  // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
@@ -1179,13 +1179,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       );
     }
   }, [mealsSubTab, authToken]);
-  useEffect(() => {
-    if (activeTab === 'meals' && mealsSubTab === 'plan' && authToken) {
-      import('../services/api').then(({ getGutHealth }) =>
-        getGutHealth(authToken, 7).then(r => setGutHealthToday(r.today)).catch(() => {})
-      );
-    }
-  }, [activeTab, mealsSubTab, authToken]);
+  // gutHealthToday fetch removed — NutritionCard computes from plan data
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
   // re-loaded when the user changes tabs to profile so a fresh scan
@@ -3661,6 +3655,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               width={320}
               height={72}
               shimmerWidth={160}
+              shimmerColor={themeColors.primary}
               style={{ alignSelf: 'center', marginBottom: 28 }}
             />
           </FadeInView>
@@ -3786,6 +3781,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 width={260}
                 height={58}
                 shimmerWidth={130}
+                shimmerColor={themeColors.primary}
                 style={{ alignSelf: 'center', marginBottom: 16 }}
               />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your workout plan</Text>
@@ -4452,14 +4448,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   skipReason={skipReasonsByDate[key]}
                   completedSummary={isCompleted ? todaySummary : null}
                   expanded={expandedDay === i}
-                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedDay(expandedDay === i ? -1 : i); }}
+                  onPress={() => { LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } }); setExpandedDay(expandedDay === i ? -1 : i); }}
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                   splitOptions={allOptions}
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
-                  onToggleSwitch={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
+                  onToggleSwitch={() => { LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } }); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
                   hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some(ex => plateauedExercises.has(ex.name.toLowerCase()))}
                   isRegenerating={(() => {
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
@@ -4551,6 +4547,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 width={260}
                 height={58}
                 shimmerWidth={130}
+                shimmerColor={themeColors.primary}
                 style={{ alignSelf: 'center', marginBottom: 16 }}
               />
               <Text style={[styles.planLoadingTitle, { color: themeColors.textPrimary }]}>Rebuilding your meal plan</Text>
@@ -5014,7 +5011,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <TouchableOpacity
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
                     onPress={() => {
-                      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                      LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } });
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                       setExpandedMealDays(prev => {
                         const next = new Set(prev);
@@ -5080,7 +5077,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
-                      gutHealthToday={idx === 0 ? gutHealthToday : null}
                     />
                   )}
                 </View>

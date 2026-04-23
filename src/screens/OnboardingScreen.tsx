@@ -429,10 +429,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       // Smooth grow animation when a card takes over full width and
       // expands its description. 280ms feels snappy without being rushed.
       LayoutAnimation.configureNext({
-        duration: 280,
-        create: { type: 'easeInEaseOut', property: 'opacity' },
-        update: { type: 'easeInEaseOut' },
-        delete: { type: 'easeInEaseOut', property: 'opacity' },
+        duration: 350,
+        create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
+        update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 },
+        delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
       });
       setSelectedGoal(goalId);
       setSelectedModifiers([]); // reset modifiers when goal changes

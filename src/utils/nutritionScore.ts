@@ -1,4 +1,20 @@
-import { DailyNutritionPlan, MealItem } from '../types';
+import { DailyNutritionPlan, MealItem, MealSuggestion } from '../types';
+
+export interface PlanGutHealth {
+  fiber_g: number;
+  fiber_per_1000_kcal: number;
+  omega3_mg: number;
+  distinct_plant_foods: number;
+  fermented_servings: number;
+  probiotic_servings: number;
+  plant_protein_g: number;
+  animal_protein_g: number;
+  gut_support_score: number;
+  food_quality_score: number;
+  longevity_score: number;
+  processing_counts: Record<string, number>;
+  item_count: number;
+}
 
 export interface NutritionScoreResult {
   score: number;
@@ -128,6 +144,78 @@ export function classifyFood(name: string, persisted?: 'whole' | 'processed' | '
 function isFruitOrVeg(name: string): boolean {
   const lower = name.toLowerCase();
   return FRUIT_VEG_KEYWORDS.some(k => lower.includes(k));
+}
+
+export function computePlanGutHealth(
+  meals: MealSuggestion[],
+  dailyMicros: Record<string, number>,
+  totalCalories: number,
+): PlanGutHealth {
+  const items: MealItem[] = meals.flatMap(m => m.items ?? []);
+
+  const fiber_g = dailyMicros.fiber || 0;
+  const fiber_per_1000_kcal = totalCalories > 0
+    ? Math.round(fiber_g / totalCalories * 1000 * 10) / 10 : 0;
+  const omega3_mg = dailyMicros.omega3 || 0;
+
+  let distinct_plant_foods = 0;
+  let fermented_servings = 0;
+  let probiotic_servings = 0;
+  let plant_protein_g = 0;
+  let animal_protein_g = 0;
+  const processing_counts: Record<string, number> = {
+    minimally_processed: 0, processed: 0, unknown: 0,
+  };
+
+  for (const it of items) {
+    distinct_plant_foods += it.plant_count ?? 0;
+    if (it.fermented) fermented_servings++;
+    if (it.probiotic) probiotic_servings++;
+
+    const prot = it.protein ?? 0;
+    const src = it.protein_source;
+    if (src === 'plant') plant_protein_g += prot;
+    else if (src === 'animal') animal_protein_g += prot;
+    else if (src === 'mixed') { plant_protein_g += prot * 0.4; animal_protein_g += prot * 0.6; }
+
+    const q = it.food_quality;
+    if (q === 'whole') processing_counts.minimally_processed++;
+    else if (q === 'processed') processing_counts.processed++;
+    else processing_counts.unknown++;
+  }
+
+  const totalFoods = Math.max(1, items.length);
+  const wholePct = processing_counts.minimally_processed / totalFoods;
+
+  const fiberScore = Math.min(100, (fiber_g / 28) * 100);
+  const fermentedScore = Math.min(100, ((fermented_servings + probiotic_servings) / 3) * 100);
+  const diversityScore = Math.min(100, (distinct_plant_foods / 12) * 100);
+  const gut_support_score = Math.round(
+    fiberScore * 0.4 + fermentedScore * 0.3 + diversityScore * 0.3
+  );
+
+  const produceScore = Math.min(100, (distinct_plant_foods / 5) * 100);
+  const processedPenalty = Math.min(100, (processing_counts.processed / totalFoods) * 100);
+  const food_quality_score = Math.round(Math.max(0,
+    (wholePct * 100) * 0.4 + produceScore * 0.3 - processedPenalty * 0.3
+  ));
+
+  const omega3Score = Math.min(100, (omega3_mg / 1600) * 100);
+  const fiberDensityScore = Math.min(100, (fiber_per_1000_kcal / 14) * 100);
+  const longevity_score = Math.round(
+    omega3Score * 0.25 + fiberDensityScore * 0.25 +
+    diversityScore * 0.2 + (wholePct * 100) * 0.3
+  );
+
+  return {
+    fiber_g, fiber_per_1000_kcal, omega3_mg,
+    distinct_plant_foods,
+    fermented_servings, probiotic_servings,
+    plant_protein_g: Math.round(plant_protein_g),
+    animal_protein_g: Math.round(animal_protein_g),
+    gut_support_score, food_quality_score, longevity_score,
+    processing_counts, item_count: items.length,
+  };
 }
 
 function collectAllItems(plan: DailyNutritionPlan): MealItem[] {

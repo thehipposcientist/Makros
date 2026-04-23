@@ -2458,8 +2458,9 @@ async def run_full_plan_generation(
     except Exception as exc:
         print(f"[plan-gen] post-assembly micro enrichment failed (non-fatal): {exc}")
 
-    # ── Classify food quality on each item ─────────────────────────────
+    # ── Classify food quality + gut-health signals on each item ─────────
     try:
+        from app.services.nutrition.food_classifier import classify_food
         from app.services.nutrition.nutrition_score import classify_food_quality
         for np_ in plans_list:
             if not isinstance(np_, dict):
@@ -2468,9 +2469,18 @@ async def run_full_plan_generation(
                 if not isinstance(meal, dict):
                     continue
                 for it in meal.get("items") or []:
-                    if not isinstance(it, dict) or it.get("food_quality"):
+                    if not isinstance(it, dict):
                         continue
-                    it["food_quality"] = classify_food_quality(it)
+                    if not it.get("food_quality"):
+                        it["food_quality"] = classify_food_quality(it)
+                    name = it.get("name") or ""
+                    if name and not it.get("protein_source"):
+                        cls = classify_food(name)
+                        it["protein_source"] = cls.protein_source
+                        it["fermented"] = cls.fermented_flag
+                        it["probiotic"] = cls.probiotic_flag
+                        it["omega3_rich"] = cls.omega3_flag
+                        it["plant_count"] = cls.plant_count_value
     except Exception:
         pass
 
