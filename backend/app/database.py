@@ -110,6 +110,80 @@ def _ensure_workout_completion_stimulus_column() -> None:
         print(f"[migration] workout_completions stimulus column add failed (non-fatal): {e}")
 
 
+def _ensure_workout_completion_health_columns() -> None:
+    """Add calories_burned + hr_summary columns to workout_completions if missing."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS calories_burned INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS hr_summary JSONB"
+            ))
+    except Exception as e:
+        print(f"[migration] workout_completions health columns add failed (non-fatal): {e}")
+
+
+def _ensure_exercise_tracking_mode_column() -> None:
+    """Add Exercise.default_tracking_mode if missing. Required for the
+    timed/distance exercise flag (planks, carries). Existing rows default
+    to "reps" — the seed re-run will update the right ones (planks → time,
+    sled drag → distance) immediately after this migration finishes."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE exercises "
+                "ADD COLUMN IF NOT EXISTS default_tracking_mode VARCHAR DEFAULT 'reps'"
+            ))
+    except Exception as e:
+        print(f"[migration] exercise default_tracking_mode column add failed (non-fatal): {e}")
+
+
+def _ensure_food_metadata_classifier_v2_columns() -> None:
+    """Add protein_source + probiotic_flag to food_metadata. Needed when a
+    v1 FoodMetadata table already exists; new DBs get these via create_all.
+    The classifier backfill (triggered by CLASSIFIER_VERSION bump in
+    food_classifier.py) will populate non-default values on next run."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE food_metadata "
+                "ADD COLUMN IF NOT EXISTS protein_source VARCHAR DEFAULT 'unknown'"
+            ))
+            conn.execute(text(
+                "ALTER TABLE food_metadata "
+                "ADD COLUMN IF NOT EXISTS probiotic_flag BOOLEAN DEFAULT FALSE"
+            ))
+    except Exception as e:
+        print(f"[migration] food_metadata classifier-v2 columns add failed (non-fatal): {e}")
+
+
+def _ensure_daily_nutrition_metrics_v2_columns() -> None:
+    """Add plant/animal protein + probiotic servings to daily_nutrition_metrics.
+    Populated on the next backfill run (METRICS_VERSION bumped to 2, which
+    re-computes every stored day)."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for col_sql in (
+                "ADD COLUMN IF NOT EXISTS plant_protein_g DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS animal_protein_g DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS probiotic_servings DOUBLE PRECISION DEFAULT 0",
+            ):
+                conn.execute(text(f"ALTER TABLE daily_nutrition_metrics {col_sql}"))
+    except Exception as e:
+        print(f"[migration] daily_nutrition_metrics v2 columns add failed (non-fatal): {e}")
+
+
 def _backfill_custom_food_micronutrients() -> None:
     """One-shot backfill: walk every FoodNutrition row whose `extra_nutrients`
     is NULL/empty, look the food name up in the seed micronutrient table,
@@ -163,7 +237,11 @@ def create_db_and_tables():
     _ensure_food_category_enum_values()
     _ensure_food_nutrition_extras_column()
     _ensure_workout_completion_stimulus_column()
+    _ensure_workout_completion_health_columns()
     _ensure_user_recovery_columns()
+    _ensure_exercise_tracking_mode_column()
+    _ensure_food_metadata_classifier_v2_columns()
+    _ensure_daily_nutrition_metrics_v2_columns()
     _backfill_custom_food_micronutrients()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:

@@ -25,7 +25,11 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
 
   const [today, setToday] = useState<GutHealthToday | null>(null);
   const [week, setWeek] = useState<GutHealthWindow | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  // Default to expanded so the key longevity details (probiotic, fermented,
+  // plant-vs-animal protein ratio, fiber, omega-3) are visible immediately
+  // without the user having to tap to reveal. They're the whole reason the
+  // card exists — hiding them behind a tap was a mistake.
+  const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -51,8 +55,48 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
     );
   }
 
+  // "No meals yet" placeholder — keeps the card visible so users can see
+  // the feature exists + what metrics they'll get once they log a meal.
+  // Still shows any weekly context if the last N days had data.
   if (!today || today.item_count === 0) {
-    return null;
+    const weeklyHasData = week && week.days_with_data > 0;
+    return (
+      <View style={{
+        backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
+        borderWidth: 1, borderColor: tc.border,
+      }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <Ionicons name="leaf-outline" size={16} color={tc.primary} />
+          <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
+            Gut & Longevity Signals
+          </Text>
+        </View>
+        <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+          Log a meal to see today's fiber, plant diversity, fermented / probiotic servings, omega-3 foods, and plant-vs-animal protein ratio.
+        </Text>
+        {weeklyHasData && (
+          <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
+            <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+              LAST {week!.days_with_data} DAY{week!.days_with_data === 1 ? '' : 'S'}
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+                Avg fiber: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.avg_fiber_g}g</Text>
+              </Text>
+              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+                Plants: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.distinct_plant_foods_week}</Text>
+              </Text>
+              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+                Fermented: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.fermented_servings}</Text>
+              </Text>
+              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+                Protein mix: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.plant_protein_pct ?? 0}% plant</Text>
+              </Text>
+            </View>
+          </View>
+        )}
+      </View>
+    );
   }
 
   const coverage = today.item_count > 0 ? today.classified_item_count / today.item_count : 0;

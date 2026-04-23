@@ -89,6 +89,11 @@ interface HomeScreenProps {
   // `mode` argument tells the parent which section to regenerate so the
   // right loading state fires (workout vs nutrition).
   onSaveProfile?: (updated: UserProfile, mode?: 'goal' | 'workout' | 'mealplan' | 'theme') => void;
+  /** Switch-Day full regen — takes the pinned day index + focus, runs the
+   *  AI workout-plan job with the big "Building your new plan" splash,
+   *  then overrides the pinned day to the chosen focus post-hoc. Lets
+   *  users see a proper whole-plan rebuild when they change a day. */
+  onSwitchDayRegen?: (pinDayIdx: number, pinFocus: string) => Promise<any[] | undefined>;
 }
 
 interface ScheduleItem {
@@ -1024,7 +1029,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1117,6 +1122,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
+  const [gutHealthToday, setGutHealthToday] = useState<import('../services/api').GutHealthToday | null>(null);
   const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
   const [reminderEnabled, setReminderEnabled] = useState(false);
@@ -1173,6 +1179,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       );
     }
   }, [mealsSubTab, authToken]);
+  useEffect(() => {
+    if (activeTab === 'meals' && mealsSubTab === 'plan' && authToken) {
+      import('../services/api').then(({ getGutHealth }) =>
+        getGutHealth(authToken, 7).then(r => setGutHealthToday(r.today)).catch(() => {})
+      );
+    }
+  }, [activeTab, mealsSubTab, authToken]);
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
   // re-loaded when the user changes tabs to profile so a fresh scan
@@ -1203,6 +1216,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       this so it always operates on the newest profile snapshot, even
       if several triggers queued up. */
   const loadPlansLatestProfileRef = useRef<UserProfile | null>(null);
+  /** When true, the next `loadPlans` run skips backend hydration and trusts
+      AsyncStorage. Set by handleSwitchDayRegen (via applyPlanResult) because
+      the client-side pin-patch writes a plan to AsyncStorage that the backend
+      DB doesn't have yet — fetching from the backend would overwrite the pin. */
+  const skipBackendHydrationOnceRef = useRef(false);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
   // Which plan-day indices are currently regenerating after a Switch-Day tap.
@@ -1844,7 +1862,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // over a live backend read, even on version match. The only time
     // cache is used is when the backend is unreachable (network hiccup
     // / offline / 404 legacy user with no DB row).
-    if (authToken) {
+    if (authToken && !skipBackendHydrationOnceRef.current) {
       try {
         const { getActiveWorkoutPlan } = await import('../services/api');
         const active = await getActiveWorkoutPlan(authToken);
@@ -1860,6 +1878,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } catch (e) {
         console.log('[loadPlans] active-plan fetch failed (using cache):', e);
       }
+    } else if (skipBackendHydrationOnceRef.current) {
+      skipBackendHydrationOnceRef.current = false;
+      console.log('[loadPlans] skipping backend hydration (switch-day pin in AsyncStorage)');
     }
 
     if (!aiWorkoutRaw) {
@@ -1893,7 +1914,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     }
     setWorkoutPlan(baseWorkout);
-    // Persist enriched plan so images survive next load without re-fetching
     if (aiWorkoutRaw) {
       AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(baseWorkout)).catch(() => {});
     }
@@ -1945,7 +1965,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             updatedDays[todayIdx % updatedDays.length] = freshDay.day;
             const updatedPlan = { ...baseWorkout, days: updatedDays };
             setWorkoutPlan(updatedPlan);
-            // Persist to AsyncStorage so the fresh day survives app restart
             await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
             await AsyncStorage.setItem(freshDayKey, '1').catch(() => {});
             console.log(`[loadPlans] fresh day generated & saved: ${freshDay.day.focus} (idx ${todayIdx})`);
@@ -4012,10 +4031,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{(session.exercises ?? []).length} exercises</Text>
                               <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
                               <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{totalSets} sets</Text>
-                              {summary && (
+                              {summary && summary.caloriesBurned > 0 && (
                                 <>
                                   <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
                                   <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>~{summary.caloriesBurned} kcal</Text>
+                                </>
+                              )}
+                              {summary && summary.hrAvg && summary.hrAvg > 0 && (
+                                <>
+                                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
+                                  <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{summary.hrAvg} avg bpm</Text>
                                 </>
                               )}
                             </View>
@@ -4073,9 +4098,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
                 for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
                 Re-runs when today's focus changes (Switch Day picker). */}
-            {workoutSubTab === 'plan' && authToken && (() => {
+            {workoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
-              const todaysFocus = workoutPlan?.days?.[0]?.focus ?? null;
+              const todayScheduleItem = schedule?.[0];
+              const todaysFocus = todayScheduleItem?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
               return (
                 <TrainingReadinessCard
                   authToken={authToken}
@@ -4094,7 +4120,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
-            {workoutSubTab === 'plan' && authToken && (
+            {workoutSubTab === 'plan' && !isFreeTier && authToken && (
               <WeeklyDigestCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
 
@@ -4442,39 +4468,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
-                    // Primary: ref equality. Fallback: match by focus label
-                    // (plans can have stale refs after a re-render cycle).
-                    // Last resort: clamp to `i` if it's a valid plan index.
                     let dayIdx = workoutPlan.days.indexOf(item.workout);
-                    if (dayIdx < 0) {
-                      dayIdx = workoutPlan.days.findIndex(d => d?.focus === item.workout?.focus);
-                    }
+                    if (dayIdx < 0) dayIdx = workoutPlan.days.findIndex(d => d?.focus === item.workout?.focus);
                     if (dayIdx < 0 && i < workoutPlan.days.length) dayIdx = i;
-                    if (dayIdx < 0) {
-                      console.log('[onChangeFocus] could not resolve dayIdx — aborting', { focus: item.workout?.focus, i });
-                      return;
-                    }
+                    if (dayIdx < 0) return;
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
 
-                    // Pro gate for AI-powered day regen. "Empty" is always
-                    // allowed (deterministic; no AI call).
                     if (newFocus !== 'Empty') {
                       const { requirePro } = await import('../utils/subscription');
                       if (!requirePro(userProfile, 'ai_day_regenerate')) return;
                     }
 
-                    // "Empty" — skip the generator entirely, start with a blank
-                    // day the user will populate manually from the Add Exercise
-                    // flow in ActiveWorkoutScreen.
                     if (newFocus === 'Empty') {
                       const updatedDays = [...workoutPlan.days];
-                      updatedDays[dayIdx] = {
-                        ...updatedDays[dayIdx],
-                        focus: 'Empty',
-                        exercises: [],
-                      };
+                      updatedDays[dayIdx] = { ...updatedDays[dayIdx], focus: 'Empty', exercises: [] };
                       const updatedPlan = { ...workoutPlan, days: updatedDays };
                       setWorkoutPlan(updatedPlan);
                       AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
@@ -4482,88 +4491,48 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       return;
                     }
 
-                    // Full-week regen. Switching a single day invalidates the
-                    // whole split (recovery spacing, push/pull/legs rotation,
-                    // adjacency), so we rebuild every entry in
-                    // workoutPlan.days. The target day pins the user's
-                    // chosen focus via focus_override; all other days get
-                    // planner-picked focuses with prev_focuses reflecting
-                    // the pinned choice so rotation stays coherent.
-                    //
-                    // Walk order: target day first (lock in the pin), then
-                    // the rest in original order. This means subsequent days
-                    // see the pinned focus in prev_focuses before they
-                    // generate.
-                    const total = workoutPlan.days.length;
-                    const daysToRegen: number[] = [dayIdx];
-                    for (let k = 0; k < total; k += 1) {
-                      if (k !== dayIdx) daysToRegen.push(k);
-                    }
-                    // Flag every day-to-regen at once so all their cards
-                    // show the overlay + the slim banner fires immediately.
-                    setRegeneratingDayIdxs(prev => {
-                      const next = new Set(prev);
-                      for (const k of daysToRegen) next.add(k);
-                      return next;
-                    });
-
-                    // Stamp the target day's new focus + name immediately so
-                    // the user sees their pick on the card the moment it's
-                    // tapped, even before the regen returns.
-                    setWorkoutPlan({
-                      ...workoutPlan,
-                      days: workoutPlan.days.map((d, k) =>
-                        k === dayIdx ? { ...d, focus: newFocus } : d,
-                      ),
-                    });
+                    // Show overlay
+                    setRegeneratingDayIdxs(new Set(Array.from({ length: workoutPlan.days.length }, (_, k) => k)));
                     setRegenSelectedFocus(newFocus);
 
-                    if (authToken) {
-                      try {
-                        // Single backend call builds the whole week
-                        // coherently. Backend respects every normal plan
-                        // rule (split, session minutes, recent completions,
-                        // muscle fatigue, injuries, dislikes) and pins the
-                        // target day to the chosen focus.
-                        const { generateWorkoutWeek } = await import('../services/api');
-                        const injuries = (userProfile.injuryEntries ?? [])
-                          .filter(i => i.status !== 'resolved')
-                          .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
-                        const res = await generateWorkoutWeek(authToken, {
-                          goal: userProfile.goal,
-                          days_per_week: userProfile.daysPerWeek,
-                          session_minutes: userProfile.workoutDurationMinutes ?? 60,
-                          experience: userProfile.experienceLevel ?? 'intermediate',
-                          equipment: userProfile.equipment ?? [],
-                          preferred_split: userProfile.preferredSplit,
-                          priority_region: userProfile.priorityRegion ?? 'balanced',
-                          injuries,
-                          disliked_exercises: userProfile.dislikedExercises ?? [],
-                          pin_day_index: dayIdx,
-                          pin_focus: newFocus,
-                        });
-                        if (res?.days?.length) {
-                          const updatedPlan = { ...workoutPlan, days: res.days };
-                          setWorkoutPlan(updatedPlan);
-                          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-                          await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
-                          setRegeneratingDayIdxs(new Set());
-                          setRegenSelectedFocus(null);
-                          return;
-                        }
-                      } catch (e) {
-                        console.log('[onChangeFocus] full-week regen failed, falling back to focus-only swap:', e);
-                      } finally {
-                        setRegeneratingDayIdxs(new Set());
-                        setRegenSelectedFocus(null);
+                    try {
+                      if (!authToken) throw new Error('no auth');
+                      const injuries = (userProfile.injuryEntries ?? [])
+                        .filter(i => i.status !== 'resolved')
+                        .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
+
+                      // 1. Generate full week with pin — backend saves to DB
+                      const { generateWorkoutWeek, getActiveWorkoutPlan } = await import('../services/api');
+                      await generateWorkoutWeek(authToken, {
+                        goal: userProfile.goal,
+                        days_per_week: userProfile.daysPerWeek,
+                        session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                        experience: userProfile.experienceLevel ?? 'intermediate',
+                        equipment: userProfile.equipment ?? [],
+                        preferred_split: userProfile.preferredSplit,
+                        priority_region: userProfile.priorityRegion ?? 'balanced',
+                        injuries,
+                        disliked_exercises: userProfile.dislikedExercises ?? [],
+                        pin_day_index: dayIdx,
+                        pin_focus: newFocus,
+                      });
+
+                      // 2. Read back from DB — single source of truth
+                      const active = await getActiveWorkoutPlan(authToken);
+                      if (active?.plan_json?.days?.length) {
+                        const plan = active.plan_json;
+                        setWorkoutPlan(plan);
+                        await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(plan));
+                        await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
+                        console.log('[switchDay] done — focuses:', plan.days.map((d: any) => d.focus));
                       }
+                      loadDayStatus();
+                    } catch (e) {
+                      console.log('[switchDay] failed:', e);
+                    } finally {
+                      setRegeneratingDayIdxs(new Set());
+                      setRegenSelectedFocus(null);
                     }
-                    // Fallback (no token or regen failed): swap focus label only.
-                    const updatedDays = [...workoutPlan.days];
-                    updatedDays[dayIdx] = { ...updatedDays[dayIdx], focus: newFocus };
-                    const updatedPlan = { ...workoutPlan, days: updatedDays };
-                    setWorkoutPlan(updatedPlan);
-                    AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
                   }}
                 />
                 </FadeInView>
@@ -5111,6 +5080,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
+                      gutHealthToday={idx === 0 ? gutHealthToday : null}
                     />
                   )}
                 </View>
@@ -7452,10 +7422,22 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                     <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                       {completedSummary.totalReps} reps
                     </Text>
-                    <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                      ~{completedSummary.caloriesBurned} kcal
-                    </Text>
+                    {completedSummary.caloriesBurned > 0 && (
+                      <>
+                        <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                          ~{completedSummary.caloriesBurned} kcal
+                        </Text>
+                      </>
+                    )}
+                    {completedSummary.hrAvg && completedSummary.hrAvg > 0 && (
+                      <>
+                        <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                          {completedSummary.hrAvg} avg bpm
+                        </Text>
+                      </>
+                    )}
                   </View>
                   <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>
                     {completedSummary.motivationMessage}

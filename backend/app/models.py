@@ -329,6 +329,10 @@ class Exercise(SQLModel, table=True):
     is_machine: bool = Field(default=False)
     is_unilateral: bool = Field(default=False)
     image_url: str | None = Field(default=None)
+    # "reps" (default) | "time" | "distance" | "calories". Lets the planner
+    # and the client pick the right rep-target string ("30-45s", "20-30 yds")
+    # instead of defaulting to goal-based rep counts for holds / carries.
+    default_tracking_mode: str = Field(default="reps")
 
 
 # ─── Food library ─────────────────────────────────────────────────────────────
@@ -515,6 +519,8 @@ class WorkoutCompletion(SQLModel, table=True):
     activity_intensity: str | None = Field(default=None)
     activity_source: str | None = Field(default=None)
     cardio_style: str | None = Field(default=None)
+    calories_burned: int | None = Field(default=None)
+    hr_summary: dict | None = Field(default=None, sa_column=Column(JSON))
     resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

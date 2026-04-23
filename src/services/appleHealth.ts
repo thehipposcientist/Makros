@@ -190,6 +190,25 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
 
 // ── Workout HR annotation ───────────────────────────────────────────────────
 //
+/** Returns the most recent heart rate sample from the last 30 seconds.
+ *  Designed for near-live HR display during an active workout. */
+export async function getLatestHeartRate(): Promise<number | null> {
+  const mod = getModule();
+  if (!mod || typeof mod.getHeartRate !== 'function') return null;
+  try {
+    const now = Date.now();
+    const samples = await mod.getHeartRate(now - 30_000, now, 5);
+    if (!Array.isArray(samples) || samples.length === 0) return null;
+    const sorted = samples
+      .map((s: any) => ({ v: Number(s.value), t: new Date(s.startDate).getTime() }))
+      .filter((x: any) => x.v > 0)
+      .sort((a: any, b: any) => b.t - a.t);
+    return sorted.length > 0 ? Math.round(sorted[0].v) : null;
+  } catch {
+    return null;
+  }
+}
+
 // Pulls raw HR samples for a workout window and summarizes them into avg, max,
 // and minutes-in-zone. Zones are %MHR bands (220 - age formula).
 

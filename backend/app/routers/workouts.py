@@ -71,6 +71,8 @@ class WorkoutCompleteRequest(BaseModel):
     activity_intensity: str | None = None
     activity_source: str | None = None
     cardio_style: str | None = None
+    calories_burned: int | None = None
+    hr_summary: dict | None = None  # {avgBpm, maxBpm, zoneMinutes}
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -604,6 +606,11 @@ def generate_full_week(
     Switch-Day — the client pins one day and every other day rotates around
     it. Respects split / session_minutes / recent completions / muscle
     fatigue / injuries / dislikes — same rules as any fresh plan gen."""
+    logger.info(
+        f"[generate-week] ENTRY: goal={body.goal} days={body.days_per_week} "
+        f"pin_idx={body.pin_day_index} pin_focus={body.pin_focus} "
+        f"split={body.preferred_split}"
+    )
     from app.seed_exercises_data import SEED_EXERCISES
     from app.services.workout.planner import PlannerInputs, generate_workout_plan
     from app.services.workout.history import (
@@ -726,38 +733,105 @@ def generate_full_week(
     except Exception:
         pass
 
-    # Pin resolution — find the recipe day matching the chosen focus and
-    # MOVE it to the pinned index. Moving (instead of relabeling) preserves
-    # the exercise selection the planner built for that focus. Generated
-    # Recovery/Mobility/Cardio days stand in when there's no matching day.
+    # Pin resolution — rotate lifting days so the pinned focus lands at
+    # the target index while preserving split order. A naive swap of two
+    # days breaks adjacency (e.g. PPL becomes L-Pull-Push-Push-Pull-L).
+    # Instead we circularly rotate the lifting sub-sequence so the whole
+    # pattern shifts, then non-lifting days (mobility/recovery/cardio)
+    # stay in their original positions.
     if body.pin_day_index is not None and body.pin_focus:
         target_idx = max(0, min(len(days) - 1, int(body.pin_day_index)))
         override_lower = body.pin_focus.lower().strip()
-        pin_day = None
+
+        NON_LIFTING = {"mobility", "recovery", "active recovery", "stretching",
+                       "cardio", "conditioning", "mobility_flow", "recovery_easy"}
+
         if override_lower in ("recovery", "active recovery"):
             from app.services.workout.planner import generate_recovery_day
-            pin_day = generate_recovery_day(body.session_minutes or 45)
+            days[target_idx] = generate_recovery_day(body.session_minutes or 45)
         elif override_lower in ("mobility", "stretching"):
             from app.services.workout.planner import generate_mobility_day
-            pin_day = generate_mobility_day(body.session_minutes or 45)
+            days[target_idx] = generate_mobility_day(body.session_minutes or 45)
         elif override_lower == "cardio":
             from app.services.workout.planner import generate_cardio_day
-            pin_day = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
+            days[target_idx] = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
         else:
-            for alt_idx, alt_day in enumerate(days):
-                if (alt_day.get("focus") or "").lower().strip() == override_lower:
-                    if alt_idx != target_idx:
-                        days[alt_idx], days[target_idx] = days[target_idx], days[alt_idx]
+            # Separate lifting days from non-lifting days
+            lift_positions: list[int] = []
+            lift_days: list[dict] = []
+            for idx, d in enumerate(days):
+                f = (d.get("focus") or "").lower().strip()
+                if f not in NON_LIFTING:
+                    lift_positions.append(idx)
+                    lift_days.append(d)
+
+            # Find which lifting slot has the desired focus
+            src_lift_idx: int | None = None
+            for li, ld in enumerate(lift_days):
+                if (ld.get("focus") or "").lower().strip() == override_lower:
+                    src_lift_idx = li
                     break
-            else:
+
+            if src_lift_idx is not None and target_idx in lift_positions:
+                dst_lift_idx = lift_positions.index(target_idx)
+                if src_lift_idx != dst_lift_idx:
+                    shift = src_lift_idx - dst_lift_idx
+                    rotated = lift_days[shift:] + lift_days[:shift]
+                    for pos, orig_idx in enumerate(lift_positions):
+                        days[orig_idx] = rotated[pos]
+                    logger.info(
+                        f"[generate-week] pin rotation: shifted lifting days by {shift}, "
+                        f"focuses now {[d.get('focus') for d in days]}"
+                    )
+            elif src_lift_idx is None:
+                # Focus not in plan (e.g. user picked a focus the split
+                # doesn't have) — label-only fallback
                 days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
-        if pin_day is not None:
-            days[target_idx] = pin_day
+                logger.info(f"[generate-week] pin fallback: label-only for {body.pin_focus}")
+
+    result_plan = {
+        "days": days,
+        "name": plan.get("workout_plan", {}).get("name", ""),
+    }
+
+    # Persist to WorkoutPlan DB table so re-login sees the switched plan.
+    try:
+        from app.models import WorkoutPlan
+        from app.services.workout.weekly_recipe import PLANNER_VERSION
+        now = datetime.now(timezone.utc)
+        active_rows = db.exec(
+            select(WorkoutPlan).where(
+                WorkoutPlan.user_id == current_user.id,
+                WorkoutPlan.is_active == True,  # noqa: E712
+            )
+        ).all()
+        for row in active_rows:
+            row.is_active = False
+            row.deactivated_at = now
+            row.deactivation_reason = "switch_day"
+            db.add(row)
+        new_row = WorkoutPlan(
+            user_id=current_user.id,
+            planner_version=PLANNER_VERSION,
+            goal=body.goal,
+            days_per_week=body.days_per_week,
+            preferred_split=body.preferred_split,
+            plan_json=result_plan,
+            is_active=True,
+        )
+        db.add(new_row)
+        db.commit()
+        logger.info(
+            f"[generate-week] persisted active plan for user={current_user.id} "
+            f"version={PLANNER_VERSION} reason=switch_day"
+        )
+    except Exception as e:
+        logger.warning(f"[generate-week] plan persistence failed (non-fatal): {e}")
 
     return {
         "days": days,
         "total_days_in_recipe": len(days),
-        "plan_name": plan.get("workout_plan", {}).get("name", ""),
+        "plan_name": result_plan.get("name", ""),
         "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
     }
 
@@ -798,6 +872,8 @@ def mark_workout_complete(
         existing.activity_intensity = body.activity_intensity or existing.activity_intensity
         existing.activity_source    = body.activity_source or existing.activity_source
         existing.cardio_style       = body.cardio_style or existing.cardio_style
+        existing.calories_burned    = body.calories_burned if body.calories_burned is not None else existing.calories_burned
+        existing.hr_summary         = body.hr_summary if body.hr_summary is not None else existing.hr_summary
         existing.completed_at       = datetime.now(timezone.utc)
         db.add(existing)
     else:
@@ -812,6 +888,8 @@ def mark_workout_complete(
             activity_intensity=body.activity_intensity,
             activity_source=body.activity_source,
             cardio_style=body.cardio_style,
+            calories_burned=body.calories_burned,
+            hr_summary=body.hr_summary,
         ))
 
     # Also persist structured per-exercise data if the client sent it.

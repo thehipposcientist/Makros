@@ -1100,6 +1100,10 @@ export async function logWorkoutDone(
     source?: string;
     cardioStyle?: string;
   },
+  healthMetrics?: {
+    caloriesBurned?: number;
+    hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] };
+  },
 ): Promise<WorkoutCompleteResponse> {
   return request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
@@ -1116,6 +1120,8 @@ export async function logWorkoutDone(
         activity_source: activity.source,
         cardio_style: activity.cardioStyle,
       } : {}),
+      ...(healthMetrics?.caloriesBurned ? { calories_burned: healthMetrics.caloriesBurned } : {}),
+      ...(healthMetrics?.hrSummary ? { hr_summary: healthMetrics.hrSummary } : {}),
     }),
   });
 }

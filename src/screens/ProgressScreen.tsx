@@ -32,7 +32,6 @@ import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import GutHealthCard from '../components/GutHealthCard';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -172,9 +171,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
-  // Gut / longevity signals. All computed client-side from existing plan + check data.
-  // Eating-window/late-eating intentionally NOT included — would require
-  // real-time meal logging which adds friction.
   const [gutInsights, setGutInsights] = useState<{
     plantCount: number;
     plantTier: 'on_track' | 'building' | 'low';
@@ -182,6 +178,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     fiberToday: { grams: number; target: number; pct: number; message: string };
     proteinFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
   } | null>(null);
+  const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -240,6 +237,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       );
       import('../services/api').then(({ getMuscleBalance }) =>
         getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
+      );
+      import('../services/api').then(({ getGutHealth }) =>
+        getGutHealth(authToken, 7).then(r => {
+          setGutHealthWindow(r.window);
+        }).catch(() => null)
       );
     }
     // Load body scan history
@@ -1045,6 +1047,58 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         })}
                         {summary && (
                           <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                            {/* HR annotation from Apple Watch (captured at
+                                finish time). Same circle viz as the active
+                                summary so users see consistent zone data
+                                whether they're looking at the just-finished
+                                workout or a past one. */}
+                            {(summary.hrAvg || summary.hrMax || (summary.hrZoneMinutes && summary.hrZoneMinutes.some(m => m > 0))) && (
+                              <View style={{ marginBottom: 10 }}>
+                                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 8 }}>
+                                  {summary.hrAvg ? (
+                                    <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 8, backgroundColor: tc.surfaceRaised }}>
+                                      <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{summary.hrAvg}</Text>
+                                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>AVG HR</Text>
+                                    </View>
+                                  ) : null}
+                                  {summary.hrMax ? (
+                                    <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 8, backgroundColor: tc.surfaceRaised }}>
+                                      <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{summary.hrMax}</Text>
+                                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>MAX HR</Text>
+                                    </View>
+                                  ) : null}
+                                </View>
+                                {summary.hrZoneMinutes && summary.hrZoneMinutes.some(m => m > 0) && (
+                                  <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', marginTop: 4 }}>
+                                    {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
+                                      const min = summary.hrZoneMinutes![i];
+                                      const peak = Math.max(...summary.hrZoneMinutes!, 1);
+                                      const size = 32 + Math.round(18 * (min / peak));
+                                      const zoneColor = ['#22C55E', '#EAB308', tc.primary, '#F97316', '#EF4444'][i];
+                                      const isEmpty = min < 0.5;
+                                      return (
+                                        <View key={label} style={{ alignItems: 'center' }}>
+                                          <View style={{
+                                            width: size, height: size, borderRadius: size / 2,
+                                            borderWidth: 2,
+                                            borderColor: isEmpty ? tc.border : zoneColor,
+                                            backgroundColor: isEmpty ? 'transparent' : zoneColor + '22',
+                                            alignItems: 'center', justifyContent: 'center',
+                                          }}>
+                                            <Text style={{ fontSize: 11, fontWeight: '800', color: isEmpty ? tc.textMuted : zoneColor }}>
+                                              {Math.round(min)}
+                                            </Text>
+                                          </View>
+                                          <Text style={{ fontSize: 9, fontWeight: '800', color: isEmpty ? tc.textMuted : zoneColor, marginTop: 3, letterSpacing: 0.5 }}>
+                                            {label}
+                                          </Text>
+                                        </View>
+                                      );
+                                    })}
+                                  </View>
+                                )}
+                              </View>
+                            )}
                             {summary.motivationMessage ? (
                               <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19, marginBottom: 6 }}>{summary.motivationMessage}</Text>
                             ) : null}
@@ -1643,9 +1697,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {/* Gut health + longevity signals (from logged meals) */}
-          {authToken && <GutHealthCard authToken={authToken} themeName={userProfile.themePreference} />}
-
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
             const completedWorkouts = history.filter(s => s.completed);
@@ -1729,52 +1780,236 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
-          {/* Longevity & Gut Health */}
-          {gutInsights && (
+          {/* Longevity & Nutrition Deep Dive — weekly rolling averages */}
+          {(gutHealthWindow || mealAverages) && (
             <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-              <View style={styles.vitalsHeader}>
+              <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
                 <Ionicons name="leaf-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Longevity & Gut Health</Text>
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Longevity & Nutrition</Text>
+                {gutHealthWindow && (
+                  <Text style={{ fontSize: 10, color: tc.textMuted }}>{gutHealthWindow.days_with_data}d data</Text>
+                )}
               </View>
-              <View style={{ marginBottom: 10 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Plant diversity (7d)</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444' }}>
-                    {gutInsights.plantCount} / 30
+
+              {/* Weekly composite scores */}
+              {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
+                <View style={{ marginBottom: 14 }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>WEEKLY AVERAGES</Text>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    {[
+                      { label: 'Gut Support', value: gutHealthWindow.avg_gut_support_score },
+                      { label: 'Food Quality', value: gutHealthWindow.avg_food_quality_score },
+                      { label: 'Longevity', value: gutHealthWindow.avg_longevity_signals_score },
+                    ].map(s => {
+                      const c = s.value >= 75 ? '#22C55E' : s.value >= 55 ? tc.primary : s.value >= 35 ? '#F59E0B' : '#EF4444';
+                      return (
+                        <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: c + '12', borderRadius: 10, paddingVertical: 8 }}>
+                          <Text style={{ fontSize: 22, fontWeight: '900', color: c }}>{Math.round(s.value)}</Text>
+                          <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              {/* Nutrition averages (14d) */}
+              {mealAverages && mealAverages.days_with_data >= 2 && (
+                <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>NUTRITION ({mealAverages.days_with_data}D AVG)</Text>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {[
+                      { label: 'Calories', value: Math.round(mealAverages.avg_calories), color: tc.primary },
+                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g)}g`, color: '#22C55E' },
+                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
+                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
+                    ].map(s => (
+                      <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
+                        <Text style={{ fontSize: 15, fontWeight: '800', color: s.color }}>{s.value}</Text>
+                        <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 1 }}>{s.label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
+                    {Math.round(mealAverages.avg_meals_per_day)} meals/day avg · {mealAverages.total_meals_logged} total logged
                   </Text>
                 </View>
-                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{
-                    width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
-                    height: 5, borderRadius: 3,
-                    backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
-                  }} />
+              )}
+
+              {/* Gut health metrics — weekly rolling */}
+              {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
+                <View style={{ paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 10 }}>GUT HEALTH ({gutHealthWindow.window_days}D)</Text>
+
+                  {/* Fiber */}
+                  {(() => {
+                    const fiberOk = gutHealthWindow.avg_fiber_g >= 25;
+                    const fiberColor = fiberOk ? '#22C55E' : gutHealthWindow.avg_fiber_g >= 18 ? '#F59E0B' : '#EF4444';
+                    return (
+                      <View style={{ marginBottom: 12 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>Avg fiber</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: fiberColor }}>{gutHealthWindow.avg_fiber_g}g / day</Text>
+                        </View>
+                        <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                          <View style={{ width: `${Math.min(100, (gutHealthWindow.avg_fiber_g / 28) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: fiberColor }} />
+                        </View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 3 }}>
+                          {gutHealthWindow.avg_fiber_per_1000_kcal}g per 1k cal · Hit target {gutHealthWindow.pct_days_fiber_target}% of days
+                        </Text>
+                      </View>
+                    );
+                  })()}
+
+                  {/* Plant diversity */}
+                  {(() => {
+                    const count = gutHealthWindow.distinct_plant_foods_week;
+                    const color = count >= 20 ? '#22C55E' : count >= 10 ? '#F59E0B' : '#EF4444';
+                    return (
+                      <View style={{ marginBottom: 12 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>Plant diversity</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: color }}>{count} / 30 plants</Text>
+                        </View>
+                        <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                          <View style={{ width: `${Math.min(100, (count / 30) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
+                        </View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 3 }}>
+                          30+ distinct plants/week linked to improved microbiome diversity
+                        </Text>
+                      </View>
+                    );
+                  })()}
+
+                  {/* Metric rows */}
+                  {[
+                    { icon: 'flask-outline', label: 'Fermented foods', value: `${gutHealthWindow.fermented_servings} servings`, detail: 'Kimchi, yogurt, sauerkraut support gut flora' },
+                    { icon: 'medkit-outline', label: 'Probiotic servings', value: `${gutHealthWindow.probiotic_servings ?? 0}`, detail: 'Live cultures for microbiome balance' },
+                    { icon: 'fish-outline', label: 'Omega-3 foods', value: `${gutHealthWindow.omega3_servings} servings`, detail: 'Anti-inflammatory, heart & brain health' },
+                  ].map(row => (
+                    <View key={row.label} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+                      <Ionicons name={row.icon as any} size={16} color={tc.primary} style={{ marginTop: 1 }} />
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textPrimary }}>{row.label}</Text>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>{row.value}</Text>
+                        </View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>{row.detail}</Text>
+                      </View>
+                    </View>
+                  ))}
+
+                  {/* Protein source breakdown */}
+                  {(gutHealthWindow.plant_protein_g + gutHealthWindow.animal_protein_g) > 0 && (() => {
+                    const total = gutHealthWindow.plant_protein_g + gutHealthWindow.animal_protein_g;
+                    const plantPct = Math.round((gutHealthWindow.plant_protein_g / total) * 100);
+                    const plantColor = plantPct >= 30 ? '#22C55E' : plantPct >= 15 ? '#F59E0B' : '#EF4444';
+                    return (
+                      <View style={{ marginBottom: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 6 }}>PROTEIN SOURCES (WEEKLY AVG)</Text>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
+                            {gutHealthWindow.plant_protein_g}g plant · {gutHealthWindow.animal_protein_g}g animal
+                          </Text>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: plantColor }}>{plantPct}% plant</Text>
+                        </View>
+                        <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: tc.border }}>
+                          {gutHealthWindow.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />}
+                          {gutHealthWindow.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: tc.primary }} />}
+                        </View>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 3 }}>
+                          <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>Plant</Text>
+                          <Text style={{ fontSize: 9, color: tc.primary, fontWeight: '700' }}>Animal</Text>
+                        </View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
+                          30%+ plant protein associated with reduced cardiovascular risk
+                        </Text>
+                      </View>
+                    );
+                  })()}
+
+                  {/* Processing mix */}
+                  {gutHealthWindow.processing_counts && Object.keys(gutHealthWindow.processing_counts).length > 0 && (
+                    <View style={{ paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>FOOD PROCESSING MIX</Text>
+                      {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map(b => {
+                        const count = gutHealthWindow.processing_counts[b] ?? 0;
+                        if (count === 0) return null;
+                        const total = Object.values(gutHealthWindow.processing_counts).reduce((s, v) => s + v, 0) || 1;
+                        const pct = Math.round(100 * count / total);
+                        const color = b === 'minimally_processed' ? '#22C55E' : b === 'processed' ? '#F59E0B' : b === 'ultra_processed' ? '#EF4444' : tc.textMuted;
+                        return (
+                          <View key={b} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+                            <Text style={{ width: 120, fontSize: 11, color: tc.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
+                            <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                              <View style={{ width: `${Math.max(3, pct)}%` as any, height: 6, borderRadius: 3, backgroundColor: color }} />
+                            </View>
+                            <Text style={{ width: 45, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textAlign: 'right' }}>{pct}%</Text>
+                          </View>
+                        );
+                      })}
+                      <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
+                        Minimizing ultra-processed intake linked to lower inflammation and disease risk
+                      </Text>
+                    </View>
+                  )}
                 </View>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
-              </View>
-              <View style={{ marginBottom: 10 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Fiber today</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B' }}>
-                    {gutInsights.fiberToday.grams}g / {gutInsights.fiberToday.target}g
+              )}
+
+              {/* Fallback: client-side gut insights when no API data */}
+              {!gutHealthWindow && gutInsights && (
+                <View>
+                  <View style={{ marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Plant diversity (7d)</Text>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444' }}>
+                        {gutInsights.plantCount} / 30
+                      </Text>
+                    </View>
+                    <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                      <View style={{
+                        width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
+                        height: 5, borderRadius: 3,
+                        backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
+                      }} />
+                    </View>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
+                  </View>
+                  <View style={{ marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Fiber today</Text>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B' }}>
+                        {gutInsights.fiberToday.grams}g / {gutInsights.fiberToday.target}g
+                      </Text>
+                    </View>
+                    <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                      <View style={{
+                        width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
+                        height: 5, borderRadius: 3,
+                        backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
+                      }} />
+                    </View>
+                  </View>
+                  {gutInsights.proteinFlag && (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                      <Ionicons
+                        name={gutInsights.proteinFlag.tier === 'good' ? 'checkmark-circle' : 'alert-circle-outline'}
+                        size={14}
+                        color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
+                      />
+                      <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {/* No data placeholder */}
+              {!gutHealthWindow && !gutInsights && (
+                <View style={{ alignItems: 'center', paddingVertical: 8 }}>
+                  <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', lineHeight: 17 }}>
+                    Log meals to see weekly nutrition & gut health trends
                   </Text>
-                </View>
-                <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{
-                    width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
-                    height: 5, borderRadius: 3,
-                    backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
-                  }} />
-                </View>
-              </View>
-              {gutInsights.proteinFlag && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
-                  <Ionicons
-                    name={gutInsights.proteinFlag.tier === 'good' ? 'checkmark-circle' : 'alert-circle-outline'}
-                    size={14}
-                    color={gutInsights.proteinFlag.tier === 'good' ? '#22C55E' : '#F59E0B'}
-                  />
-                  <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1 }}>{gutInsights.proteinFlag.detail}</Text>
                 </View>
               )}
             </View>

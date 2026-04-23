@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
@@ -980,6 +981,43 @@ export default function Index() {
     }
   };
 
+  // Switch-Day regen. Uses /generate-week which builds one coherent recipe
+  // with the pinned focus baked in — the whole split rotates correctly
+  // around the user's pick. Also persists to the DB so re-login keeps it.
+  // Throws on failure so HomeScreen can fall through to its own fallbacks.
+  const handleSwitchDayRegen = async (pinDayIdx: number, pinFocus: string): Promise<any[] | undefined> => {
+    if (!authToken || !userProfile) return undefined;
+    const injuries = (userProfile.injuryEntries ?? [])
+      .filter((i: any) => i.status !== 'resolved')
+      .map((i: any) => `${i.bodyPart || i.description} (status: ${i.status})`);
+
+    const { generateWorkoutWeek } = await import('../src/services/api');
+    const res = await generateWorkoutWeek(authToken, {
+      goal: userProfile.goal,
+      days_per_week: userProfile.daysPerWeek,
+      session_minutes: userProfile.workoutDurationMinutes ?? 60,
+      experience: userProfile.experienceLevel ?? 'intermediate',
+      equipment: userProfile.equipment ?? [],
+      preferred_split: userProfile.preferredSplit,
+      priority_region: userProfile.priorityRegion ?? 'balanced',
+      injuries,
+      disliked_exercises: userProfile.dislikedExercises ?? [],
+      pin_day_index: pinDayIdx,
+      pin_focus: pinFocus,
+    });
+
+    if (!res?.days?.length) throw new Error('/generate-week returned no days');
+
+    const planRaw = await AsyncStorage.getItem('aiWorkoutPlan');
+    const existingPlan = planRaw ? JSON.parse(planRaw) : {};
+    const updatedPlan = { ...existingPlan, days: res.days };
+    await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+    const t = new Date();
+    const tk = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    await AsyncStorage.setItem(`freshDayGenerated_${tk}`, '1');
+    return res.days;
+  };
+
   // Optional explicit mode override — used by the inline tab editors in
   // HomeScreen which don't go through the EditProfileScreen modal so
   // `editMode` state would otherwise be stale and the wrong section
@@ -1242,6 +1280,7 @@ export default function Index() {
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
+        onSwitchDayRegen={handleSwitchDayRegen}
         onBackendSync={async () => {
           // Called by the trainer chat Apply flow after a plan is
           // written to AsyncStorage. Pushes the updated state blob so
@@ -1721,8 +1760,13 @@ function AccountInfoModal({
                 onPress={() => {}}
                 style={{
                   backgroundColor: tc.surface, borderRadius: 18, padding: 20,
-                  width: '100%', maxWidth: 440, maxHeight: '80%',
+                  width: '100%', maxWidth: 440, maxHeight: '85%',
                   borderWidth: 1, borderColor: tc.border,
+                  // Flex constraints so the inner ScrollView can own remaining
+                  // space between the header and Got-it button. Without these,
+                  // the ScrollView sized itself to its intrinsic content and
+                  // overflowed instead of scrolling.
+                  flexShrink: 1,
                 }}
               >
                 <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
@@ -1734,56 +1778,69 @@ function AccountInfoModal({
                   </TouchableOpacity>
                 </View>
 
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {/* Two-column header */}
-                  <View style={{ flexDirection: 'row', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border }}>
-                    <View style={{ flex: 2 }} />
-                    <View style={{ flex: 1, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6 }}>FREE</Text>
+                <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={true} bounces={true}>
+                  {/* FREE tier */}
+                  <View style={{ marginBottom: 18 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: tc.border, alignItems: 'center', justifyContent: 'center' }}>
+                        <Ionicons name="person-outline" size={14} color={tc.textSecondary} />
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Free</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Basic tracking to try the app</Text>
+                      </View>
                     </View>
-                    <View style={{ flex: 1, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.6 }}>PRO</Text>
-                    </View>
+                    {[
+                      'Log workouts manually',
+                      'Log meals manually',
+                      'Track weight + body measurements',
+                      'Basic workout history',
+                    ].map((label) => (
+                      <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
+                        <Text style={{ fontSize: 14, color: tc.textMuted }}>{'·'}</Text>
+                        <Text style={{ fontSize: 13, color: tc.textSecondary }}>{label}</Text>
+                      </View>
+                    ))}
                   </View>
 
-                  {([
-                    ['Manual workout logging',     true,  true],
-                    ['Manual meal logging',        true,  true],
-                    ['Weight + body tracking',     true,  true],
-                    ['Recovery + fatigue tracking',true,  true],
-                    ['Charts & adherence trends',  true,  true],
-                    ['Apple Health sync',          true,  true],
-                    ['AI workout plan generation', false, true],
-                    ['AI meal plan generation',    false, true],
-                    ['AI coach chat',              false, true],
-                    ['Food photo scanning',        false, true],
-                    ['Form analysis (photo/video)',false, true],
-                    ['Smart starting-weight recs', false, true],
-                    ['Switch Day week regen',      false, true],
-                    ['In-workout AI feedback',     false, true],
-                  ] as const).map(([label, inFree, inPro], i, arr) => (
-                    <View
-                      key={String(label)}
-                      style={{
-                        flexDirection: 'row', alignItems: 'center',
-                        paddingVertical: 10,
-                        borderBottomWidth: i === arr.length - 1 ? 0 : 1,
-                        borderBottomColor: tc.border + '44',
-                      }}
-                    >
-                      <Text style={{ flex: 2, fontSize: 13, color: tc.textPrimary }}>{label}</Text>
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 18, color: inFree ? tc.success : tc.textMuted }}>
-                          {inFree ? '✓' : '—'}
-                        </Text>
+                  <View style={{ height: 1, backgroundColor: tc.border, marginBottom: 18 }} />
+
+                  {/* PRO tier */}
+                  <View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: tc.primary + '22', alignItems: 'center', justifyContent: 'center' }}>
+                        <Ionicons name="diamond-outline" size={14} color={tc.primary} />
                       </View>
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 18, color: inPro ? tc.success : tc.textMuted }}>
-                          {inPro ? '✓' : '—'}
-                        </Text>
+                      <View>
+                        <Text style={{ fontSize: 14, fontWeight: '800', color: tc.primary }}>Pro</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Full coaching, deeper insights, best results</Text>
                       </View>
                     </View>
-                  ))}
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: 10, marginLeft: 36, lineHeight: 17 }}>
+                      Everything in Free, plus:
+                    </Text>
+                    {[
+                      ['barbell-outline',     'Personalized AI workout plans'],
+                      ['swap-horizontal-outline', 'Rebuild your week when you switch a day'],
+                      ['restaurant-outline',  'AI-generated meal plans'],
+                      ['chatbubble-outline',  'AI coach for training + nutrition questions'],
+                      ['camera-outline',      'Snap a photo to log any meal'],
+                      ['fitness-outline',     'Smart starting-weight recommendations'],
+                      ['flash-outline',       'In-workout AI set feedback'],
+                      ['leaf-outline',        'Daily nutrition insights (fiber, protein sources)'],
+                      ['star-outline',        'Nutrition scoring + daily grades'],
+                      ['bar-chart-outline',   'Weekly progress digest with trends'],
+                      ['pulse-outline',       'Recovery + fatigue tracking'],
+                      ['heart-outline',       'Apple Health sync (HR, sleep, readiness)'],
+                      ['flame-outline',       'Workout calorie + HR zone tracking'],
+                      ['trending-up-outline', 'Charts, trends, and progress analytics'],
+                    ].map(([icon, label]) => (
+                      <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
+                        <Ionicons name={icon as any} size={15} color={tc.primary} />
+                        <Text style={{ fontSize: 13, color: tc.textPrimary, flex: 1 }}>{label}</Text>
+                      </View>
+                    ))}
+                  </View>
                 </ScrollView>
 
                 <TouchableOpacity
@@ -1890,8 +1947,8 @@ function AccountInfoModal({
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {(profile.subscriptionTier ?? 'pro') === 'free'
-                ? 'Free: manual tracking only. No AI plan generation, coach, food scan, or smart weight recs.'
-                : 'Pro: full feature set including AI plans, coaching, and scanning.'}
+                ? 'Free: basic workout + meal logging. Upgrade for AI plans, coaching, insights, and analytics.'
+                : 'Pro: personalized AI plans, coaching, nutrition insights, recovery tracking, and full analytics.'}
             </Text>
           </View>
 

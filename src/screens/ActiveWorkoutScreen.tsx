@@ -21,7 +21,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
-import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary } from '../services/appleHealth';
+import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
@@ -481,6 +481,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restTotalSecondsRef = useRef<number>(0);
   const restExerciseNameRef = useRef<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [liveHR, setLiveHR] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    (async () => {
+      const healthOn = await isAppleHealthEnabled();
+      if (!healthOn || !isHealthKitAvailable() || !active) return;
+      const poll = async () => {
+        if (!active) return;
+        const bpm = await getLatestHeartRate();
+        if (active) setLiveHR(bpm);
+      };
+      poll();
+      interval = setInterval(poll, 6000);
+    })();
+    return () => { active = false; if (interval) clearInterval(interval); };
+  }, []);
 
   const [exercises, setExercisesRaw] = useState<SessionExercise[]>(() => {
     // Try to restore in-progress session from AsyncStorage
@@ -1895,6 +1913,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Now includes per-exercise per-set data so the backend can build
     // real WorkoutSession + WorkoutExercise + ExerciseSet rows for
     // downstream systems (plan reviewer, progression engine, analytics).
+    // Fetch Apple Health data first so we can send it with the completion.
+    let healthMetrics: { caloriesBurned?: number; hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] } } | undefined;
+    try {
+      if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
+        let profileAge: number | null = null;
+        try {
+          const r = await AsyncStorage.getItem('userProfile');
+          if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
+        } catch {}
+        const [watchCal, hrData] = await Promise.all([
+          getAppleWorkoutCaloriesForWindow(startTime.current, now.getTime()),
+          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge),
+        ]);
+        healthMetrics = {};
+        if (watchCal != null && watchCal > 0) healthMetrics.caloriesBurned = watchCal;
+        if (hrData) healthMetrics.hrSummary = { avgBpm: hrData.avgBpm, maxBpm: hrData.maxBpm, zoneMinutes: [...hrData.zoneMinutes] };
+      }
+    } catch {}
     try {
       if (authToken) {
         const exercisesPayload = session.exercises.map((ex, idx) => ({
@@ -1916,7 +1952,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           category: 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
-        });
+        }, healthMetrics);
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 
         // PR toast + persist on session for Progress history to show "🏆 PR!"
@@ -1951,28 +1987,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           goal,
           weightLbs,
         });
-        // If the user wore an Apple Watch, prefer its calorie total — it's more
-        // accurate than our METs estimate. Fall back to the default otherwise.
-        // Also pull HR samples for the window to annotate avg/max + zone time.
-        try {
-          if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
-            let profileAge: number | null = null;
-            try {
-              const r = await AsyncStorage.getItem('userProfile');
-              if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
-            } catch {}
-            const [watchCal, hrSummary] = await Promise.all([
-              getAppleWorkoutCaloriesForWindow(startTime.current, now.getTime()),
-              getWorkoutHrSummary(startTime.current, now.getTime(), profileAge),
-            ]);
-            if (watchCal != null && watchCal > 0) (s as any).caloriesBurned = watchCal;
-            if (hrSummary) {
-              (s as any).hrAvg = hrSummary.avgBpm;
-              (s as any).hrMax = hrSummary.maxBpm;
-              (s as any).hrZoneMinutes = hrSummary.zoneMinutes;
-            }
-          }
-        } catch {}
+        // Reuse Apple Health data fetched before logWorkoutDone — no second fetch.
+        if (healthMetrics?.caloriesBurned) (s as any).caloriesBurned = healthMetrics.caloriesBurned;
+        if (healthMetrics?.hrSummary) {
+          (s as any).hrAvg = healthMetrics.hrSummary.avgBpm;
+          (s as any).hrMax = healthMetrics.hrSummary.maxBpm;
+          (s as any).hrZoneMinutes = healthMetrics.hrSummary.zoneMinutes;
+        }
         setSummaryData(s);
         // Persist summary so user can review it later in Progress.
         // Now includes the full per-exercise detail (name, equipment,
@@ -2254,7 +2275,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.focusLabel}>{workout.focus}</Text>
-          <Text style={styles.timer}>{formatTime(elapsed)}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <Text style={styles.timer}>{formatTime(elapsed)}</Text>
+            {liveHR != null && liveHR > 0 && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: themeColors.error + '18', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 }}>
+                <Text style={{ fontSize: 12, color: themeColors.error }}>♥</Text>
+                <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.error }}>{liveHR}</Text>
+              </View>
+            )}
+          </View>
         </View>
         <View style={styles.headerRight}>
           <Text style={styles.progressText}>{completedCount}/{exercises.length}</Text>
@@ -2484,38 +2513,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </Text>
                   )}
                 </View>
-                <View style={[styles.setsBadge, isDone && styles.setsBadgeDone]}>
-                  <Text style={[styles.setsBadgeText, isDone && styles.setsBadgeTextDone]}>
-                    {`${ex.sets.length}/${totalSetCount}`}
-                  </Text>
-                </View>
-                {/* Exercise-complete stamp — big check that bounces in when
-                    the final set lands. Layered over the row so it's hard to
-                    miss even when the user is scrolled down focused on the
-                    inputs. Only rendered while done so scales stay cheap. */}
-                {isDone && (
+                {/* Sets progress badge. Switches to an animated check stamp
+                    when the last set lands — replaces the "N/N" text so it
+                    doesn't collide with the surrounding row controls. */}
+                {isDone ? (
                   <Animated.View
-                    pointerEvents="none"
                     style={{
-                      position: 'absolute',
-                      right: 8,
-                      top: '50%',
-                      marginTop: -14,
                       transform: [{ scale: getExerciseCompleteScale(i) }],
-                    }}
-                  >
-                    <View style={{
-                      width: 28, height: 28, borderRadius: 14,
+                      width: 30, height: 30, borderRadius: 15,
                       backgroundColor: themeColors.success,
                       alignItems: 'center', justifyContent: 'center',
                       shadowColor: themeColors.success,
-                      shadowOpacity: 0.6,
-                      shadowRadius: 8,
+                      shadowOpacity: 0.5,
+                      shadowRadius: 6,
                       shadowOffset: { width: 0, height: 0 },
-                    }}>
-                      <Ionicons name="checkmark" size={18} color={themeColors.background} />
-                    </View>
+                    }}
+                  >
+                    <Ionicons name="checkmark" size={18} color={themeColors.background} />
                   </Animated.View>
+                ) : (
+                  <View style={styles.setsBadge}>
+                    <Text style={styles.setsBadgeText}>
+                      {`${ex.sets.length}/${totalSetCount}`}
+                    </Text>
+                  </View>
                 )}
                 {/* Swap — replace with a similar exercise (same muscle) */}
                 {!isDone && (
@@ -3366,26 +3387,44 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                     {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
                       <View style={{ marginTop: 10, paddingHorizontal: 2 }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8, textAlign: 'center' }}>
                           TIME IN ZONES
                         </Text>
-                        {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
-                          const min = summaryData.hrZoneMinutes![i];
-                          const totalMin = summaryData.hrZoneMinutes!.reduce((a, b) => a + b, 0);
-                          const pct = totalMin > 0 ? (min / totalMin) : 0;
-                          const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
-                          return (
-                            <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                              <Text style={{ width: 24, fontSize: 10, fontWeight: '700', color: zoneColor }}>{label}</Text>
-                              <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: themeColors.border }}>
-                                <View style={{ width: `${Math.max(1, pct * 100)}%` as any, height: 6, borderRadius: 3, backgroundColor: zoneColor }} />
+                        {/* Zone circles — ring size scales with time in that
+                            zone relative to the peak zone. Minutes + label
+                            inline under each. Legible at a glance and photo-
+                            shareable for the summary card. */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end' }}>
+                          {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
+                            const min = summaryData.hrZoneMinutes![i];
+                            const peak = Math.max(...summaryData.hrZoneMinutes!, 1);
+                            // Min ring 36 when zero, max ring 60 at peak.
+                            const size = 36 + Math.round(24 * (min / peak));
+                            const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
+                            const isEmpty = min < 0.5;
+                            return (
+                              <View key={label} style={{ alignItems: 'center' }}>
+                                <View style={{
+                                  width: size, height: size, borderRadius: size / 2,
+                                  borderWidth: 3,
+                                  borderColor: isEmpty ? themeColors.border : zoneColor,
+                                  backgroundColor: isEmpty ? 'transparent' : zoneColor + '22',
+                                  alignItems: 'center', justifyContent: 'center',
+                                }}>
+                                  <Text style={{ fontSize: 13, fontWeight: '800', color: isEmpty ? themeColors.textMuted : zoneColor }}>
+                                    {Math.round(min)}
+                                  </Text>
+                                  <Text style={{ fontSize: 8, fontWeight: '600', color: isEmpty ? themeColors.textMuted : zoneColor, marginTop: -1 }}>
+                                    min
+                                  </Text>
+                                </View>
+                                <Text style={{ fontSize: 10, fontWeight: '800', color: isEmpty ? themeColors.textMuted : zoneColor, marginTop: 4, letterSpacing: 0.5 }}>
+                                  {label}
+                                </Text>
                               </View>
-                              <Text style={{ width: 50, fontSize: 10, color: themeColors.textSecondary, textAlign: 'right' }}>
-                                {Math.round(min)} min
-                              </Text>
-                            </View>
-                          );
-                        })}
+                            );
+                          })}
+                        </View>
                       </View>
                     ) : null}
 

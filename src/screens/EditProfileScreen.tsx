@@ -133,18 +133,30 @@ function AnimatedGoalCard({
   const translateY = mount.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
   const opacity = mount;
 
+  // Layout styles (width, padding, border) stay on the TouchableOpacity so
+  // it participates correctly in the goal grid's flex layout. Only the
+  // animated transform + opacity live on the inner Animated.View — those
+  // can't affect layout positioning.
   return (
     <TouchableOpacity
       activeOpacity={1}
       onPressIn={() => Animated.spring(press, { toValue: 0.97, useNativeDriver: true, damping: 20, stiffness: 320 }).start()}
       onPressOut={() => Animated.spring(press, { toValue: 1, useNativeDriver: true, damping: 20, stiffness: 320 }).start()}
       onPress={onPress}
+      style={style}
     >
+      {/* The Animated.View must mirror goalCard's internal flex config
+          (alignItems + gap) or the icon + text children collapse to the
+          top-left of the card. Width 100% so the scale transform pivots
+          around the visual center. */}
       <Animated.View
-        style={[
-          style,
-          { opacity, transform: [{ translateY }, { scale: Animated.multiply(press, select) }] },
-        ]}
+        style={{
+          width: '100%',
+          alignItems: 'center',
+          gap: 6,
+          opacity,
+          transform: [{ translateY }, { scale: Animated.multiply(press, select) }],
+        }}
       >
         {children}
       </Animated.View>

@@ -35,17 +35,27 @@ def _count_sessions_and_focus(user_id: int, start: date, end: date, db: Session)
     stimulus_counter: Counter = Counter()
     distinct_days: set[date] = set()
     duration_total = 0
+    cal_values: list[int] = []
+    hr_avg_values: list[float] = []
     for r in rows:
         focus_counter[(r.focus_label or "Other").strip().title()] += 1
         stimulus_counter[(r.stimulus or "unspecified").strip().lower()] += 1
         distinct_days.add(r.workout_date)
         duration_total += r.duration_seconds or 0
+        if r.calories_burned is not None:
+            cal_values.append(r.calories_burned)
+        if r.hr_summary and isinstance(r.hr_summary, dict) and r.hr_summary.get("avgBpm"):
+            hr_avg_values.append(float(r.hr_summary["avgBpm"]))
+    avg_calories_burned = round(sum(cal_values) / len(cal_values), 1) if cal_values else None
+    avg_hr = round(sum(hr_avg_values) / len(hr_avg_values), 1) if hr_avg_values else None
     return {
         "completion_count": len(rows),
         "distinct_days": len(distinct_days),
         "focus_distribution": dict(focus_counter),
         "stimulus_distribution": dict(stimulus_counter),
         "duration_seconds": duration_total,
+        "avg_calories_burned": avg_calories_burned,
+        "avg_hr": avg_hr,
     }
 
 
@@ -237,6 +247,8 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
             "focus_distribution": this_week["focus_distribution"],
             "stimulus_distribution": this_week["stimulus_distribution"],
             "duration_seconds": this_week["duration_seconds"],
+            "avg_calories_burned": this_week["avg_calories_burned"],
+            "avg_hr": this_week["avg_hr"],
         },
         "volume": {
             "total_sets": vol_this["total_sets"],

@@ -117,9 +117,16 @@ def seed_exercises(session: Session) -> None:
             ex.exercise_type = entry.get("exercise_type", "strength")
             ex.is_machine = entry.get("is_machine", False)
             ex.is_unilateral = entry.get("is_unilateral", False)
+            # Read through hydrated_exercise so tracking-mode defaults
+            # (strength→reps, cardio/mobility→time) still apply when a
+            # seed entry hasn't set the field explicitly.
+            from app.seed_exercises_data import hydrated_exercise as _hydrate
+            ex.default_tracking_mode = _hydrate(entry).get("default_tracking_mode", "reps")
             session.add(ex)
             updated += 1
         else:
+            from app.seed_exercises_data import hydrated_exercise as _hydrate
+            hydrated = _hydrate(entry)
             ex = Exercise(
                 slug=slug,
                 name=name,
@@ -133,6 +140,7 @@ def seed_exercises(session: Session) -> None:
                 exercise_type=entry.get("exercise_type", "strength"),
                 is_machine=entry.get("is_machine", False),
                 is_unilateral=entry.get("is_unilateral", False),
+                default_tracking_mode=hydrated.get("default_tracking_mode", "reps"),
             )
             session.add(ex)
             added += 1

@@ -293,11 +293,21 @@ class WorkoutProgressionEngine:
     @staticmethod
     def _parse_rep_range_override(raw: Optional[str]) -> Optional[tuple[int, int]]:
         """Parse a plan-supplied rep-target string (e.g. "3-5", "8", "6-8").
-        Returns None when the string is empty / non-numeric / reversed."""
+        Returns None when the string is empty / non-numeric / reversed /
+        or is a non-rep unit (e.g. "30-45s" for timed holds, "20-30 yds"
+        for carries). For those we WANT the caller to keep the unit as-is
+        rather than fall back to goal-based rep defaults that would invent
+        "8-10" where reps don't apply."""
         if not raw:
             return None
         s = str(raw).strip().replace(" ", "")
         if not s:
+            return None
+        # Any non-rep unit marker means this isn't a rep range — return
+        # None so the rep-based classifier skips this planned set entirely.
+        # The caller already preserves the raw string in `target_reps` for
+        # display so the client still shows "30-45s".
+        if any(ch.isalpha() for ch in s):
             return None
         try:
             if "-" in s:

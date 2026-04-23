@@ -4,23 +4,24 @@
 // through `isPro()` so flipping the dev toggle instantly changes UI + API
 // behavior across the app.
 //
-// What free users CAN do:
-//   - Manual workout logging, manual set tracking
-//   - Manual meal logging (no AI skeleton, no barcode scan)
-//   - Track weight, view history + PRs
-//   - See their own charts + adherence trends
-//   - Read-only: recovery, preparedness (from manual data only)
+// FREE — basic tracking, enough to experience the app:
+//   - Manual workout logging + set tracking
+//   - Manual meal logging (no AI)
+//   - Weight + body measurements
+//   - Basic workout history (sets, reps, duration)
 //
-// What free users CANNOT do:
-//   - Generate AI workout plans / regenerate day
-//   - Generate AI meal plans
-//   - Ask the AI coach (trainer / nutritionist)
-//   - AI food scanning (photo-to-meal, barcode-to-food via AI lookup)
-//   - AI workout form analysis (photo/video)
-//   - AI starting-weight recommendations
-//   - AI plan review / swap
-//
-// Bump FEATURE in one place when a new AI endpoint ships — no grep hunt.
+// PRO — full coaching, deeper insights, best results:
+//   - AI workout plan generation + day regeneration
+//   - AI meal plans + food photo scanning
+//   - AI coach chat (trainer + nutritionist)
+//   - Smart starting-weight recommendations
+//   - In-workout AI set review
+//   - Gut & longevity nutrition insights
+//   - Nutrition scoring + weekly digest
+//   - Recovery + fatigue tracking with adaptive recommendations
+//   - Apple Health integration (HR, sleep, readiness)
+//   - Workout calorie + HR zone tracking
+//   - Charts, trends, and progress analytics
 
 import { Alert } from 'react-native';
 import type { UserProfile } from '../types';
@@ -37,24 +38,36 @@ export type ProFeature =
   | 'ai_weight_recommendation'
   | 'ai_plan_review'
   | 'ai_food_enrichment'
-  | 'ai_in_workout_review';
+  | 'ai_in_workout_review'
+  | 'nutrition_insights'
+  | 'nutrition_scoring'
+  | 'weekly_digest'
+  | 'recovery_tracking'
+  | 'apple_health'
+  | 'workout_analytics'
+  | 'progress_charts';
 
 const FEATURE_LABEL: Record<ProFeature, string> = {
-  ai_plan_generation:       'AI plan generation',
-  ai_day_regenerate:        'Regenerate workouts',
+  ai_plan_generation:       'AI workout plans',
+  ai_day_regenerate:        'Rebuild your week',
   ai_meal_plan:             'AI meal plans',
   ai_coach:                 'AI coach chat',
   ai_food_scan:             'Food photo scanning',
-  ai_form_analysis:         'Form check (photo/video)',
+  ai_form_analysis:         'Form analysis',
   ai_weight_recommendation: 'Smart starting weights',
   ai_plan_review:           'AI plan review',
   ai_food_enrichment:       'AI food lookup',
-  ai_in_workout_review:     'In-workout set review',
+  ai_in_workout_review:     'In-workout AI feedback',
+  nutrition_insights:        'Gut & longevity insights',
+  nutrition_scoring:         'Nutrition scoring',
+  weekly_digest:             'Weekly progress digest',
+  recovery_tracking:         'Recovery + fatigue tracking',
+  apple_health:              'Apple Health sync',
+  workout_analytics:         'Workout calorie + HR tracking',
+  progress_charts:           'Charts + trends',
 };
 
 export function tierOf(profile: UserProfile | null | undefined): Tier {
-  // Default to `pro` when the field is missing so existing users keep
-  // everything. New signups should be created with subscriptionTier='free'.
   return profile?.subscriptionTier ?? 'pro';
 }
 
@@ -77,8 +90,8 @@ export function requirePro(
   if (isPro(profile)) return true;
   if (opts?.silent) return false;
   Alert.alert(
-    'Pro feature',
-    `${FEATURE_LABEL[feature]} is a Thallo Pro feature. Upgrade to unlock AI-generated plans, coaching, and more.`,
+    'Upgrade to Pro',
+    `${FEATURE_LABEL[feature]} is a Thallo Pro feature. Upgrade for personalized plans, deeper insights, and AI coaching.`,
     [
       { text: 'Not now', style: 'cancel' },
       { text: 'Upgrade', onPress: () => opts?.onUpgrade?.() },
