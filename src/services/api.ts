@@ -1530,6 +1530,17 @@ export async function searchFoodNutrition(
   }, 45000);
 }
 
+export async function classifyFoods(
+  token: string,
+  names: string[],
+): Promise<{ classifications: Array<{ name: string; protein_source: string; fermented: boolean; probiotic: boolean; omega3_rich: boolean; plant_count: number; food_quality: string }> }> {
+  return request<any>('/ai/classify-foods', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ names }),
+  }, 10000);
+}
+
 /** Enrich food items with micronutrients. Used for routine/custom foods
  *  that bypass normal plan gen enrichment. */
 export async function enrichFoodItems(

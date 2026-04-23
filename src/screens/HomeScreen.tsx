@@ -19,7 +19,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -36,6 +36,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
+import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -553,6 +554,69 @@ async function _enrichRoutineMealsMicros(
     }
   } catch (e) {
     console.log(`[enrichRoutineMicros] failed (non-fatal):`, e);
+  }
+}
+
+async function _backfillFoodClassifications(
+  plansByDate: Record<string, DailyNutritionPlan>,
+  token: string,
+  setPlansByDate: React.Dispatch<React.SetStateAction<Record<string, DailyNutritionPlan>>>,
+) {
+  try {
+    const unclassified = new Set<string>();
+    for (const plan of Object.values(plansByDate)) {
+      for (const meal of plan.meals ?? []) {
+        for (const it of meal.items ?? []) {
+          if (!it.protein_source && it.name) {
+            unclassified.add(it.name);
+          }
+        }
+      }
+    }
+    if (unclassified.size === 0) return;
+    console.log(`[backfillClassify] ${unclassified.size} items need classification`);
+    const resp = await classifyFoods(token, Array.from(unclassified));
+    if (!resp?.classifications?.length) return;
+    const byName: Record<string, typeof resp.classifications[number]> = {};
+    for (const c of resp.classifications) {
+      byName[c.name.toLowerCase()] = c;
+    }
+    setPlansByDate(prev => {
+      const patched = { ...prev };
+      let count = 0;
+      for (const [dk, plan] of Object.entries(patched)) {
+        let touched = false;
+        const meals = (plan.meals ?? []).map(meal => {
+          const items = (meal.items ?? []).map(it => {
+            if (it.protein_source) return it;
+            const cls = byName[it.name?.toLowerCase()];
+            if (!cls) return it;
+            count++;
+            touched = true;
+            return {
+              ...it,
+              protein_source: cls.protein_source as any,
+              fermented: cls.fermented,
+              probiotic: cls.probiotic,
+              omega3_rich: cls.omega3_rich,
+              plant_count: cls.plant_count,
+              food_quality: cls.food_quality as any,
+            };
+          });
+          return { ...meal, items };
+        });
+        if (touched) patched[dk] = { ...plan, meals };
+      }
+      if (count > 0) {
+        console.log(`[backfillClassify] patched ${count} items`);
+        for (const [dk, plan] of Object.entries(patched)) {
+          saveNutritionPlan(dk, plan).catch(() => {});
+        }
+      }
+      return patched;
+    });
+  } catch (e) {
+    console.log(`[backfillClassify] failed (non-fatal):`, e);
   }
 }
 
@@ -1089,26 +1153,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  const progressFade = useRef(new Animated.Value(0)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
-    // Soft fade-through between top-level tabs. Tabs are siblings in the
-    // layout tree, so the easiest crossfade is a short LayoutAnimation —
-    // no per-tab Animated.Value wiring, no layout shift, and the
-    // Progress tab (which is kept mounted via display:'none') still
-    // flips cleanly. Keeping the duration short (180ms) avoids fighting
-    // the sub-tab animations already in place.
-    LayoutAnimation.configureNext({
-      duration: 180,
-      create: { type: 'easeInEaseOut', property: 'opacity' },
-      update: { type: 'easeInEaseOut' },
-      delete: { type: 'easeInEaseOut', property: 'opacity' },
-    });
     setActiveTabRaw(tab);
+    if (tab === 'progress') {
+      progressFade.setValue(0);
+      Animated.timing(progressFade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+    }
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
   }, []);
   useEffect(() => {
     AsyncStorage.getItem('lastActiveTab').then(saved => {
       if (saved && ['goals', 'workout', 'meals', 'progress', 'profile'].includes(saved)) {
         setActiveTabRaw(saved as typeof activeTab);
+        if (saved === 'progress') progressFade.setValue(1);
       }
     }).catch(() => {});
   }, []);
@@ -2279,6 +2337,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // in micros for any items that lack them.
     if (authToken) {
       _enrichRoutineMealsMicros(raw, authToken, routines, setNutritionPlansByDate);
+      _backfillFoodClassifications(raw, authToken, setNutritionPlansByDate);
     }
     } finally {
       loadPlansInFlightRef.current = false;
@@ -4448,14 +4507,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   skipReason={skipReasonsByDate[key]}
                   completedSummary={isCompleted ? todaySummary : null}
                   expanded={expandedDay === i}
-                  onPress={() => { LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } }); setExpandedDay(expandedDay === i ? -1 : i); }}
+                  onPress={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setExpandedDay(expandedDay === i ? -1 : i); }}
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                   splitOptions={allOptions}
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
-                  onToggleSwitch={() => { LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } }); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
+                  onToggleSwitch={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
                   hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some(ex => plateauedExercises.has(ex.name.toLowerCase()))}
                   isRegenerating={(() => {
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
@@ -5011,7 +5070,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <TouchableOpacity
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
                     onPress={() => {
-                      LayoutAnimation.configureNext({ duration: 350, create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity }, update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 }, delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity } });
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                       setExpandedMealDays(prev => {
                         const next = new Set(prev);
@@ -5051,7 +5109,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
 
-                  {isExpanded && (
+                  <AnimatedCollapsible visible={isExpanded}>
                     <NutritionCard
                       themeName={userProfile.themePreference}
                       nutritionPlan={plan}
@@ -5078,7 +5136,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
                     />
-                  )}
+                  </AnimatedCollapsible>
                 </View>
                 </FadeInView>
               );
@@ -5111,7 +5169,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* ── Progress tab — kept mounted to avoid white flash on tab switch */}
-      <View style={{ flex: 1, paddingBottom: 88, display: activeTab === 'progress' ? 'flex' : 'none' }}>
+      <Animated.View style={{ flex: 1, paddingBottom: 88, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
         <ErrorBoundary>
           <ProgressScreen
             authToken={authToken}
@@ -5126,7 +5184,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }}
           />
         </ErrorBoundary>
-      </View>
+      </Animated.View>
 
       {/* ── Profile tab ─────────────────────────────────────────────── */}
       {activeTab === 'profile' && (<ErrorBoundary>{(() => {
@@ -7401,7 +7459,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
         )}
       </View>
 
-      {expanded && (
+      <AnimatedCollapsible visible={expanded}>
         <View style={styles.expandedContent}>
           {isCompleted ? (
             <View style={{ gap: 10 }}>
@@ -7570,7 +7628,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             </>
           )}
         </View>
-      )}
+      </AnimatedCollapsible>
     </TouchableOpacity>
   );
 }

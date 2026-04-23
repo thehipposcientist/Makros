@@ -13,16 +13,12 @@ import {
   ActivityIndicator,
   Modal,
   findNodeHandle,
-  LayoutAnimation,
   UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import Animated, { LinearTransition } from 'react-native-reanimated';
 import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
-
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
 import {
@@ -426,16 +422,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const selectGoal = (goalId: string) => {
     if (goalId !== selectedGoal) {
-      // Smooth grow animation when a card takes over full width and
-      // expands its description. 280ms feels snappy without being rushed.
-      LayoutAnimation.configureNext({
-        duration: 350,
-        create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
-        update: { type: LayoutAnimation.Types.spring, springDamping: 0.82 },
-        delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
-      });
       setSelectedGoal(goalId);
-      setSelectedModifiers([]); // reset modifiers when goal changes
+      setSelectedModifiers([]);
       setSelectedRegion('balanced');
     }
   };
@@ -513,7 +501,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     if (error) { Alert.alert('One more thing', error); return; }
 
     if (currentStep < totalSteps - 1) {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
       setCurrentStep(s => s + 1);
       requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
@@ -525,7 +512,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const handleBack = () => {
     if (currentStep > 0) {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
       setCurrentStep(s => s - 1);
       requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
@@ -768,38 +754,39 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             description so users can compare without tapping. Selected
             card expands to full width for the full text. */}
         <Text style={styles.sectionHeading}>Most popular</Text>
-        <View style={styles.goalGrid}>
+        <Animated.View style={styles.goalGrid} layout={LinearTransition.springify().damping(18).stiffness(160)}>
           {LAUNCH_GOALS.map(g => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = selectedGoal === g.id;
             return (
-              <TouchableOpacity
-                key={g.id}
-                testID={`goal-card-${g.id}`}
-                accessibilityLabel={`goal-card-${g.id}`}
-                style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
-                onPress={() => selectGoal(g.id)}
-                activeOpacity={0.75}
-              >
-                <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? colors.primary : colors.textMuted} style={{ marginBottom: 6 }} />
-                <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
-                <Text
-                  style={{
-                    fontSize: 11,
-                    color: active ? colors.textSecondary : colors.textMuted,
-                    marginTop: 6,
-                    lineHeight: 15,
-                    textAlign: active ? 'left' : 'center',
-                    width: '100%',
-                  }}
-                  numberOfLines={active ? undefined : 3}
+              <Animated.View key={g.id} layout={LinearTransition.springify().damping(18).stiffness(160)}>
+                <TouchableOpacity
+                  testID={`goal-card-${g.id}`}
+                  accessibilityLabel={`goal-card-${g.id}`}
+                  style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
+                  onPress={() => selectGoal(g.id)}
+                  activeOpacity={0.75}
                 >
-                  {g.description}
-                </Text>
-              </TouchableOpacity>
+                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? colors.primary : colors.textMuted} style={{ marginBottom: 6 }} />
+                  <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      color: active ? colors.textSecondary : colors.textMuted,
+                      marginTop: 6,
+                      lineHeight: 15,
+                      textAlign: active ? 'left' : 'center',
+                      width: '100%',
+                    }}
+                    numberOfLines={active ? undefined : 3}
+                  >
+                    {g.description}
+                  </Text>
+                </TouchableOpacity>
+              </Animated.View>
             );
           })}
-        </View>
+        </Animated.View>
 
         {/* Pace — shown inline on the goal step itself whenever the user
             picks a pace-aware goal (fat loss / bulk / body-recomp / tone).

@@ -10,6 +10,31 @@ from fastapi import HTTPException, Depends
 from pydantic import BaseModel as _PydanticBaseModel
 
 
+def _attach_food_classification(item: dict) -> dict:
+    """Attach gut-health classification fields to a food item dict."""
+    try:
+        from app.services.nutrition.food_classifier import classify_food
+        name = item.get("name") or ""
+        if not name or item.get("protein_source"):
+            return item
+        cls = classify_food(name)
+        item["protein_source"] = cls.protein_source
+        item["fermented"] = cls.fermented_flag
+        item["probiotic"] = cls.probiotic_flag
+        item["omega3_rich"] = cls.omega3_flag
+        item["plant_count"] = cls.plant_count_value
+        if not item.get("food_quality"):
+            bucket = cls.processing_bucket
+            item["food_quality"] = (
+                "whole" if bucket == "minimally_processed"
+                else "processed" if bucket in ("processed", "ultra_processed")
+                else "unknown"
+            )
+    except Exception:
+        pass
+    return item
+
+
 def _fix_image_mime(b64: str, declared_mime: str) -> tuple[str, str]:
     """Detect actual image format from magic bytes and re-encode to JPEG if needed.
 
@@ -109,7 +134,11 @@ def analyze_food_photo(
     try:
         kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45)
         response = _chat_create(client, **kwargs)
-        return _extract_json(response.choices[0].message.content)
+        result = _extract_json(response.choices[0].message.content)
+        for item_name in (result.get("items") or []):
+            if isinstance(item_name, dict):
+                _attach_food_classification(item_name)
+        return result
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -172,7 +201,11 @@ def scan_foods_photo(
         # 500 tokens truncated mid-object and produced invalid JSON.
         kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45)
         response = _chat_create(client, **kwargs)
-        return _extract_json(response.choices[0].message.content)
+        result = _extract_json(response.choices[0].message.content)
+        for food in (result.get("foods") or []):
+            if isinstance(food, dict):
+                _attach_food_classification(food)
+        return result
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
@@ -382,6 +415,8 @@ def barcode_lookup(
     result = lookup_barcode(body.barcode.strip())
     if not result:
         raise HTTPException(status_code=404, detail="Product not found for this barcode")
+    if isinstance(result, dict):
+        _attach_food_classification(result)
     return result
 
 
@@ -402,6 +437,9 @@ def food_nutrition_search(
         usda_results = usda_search(body.query.strip(), max_results=5)
         if usda_results:
             print(f"[food-search] USDA hit: {len(usda_results)} results for '{body.query}'")
+            for r in usda_results:
+                if isinstance(r, dict):
+                    _attach_food_classification(r)
             return {"results": usda_results}
         print(f"[food-search] USDA miss for '{body.query}', falling back to AI")
     else:
@@ -446,9 +484,41 @@ def food_nutrition_search(
         results = data if isinstance(data, list) else data.get("results", [])
         for r in results:
             r["source"] = "ai"
+            _attach_food_classification(r)
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Food search failed: {str(e)}")
+
+
+class ClassifyFoodsRequest(_PydanticBaseModel):
+    names: list[str]
+
+
+@router.post("/classify-foods")
+def classify_foods_batch(
+    body: ClassifyFoodsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Classify a batch of food names. Returns protein_source, fermented,
+    probiotic, omega3_rich, plant_count, food_quality for each."""
+    from app.services.nutrition.food_classifier import classify_food
+    results = []
+    for name in (body.names or [])[:200]:
+        cls = classify_food(name)
+        results.append({
+            "name": name,
+            "protein_source": cls.protein_source,
+            "fermented": cls.fermented_flag,
+            "probiotic": cls.probiotic_flag,
+            "omega3_rich": cls.omega3_flag,
+            "plant_count": cls.plant_count_value,
+            "food_quality": (
+                "whole" if cls.processing_bucket == "minimally_processed"
+                else "processed" if cls.processing_bucket in ("processed", "ultra_processed")
+                else "unknown"
+            ),
+        })
+    return {"classifications": results}
 
 
 @router.post("/exercise-search")

@@ -182,7 +182,10 @@
       "Bash(npx expo-doctor@latest)",
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(node_modules/.bin/expo-modules-autolinking resolve *)",
-      "Bash(export PATH=\"/opt/homebrew/Cellar/node/25.9.0_1/bin:$PATH\")"
+      "Bash(export PATH=\"/opt/homebrew/Cellar/node/25.9.0_1/bin:$PATH\")",
+      "Bash(awk *)",
+      "Bash(/Users/sawyerhannel/.bun/bin/bun run *)",
+      "Bash(export PATH=\"$HOME/.nvm/versions/node/*/bin:$PATH\")"
     ]
   }
 }
