@@ -217,6 +217,11 @@ export interface UserProfile {
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
   dislikedExercises?: string[];  // exercise names excluded from plan generation
+  /** Subscription tier. `free` = manual tracking only (no AI, no generators).
+   *  `pro` = full feature set. Persisted locally for MVP; server-of-record
+   *  once billing ships. Default `pro` for existing users so they keep
+   *  everything they've had; new signups should be created as `free`. */
+  subscriptionTier?: 'free' | 'pro';
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────

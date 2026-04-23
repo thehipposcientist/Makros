@@ -959,6 +959,27 @@ export default function Index() {
     // re-populated from AsyncStorage by loadProfile anyway.
   };
 
+  // Fired when the dev tier toggle flips free → pro. Kicks off a full
+  // plan regen (same end-state as a new signup completing onboarding) so
+  // the user sees their generated workout + nutrition immediately. Guard
+  // ensures we don't run if the user is already pro or there's no token.
+  const handleUpgradeToPro = async (updated: UserProfile) => {
+    if (!authToken) return;
+    setIsWorkoutUpdating(true);
+    setIsNutritionUpdating(true);
+    holdPlanGenAwake();
+    try {
+      const { getAIPlans } = await import('../src/services/api');
+      const aiPlans: any = await getAIPlans(authToken, updated);
+      await applyPlanResult(aiPlans);
+    } catch (e) {
+      console.error('[handleUpgradeToPro] regen failed:', e);
+    } finally {
+      setIsWorkoutUpdating(false);
+      setIsNutritionUpdating(false);
+    }
+  };
+
   // Optional explicit mode override — used by the inline tab editors in
   // HomeScreen which don't go through the EditProfileScreen modal so
   // `editMode` state would otherwise be stale and the wrong section
@@ -1011,8 +1032,13 @@ export default function Index() {
       // Regen strictly by edit mode. Workout edits NEVER touch
       // nutrition and vice versa. Goal edits regenerate both only if
       // `goalChanged` is true.
-      const regenWorkout  = priorEditMode === 'workout' || (priorEditMode === 'goal' && goalChanged);
-      const regenNutrition = priorEditMode === 'mealplan' || (priorEditMode === 'goal' && goalChanged);
+      // Pro gate — free users don't hit AI plan generation. Their workout
+      // and nutrition surfaces stay on whatever deterministic local plan
+      // was last persisted (generateWorkoutPlan in utils/planGenerator.ts).
+      const { isPro } = await import('../src/utils/subscription');
+      const canRegen = isPro(stamped);
+      const regenWorkout  = canRegen && (priorEditMode === 'workout' || (priorEditMode === 'goal' && goalChanged));
+      const regenNutrition = canRegen && (priorEditMode === 'mealplan' || (priorEditMode === 'goal' && goalChanged));
 
       if (regenWorkout || regenNutrition) {
         // Preserve today's logged meals when regenerating nutrition
@@ -1336,6 +1362,8 @@ export default function Index() {
         <AccountInfoModal
           token={authToken}
           profile={userProfile}
+          setUserProfile={setUserProfile}
+          onUpgradeToPro={handleUpgradeToPro}
           onClose={() => setShowAccount(false)}
           onSignOut={handleSignOut}
         />
@@ -1595,10 +1623,12 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, onClose, onSignOut,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut,
 }: {
   token: string;
   profile: UserProfile;
+  setUserProfile: (p: UserProfile) => void;
+  onUpgradeToPro: (p: UserProfile) => void;
   onClose: () => void;
   onSignOut: () => void;
 }) {
@@ -1713,6 +1743,61 @@ function AccountInfoModal({
               />
             </View>
           )}
+
+          {/* DEV: Subscription tier toggle. Flips between free (manual tracking
+              only) and pro (full AI features). Writes back to the profile
+              immediately so gates take effect without navigating away. */}
+          <View style={{
+            marginHorizontal: 20, marginTop: 16, padding: 14, borderRadius: 12,
+            backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
+          }}>
+            <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, marginBottom: 8 }}>
+              DEVELOPER · SUBSCRIPTION TIER
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              {(['free', 'pro'] as const).map(t => {
+                const active = (profile.subscriptionTier ?? 'pro') === t;
+                return (
+                  <TouchableOpacity
+                    key={t}
+                    activeOpacity={0.8}
+                    onPress={async () => {
+                      const wasFree = (profile.subscriptionTier ?? 'pro') === 'free';
+                      const next: UserProfile = { ...profile, subscriptionTier: t };
+                      try {
+                        await AsyncStorage.setItem('userProfile', JSON.stringify(next));
+                        setUserProfile(next);
+                      } catch {}
+                      // Upgrading from free → pro rebuilds both plans so the
+                      // user sees their generated workout + nutrition right away.
+                      if (wasFree && t === 'pro') {
+                        onClose();
+                        onUpgradeToPro(next);
+                      }
+                    }}
+                    style={{
+                      flex: 1, paddingVertical: 10, borderRadius: 10,
+                      backgroundColor: active ? tc.primary : tc.surface,
+                      borderWidth: 1, borderColor: active ? tc.primary : tc.border,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text style={{
+                      fontSize: 13, fontWeight: '800', letterSpacing: 0.6,
+                      color: active ? tc.background : tc.textSecondary,
+                    }}>
+                      {t === 'free' ? 'FREE' : 'PRO'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
+              {(profile.subscriptionTier ?? 'pro') === 'free'
+                ? 'Free: manual tracking only. No AI plan generation, coach, food scan, or smart weight recs.'
+                : 'Pro: full feature set including AI plans, coaching, and scanning.'}
+            </Text>
+          </View>
 
           <TouchableOpacity
             style={am.signOutBtn}

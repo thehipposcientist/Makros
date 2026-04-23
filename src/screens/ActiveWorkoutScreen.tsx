@@ -1986,6 +1986,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
     if (!q) return;
+    // Pro-only: in-workout AI coach.
+    const { requirePro } = await import('../utils/subscription');
+    let profile: any = null;
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (raw) profile = JSON.parse(raw);
+    } catch {}
+    if (!requirePro(profile, 'ai_coach')) return;
 
     const userMsg: WorkoutCoachMessage = { role: 'user', content: q };
     setCoachChat(prev => [...prev, userMsg]);
@@ -2021,6 +2029,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       Alert.alert('Sign in required', 'You need to be signed in to analyze form photos.');
       return;
     }
+    // Pro-only: AI form analysis.
+    const { requirePro } = await import('../utils/subscription');
+    let profile: any = null;
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (raw) profile = JSON.parse(raw);
+    } catch {}
+    if (!requirePro(profile, 'ai_form_analysis')) return;
 
     const permission = source === 'camera'
       ? await ImagePicker.requestCameraPermissionsAsync()

@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import FormVideoModal from '../components/FormVideoModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
-  LayoutAnimation, UIManager,
+  LayoutAnimation, UIManager, Animated, Easing,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import FadeInView from '../components/FadeInView';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -90,6 +91,65 @@ interface InputModalProps {
   error?: string;
   keyboardType?: 'default' | 'decimal-pad' | 'number-pad';
   themeColors: ReturnType<typeof getTheme>['colors'];
+}
+
+// AnimatedGoalCard — staggered fade + slide-up on mount, spring-scale pulse
+// when `active` flips true, and press-down scale feedback. Wraps a Pressable
+// so the interaction feels tactile without changing the goal-grid layout.
+function AnimatedGoalCard({
+  children, delay, active, style, onPress,
+}: {
+  children: React.ReactNode;
+  delay: number;
+  active: boolean;
+  style: any;
+  onPress: () => void;
+}) {
+  const mount = useRef(new Animated.Value(0)).current;   // 0 → 1 entrance
+  const press = useRef(new Animated.Value(1)).current;   // 1 at rest, 0.97 pressed
+  const select = useRef(new Animated.Value(1)).current;  // 1 normal, spring to 1.05 → 1 on select
+  const wasActive = useRef(active);
+
+  useEffect(() => {
+    Animated.timing(mount, {
+      toValue: 1,
+      duration: 360,
+      delay,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [delay, mount]);
+
+  useEffect(() => {
+    if (active && !wasActive.current) {
+      Animated.sequence([
+        Animated.spring(select, { toValue: 1.04, useNativeDriver: true, damping: 10, stiffness: 220 }),
+        Animated.spring(select, { toValue: 1, useNativeDriver: true, damping: 14, stiffness: 240 }),
+      ]).start();
+    }
+    wasActive.current = active;
+  }, [active, select]);
+
+  const translateY = mount.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
+  const opacity = mount;
+
+  return (
+    <TouchableOpacity
+      activeOpacity={1}
+      onPressIn={() => Animated.spring(press, { toValue: 0.97, useNativeDriver: true, damping: 20, stiffness: 320 }).start()}
+      onPressOut={() => Animated.spring(press, { toValue: 1, useNativeDriver: true, damping: 20, stiffness: 320 }).start()}
+      onPress={onPress}
+    >
+      <Animated.View
+        style={[
+          style,
+          { opacity, transform: [{ translateY }, { scale: Animated.multiply(press, select) }] },
+        ]}
+      >
+        {children}
+      </Animated.View>
+    </TouchableOpacity>
+  );
 }
 
 function InputModal({
@@ -256,6 +316,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     profile.goalDetails.targetEvent ?? ''
   );
   const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'midnight');
+  // Dev toggle for the free/pro tier. Default to whatever the profile has;
+  // undefined → pro so existing users keep the full feature set.
+  const [subscriptionTier, setSubscriptionTier] = useState<'free' | 'pro'>(
+    profile.subscriptionTier ?? 'pro',
+  );
 
   // Physical stats
   const [currentWeight, setCurrentWeight] = useState<string>(
@@ -1171,6 +1236,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       goalSelection: goalSel,
       priorityRegion: selectedRegion,
       themePreference,
+      subscriptionTier,
       goalDetails: {
         ...profile.goalDetails,
         pace,
@@ -1315,16 +1381,23 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         <>
         {/* ── Goal ── Matches onboarding: inline descriptions on every
             card, selected card grows to full width with smooth layout
-            animation, full description visible when active. No modal. */}
+            animation, full description visible when active. No modal.
+            Each card fades + slides up with a staggered delay so the grid
+            composes itself visually on mount. Selected icon does a small
+            spring scale for tap feedback. */}
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Goal</Text>
+          <FadeInView delay={0}>
+            <Text style={styles.sectionLabel}>Goal</Text>
+          </FadeInView>
           <View style={[styles.goalGrid, { marginBottom: 6 }]}>
-            {LAUNCH_GOALS.map(g => {
+            {LAUNCH_GOALS.map((g, idx) => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
               const active = selectedGoal === g.id;
               return (
-                <TouchableOpacity
+                <AnimatedGoalCard
                   key={g.id}
+                  delay={80 + idx * 50}
+                  active={active}
                   style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
                   onPress={() => {
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -1332,7 +1405,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     setSelectedModifiers([]);
                     setPace('moderate');
                   }}
-                  activeOpacity={0.75}>
+                >
                   <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 6 }} />
                   <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
                   <Text
@@ -1348,7 +1421,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   >
                     {g.description}
                   </Text>
-                </TouchableOpacity>
+                </AnimatedGoalCard>
               );
             })}
           </View>
@@ -2226,6 +2299,45 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'theme' && (
         <View style={styles.section}>
+          {/* DEV: Subscription tier toggle. Flips between free (manual tracking
+              only) and pro (full AI features). Remove / hide behind a debug
+              flag once the billing flow ships. */}
+          <View style={{
+            backgroundColor: tc.surfaceRaised, padding: 14, borderRadius: radius.lg,
+            borderWidth: 1, borderColor: tc.border, marginBottom: 14,
+          }}>
+            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, marginBottom: 8 }}>
+              DEVELOPER · SUBSCRIPTION TIER
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              {(['free', 'pro'] as const).map(t => {
+                const active = subscriptionTier === t;
+                return (
+                  <TouchableOpacity
+                    key={t}
+                    onPress={() => setSubscriptionTier(t)}
+                    activeOpacity={0.8}
+                    style={{
+                      flex: 1, paddingVertical: 10, borderRadius: 10,
+                      backgroundColor: active ? tc.primary : tc.surface,
+                      borderWidth: 1, borderColor: active ? tc.primary : tc.border,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: active ? tc.background : tc.textSecondary, letterSpacing: 0.6 }}>
+                      {t === 'free' ? 'FREE' : 'PRO'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
+              {subscriptionTier === 'free'
+                ? 'Free: manual tracking only. No AI plan generation, coach, food scan, or smart weight recs.'
+                : 'Pro: full feature set including AI plans, coaching, and scanning.'}
+            </Text>
+          </View>
+
           <View style={styles.themeList}>
             {(Object.values(APP_THEMES) as Array<(typeof APP_THEMES)[keyof typeof APP_THEMES]>).map((theme) => {
               const selected = themePreference === theme.name;

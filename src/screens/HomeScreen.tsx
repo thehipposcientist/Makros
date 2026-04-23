@@ -1205,6 +1205,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const loadPlansLatestProfileRef = useRef<UserProfile | null>(null);
   const [expandedDay, setExpandedDay]     = useState<number>(-1);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
+  // Which plan-day indices are currently regenerating after a Switch-Day tap.
+  // Surfaced to the DayCard so it can render a shimmer overlay while the
+  // deterministic planner call is in flight. Stored as a Set so future multi-
+  // day flows (e.g. "regen all") work without a refactor.
+  const [regeneratingDayIdxs, setRegeneratingDayIdxs] = useState<Set<number>>(new Set());
   // Shown as a full-screen overlay while the "Switch Day" flow regenerates
   // the whole week (chosen day + ripple-sweep on conflicting neighbors).
   // Kept separate from isWorkoutUpdating so the big plan-gen overlay
@@ -2462,6 +2467,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       Alert.alert('Unavailable', 'Please sign in first.');
       return;
     }
+    // Pro-only: AI coach chat. Free users see an upgrade alert.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(userProfile, 'ai_coach')) return;
     if (coachMode === 'trainer' && !workoutPlan) {
       Alert.alert('Unavailable', 'Your workout plan is still loading. Please try again in a moment.');
       return;
@@ -3528,6 +3536,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     return item;
   });
+  // Free tier — strip all generated exercises and replace each scheduled day
+  // with an "Empty" shell the user can start + populate manually. Past
+  // preserved/completed workouts are left untouched so the user's history
+  // remains intact. When they upgrade to pro, the parent triggers a regen
+  // that repopulates these days.
+  const isFreeTier = (userProfile.subscriptionTier ?? 'pro') === 'free';
+  const scheduleForRender = isFreeTier
+    ? schedule.map(item => {
+        // Keep completed/historical cards; only reset forward-looking days.
+        if (item.isCompleted || item.isRest) return item;
+        return {
+          ...item,
+          workout: {
+            day: item.workout?.day ?? DAY_NAMES[item.date.getDay()],
+            focus: 'Empty',
+            exercises: [],
+            stimulus: null,
+          } as any,
+        };
+      })
+    : schedule;
   const mealDays = getNextMealDays(7);
 
   const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow', 'steel', 'sand', 'linen', 'mint'].includes(userProfile.themePreference ?? 'midnight');
@@ -3624,11 +3653,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </Animated.View>
       ) : null}
 
-      {/* Chat-triggered plan update — slim inline banner */}
-      {isChatPlanUpdating && !isWorkoutUpdating && !isNutritionUpdating ? (
+      {/* Chat-triggered plan update OR per-day switch regen — slim inline
+          banner. Same visual vocabulary whether the regen is AI-driven from
+          the coach chat or deterministic from the Switch Day picker, so the
+          user always sees a consistent "plan is updating" signal. */}
+      {(isChatPlanUpdating || regeneratingDayIdxs.size > 0) && !isWorkoutUpdating && !isNutritionUpdating ? (
         <View style={[styles.chatPlanUpdateBanner, { backgroundColor: themeColors.primary + '18', borderBottomColor: themeColors.primary + '33' }]}>
           <ActivityIndicator size="small" color={themeColors.primary} />
-          <Text style={[styles.chatPlanUpdateText, { color: themeColors.primary }]}>Applying plan updates…</Text>
+          <Text style={[styles.chatPlanUpdateText, { color: themeColors.primary }]}>
+            {regeneratingDayIdxs.size > 1
+              ? `Rebuilding week · ${regeneratingDayIdxs.size} days left…`
+              : regeneratingDayIdxs.size === 1
+                ? 'Finishing up…'
+                : 'Applying plan updates…'}
+          </Text>
         </View>
       ) : null}
 
@@ -4244,7 +4282,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               };
               const focusOptions = splitFocusOptions[split] ?? splitFocusOptions.ppl;
               const extraOptions = ['Cardio', 'Mobility', 'Recovery'];
-              const allOptions = [...focusOptions, ...extraOptions];
+              // "Empty" lets the user start from a blank day and add their
+              // own exercises — no generator is run. Always last so it reads
+              // as an escape hatch, not a primary choice.
+              const allOptions = [...focusOptions, ...extraOptions, 'Empty'];
 
               // Map dateKey → completed focus so when schedule index 0 is
               // today, we can still see yesterday's focus (outside schedule).
@@ -4280,7 +4321,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return completedDates.has(dk) || skippedDates.has(dk);
               };
 
-              return schedule.map((item, i) => {
+              return scheduleForRender.map((item, i) => {
               const key = dateKey(item.date);
               const isToday     = i === 0;
               const isCompleted = isToday && todayDone;
@@ -4342,6 +4383,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   showSwitchOptions={switchDayIdx === i}
                   onToggleSwitch={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
                   hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some(ex => plateauedExercises.has(ex.name.toLowerCase()))}
+                  isRegenerating={(() => {
+                    const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
+                    return idx >= 0 && regeneratingDayIdxs.has(idx);
+                  })()}
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
@@ -4361,46 +4406,117 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
 
-                    // Single-day swap only — no full-plan regen. User picked
-                    // an option (potentially with a warning they confirmed),
-                    // so just regenerate THIS day's exercises with the new
-                    // focus and update plan in place.
+                    // Pro gate for AI-powered day regen. "Empty" is always
+                    // allowed (deterministic; no AI call).
+                    if (newFocus !== 'Empty') {
+                      const { requirePro } = await import('../utils/subscription');
+                      if (!requirePro(userProfile, 'ai_day_regenerate')) return;
+                    }
+
+                    // "Empty" — skip the generator entirely, start with a blank
+                    // day the user will populate manually from the Add Exercise
+                    // flow in ActiveWorkoutScreen.
+                    if (newFocus === 'Empty') {
+                      const updatedDays = [...workoutPlan.days];
+                      updatedDays[dayIdx] = {
+                        ...updatedDays[dayIdx],
+                        focus: 'Empty',
+                        exercises: [],
+                      };
+                      const updatedPlan = { ...workoutPlan, days: updatedDays };
+                      setWorkoutPlan(updatedPlan);
+                      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                      AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1').catch(() => {});
+                      return;
+                    }
+
+                    // Full-week regen around the user's pick. Philosophy:
+                    // switching today from "push" to "legs" makes the rest of
+                    // the week's split distribution stale, so we rebuild
+                    // every day from dayIdx onward. The chosen focus is
+                    // pinned on the target day via focus_override; subsequent
+                    // days are generated with prev_focuses reflecting the
+                    // new reality so the rotation stays coherent.
+                    //
+                    // Completed / historical days (< dayIdx) are never
+                    // touched — we only regen forward.
+                    const daysToRegen: number[] = [];
+                    for (let k = dayIdx; k < workoutPlan.days.length; k += 1) {
+                      daysToRegen.push(k);
+                    }
+                    // Flag every day-to-regen at once so all their cards
+                    // show the overlay + the slim banner fires immediately.
+                    setRegeneratingDayIdxs(prev => {
+                      const next = new Set(prev);
+                      for (const k of daysToRegen) next.add(k);
+                      return next;
+                    });
+
                     if (authToken) {
                       try {
                         const { generateWorkoutDay } = await import('../services/api');
-                        // Preceding plan-day focuses (queued, possibly
-                        // not yet completed) — keeps split rotation
-                        // honest when the user switches a day mid-week.
-                        const prevFocuses: string[] = [];
+                        const injuries = (userProfile.injuryEntries ?? [])
+                          .filter(i => i.status !== 'resolved')
+                          .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
+
+                        const updatedDays = [...workoutPlan.days];
+                        const runningPrevFocuses: string[] = [];
                         for (let k = 0; k < dayIdx; k += 1) {
                           const f = workoutPlan.days[k]?.focus;
-                          if (f) prevFocuses.push(String(f));
+                          if (f) runningPrevFocuses.push(String(f));
                         }
-                        const fresh = await generateWorkoutDay(authToken, {
-                          goal: userProfile.goal,
-                          day_index: dayIdx,
-                          days_per_week: userProfile.daysPerWeek,
-                          session_minutes: userProfile.workoutDurationMinutes ?? 60,
-                          experience: userProfile.experienceLevel ?? 'intermediate',
-                          equipment: userProfile.equipment ?? [],
-                          preferred_split: userProfile.preferredSplit,
-                          priority_region: userProfile.priorityRegion ?? 'balanced',
-                          injuries: (userProfile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
-                          disliked_exercises: userProfile.dislikedExercises ?? [],
-                          focus_override: newFocus,
-                          prev_focuses: prevFocuses,
-                        });
-                        if (fresh?.day) {
-                          const updatedDays = [...workoutPlan.days];
-                          updatedDays[dayIdx] = { ...fresh.day, focus: newFocus };
-                          const updatedPlan = { ...workoutPlan, days: updatedDays };
-                          setWorkoutPlan(updatedPlan);
-                          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
-                          await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
-                          return;
+
+                        // Sequentially walk forward. Sequential (not parallel)
+                        // because each call needs the prior day's focus in
+                        // prev_focuses to avoid back-to-back duplicates.
+                        for (const k of daysToRegen) {
+                          const isTargetDay = k === dayIdx;
+                          const fresh = await generateWorkoutDay(authToken, {
+                            goal: userProfile.goal,
+                            day_index: k,
+                            days_per_week: userProfile.daysPerWeek,
+                            session_minutes: userProfile.workoutDurationMinutes ?? 60,
+                            experience: userProfile.experienceLevel ?? 'intermediate',
+                            equipment: userProfile.equipment ?? [],
+                            preferred_split: userProfile.preferredSplit,
+                            priority_region: userProfile.priorityRegion ?? 'balanced',
+                            injuries,
+                            disliked_exercises: userProfile.dislikedExercises ?? [],
+                            focus_override: isTargetDay ? newFocus : undefined,
+                            prev_focuses: [...runningPrevFocuses],
+                          });
+                          if (fresh?.day) {
+                            const resolvedFocus = isTargetDay
+                              ? newFocus
+                              : String(fresh.day.focus ?? updatedDays[k]?.focus ?? '');
+                            updatedDays[k] = { ...fresh.day, focus: resolvedFocus };
+                            runningPrevFocuses.push(resolvedFocus);
+                            // Commit incrementally so the UI reveals each
+                            // regenerated day as it lands (cards flip out of
+                            // the regenerating state one at a time).
+                            setWorkoutPlan({ ...workoutPlan, days: [...updatedDays] });
+                            setRegeneratingDayIdxs(prev => {
+                              const next = new Set(prev); next.delete(k); return next;
+                            });
+                          } else {
+                            // Fallback for this day: at least flip the focus
+                            // so the rotation context is sane going forward.
+                            const fallbackFocus = isTargetDay ? newFocus : String(updatedDays[k]?.focus ?? '');
+                            updatedDays[k] = { ...updatedDays[k], focus: fallbackFocus };
+                            runningPrevFocuses.push(fallbackFocus);
+                          }
                         }
+
+                        const updatedPlan = { ...workoutPlan, days: updatedDays };
+                        setWorkoutPlan(updatedPlan);
+                        await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan));
+                        await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
+                        setRegeneratingDayIdxs(new Set());
+                        return;
                       } catch (e) {
-                        console.log('[onChangeFocus] day regen failed, using focus-only swap:', e);
+                        console.log('[onChangeFocus] full-week regen failed, falling back to focus-only swap:', e);
+                      } finally {
+                        setRegeneratingDayIdxs(new Set());
                       }
                     }
                     // Fallback (no token or regen failed): swap focus label only.
@@ -4822,7 +4938,42 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
+            {/* Free tier — replace the AI-generated meal list with a compact
+                manual-logging prompt. Logged meals still surface via the
+                existing meal-history + checked-meal paths; they just don't
+                come from an AI-built plan. */}
+            {mealsSubTab === 'plan' && isFreeTier && (
+              <FadeInView delay={0}>
+                <View style={{
+                  backgroundColor: themeColors.surface,
+                  borderRadius: 14, padding: 20, marginTop: 8,
+                  borderWidth: 1, borderColor: themeColors.border,
+                  alignItems: 'center',
+                }}>
+                  <Ionicons name="restaurant-outline" size={32} color={themeColors.textMuted} />
+                  <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary, marginTop: 10 }}>
+                    Manual meal logging
+                  </Text>
+                  <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center', marginTop: 6, lineHeight: 17 }}>
+                    You're on the Free tier. Add meals yourself in the Foods tab; totals + averages still update in the background.
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setMealsSubTab('foods' as any)}
+                    style={{
+                      marginTop: 14, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10,
+                      backgroundColor: themeColors.primary,
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.background }}>Add a meal</Text>
+                  </TouchableOpacity>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 10, fontStyle: 'italic' }}>
+                    Upgrade to Pro for AI-generated meal plans.
+                  </Text>
+                </View>
+              </FadeInView>
+            )}
+
+            {mealsSubTab === 'plan' && !isFreeTier && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
               if (!plan) return (
                 <FadeInView key={d.key} delay={idx * 60}>
@@ -6850,7 +7001,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -6869,6 +7020,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   showSwitchOptions?: boolean;
   onToggleSwitch?: () => void;
   hasPlateauedExercises?: boolean;
+  /** Local "this card is regenerating" flag set by the parent when a
+   *  Switch-Day tap fires generateWorkoutDay. Drives a shimmer overlay. */
+  isRegenerating?: boolean;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -6969,9 +7123,26 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
         { backgroundColor: isToday ? tc.surfaceRaised : tc.surface, borderColor },
       ]}
       onPress={onPress}
-      activeOpacity={0.8}>
+      activeOpacity={0.8}
+      disabled={isRegenerating}>
       {(isToday || isCompleted) && (
         <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor }]} />
+      )}
+      {/* Regen overlay while the deterministic planner swaps this day's
+          exercises. Translucent so the card structure stays visible. */}
+      {isRegenerating && (
+        <View style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: tc.surface + 'CC',
+          borderRadius: 14,
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 10,
+        }}>
+          <ActivityIndicator size="small" color={accentColor} />
+          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, marginTop: 8, letterSpacing: 0.8 }}>
+            REGENERATING
+          </Text>
+        </View>
       )}
       <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 14 }]}>
         <View style={styles.dayCardLeft}>
