@@ -1907,6 +1907,44 @@ export async function getMealInsights(token: string): Promise<{ insights: string
   });
 }
 
+export interface GutHealthToday {
+  date: string;
+  calories_total: number;
+  fiber_total_g: number;
+  fiber_per_1000_kcal: number;
+  distinct_plant_foods: number;
+  fermented_servings: number;
+  omega3_servings: number;
+  processing_counts: Record<string, number>;
+  saturated_fat_g: number;
+  gut_support_score: number;
+  food_quality_score: number;
+  longevity_signals_score: number;
+  classified_item_count: number;
+  item_count: number;
+}
+
+export interface GutHealthWindow {
+  days_with_data: number;
+  window_days: number;
+  avg_fiber_g: number;
+  avg_fiber_per_1000_kcal: number;
+  pct_days_fiber_target: number;
+  distinct_plant_foods_week: number;
+  fermented_servings: number;
+  omega3_servings: number;
+  processing_counts: Record<string, number>;
+  avg_gut_support_score: number;
+  avg_food_quality_score: number;
+  avg_longevity_signals_score: number;
+}
+
+export async function getGutHealth(token: string, days = 7): Promise<{ today: GutHealthToday | null; window: GutHealthWindow }> {
+  return request(`/meals/gut-health?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getCommonMeals(token: string): Promise<{ meals: Array<{ name: string; count: number; avg_calories: number; avg_protein_g: number; avg_carbs_g: number; avg_fat_g: number }> }> {
   return request('/meals/common', {
     headers: { Authorization: `Bearer ${token}` },

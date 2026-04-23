@@ -1,0 +1,155 @@
+// Gut health / longevity signals card. Reads from /meals/gut-health and shows
+// the three derived scores (Gut Support / Food Quality / Longevity Signals)
+// plus raw drivers (fiber, plant diversity, fermented, omega-3). Collapsed
+// by default; expandable for drivers.
+
+import { useCallback, useEffect, useState } from 'react';
+import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { getTheme, radius } from '../constants/theme';
+import { AppThemeName } from '../types';
+import { getGutHealth, GutHealthToday, GutHealthWindow } from '../services/api';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+interface Props {
+  authToken: string;
+  themeName?: AppThemeName;
+}
+
+export default function GutHealthCard({ authToken, themeName }: Props) {
+  const theme = getTheme(themeName);
+  const tc = theme.colors;
+
+  const [today, setToday] = useState<GutHealthToday | null>(null);
+  const [week, setWeek] = useState<GutHealthWindow | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await getGutHealth(authToken, 7);
+      setToday(res.today);
+      setWeek(res.window);
+    } catch {
+      setToday(null); setWeek(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) {
+    return (
+      <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: tc.border }}>
+        <Text style={{ fontSize: 12, color: tc.textMuted }}>Loading gut-health signals…</Text>
+      </View>
+    );
+  }
+
+  if (!today || today.item_count === 0) {
+    return null;
+  }
+
+  const coverage = today.item_count > 0 ? today.classified_item_count / today.item_count : 0;
+  const low = coverage < 0.5;
+
+  const toggle = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpanded(e => !e);
+  };
+
+  const scoreColor = (v: number) =>
+    v >= 75 ? tc.success :
+    v >= 55 ? tc.primary :
+    v >= 35 ? tc.warning : tc.error;
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.85}
+      onPress={toggle}
+      style={{
+        backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
+        borderWidth: 1, borderColor: tc.border,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <Ionicons name="leaf-outline" size={16} color={tc.primary} />
+        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
+          Gut & Longevity Signals
+        </Text>
+        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color={tc.textMuted} />
+      </View>
+      <View style={{ flexDirection: 'row', gap: 8 }}>
+        {[
+          { label: 'Gut Support', value: today.gut_support_score },
+          { label: 'Food Quality', value: today.food_quality_score },
+          { label: 'Longevity', value: today.longevity_signals_score },
+        ].map(s => (
+          <View key={s.label} style={{
+            flex: 1, alignItems: 'center',
+            backgroundColor: tc.background, borderRadius: 10, padding: 8,
+          }}>
+            <Text style={{ fontSize: 20, fontWeight: '900', color: scoreColor(s.value) }}>
+              {Math.round(s.value)}
+            </Text>
+            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
+          </View>
+        ))}
+      </View>
+
+      {low && (
+        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 8, fontStyle: 'italic' }}>
+          Low food-classification coverage today — scores may be conservative.
+        </Text>
+      )}
+
+      {expanded && (
+        <View style={{ marginTop: 12, gap: 6 }}>
+          {[
+            ['Fiber',           `${today.fiber_total_g}g`, `${today.fiber_per_1000_kcal} per 1000 kcal`],
+            ['Plant diversity', `${today.distinct_plant_foods} today`, week ? `${week.distinct_plant_foods_week} this week` : ''],
+            ['Fermented',       `${today.fermented_servings} today`, week ? `${week.fermented_servings} this week` : ''],
+            ['Omega-3 foods',   `${today.omega3_servings} today`, week ? `${week.omega3_servings} this week` : ''],
+          ].map(([label, main, detail]) => (
+            <View key={label as string} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label}</Text>
+              <Text style={{ flex: 1, fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{main}</Text>
+              <Text style={{ fontSize: 10, color: tc.textMuted }}>{detail as string}</Text>
+            </View>
+          ))}
+          {today.processing_counts && Object.keys(today.processing_counts).length > 0 && (
+            <View style={{ marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
+              <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
+                PROCESSING MIX TODAY
+              </Text>
+              {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map(b => {
+                const count = today.processing_counts[b] ?? 0;
+                if (count === 0) return null;
+                const total = today.item_count || 1;
+                const pct = Math.round(100 * count / total);
+                const color = b === 'minimally_processed' ? tc.success
+                  : b === 'processed' ? tc.warning
+                  : b === 'ultra_processed' ? tc.error
+                  : tc.textMuted;
+                return (
+                  <View key={b} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                    <Text style={{ width: 130, fontSize: 10, color: tc.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
+                    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                      <View style={{ width: `${Math.max(3, pct)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
+                    </View>
+                    <Text style={{ width: 48, fontSize: 10, color: tc.textSecondary, textAlign: 'right' }}>{count} ({pct}%)</Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}

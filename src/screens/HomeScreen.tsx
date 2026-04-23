@@ -40,7 +40,7 @@ import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
 import RecoveryCard from '../components/RecoveryCard';
 import WeeklyDigestCard from '../components/WeeklyDigestCard';
-import PreparednessCard from '../components/PreparednessCard';
+import TrainingReadinessCard from '../components/TrainingReadinessCard';
 import CyclePhaseCard from '../components/CyclePhaseCard';
 import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
@@ -3980,16 +3980,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.theme} />
             )}
 
-            {/* Daily preparedness score */}
+            {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
+                for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
+                Re-runs when today's focus changes (Switch Day picker). */}
             {workoutSubTab === 'plan' && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+              const todaysFocus = workoutPlan?.days?.[0]?.focus ?? null;
               return (
-                <PreparednessCard
+                <TrainingReadinessCard
                   authToken={authToken}
                   themeName={userProfile.theme}
                   age={userProfile.physicalStats?.age ?? null}
                   proteinTarget={todayPlan?.targets?.protein ?? null}
                   calorieTarget={todayPlan?.targets?.calories ?? null}
+                  todaysFocus={todaysFocus}
                 />
               );
             })()}
@@ -4068,10 +4072,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
 
-            {/* Readiness badge — tap to expand full muscle breakdown */}
-            {workoutSubTab === 'plan' && readinessScore && (
-              <RecoveryCard data={readinessScore} themeName={userProfile.themePreference} compact />
-            )}
+            {/* (Previous Readiness/RecoveryCard was replaced by TrainingReadinessCard above.) */}
 
             {/* Resume workout banner — shown when the user force-quit
                 mid-workout. Jumps straight back into ActiveWorkoutScreen

@@ -32,7 +32,7 @@ import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import WorkoutImportCard from '../components/WorkoutImportCard';
+import GutHealthCard from '../components/GutHealthCard';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -1308,13 +1308,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Unlogged Apple Health workouts — import into Thallo */}
-          <WorkoutImportCard
-            healthSummary={healthSummary}
-            themeName={userProfile.theme}
-            onImported={() => { loadWorkoutHistory().then(setHistory); }}
-          />
-
           {/* Apple Health vitals */}
           {isHealthKitAvailable() && (() => {
             const hs = healthSummary;
@@ -1424,7 +1417,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
                 {vitalsRow('walk-outline', 'Steps (avg)', hs!.avgSteps7d)}
                 {vitalsRow('flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal')}
-                {vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? `${hs!.avgSleepHours7d}` : null, 'hrs')}
+                {vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? (() => {
+                  const total = Math.round(hs!.avgSleepHours7d! * 60);
+                  const h = Math.floor(total / 60), m = total % 60;
+                  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+                })() : null)}
                 {hs!.vo2Max != null && vitalsRow('fitness-outline', 'VO2 Max', Math.round(hs!.vo2Max * 10) / 10, 'ml/kg/min')}
                 {hs!.respiratoryRate != null && vitalsRow('leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm')}
                 {hs!.oxygenSaturation != null && vitalsRow('water-outline', 'Blood oxygen', hs!.oxygenSaturation, '%')}
@@ -1478,6 +1475,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {healthSummary?.sleepScore && (() => {
             const ss = healthSummary.sleepScore;
             const scoreColor = ss.score >= 80 ? '#22C55E' : ss.score >= 60 ? '#F59E0B' : '#EF4444';
+            // Show sleep durations as "Xh Ym" (more intuitive than 5.8h).
+            const formatHM = (hours: number) => {
+              const totalMin = Math.round(hours * 60);
+              const h = Math.floor(totalMin / 60);
+              const m = totalMin % 60;
+              if (h > 0 && m > 0) return `${h}h ${m}m`;
+              if (h > 0) return `${h}h`;
+              return `${m}m`;
+            };
             const stageBar = (label: string, hours: number, color: string, total: number) => {
               const pct = total > 0 ? Math.round((hours / total) * 100) : 0;
               return (
@@ -1486,7 +1492,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
                     <View style={{ width: `${Math.max(3, pct)}%` as any, height: 8, borderRadius: 4, backgroundColor: color }} />
                   </View>
-                  <Text style={{ width: 50, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{hours}h ({pct}%)</Text>
+                  <Text style={{ width: 78, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{formatHM(hours)} ({pct}%)</Text>
                 </View>
               );
             };
@@ -1503,7 +1509,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text style={{ fontSize: 24, fontWeight: '900', color: scoreColor }}>{ss.score}</Text>
-                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{ss.rating} · {ss.duration}h total</Text>
+                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{ss.rating} · {formatHM(ss.duration)} total</Text>
                   </View>
                 </View>
                 {/* Mode badge */}
@@ -1581,6 +1587,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
+
+          {/* Gut health + longevity signals (from logged meals) */}
+          {authToken && <GutHealthCard authToken={authToken} themeName={userProfile.theme} />}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
@@ -1661,10 +1670,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {/* Muscle Recovery — shared component matches the Workout tab header */}
-          {muscleFatigue && (
-            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
-          )}
           {authToken && (
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
@@ -1723,6 +1728,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'body' ? (
         /* ── Body Tab ───────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
+              all 12 muscle groups with the full expanded bars. */}
+          {muscleFatigue && (
+            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
+          )}
+
           {/* Muscle Balance — volume distribution across muscle groups (14d) */}
           {muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);

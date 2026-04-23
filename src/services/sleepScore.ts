@@ -162,7 +162,9 @@ function scoreEfficiency(hours: number, inBedMinutes: number | null, max: number
     return { points: Math.round(max * 0.6), ratio: null };
   }
   const asleepMin = hours * 60;
-  const ratio = asleepMin / inBedMinutes;
+  // HealthKit occasionally reports more asleep minutes than in-bed samples
+  // (different source coverage). Clamp to 100% so the UI never shows >100%.
+  const ratio = Math.min(1.0, asleepMin / inBedMinutes);
   let points: number;
   let insight: string | undefined;
   if (ratio >= 0.90) points = max;

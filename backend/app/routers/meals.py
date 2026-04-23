@@ -177,7 +177,7 @@ def log_checked_meal(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid meal_date format. Use YYYY-MM-DD.")
 
-    return log_meal_from_plan(
+    result = log_meal_from_plan(
         user_id=current_user.id,
         meal_date=meal_date,
         meal_type=body.meal_type,
@@ -185,6 +185,14 @@ def log_checked_meal(
         source=body.source or "plan_check",
         db=db,
     )
+    # Incrementally refresh today's derived gut-health metrics. Non-blocking
+    # semantics — failures here should never break logging a meal.
+    try:
+        from app.services.nutrition.gut_health import compute_daily_metrics
+        compute_daily_metrics(db, user_id=current_user.id, metric_date=meal_date, allow_ai=False)
+    except Exception:
+        pass
+    return result
 
 
 @router.get("/history")
@@ -245,6 +253,50 @@ def meal_insights(
     patterns = get_nutrition_patterns(current_user.id, days=14, db=db)
     insights = get_meal_insights(current_user.id, db=db)
     return {"insights": insights, "patterns": patterns}
+
+
+@router.get("/gut-health")
+def gut_health_signals(
+    days: int = Query(default=7, ge=1, le=30),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return derived gut-health + longevity signals for today + the rolling
+    window. Reads from DailyNutritionMetrics (regenerable) so this endpoint
+    is cheap; computes today on-the-fly in case the background pass hasn't
+    caught up yet."""
+    from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
+
+    today = date.today()
+    try:
+        today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=False)
+    except Exception:
+        today_row = None
+
+    rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days)
+
+    if today_row is None:
+        return {"today": None, "window": rollup}
+
+    return {
+        "today": {
+            "date": str(today_row.metric_date),
+            "calories_total": today_row.calories_total,
+            "fiber_total_g": today_row.fiber_total_g,
+            "fiber_per_1000_kcal": today_row.fiber_per_1000_kcal,
+            "distinct_plant_foods": today_row.distinct_plant_foods,
+            "fermented_servings": today_row.fermented_servings,
+            "omega3_servings": today_row.omega3_servings,
+            "processing_counts": today_row.processing_counts or {},
+            "saturated_fat_g": today_row.saturated_fat_g,
+            "gut_support_score": today_row.gut_support_score,
+            "food_quality_score": today_row.food_quality_score,
+            "longevity_signals_score": today_row.longevity_signals_score,
+            "classified_item_count": today_row.classified_item_count,
+            "item_count": today_row.item_count,
+        },
+        "window": rollup,
+    }
 
 
 # ─── Get one ──────────────────────────────────────────────────────────────────

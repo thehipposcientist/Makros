@@ -319,6 +319,28 @@ def _startup_backfill_muscle_fatigue():
     threading.Thread(target=_worker, daemon=True, name="backfill-muscle-fatigue").start()
 
 
+def _startup_backfill_gut_health():
+    """Classify every distinct food name + compute daily gut/longevity metrics
+    for historical logs. Idempotent; skips rows already at the current version.
+    AI fallback stays off by default to avoid surprise API costs — flip
+    GUT_BACKFILL_ALLOW_AI=1 to enable during a deliberate pass."""
+    import os, threading
+    if os.getenv("GUT_BACKFILL_ENABLED", "1") != "1":
+        logger.info("gut_backfill_disabled", extra={"reason": "GUT_BACKFILL_ENABLED=0"})
+        return
+    allow_ai = os.getenv("GUT_BACKFILL_ALLOW_AI", "0") == "1"
+
+    def _worker():
+        try:
+            from app.services.nutrition.gut_backfill import run_full_backfill
+            stats = run_full_backfill(allow_ai=allow_ai)
+            logger.info("gut_backfill_startup_done", extra=stats)
+        except Exception:
+            logger.exception("gut_backfill_startup_failed")
+
+    threading.Thread(target=_worker, daemon=True, name="backfill-gut-health").start()
+
+
 @app.on_event("startup")
 def on_startup():
     logger.info("app_startup", extra={"version": app.version})
@@ -327,6 +349,7 @@ def on_startup():
     _startup_enrich_food_micros()
     _startup_enrich_exercise_images()
     _startup_backfill_muscle_fatigue()
+    _startup_backfill_gut_health()
     logger.info("app_startup_complete")
 
 

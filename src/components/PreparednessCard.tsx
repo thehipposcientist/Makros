@@ -94,22 +94,14 @@ export default function PreparednessCard({
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading && !result) {
-    return (
-      <View style={{
-        backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 12,
-        borderWidth: 1, borderColor: tc.border,
-      }}>
-        <Text style={{ fontSize: 13, color: tc.textMuted }}>Computing preparedness…</Text>
-      </View>
-    );
-  }
+  if (loading && !result) return null;
   if (!result) return null;
 
+  // Use theme color tokens so every palette reads correctly (not hardcoded hex).
   const labelColor =
-    result.label === 'Primed'    ? '#22C55E' :
+    result.label === 'Primed'    ? tc.success :
     result.label === 'Ready'     ? tc.primary :
-    result.label === 'Moderate'  ? '#F59E0B' : '#EF4444';
+    result.label === 'Moderate'  ? tc.warning : tc.error;
 
   const toggle = () => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -134,26 +126,15 @@ export default function PreparednessCard({
         borderWidth: 1, borderColor: tc.border,
       }}
     >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-        <View style={{
-          width: 54, height: 54, borderRadius: 27,
-          backgroundColor: labelColor + '22',
-          alignItems: 'center', justifyContent: 'center',
-          borderWidth: 2, borderColor: labelColor,
-        }}>
-          <Text style={{ fontSize: 20, fontWeight: '900', color: labelColor, lineHeight: 22 }}>
-            {result.score}
-          </Text>
-        </View>
+      {/* Header — mirrors RecoveryCard / AdherenceTrendCard: icon + title + chevron. */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Ionicons name="flash-outline" size={16} color={labelColor} />
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.8 }}>
-            READY TO TRAIN?
-          </Text>
-          <Text style={{ fontSize: 18, fontWeight: '800', color: labelColor, marginTop: 1 }}>
-            {result.label}
+          <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+            Ready to train: <Text style={{ color: labelColor }}>{result.label}</Text> ({result.score})
           </Text>
           {result.insights.length > 0 && (
-            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }} numberOfLines={expanded ? undefined : 1}>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={expanded ? undefined : 1}>
               {result.insights[0]}
             </Text>
           )}
@@ -162,21 +143,22 @@ export default function PreparednessCard({
       </View>
 
       {expanded && (
-        <View style={{ marginTop: 12, gap: 6 }}>
+        <View style={{ marginTop: 10, gap: 4 }}>
           {pillarRows.map(([label, pts, max]) => {
             const pct = Math.max(0, Math.min(1, pts / max));
+            const barColor = pct >= 0.75 ? tc.success : pct >= 0.50 ? tc.primary : pct >= 0.30 ? tc.warning : tc.error;
             return (
               <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                   {label}
                 </Text>
-                <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
+                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
                   <View style={{
                     width: `${Math.max(3, pct * 100)}%` as any,
-                    height: 6, borderRadius: 3, backgroundColor: labelColor,
+                    height: 5, borderRadius: 3, backgroundColor: barColor,
                   }} />
                 </View>
-                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>
+                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
                   {pts}/{max}
                 </Text>
               </View>
