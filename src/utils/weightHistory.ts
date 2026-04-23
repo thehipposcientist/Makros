@@ -34,6 +34,30 @@ export async function saveWeightEntry(
   return trimmed;
 }
 
+/** Delete a single weight entry by its ISO date. Returns the trimmed history. */
+export async function deleteWeightEntry(date: string): Promise<WeightEntry[]> {
+  const history = await loadWeightHistory();
+  const next = history.filter(e => e.date !== date);
+  await AsyncStorage.setItem(KEY, JSON.stringify(next));
+  return next;
+}
+
+/** Replace an entry's weight at a given date. Inserts one if missing. */
+export async function updateWeightEntry(date: string, weightLbs: number): Promise<WeightEntry[]> {
+  const history = await loadWeightHistory();
+  const idx = history.findIndex(e => e.date === date);
+  const entry: WeightEntry = { date, weightLbs: Math.round(weightLbs * 10) / 10, source: 'manual' };
+  if (idx >= 0) history[idx] = entry; else history.push(entry);
+  history.sort((a, b) => a.date.localeCompare(b.date));
+  await AsyncStorage.setItem(KEY, JSON.stringify(history));
+  return history;
+}
+
+/** Wipe all weight entries. Used by the "Reset history" action. */
+export async function clearWeightHistory(): Promise<void> {
+  await AsyncStorage.removeItem(KEY);
+}
+
 export function weightChange(history: WeightEntry[], days: number): { change: number; startWeight: number; endWeight: number } | null {
   if (history.length < 2) return null;
   const cutoff = new Date();

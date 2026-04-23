@@ -13,8 +13,8 @@
 // Works with no Apple Health: in that case we surface backend readiness
 // + nutrition + yesterday strain only, and the Apple-Health pillars disappear.
 
-import { useCallback, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
@@ -25,6 +25,50 @@ import { loadWorkoutHistory, loadHealthSummary } from '../utils/workoutHistory';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Animated width bar. Re-runs whenever `pct` changes (so switching focus
+// mid-session animates the new target). Uses JS driver because percentage
+// width isn't supported by the native one.
+function AnimBar({ pct, color, trackColor }: { pct: number; color: string; trackColor: string }) {
+  const w = useRef(new Animated.Value(0)).current;
+  const last = useRef<number>(-1);
+  useEffect(() => {
+    if (last.current === pct) return;
+    last.current = pct;
+    Animated.timing(w, {
+      toValue: Math.max(0, Math.min(1, pct)),
+      duration: 650,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [pct, w]);
+  return (
+    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: trackColor }}>
+      <Animated.View style={{
+        width: w.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
+        height: 5, borderRadius: 3, backgroundColor: color,
+      }} />
+    </View>
+  );
+}
+
+// Animated integer counter. Eases up to `value` on mount + whenever value
+// changes. Used for the hero score.
+function AnimCounter({ value, style }: { value: number; style: any }) {
+  const v = useRef(new Animated.Value(0)).current;
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    const sub = v.addListener(({ value: x }) => setDisplay(Math.round(x)));
+    Animated.timing(v, {
+      toValue: value,
+      duration: 800,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+    return () => v.removeListener(sub);
+  }, [value, v]);
+  return <Text style={style}>{display}</Text>;
 }
 
 // Map planned focuses to the muscle groups they actually train. Keep it
@@ -108,10 +152,12 @@ export default function TrainingReadinessCard({
       // When a specific focus is planned, prefer the backend's per-focus
       // readiness (it weights the relevant muscle groups). When focus changes
       // the card re-computes against the correct readiness number.
+      // NOTE: backend returns focus_readiness as 0.0-1.0 floats but
+      // readiness_score as 0-100 int — normalize to 0-100 before passing.
       const focusKey = (todaysFocus ?? '').toLowerCase().replace(/\s+/g, '_');
       const focusReadiness =
         focusKey && f?.focus_readiness?.[focusKey] != null
-          ? f.focus_readiness[focusKey]
+          ? Math.round(f.focus_readiness[focusKey] * 100)
           : f?.readiness_score ?? null;
 
       const res = scorePreparedness({
@@ -142,10 +188,25 @@ export default function TrainingReadinessCard({
   if (loading && !prep) return null;
   if (!prep) return null;
 
+  // Status colors — lean into the theme. Primed/Ready both wear the theme's
+  // primary (varying intensity), and only Moderate/Fatigued switch to the
+  // semantic amber/red signal. Keeps the card cohesive with whatever palette
+  // the user picked without dropping the "you need to rest" warning.
   const labelColor =
-    prep.label === 'Primed'    ? tc.success :
+    prep.label === 'Primed'    ? tc.primary :
     prep.label === 'Ready'     ? tc.primary :
     prep.label === 'Moderate'  ? tc.warning : tc.error;
+
+  // Bar colors follow the same philosophy: primary at full or reduced weight
+  // for "good" bands, only amber/red when something is actually off.
+  const barColorFor = (pct: number) =>
+    pct >= 0.75 ? tc.primary :
+    pct >= 0.50 ? (tc.primaryDark ?? tc.primary) :
+    pct >= 0.30 ? tc.warning : tc.error;
+  const muscleBarColor = (recovery: number) =>
+    recovery >= 75 ? tc.primary :
+    recovery >= 50 ? (tc.primaryDark ?? tc.primary) :
+    recovery >= 30 ? tc.warning : tc.error;
 
   const focusMuscles = musclesForFocus(todaysFocus);
   const muscleFatigue = fatigue?.muscle_fatigue ?? {};
@@ -186,18 +247,35 @@ export default function TrainingReadinessCard({
       onPress={toggle}
       style={{
         backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
-        borderWidth: 1, borderColor: tc.border,
+        borderWidth: 1,
+        // Accent-tinted border that still respects each theme's identity.
+        // Primed/Ready wear the theme color; Moderate/Fatigued switch to
+        // the semantic signal so the UI still warns appropriately.
+        borderColor: (prep.label === 'Primed' || prep.label === 'Ready')
+          ? tc.primary + '55'
+          : labelColor + '55',
+        overflow: 'hidden',
       }}
     >
+      {/* Left accent strip — subtle theme anchor. 3px wide on the leading edge. */}
+      <View style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
+        backgroundColor: labelColor,
+        opacity: 0.6,
+      }} />
       {/* Header — same shape as RecoveryCard */}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <Ionicons name="flash-outline" size={16} color={labelColor} />
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
-            {focusLabel ? `${focusLabel}: ` : 'Today: '}
-            <Text style={{ color: labelColor }}>{prep.label}</Text>
-            <Text style={{ color: tc.textSecondary }}> ({prep.score})</Text>
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+            <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+              {focusLabel ? `${focusLabel}: ` : 'Today: '}
+              <Text style={{ color: labelColor }}>{prep.label}</Text>
+              <Text style={{ color: tc.textSecondary }}> (</Text>
+            </Text>
+            <AnimCounter value={prep.score} style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }} />
+            <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }}>)</Text>
+          </View>
           {!expanded && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
               {prep.insights[0] ?? (relevantMuscles.length > 0
@@ -220,15 +298,13 @@ export default function TrainingReadinessCard({
               {relevantMuscles.map(([muscle, fat]) => {
                 const pct = Math.round(fat * 100);
                 const recovery = Math.max(0, Math.min(100, 100 - pct));
-                const barColor = recovery >= 70 ? tc.success : recovery >= 40 ? tc.warning : tc.error;
+                const barColor = muscleBarColor(recovery);
                 return (
                   <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
                     <Text style={{ width: 92, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>
                       {muscle.replace('_', ' ')}
                     </Text>
-                    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                      <View style={{ width: `${Math.max(3, recovery)}%` as any, height: 5, borderRadius: 3, backgroundColor: barColor }} />
-                    </View>
+                    <AnimBar pct={recovery / 100} color={barColor} trackColor={tc.border} />
                     <Text style={{ width: 44, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
                       {recovery}%
                     </Text>
@@ -244,13 +320,11 @@ export default function TrainingReadinessCard({
           </Text>
           {pillarRows.map(([label, pts, max]) => {
             const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
-            const barColor = pct >= 0.75 ? tc.success : pct >= 0.50 ? tc.primary : pct >= 0.30 ? tc.warning : tc.error;
+            const barColor = barColorFor(pct);
             return (
               <View key={label as string} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label as string}</Text>
-                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{ width: `${Math.max(3, pct * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: barColor }} />
-                </View>
+                <AnimBar pct={pct} color={barColor} trackColor={tc.border} />
                 <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
                   {pts}/{max}
                 </Text>

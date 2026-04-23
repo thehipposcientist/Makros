@@ -3977,7 +3977,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Streak + consistency widget (Feature 8) */}
             {workoutSubTab === 'plan' && authToken && (
-              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.theme} />
+              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} />
             )}
 
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
@@ -3989,7 +3989,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               return (
                 <TrainingReadinessCard
                   authToken={authToken}
-                  themeName={userProfile.theme}
+                  themeName={userProfile.themePreference}
                   age={userProfile.physicalStats?.age ?? null}
                   proteinTarget={todayPlan?.targets?.protein ?? null}
                   calorieTarget={todayPlan?.targets?.calories ?? null}
@@ -4000,12 +4000,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Menstrual cycle phase (auto-hides if no Apple Health data) */}
             {workoutSubTab === 'plan' && authToken && (
-              <CyclePhaseCard themeName={userProfile.theme} />
+              <CyclePhaseCard themeName={userProfile.themePreference} />
             )}
 
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
             {workoutSubTab === 'plan' && authToken && (
-              <WeeklyDigestCard authToken={authToken} themeName={userProfile.theme} />
+              <WeeklyDigestCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
 
             {/* Weekly check-in countdown */}
@@ -4470,12 +4470,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         flexDirection: 'row', alignItems: 'center', gap: 10,
                         backgroundColor: themeColors.surface,
                         borderRadius: 12, padding: 12, marginBottom: 10,
-                        borderWidth: 1, borderColor: themeColors.primary + '44',
+                        borderWidth: 1, borderColor: themeColors.border,
                       }}
                     >
                       <View style={{
-                        width: 36, height: 36, borderRadius: 18,
-                        backgroundColor: themeColors.primary + '22',
+                        width: 34, height: 34, borderRadius: 17,
+                        backgroundColor: themeColors.surfaceRaised,
                         alignItems: 'center', justifyContent: 'center',
                       }}>
                         <Ionicons name="cart-outline" size={18} color={themeColors.primary} />
@@ -6165,7 +6165,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showGroceryList}
         onClose={() => setShowGroceryList(false)}
         plansByDate={nutritionPlansByDate}
-        themeName={userProfile.theme}
+        themeName={userProfile.themePreference}
       />
 
       {/* Weekly check-in — auto-popup every 7 days */}

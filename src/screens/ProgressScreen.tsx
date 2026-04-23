@@ -19,7 +19,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError } from '../services/appleHealth';
+import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -152,6 +152,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
@@ -301,6 +302,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           setHealthSummary(fresh);
           saveHealthSummary(fresh).catch(() => null);
         }
+        // Nights of HRV/sleep history drive the "X/14 nights" calibration UI.
+        try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
       } catch {}
     })();
     computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
@@ -1474,8 +1477,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {/* Sleep Score */}
           {healthSummary?.sleepScore && (() => {
             const ss = healthSummary.sleepScore;
-            const scoreColor = ss.score >= 80 ? '#22C55E' : ss.score >= 60 ? '#F59E0B' : '#EF4444';
-            // Show sleep durations as "Xh Ym" (more intuitive than 5.8h).
+            const scoreColor = ss.score >= 80 ? tc.success : ss.score >= 60 ? tc.warning : tc.error;
             const formatHM = (hours: number) => {
               const totalMin = Math.round(hours * 60);
               const h = Math.floor(totalMin / 60);
@@ -1484,92 +1486,145 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               if (h > 0) return `${h}h`;
               return `${m}m`;
             };
-            const stageBar = (label: string, hours: number, color: string, total: number) => {
-              const pct = total > 0 ? Math.round((hours / total) * 100) : 0;
-              return (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <Text style={{ width: 44, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label}</Text>
-                  <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
-                    <View style={{ width: `${Math.max(3, pct)}%` as any, height: 8, borderRadius: 4, backgroundColor: color }} />
-                  </View>
-                  <Text style={{ width: 78, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{formatHM(hours)} ({pct}%)</Text>
-                </View>
-              );
-            };
             const isPersonalized = (ss as any).mode === 'personalized';
             const pillars = (ss as any).pillars as {
               duration: number; efficiency: number; hrv: number;
               regularity?: number; stageComposite: number; healthFlags: number;
             } | undefined;
             const effRatio = (ss as any).efficiency as number | null | undefined;
+            const effPct = effRatio != null ? Math.min(100, Math.round(effRatio * 100)) : null;
+            const nightsLogged = sleepHistoryCount;
+
+            // Stage composition (single stacked bar). Awake is visually
+            // appended after the asleep stages for a "time in bed" read.
+            const totalAsleep = ss.stages.total;
+            const totalWithAwake = totalAsleep + ss.stages.awake;
+            const deepPct = totalAsleep > 0 ? (ss.stages.deep / totalAsleep) * 100 : 0;
+            const corePct = totalAsleep > 0 ? (ss.stages.core / totalAsleep) * 100 : 0;
+            const remPct  = totalAsleep > 0 ? (ss.stages.rem  / totalAsleep) * 100 : 0;
+            const awakePctOfTotal = totalWithAwake > 0 ? (ss.stages.awake / totalWithAwake) * 100 : 0;
+            const STAGE_COLOR = { deep: '#6366F1', core: '#818CF8', rem: '#A78BFA', awake: tc.error };
+
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
+                {/* Header: icon + title + score (score is the hero metric). */}
+                <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
                   <Ionicons name="moon-outline" size={16} color="#818CF8" />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={{ fontSize: 24, fontWeight: '900', color: scoreColor }}>{ss.score}</Text>
-                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{ss.rating} · {formatHM(ss.duration)} total</Text>
-                  </View>
+                  <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor, lineHeight: 32 }}>{ss.score}</Text>
                 </View>
-                {/* Mode badge */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+
+                {/* Rating + total + baseline-mode pill on one compact line. */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textSecondary }}>{ss.rating}</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>· {formatHM(ss.duration)} total</Text>
+                  <View style={{ flex: 1 }} />
                   <View style={{
-                    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10,
-                    backgroundColor: isPersonalized ? tc.primary + '22' : tc.border + '66',
+                    paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8,
+                    backgroundColor: isPersonalized ? tc.primary + '22' : tc.surfaceRaised,
                   }}>
                     <Text style={{
-                      fontSize: 9, fontWeight: '800', letterSpacing: 0.8,
-                      color: isPersonalized ? tc.primary : tc.textSecondary,
+                      fontSize: 9, fontWeight: '800', letterSpacing: 0.6,
+                      color: isPersonalized ? tc.primary : tc.textMuted,
                     }}>
-                      {isPersonalized ? 'PERSONALIZED' : 'BUILDING BASELINE'}
+                      {isPersonalized ? 'PERSONALIZED' : 'CALIBRATING'}
                     </Text>
                   </View>
-                  {!isPersonalized && (
-                    <Text style={{ fontSize: 10, color: tc.textMuted, flex: 1 }}>
-                      Score will adapt to your HRV + sleep-timing baseline after 14 nights
-                    </Text>
-                  )}
                 </View>
-                {stageBar('Deep', ss.stages.deep, '#6366F1', ss.stages.total)}
-                {stageBar('Core', ss.stages.core, '#818CF8', ss.stages.total)}
-                {stageBar('REM', ss.stages.rem, '#A78BFA', ss.stages.total)}
-                {ss.stages.awake > 0 && stageBar('Awake', ss.stages.awake, '#EF4444', ss.stages.total + ss.stages.awake)}
-                {/* Efficiency + regularity summary row */}
-                {(effRatio != null || (isPersonalized && pillars?.regularity != null)) && (
-                  <View style={{ flexDirection: 'row', gap: 12, marginTop: 6 }}>
-                    {effRatio != null && (
-                      <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 10, backgroundColor: tc.background }}>
-                        <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{Math.round(effRatio * 100)}%</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>EFFICIENCY</Text>
-                      </View>
-                    )}
-                    {isPersonalized && pillars?.regularity != null && (
-                      <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 10, backgroundColor: tc.background }}>
-                        <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{pillars.regularity}</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>REGULARITY /15</Text>
-                      </View>
-                    )}
+
+                {/* Compact calibration progress (only while building baseline). */}
+                {!isPersonalized && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <View style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: tc.border }}>
+                      <View style={{
+                        width: `${Math.min(100, (nightsLogged / 14) * 100)}%` as any,
+                        height: 4, borderRadius: 2, backgroundColor: tc.primary,
+                      }} />
+                    </View>
+                    <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600' }}>
+                      {Math.min(14, nightsLogged)}/14 nights
+                    </Text>
                   </View>
                 )}
+
+                {/* Single stacked stage-composition bar. Fades + slides in on mount. */}
+                <FadeInView delay={60} style={{
+                  flexDirection: 'row', height: 12, borderRadius: 6, overflow: 'hidden',
+                  backgroundColor: tc.border,
+                }}>
+                  {ss.stages.deep > 0 && (
+                    <View style={{ width: `${deepPct}%` as any, backgroundColor: STAGE_COLOR.deep }} />
+                  )}
+                  {ss.stages.core > 0 && (
+                    <View style={{ width: `${corePct}%` as any, backgroundColor: STAGE_COLOR.core }} />
+                  )}
+                  {ss.stages.rem > 0 && (
+                    <View style={{ width: `${remPct}%` as any, backgroundColor: STAGE_COLOR.rem }} />
+                  )}
+                </FadeInView>
+                {/* Stage legend — each row in one line. */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, gap: 4 }}>
+                  {[
+                    { label: 'Deep', hours: ss.stages.deep, color: STAGE_COLOR.deep, pct: deepPct },
+                    { label: 'Core', hours: ss.stages.core, color: STAGE_COLOR.core, pct: corePct },
+                    { label: 'REM',  hours: ss.stages.rem,  color: STAGE_COLOR.rem,  pct: remPct },
+                  ].map(s => (
+                    <View key={s.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 8 }}>
+                      <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: s.color }} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{s.label}</Text>
+                      <Text style={{ fontSize: 11, color: tc.textMuted }}>{formatHM(s.hours)} ({Math.round(s.pct)}%)</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {/* Summary strip: Total · Efficiency · Awake. */}
+                <View style={{
+                  flexDirection: 'row', marginTop: 10, paddingTop: 10,
+                  borderTopWidth: 1, borderTopColor: tc.border + '55',
+                }}>
+                  <View style={{ flex: 1, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{formatHM(ss.duration)}</Text>
+                    <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>TOTAL</Text>
+                  </View>
+                  {effPct != null && (
+                    <View style={{ flex: 1, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{effPct}%</Text>
+                      <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>EFFICIENCY</Text>
+                    </View>
+                  )}
+                  <View style={{ flex: 1, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: ss.stages.awake > 0.5 ? tc.warning : tc.textPrimary }}>
+                      {formatHM(ss.stages.awake)}
+                      {awakePctOfTotal > 0 && <Text style={{ fontSize: 10, color: tc.textMuted }}> ({Math.round(awakePctOfTotal)}%)</Text>}
+                    </Text>
+                    <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>AWAKE</Text>
+                  </View>
+                  {isPersonalized && pillars?.regularity != null && (
+                    <View style={{ flex: 1, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{pillars.regularity}<Text style={{ fontSize: 10, color: tc.textMuted }}>/15</Text></Text>
+                      <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>REGULARITY</Text>
+                    </View>
+                  )}
+                </View>
+
                 {(ss.hrvAvg != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
                   <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                     {ss.hrvAvg != null && (
                       <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.hrvAvg}</Text>
-                        <Text style={{ fontSize: 10, color: tc.textMuted }}>HRV (ms)</Text>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.hrvAvg}</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted }}>HRV (ms)</Text>
                       </View>
                     )}
                     {ss.respiratoryRate != null && (
                       <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.respiratoryRate}</Text>
-                        <Text style={{ fontSize: 10, color: tc.textMuted }}>Resp (brpm)</Text>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.respiratoryRate}</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted }}>Resp (brpm)</Text>
                       </View>
                     )}
                     {ss.oxygenSaturation != null && (
                       <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{ss.oxygenSaturation}%</Text>
-                        <Text style={{ fontSize: 10, color: tc.textMuted }}>SpO2</Text>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.oxygenSaturation}%</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted }}>SpO2</Text>
                       </View>
                     )}
                   </View>
@@ -1589,7 +1644,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Gut health + longevity signals (from logged meals) */}
-          {authToken && <GutHealthCard authToken={authToken} themeName={userProfile.theme} />}
+          {authToken && <GutHealthCard authToken={authToken} themeName={userProfile.themePreference} />}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
           {(() => {
@@ -1889,17 +1944,84 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   );
                 })()}
-                {/* Weight log */}
+                {/* Weight log — tap trash to delete. After deletion we
+                    reload history from disk so the derived stats (diff,
+                    goal progress, ETA) recompute off the new series. */}
                 {weightEntries.slice(-10).reverse().map((e, i) => (
-                  <View key={e.date} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary }}>
+                  <View key={e.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
+                    <Text style={{ flex: 1, fontSize: 13, color: tc.textSecondary }}>
                       {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                     </Text>
                     <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>
                       {e.weightLbs} lbs
                     </Text>
+                    <TouchableOpacity
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      onPress={() => {
+                        Alert.alert(
+                          'Delete entry?',
+                          `Remove ${e.weightLbs} lbs logged on ${new Date(e.date + 'T12:00:00').toLocaleDateString()}? Derived stats (diff, ETA) will recalculate.`,
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Delete',
+                              style: 'destructive',
+                              onPress: async () => {
+                                const { deleteWeightEntry } = await import('../utils/weightHistory');
+                                const next = await deleteWeightEntry(e.date);
+                                setWeightEntries(next);
+                                // Sync latest to profile so macros/goal progress update.
+                                if (next.length > 0 && onUpdateWeight) {
+                                  onUpdateWeight(next[next.length - 1].weightLbs);
+                                }
+                              },
+                            },
+                          ],
+                        );
+                      }}
+                    >
+                      <Ionicons name="trash-outline" size={14} color={tc.textMuted} />
+                    </TouchableOpacity>
                   </View>
                 ))}
+
+                {/* Footer actions */}
+                {weightEntries.length > 0 && (
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                    <TouchableOpacity
+                      onPress={async () => {
+                        // Force a re-read of the persisted history and re-derive
+                        // downstream stats in case another screen mutated it.
+                        const { loadWeightHistory } = await import('../utils/weightHistory');
+                        setWeightEntries(await loadWeightHistory());
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, color: tc.textMuted }}>Recalculate</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={() => {
+                        Alert.alert(
+                          'Reset weight history?',
+                          'This deletes every logged weight. The current weight on your profile stays unchanged.',
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Reset',
+                              style: 'destructive',
+                              onPress: async () => {
+                                const { clearWeightHistory } = await import('../utils/weightHistory');
+                                await clearWeightHistory();
+                                setWeightEntries([]);
+                              },
+                            },
+                          ],
+                        );
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, color: tc.error }}>Reset history</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </>
             )}
           </View>

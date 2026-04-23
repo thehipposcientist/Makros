@@ -11,6 +11,7 @@ import { AppThemeName, DailyNutritionPlan } from '../types';
 import { buildGroceryList, formatGroceryText, GroceryRow } from '../utils/groceryList';
 
 const CHECKED_KEY = 'groceryChecked_v1';
+const REMOVED_KEY = 'groceryRemoved_v1';
 
 interface Props {
   visible: boolean;
@@ -24,9 +25,13 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
   const tc = theme.colors;
 
   const [checked, setChecked] = useState<Record<string, boolean>>({});
+  // Per-item removal (user said they don't want this item; persisted separately
+  // from `checked` so completing a shopping trip doesn't also hide future
+  // weeks' items).
+  const [removed, setRemoved] = useState<Record<string, boolean>>({});
 
   // Use next 7 days of plans
-  const rows: GroceryRow[] = useMemo(() => {
+  const allRows: GroceryRow[] = useMemo(() => {
     if (!visible) return [];
     const now = new Date();
     const keys: string[] = [];
@@ -38,10 +43,16 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
     return buildGroceryList(plans);
   }, [plansByDate, visible]);
 
+  const rows = useMemo(() => allRows.filter(r => !removed[r.name]), [allRows, removed]);
+  const removedCount = useMemo(() => allRows.filter(r => removed[r.name]).length, [allRows, removed]);
+
   useEffect(() => {
     if (!visible) return;
     AsyncStorage.getItem(CHECKED_KEY).then(raw => {
       if (raw) { try { setChecked(JSON.parse(raw)); } catch {} }
+    });
+    AsyncStorage.getItem(REMOVED_KEY).then(raw => {
+      if (raw) { try { setRemoved(JSON.parse(raw)); } catch {} }
     });
   }, [visible]);
 
@@ -51,6 +62,27 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
       AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(next)).catch(() => {});
       return next;
     });
+  }, []);
+
+  const removeRow = useCallback((name: string) => {
+    setRemoved(prev => {
+      const next = { ...prev, [name]: true };
+      AsyncStorage.setItem(REMOVED_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+    // If it was checked, clean that flag too — meaningless for a removed row.
+    setChecked(prev => {
+      if (!prev[name]) return prev;
+      const next = { ...prev };
+      delete next[name];
+      AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const restoreAllRemoved = useCallback(() => {
+    setRemoved({});
+    AsyncStorage.removeItem(REMOVED_KEY).catch(() => {});
   }, []);
 
   const clearChecks = () => {
@@ -141,7 +173,10 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
                       backgroundColor: isChecked ? tc.primary : 'transparent',
                       alignItems: 'center', justifyContent: 'center',
                     }}>
-                      {isChecked && <Ionicons name="checkmark" size={14} color="#fff" />}
+                      {/* Contrast-aware checkmark: inherits the theme's background
+                          so it reads as a "negative" mark on the primary fill,
+                          matching whatever palette the user is in. */}
+                      {isChecked && <Ionicons name="checkmark" size={14} color={tc.background} />}
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text
@@ -160,17 +195,38 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
                     <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textSecondary }}>
                       {q}{r.unit ? ' ' + r.unit : ''}
                     </Text>
+                    {/* Remove (x) — nested touchable with large hitSlop so a
+                        tap on the main row still toggles the check. */}
+                    <TouchableOpacity
+                      onPress={() => removeRow(r.name)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      style={{ padding: 2 }}
+                    >
+                      <Ionicons name="close-circle" size={18} color={tc.textMuted} />
+                    </TouchableOpacity>
                   </TouchableOpacity>
                 );
               })}
-              {done > 0 && (
-                <TouchableOpacity
-                  onPress={clearChecks}
-                  style={{ alignItems: 'center', padding: 10, marginTop: 6 }}
-                >
-                  <Text style={{ fontSize: 12, color: tc.textMuted }}>Uncheck all</Text>
-                </TouchableOpacity>
-              )}
+              <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 6 }}>
+                {done > 0 && (
+                  <TouchableOpacity
+                    onPress={clearChecks}
+                    style={{ alignItems: 'center', padding: 10 }}
+                  >
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>Uncheck all</Text>
+                  </TouchableOpacity>
+                )}
+                {removedCount > 0 && (
+                  <TouchableOpacity
+                    onPress={restoreAllRemoved}
+                    style={{ alignItems: 'center', padding: 10 }}
+                  >
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>
+                      Restore {removedCount} removed
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </ScrollView>
           )}
         </View>

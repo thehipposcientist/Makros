@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, LayoutAnimation, Animated, Easing } from 
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import BodyHeatMap, { HeatMuscleKey, HeatRecoveryMap } from './BodyHeatMap';
 
 /**
  * Per-muscle recovery bar with animated fill. Width is a layout prop so
@@ -151,21 +152,59 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
       </View>
 
       {expanded && (
-        <View style={{ marginTop: 10, gap: 4 }}>
-          {muscleEntries.map(([muscle, fatigue], idx) => {
-            const pct = Math.round(fatigue * 100);
-            const recovery = Math.max(0, Math.min(100, 100 - pct));
-            const color = recovery >= 70 ? '#22C55E' : recovery >= 40 ? '#F59E0B' : '#EF4444';
-            return (
-              <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary, width: 75, textTransform: 'capitalize' }}>
-                  {muscle.replace('_', ' ')}
-                </Text>
-                <AnimatedRecoveryBar recovery={recovery} color={color} borderColor={tc.border} delay={idx * 40} />
-                <Text style={{ fontSize: 10, fontWeight: '700', color, width: 32, textAlign: 'right' }}>{recovery}%</Text>
-              </View>
-            );
-          })}
+        <View style={{ marginTop: 10 }}>
+          {/* Main visualization — body heat map */}
+          {(() => {
+            // Map backend muscle fatigue (chest/back/... as 0-1) onto the heat
+            // map's muscle keys (front + back). "back" projects onto both
+            // upper_back and lats since backend doesn't split them.
+            const toRecovery = (muscle: string): number =>
+              Math.max(0, Math.min(100, 100 - Math.round((fatigueMap[muscle] ?? 0) * 100)));
+            const heatRecovery: HeatRecoveryMap = {
+              chest:      toRecovery('chest'),
+              shoulders:  toRecovery('shoulders'),
+              biceps:     toRecovery('biceps'),
+              triceps:    toRecovery('triceps'),
+              abs:        toRecovery('core'),
+              quads:      toRecovery('quads'),
+              hamstrings: toRecovery('hamstrings'),
+              glutes:     toRecovery('glutes'),
+              calves:     toRecovery('calves'),
+              upper_back: toRecovery('back'),
+              lats:       toRecovery('back'),
+            };
+            return <BodyHeatMap recovery={heatRecovery} themeName={themeName} height={240} />;
+          })()}
+
+          {/* Compact exact-value list — two columns */}
+          <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap' }}>
+            {muscleEntries.map(([muscle, fatigue]) => {
+              const pct = Math.round(fatigue * 100);
+              const recovery = Math.max(0, Math.min(100, 100 - pct));
+              const color = recovery >= 70 ? tc.success : recovery >= 40 ? tc.warning : tc.error;
+              return (
+                <View
+                  key={muscle}
+                  style={{
+                    width: '50%',
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingVertical: 3,
+                    paddingRight: 8,
+                  }}
+                >
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color, marginRight: 6 }} />
+                  <Text style={{ flex: 1, fontSize: 11, color: tc.textSecondary, textTransform: 'capitalize' }} numberOfLines={1}>
+                    {muscle.replace('_', ' ')}
+                  </Text>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{recovery}%</Text>
+                </View>
+              );
+            })}
+          </View>
+          {/* The animated bar helper is unused here now but kept exported for
+              other consumers that still want per-muscle bars. */}
+          {false && <AnimatedRecoveryBar recovery={0} color={tc.primary} borderColor={tc.border} delay={0} />}
           {/* Overall Load / systemic bar removed per request — the per-muscle
               bars above cover the useful signal. Users found the aggregate
               redundant with the headline readiness score. */}

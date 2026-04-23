@@ -123,7 +123,7 @@ export default function StreakConsistencyWidget({ authToken, themeName }: Props)
         borderWidth: 1, borderColor: tc.border,
       }}>
         <Animated.View style={{ transform: [{ scale: streakScale }, { scale: flamePulse }] }}>
-          <Ionicons name="flame" size={12} color="#F59E0B" />
+          <Ionicons name="flame" size={12} color={tc.warning} />
         </Animated.View>
         <Animated.Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any, transform: [{ scale: streakScale }] }}>
           {data.current_streak}

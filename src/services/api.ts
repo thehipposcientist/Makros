@@ -1115,7 +1115,7 @@ export interface FatigueScore {
   readiness_score: number;
   readiness_label: string;
   muscle_fatigue: Record<string, number>;
-  focus_readiness: Record<string, number>;
+  focus_readiness: Record<string, number>;  // 0.0-1.0 floats (NOT 0-100)
   top_fatigued: Array<{ muscle: string; value: number }>;
   blocked_focuses: string[];
   days_analyzed: number;
