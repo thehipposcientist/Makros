@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key>
+  <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSRequiresIPhoneOS</key>
+  <false/>
+  <key>UIDeviceFamily</key>
+  <array>
+    <integer>4</integer>
+  </array>
+  <key>WKApplication</key>
+  <true/>
+  <!-- Enables WKExtendedRuntimeSession so workouts keep HR reading
+       + the screen awake during lifts. -->
+  <key>WKBackgroundModes</key>
+  <array>
+    <string>workout-processing</string>
+  </array>
+  <!-- HealthKit usage descriptions — watchOS requires both read + share
+       strings for HKWorkoutSession. -->
+  <key>NSHealthShareUsageDescription</key>
+  <string>Thallo reads your heart rate during workouts so you can see your live rate and zone on the watch.</string>
+  <key>NSHealthUpdateUsageDescription</key>
+  <string>Thallo writes your completed workouts to Apple Health so they appear in the Fitness app.</string>
+</dict>
+</plist>

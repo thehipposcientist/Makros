@@ -1,0 +1,7 @@
+{
+  "name": "thallo-watch-bridge",
+  "version": "1.0.0",
+  "description": "WatchConnectivity bridge for the Thallo watchOS companion.",
+  "main": "index.ts",
+  "private": true
+}

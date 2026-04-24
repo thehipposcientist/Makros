@@ -1786,6 +1786,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { mounted = false; };
   }, [todayDone, workoutPlan]);
 
+  // Apple Watch sync — pushes today's workout + active theme to the
+  // paired watch whenever either changes. No-ops on devices without
+  // the watch bridge module (Android, devices without a paired watch).
+  useEffect(() => {
+    (async () => {
+      try {
+        const { pushWorkoutToWatch, pushThemeToWatch } = await import('../utils/watchSync');
+        const today = workoutPlan?.days?.[0] ?? null;
+        await pushWorkoutToWatch(today as any, new Date().toISOString().slice(0, 10));
+        await pushThemeToWatch(userProfile?.themePreference);
+      } catch { /* watch bridge optional — silent failure is fine */ }
+    })();
+  }, [workoutPlan, userProfile?.themePreference]);
+
+  // Listen for commands the user taps on the watch. Routes each to
+  // the existing phone-side action — watch is purely a remote control
+  // for state that already lives on the phone.
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    (async () => {
+      try {
+        const { onWatchCommand } = await import('../utils/watchSync');
+        unsubscribe = onWatchCommand((command) => {
+          const today = workoutPlan?.days?.[0];
+          if (!today) return;
+          if (command === 'start_workout') {
+            // Phone has a dedicated "start workout" action on HomeScreen —
+            // route through the same onStartWorkout passed from the parent.
+            onStartWorkout?.(today as any);
+          } else if (command === 'skip_workout') {
+            handleSkipToday(today.focus);
+          }
+          // Rest / set / end commands only fire inside an active
+          // workout; ActiveWorkoutScreen owns those handlers.
+        });
+      } catch { /* optional */ }
+    })();
+    return () => { if (unsubscribe) unsubscribe(); };
+  // handleSkipToday is declared later in this component (useCallback),
+  // so its reference is stable across re-renders — safe to omit from
+  // deps without stale-closure risk.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workoutPlan, onStartWorkout]);
+
   // Reload the preserved-completed-workouts overlay whenever the plan
   // changes or today's completion flag flips. Without this, trainer-chat
   // plan updates that call `setWorkoutPlan` directly (without bumping
