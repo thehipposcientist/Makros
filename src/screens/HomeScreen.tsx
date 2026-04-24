@@ -1825,7 +1825,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           todayPlan,
           checkedMealsByDate[todayISO],
           todayISO,
-          nutritionScoreData?.total ?? null,
+          nutritionScoreData?.score ?? null,
         );
       } catch { /* watch bridge optional — silent failure is fine */ }
     })();
@@ -1842,6 +1842,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
   // for state that already lives on the phone.
+  //
+  // handleToggleMeal / handleSkipToday / onStartWorkout are captured
+  // via refs so the WC listener (registered once) always dispatches to
+  // the latest handler closure. Without this, `handleToggleMeal` froze
+  // at initial-mount checkedMealsByDate, so every watch toggle after
+  // the first one was operating on stale check state.
+  const watchCmdHandlersRef = useRef({
+    start: (today: any) => { onStartWorkout?.(today); },
+    skip: (_focus: string) => {},
+    toggleMeal: (_date: string, _mealType: string) => {},
+  });
+  useEffect(() => {
+    watchCmdHandlersRef.current = {
+      start: (today: any) => { onStartWorkout?.(today); },
+      skip: (focus: string) => handleSkipToday(focus),
+      toggleMeal: (date: string, mealType: string) => handleToggleMeal(date, mealType),
+    };
+  });
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
     (async () => {
@@ -1850,14 +1868,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         unsubscribe = onWatchCommand((command, payload) => {
           if (command === 'start_workout') {
             const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
-            if (today) onStartWorkout?.(today as any);
+            if (today) watchCmdHandlersRef.current.start(today);
           } else if (command === 'skip_workout') {
             const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
-            if (today) handleSkipToday(today.focus);
+            if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'toggle_meal') {
             const mealType = String(payload?.mealType || '');
             const todayISO = new Date().toISOString().slice(0, 10);
-            if (mealType) handleToggleMeal(todayISO, mealType);
+            if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
           } else if (command === 'cancel_workout') {
             // Watch-originated cancel — drop any in-progress phone-side
             // workout state. We don't persist anything: past AsyncStorage

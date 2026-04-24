@@ -495,6 +495,62 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     })();
   }, [workout]);
 
+  // Watch→phone command handler. The watch is a remote control for the
+  // phone's workout state — log_set commits weight/reps into the same
+  // handler the phone UI uses (handleLogSetInline with overrides so we
+  // don't round-trip through setInputs); end_workout / cancel_workout
+  // forward to the phone's finish/cancel paths. Without this, every
+  // watch tap landed in HomeScreen which stays mounted but can only
+  // handle start/skip/meal commands — set logs were being dropped.
+  // Refs so the once-mounted WC listener can always reach the latest
+  // handlers without re-subscribing on every render (re-subscribing
+  // churns WatchConnectivity and can drop in-flight messages).
+  const handleLogSetInlineRef = useRef(handleLogSetInline);
+  useEffect(() => { handleLogSetInlineRef.current = handleLogSetInline; }, [handleLogSetInline]);
+  const exercisesRef = useRef(exercises);
+  useEffect(() => { exercisesRef.current = exercises; }, [exercises]);
+  const watchHandlersRef = useRef<{
+    finish: () => void;
+    cancel: () => void;
+  }>({ finish: () => {}, cancel: () => {} });
+  // handlersRef is updated further down once handleFinish / onCancel
+  // are in scope (see the `watchHandlersRef.current = ...` assignment
+  // below the handleFinish definition).
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    (async () => {
+      try {
+        const { onWatchCommand } = await import('../utils/watchSync');
+        unsubscribe = onWatchCommand((command, payload) => {
+          if (command === 'log_set') {
+            const exIdx = Number(payload?.exerciseIndex ?? -1);
+            const weight = payload?.weightLbs;
+            const reps = payload?.reps;
+            if (exIdx < 0 || !Number.isFinite(exIdx)) return;
+            const exs = exercisesRef.current;
+            if (!exs[exIdx]) return;
+            // Slot = next unfilled set slot for this exercise.
+            const slot = exs[exIdx].sets.length;
+            handleLogSetInlineRef.current(
+              exIdx,
+              slot,
+              true, // silent — no Alerts, watch already confirmed
+              undefined,
+              weight != null ? String(weight) : undefined,
+              reps != null ? String(reps) : undefined,
+            );
+          } else if (command === 'end_workout') {
+            watchHandlersRef.current.finish();
+          } else if (command === 'cancel_workout') {
+            watchHandlersRef.current.cancel();
+          }
+        });
+      } catch { /* watch bridge optional */ }
+    })();
+    return () => { if (unsubscribe) unsubscribe(); };
+  }, []);
+
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
   // Ref-based rest timer — avoids interval churn from re-running useEffect every second
@@ -1155,11 +1211,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // `overrideDuration` bypasses the state read for timed exercises —
   // needed because the timer "Done" button sets duration in state then
   // calls this immediately, but React hasn't flushed the state yet.
-  const handleLogSetInline = useCallback(async (exIdx: number, setSlot: number, silent = false, overrideDuration?: string) => {
+  const handleLogSetInline = useCallback(async (
+    exIdx: number,
+    setSlot: number,
+    silent = false,
+    overrideDuration?: string,
+    overrideWeight?: string,
+    overrideReps?: string,
+  ) => {
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
     const ex = exercises[exIdx];
     const timed = isTimedExercise(ex?.name ?? '', ex?.targetReps);
+
+    // Watch-originated logs pass weight / reps directly as overrides
+    // so we don't have to round-trip through React state first. Phone
+    // UI continues to flow through setInputs.
+    const effectiveWeight = overrideWeight ?? input?.weight;
+    const effectiveReps = overrideReps ?? input?.reps;
 
     let newSet: CompletedSet;
 
@@ -1194,13 +1263,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       };
       const skipWeight = shouldHideWeight(exMeta);
       const skipReps   = shouldHideReps(exMeta);
-      const weightNum  = skipWeight ? 0 : parseFloat(input?.weight ?? '');
-      const repsNum    = skipReps   ? 0 : parseInt(input?.reps ?? '', 10);
-      if (!skipWeight && (!input?.weight || isNaN(weightNum))) {
+      const weightNum  = skipWeight ? 0 : parseFloat(effectiveWeight ?? '');
+      const repsNum    = skipReps   ? 0 : parseInt(effectiveReps ?? '', 10);
+      if (!skipWeight && (!effectiveWeight || isNaN(weightNum))) {
         if (!silent) Alert.alert('Enter values', 'Fill in weight before logging this set.');
         return;
       }
-      if (!skipReps && (!input?.reps || isNaN(repsNum) || repsNum <= 0)) {
+      if (!skipReps && (!effectiveReps || isNaN(repsNum) || repsNum <= 0)) {
         if (!silent) Alert.alert('Enter values', 'Fill in reps before logging this set.');
         return;
       }
@@ -1240,14 +1309,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
 
     // Auto-advance to next incomplete exercise when all effective sets are done
+    let nextExIdx = exIdx;
     if (cleanSets.length >= effectiveTotal) {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       const nextIdx = updatedExercises.findIndex((e, i) => i > exIdx && e.sets.length < getTargetSetCount(e.targetSets));
       setActiveExIdx(nextIdx >= 0 ? nextIdx : -1);
+      nextExIdx = nextIdx >= 0 ? nextIdx : exIdx;
       import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     } else {
       setActiveExIdx(exIdx);
     }
+
+    // Mirror the phone's set + rest state to the watch so the wrist
+    // stays in sync whether the log came from phone or watch.
+    (async () => {
+      try {
+        const { pushProgressToWatch } = await import('../utils/watchSync');
+        await pushProgressToWatch({
+          exerciseIndex: nextExIdx,
+          setNumber: cleanSets.length + 1,
+        });
+      } catch { /* watch bridge optional */ }
+    })();
 
     // Start rest timer automatically if more sets remain
     if (cleanSets.length < effectiveTotal) {
@@ -1261,6 +1344,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
       startRestTimer(restSeconds, ex.name);
+      // Push rest seconds to watch so its rest-timer view reflects the
+      // phone's timer without running a second independent clock.
+      (async () => {
+        try {
+          const { pushProgressToWatch } = await import('../utils/watchSync');
+          await pushProgressToWatch({ restRemainingSec: restSeconds });
+        } catch { /* watch bridge optional */ }
+      })();
       await rescheduleRestNotifications({
         seconds: restSeconds,
         exerciseName: ex.name,
@@ -1901,6 +1992,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setSummaryVisible(false);
     setSummaryStep('summary');
     if (finishedSession) onFinish(finishedSession);
+  };
+
+  // Kept in sync on every render so the watch command listener always
+  // dispatches to the current finish / cancel closures.
+  watchHandlersRef.current = {
+    finish: () => { handleFinish(); },
+    cancel: () => { onCancel(); },
   };
 
   const handleFinish = async () => {

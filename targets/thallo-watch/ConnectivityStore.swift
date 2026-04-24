@@ -111,6 +111,53 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
+    // ─── Local optimistic mutations ─────────────────────────────────
+
+    /// Flip a meal's `checked` flag locally and recompute the `actual`
+    /// macro totals so the UI updates the instant a tap happens. The
+    /// phone is the source of truth — whatever it pushes back on the
+    /// next `applicationContext` / message overwrites this. Needed
+    /// because WC delivery to a backgrounded phone can take seconds
+    /// and leaving the watch UI stale during that window felt broken.
+    func toggleMealLocal(mealType: String) {
+        guard let day = meals else { return }
+        var newMeals: [WatchMealItem] = []
+        var actCal = 0, actPro = 0, actCarb = 0, actFat = 0
+        for m in day.meals {
+            let updated: WatchMealItem
+            if m.mealType == mealType {
+                updated = WatchMealItem(
+                    mealType: m.mealType,
+                    name: m.name,
+                    calories: m.calories,
+                    proteinG: m.proteinG,
+                    carbsG: m.carbsG,
+                    fatG: m.fatG,
+                    checked: !m.checked,
+                )
+            } else {
+                updated = m
+            }
+            if updated.checked {
+                actCal += updated.calories
+                actPro += updated.proteinG
+                actCarb += updated.carbsG
+                actFat += updated.fatG
+            }
+            newMeals.append(updated)
+        }
+        self.meals = WatchMealsDay(
+            dateISO: day.dateISO,
+            targets: day.targets,
+            actual: WatchMealTargets(
+                calories: actCal, proteinG: actPro, carbsG: actCarb, fatG: actFat,
+            ),
+            score: day.score,
+            meals: newMeals,
+            syncedAtMs: day.syncedAtMs,
+        )
+    }
+
     // ─── Outgoing ───────────────────────────────────────────────────
 
     /// Fired when the user taps Start / Skip on the watch. Phone

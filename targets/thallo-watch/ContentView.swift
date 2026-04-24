@@ -480,7 +480,10 @@ private struct MealsView: View {
         VStack(spacing: 6) {
             ForEach(meals.meals) { m in
                 Button {
-                    // Toggle check — phone handles persistence.
+                    // Optimistic: flip the check locally so the tick
+                    // + macro totals update instantly. Phone authors
+                    // the next push and overrides if needed.
+                    conn.toggleMealLocal(mealType: m.mealType)
                     conn.sendCommand("toggle_meal", payload: [
                         "mealType": m.mealType,
                         "check": !m.checked,
