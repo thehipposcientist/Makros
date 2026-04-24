@@ -108,6 +108,16 @@ def create_meal(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    # consumed_at: honor the explicit value when the client sends one
+    # (e.g. user back-logged yesterday's lunch), otherwise default to
+    # now. Falling back to meal_date alone would lose time-of-day data
+    # needed for fasting windows / late-eating / pre-post workout.
+    from datetime import datetime as _dt, time as _time, timezone as _tz
+    if getattr(body, "consumed_at", None):
+        consumed_at = body.consumed_at
+    else:
+        consumed_at = _dt.now(_tz.utc)
+
     meal = Meal(
         user_id=current_user.id,
         meal_date=body.meal_date,
@@ -115,6 +125,7 @@ def create_meal(
         name=body.name,
         source=body.source,
         notes=body.notes,
+        consumed_at=consumed_at,
     )
     db.add(meal)
     db.flush()
@@ -125,6 +136,41 @@ def create_meal(
     db.commit()
     db.refresh(meal)
     _refresh_daily_metrics(db, current_user.id, meal.meal_date)
+    return _build_meal_response(meal, db)
+
+
+@router.patch("/{meal_id}")
+def update_meal(
+    meal_id: int,
+    body: dict,  # accept partial — {meal_type, consumed_at, notes, name}
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Patch a small set of mutable fields on an existing meal. Used by
+    the meal editor to change `meal_type` (e.g. correct a mis-defaulted
+    breakfast → pre_workout) and `consumed_at` (back-log time)."""
+    meal = db.get(Meal, meal_id)
+    if not meal or meal.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    if "meal_type" in body and body["meal_type"]:
+        try:
+            from app.enums import MealType as _MT
+            meal.meal_type = _MT(body["meal_type"])
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid meal_type")
+    if "consumed_at" in body and body["consumed_at"]:
+        from datetime import datetime as _dt
+        try:
+            meal.consumed_at = _dt.fromisoformat(str(body["consumed_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid consumed_at")
+    if "notes" in body:
+        meal.notes = body["notes"]
+    if "name" in body and body["name"]:
+        meal.name = body["name"]
+    db.add(meal)
+    db.commit()
+    db.refresh(meal)
     return _build_meal_response(meal, db)
 
 

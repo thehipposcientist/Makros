@@ -384,7 +384,32 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
             DayArchetype.LIFT_UPPER,
             DayArchetype.LIFT_LOWER,
         ]
-        return seq[:days] + [seq[i % len(seq)] for i in range(len(seq), days)]
+        if days <= 5:
+            return seq[:days]
+        # 6+ days: pick extras that balance weekly volume instead of
+        # blindly cycling back to PUSH (the naive `[i % 5]` produced
+        # `[PUSH, PULL, LEGS, UPPER, LOWER, PUSH, PULL]`, which stacks
+        # the chest/triceps volume disproportionately).
+        #
+        # Volume-balance logic: Upper+Lower already covers all muscles
+        # with one exposure each. The 6th/7th extras should go to the
+        # family the user is biasing toward (priority_region) or to
+        # Legs as the default — legs typically need the most volume
+        # and benefit from 2 dedicated days/wk.
+        extras_pool: list[DayArchetype] = []
+        if priority_region == "upper_body":
+            # Upper-body bias: second Pull day (better for back
+            # development than a second Push), then Push, then Legs.
+            extras_pool = [DayArchetype.LIFT_PULL, DayArchetype.LIFT_PUSH, DayArchetype.LIFT_LEGS]
+        elif priority_region == "lower_body":
+            extras_pool = [DayArchetype.LIFT_LEGS, DayArchetype.LIFT_LOWER, DayArchetype.LIFT_PULL]
+        else:
+            # Balanced default: Legs (most common under-volume), then
+            # Pull, then Push. Avoids the historical "always adds Push"
+            # pattern the old blind-cycle produced.
+            extras_pool = [DayArchetype.LIFT_LEGS, DayArchetype.LIFT_PULL, DayArchetype.LIFT_PUSH]
+        extras_needed = days - len(seq)
+        return seq + [extras_pool[i % len(extras_pool)] for i in range(extras_needed)]
 
     if split == SPLIT_BRO:
         seq = [

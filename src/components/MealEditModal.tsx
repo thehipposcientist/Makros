@@ -35,6 +35,26 @@ interface Props {
   onClose: () => void;
   onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
   onToggleRoutine?: () => void;
+  /** Save the current meal's items as a reusable Saved Meal (distinct
+   *  from Routine — Routine = scheduled recurring, Saved = one-tap log
+   *  from the Add Foods flow). When null/undefined, the button hides. */
+  onSaveAsMeal?: () => void;
+  /** Editor mode:
+   *  - 'day' (default): editing a single meal on a single day. Save
+   *    calls `onSave(updated)` and the parent decides whether to
+   *    detach / apply-to-all / etc.
+   *  - 'template': editing a Saved Meal library item. The save writes
+   *    to the template via the parent's onSave; routine + save-as-meal
+   *    chips are hidden because they don't apply. A banner explains
+   *    the semantics so users aren't surprised past days didn't change.
+   */
+  mode?: 'day' | 'template';
+  /** Optional routine-save scope callback. When the meal being edited
+   *  is routine-backed (has `_routineId`), the editor surfaces a
+   *  "Just today / Apply to every day" prompt on save and invokes
+   *  this. When omitted, save falls through to `onSave` with the raw
+   *  meal (legacy behavior). */
+  onSaveRoutine?: (updated: MealSuggestion, scope: 'today' | 'all') => void | Promise<void>;
   cookingSkill?: string;
   prepTimeMinutes?: number;
   dietaryPreference?: string;
@@ -182,7 +202,7 @@ function otherMealsMacros(plan: DailyNutritionPlan, editingType: string): Macros
   }, zero);
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, dateKey, onSave, onClose, onAddCustomFood, onToggleRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], authToken, dateKey, onSave, onClose, onAddCustomFood, onToggleRoutine, onSaveAsMeal, mode = 'day', onSaveRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName }: Props) {
   const colors = useMemo(() => getTheme(themeName).colors, [themeName]);
   const s = useMemo(() => createStyles(colors), [colors]);
   // Structured items are the source of truth. Legacy foods[] / amounts[]
@@ -707,6 +727,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       .filter(cat => cat.foods.length > 0);
   }, [foodCategories, search, items]);
 
+  // A routine-tagged meal carries a `_routineId`. Editing one from the
+  // day card presents a scope prompt on save: "Just today" detaches
+  // (next loadPlans won't clobber the edit), "Apply to every day"
+  // updates the routine template and keeps the linkage.
+  const _routineId = (meal as any)?._routineId as string | undefined;
+  const isRoutineEdit = mode === 'day' && !!_routineId && !!onSaveRoutine;
+
   const handleSave = () => {
     // Empty-meal guard: if every item has 0 calories, saving would create
     // a ghost meal that muddies the nutrition totals. Prompt instead.
@@ -740,6 +767,29 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         : {}),
     };
     const synced = syncLegacyFieldsFromItems(finalMeal);
+
+    if (isRoutineEdit && onSaveRoutine) {
+      // Routine-scope prompt — the whole point of the detach model.
+      // "Just today" is the default / destructive-styled option so the
+      // user doesn't accidentally change every day with a tap.
+      Alert.alert(
+        'Save changes',
+        'This meal is part of a routine that appears on every day. Apply your edit to just today, or update the routine for every day going forward?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Just today',
+            onPress: () => { onSaveRoutine(synced, 'today'); onClose(); },
+          },
+          {
+            text: 'Every day',
+            onPress: () => { onSaveRoutine(synced, 'all'); onClose(); },
+          },
+        ],
+      );
+      return;
+    }
+
     onSave(synced);
     onClose();
   };
@@ -829,20 +879,70 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               returnKeyType="done"
             />
             {/* No slot subtitle — the meal name above is the only identity. */}
-            {onToggleRoutine && (
-              <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-                <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
-                  {meal.isRoutine ? 'Pinned' : 'Pin as Routine'}
-                </Text>
-              </TouchableOpacity>
-            )}
+            {/* Chips hide in template mode (not meaningful when editing
+                a Saved Meal from Foods → Saved Meals; it's already a
+                template, and pinning it as a routine would be a
+                separate action the user should take on the day card). */}
+            <View style={{ flexDirection: 'row', gap: 6, justifyContent: 'center' }}>
+              {mode === 'day' && onToggleRoutine && (
+                <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                  <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
+                    {meal.isRoutine ? 'Pinned' : 'Pin as Routine'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+              {mode === 'day' && onSaveAsMeal && (
+                <TouchableOpacity onPress={onSaveAsMeal} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                  <Text style={s.routineBadgeText}>Save as Meal</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
           <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.saveText}>Save</Text>
           </TouchableOpacity>
         </View>
 
-        {/* How to make this — on-demand AI recipe, cached on the meal */}
+        {/* Scope banner — tells the user what their save will affect
+            BEFORE they tap save. Keeps the mental model visible so
+            routine/template edits don't feel like stealth changes. */}
+        {mode === 'template' && (
+          <View style={{
+            marginHorizontal: 16, marginTop: 8,
+            backgroundColor: colors.primary + '14',
+            borderWidth: 1, borderColor: colors.primary + '55',
+            borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12,
+            flexDirection: 'row', alignItems: 'center', gap: 8,
+          }}>
+            <Ionicons name="albums-outline" size={14} color={colors.primary} />
+            <Text style={{ flex: 1, fontSize: 11, color: colors.textSecondary, lineHeight: 15 }}>
+              <Text style={{ fontWeight: '800', color: colors.textPrimary }}>Editing template.</Text>
+              {' '}Past days that used this saved meal stay unchanged. Future logs will use your updated version.
+            </Text>
+          </View>
+        )}
+        {mode === 'day' && isRoutineEdit && (
+          <View style={{
+            marginHorizontal: 16, marginTop: 8,
+            backgroundColor: colors.primary + '14',
+            borderWidth: 1, borderColor: colors.primary + '55',
+            borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12,
+            flexDirection: 'row', alignItems: 'center', gap: 8,
+          }}>
+            <Ionicons name="repeat-outline" size={14} color={colors.primary} />
+            <Text style={{ flex: 1, fontSize: 11, color: colors.textSecondary, lineHeight: 15 }}>
+              <Text style={{ fontWeight: '800', color: colors.textPrimary }}>Routine meal.</Text>
+              {' '}On save you'll pick: change only today, or update the routine for every day.
+            </Text>
+          </View>
+        )}
+
+        {/* How to make this — on-demand AI recipe, cached on the meal.
+            The "From Saved Meal" shortcut was removed from the editor:
+            the plan card ("From saved" next to "Empty meal") and the
+            Foods → Saved Meals carousel are the canonical entry points.
+            Keeping it here too was redundant and confused users about
+            whether saving and pasting were the same action. */}
         <TouchableOpacity
           onPress={fetchInstructions}
           disabled={instructionsLoading}
@@ -866,7 +966,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <>
               <Ionicons name="restaurant-outline" size={16} color={colors.textPrimary} />
               <Text style={{ color: colors.textPrimary, fontWeight: '700', fontSize: 14 }}>
-                {instructions ? 'View Recipe' : 'Get Recipe'}
+                {instructions ? 'View Recipe' : 'Generate Cooking Steps'}
               </Text>
             </>
           )}

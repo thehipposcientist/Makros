@@ -12,6 +12,19 @@ interface Props {
   insight: NutrientInsight;
   themeColors: { textPrimary: string; textSecondary: string; textMuted: string; border: string; surface: string; primary: string; surfaceRaised: string };
   meals?: MealSuggestion[];
+  /** Time window the insight is based on. Defaults to "today" since
+   *  the current insight engine runs on today's totals. Gets surfaced
+   *  as a caption so users don't hit contradictions between this card
+   *  ("fiber low") and another card using a 14-day average ("fiber
+   *  on track"). */
+  window?: 'today' | '7day' | '14day' | 'weekly';
+}
+
+function windowLabel(w: Props['window']): string {
+  if (w === '7day') return '7-day avg';
+  if (w === '14day') return '14-day avg';
+  if (w === 'weekly') return 'Weekly total';
+  return 'Today';
 }
 
 const BACKEND_KEYS: Record<string, string[]> = {
@@ -61,17 +74,48 @@ function getItemValue(micros: Record<string, any> | undefined, key: string): num
   return 0;
 }
 
-export default function NutritionInsightCard({ insight, themeColors, meals }: Props) {
+// Context-specific warning label — "LOW" alone is ambiguous. A low
+// omega-3 is a gap (add a source); a high sugar is a limit exceeded
+// (swap something out); a low fiber intake is a low-intake signal
+// (ramp it up). Map by nutrient family + direction.
+const LIMIT_NUTRIENTS: Set<string> = new Set([
+  'sugar', 'sodium', 'saturatedFat', 'cholesterol', 'addedSugar',
+]);
+const GAP_NUTRIENTS: Set<string> = new Set([
+  'omega3', 'vitaminD', 'vitaminB12', 'iron', 'calcium', 'magnesium',
+  'potassium', 'vitaminC',
+]);
+
+function warningLabel(key: string, direction: 'min' | 'max', severity: 'critical' | 'notable'): string {
+  if (direction === 'max') {
+    // Sugar / sodium / sat fat etc. — the user is OVER the limit.
+    return severity === 'critical' ? 'LIMIT EXCEEDED' : 'HIGH INTAKE';
+  }
+  // direction === 'min' — user is UNDER the target.
+  if (GAP_NUTRIENTS.has(key)) {
+    // Micronutrients read as "gap" (missing from diet), not "low intake".
+    return 'GAP';
+  }
+  // Macros / fiber / fluids: "low intake" is the right read.
+  return severity === 'critical' ? 'LOW INTAKE' : 'LOW';
+}
+
+export default function NutritionInsightCard({ insight, themeColors, meals, window }: Props) {
   const [expanded, setExpanded] = useState(false);
+  // Severity → theme semantic. The insight card is a shared component
+  // without a direct theme handle; callers already pass `themeColors`
+  // (the prop-bundle version of tc). `warning` for critical,
+  // `textMuted` for softer severities.
   const accent =
-    insight.severity === 'critical' ? '#F59E0B' :
-    insight.severity === 'notable'  ? '#9CA3AF' :
-    '#6B7280';
+    insight.severity === 'critical' ? (themeColors as any).warning ?? '#F59E0B' :
+    insight.severity === 'notable'  ? themeColors.textMuted :
+    themeColors.textMuted;
   const fix = FIX_SUGGESTIONS[insight.key];
   const directionWord = insight.direction === 'min' ? 'low' : 'high';
   const actual = Math.round(insight.actual);
   const target = insight.target;
   const isOver = insight.direction === 'max';
+  const statusLabel = warningLabel(insight.key, insight.direction, insight.severity);
 
   const culprits: Array<{ food: string; meal: string; amount: number }> = [];
   if (expanded && meals) {
@@ -111,12 +155,13 @@ export default function NutritionInsightCard({ insight, themeColors, meals }: Pr
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
           <Text style={[styles.severity, { color: accent }]}>
-            {insight.severity === 'critical' ? 'LOW' : 'WATCH'}
+            {statusLabel}
           </Text>
           <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{expanded ? '▲' : '▼'}</Text>
         </View>
       </View>
       <Text style={[styles.numbers, { color: themeColors.textSecondary }]}>
+        <Text style={{ color: themeColors.textMuted }}>{windowLabel(window)} · </Text>
         {actual}{insight.unit} vs {insight.direction === 'min' ? 'target' : 'limit'} {target}{insight.unit}
         {'  '}({Math.round(insight.ratio * 100)}%)
       </Text>

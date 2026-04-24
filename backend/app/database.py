@@ -361,9 +361,110 @@ def _backfill_custom_food_micronutrients() -> None:
         print(f"[migration] micronutrient backfill failed (non-fatal): {e}")
 
 
+def _seed_supplement_ingredients() -> None:
+    """Seed the common supplement ingredient catalog with evidence +
+    risk tiers. Idempotent — existing slugs are left alone; new rows
+    added on first startup after the migration."""
+    from sqlmodel import select
+    from app.models import SupplementIngredient
+
+    seeds = [
+        # slug, name, category, default_unit, evidence, risk, description, timing, safety
+        ("creatine_monohydrate", "Creatine Monohydrate", "performance", "g", "strong", "low",
+         "Among the most-studied supplements. Supports strength + lean mass across training styles.",
+         "Daily, any time — consistency matters more than timing.",
+         "Stay hydrated. Discuss with a clinician if you have kidney disease."),
+        ("whey_protein", "Whey Protein", "protein", "g", "strong", "low",
+         "Convenient protein source. Useful when whole-food protein intake is consistently low.",
+         "Post-workout or any meal where you're short on protein.",
+         None),
+        ("caffeine", "Caffeine", "stimulant", "mg", "strong", "moderate",
+         "Ergogenic aid for training performance. Dose-dependent effects on sleep, anxiety, heart rate.",
+         "Morning / pre-workout. Avoid within 6–8 hours of bedtime.",
+         "Limit total daily intake. Caution with heart conditions or pregnancy."),
+        ("vitamin_d3", "Vitamin D3", "vitamin", "IU", "moderate", "moderate",
+         "May support bone + immune function. Blood levels vary widely — dosing should ideally be guided by bloodwork.",
+         "With a fat-containing meal for better absorption.",
+         "High long-term doses can be harmful. Discuss with a clinician."),
+        ("omega_3", "Omega-3 (EPA/DHA)", "fatty_acid", "mg", "moderate", "low",
+         "Provides EPA/DHA when fish intake is low. May support cardiovascular + inflammatory markers.",
+         "Any meal with fat.",
+         "High doses (>3g combined EPA+DHA) may increase bleeding risk."),
+        ("magnesium", "Magnesium", "mineral", "mg", "limited", "low",
+         "Supports many metabolic pathways. Most benefit seen in people with low dietary intake.",
+         "Evening, with or without food.",
+         "Citrate/oxide forms can cause loose stools at higher doses."),
+        ("electrolytes", "Electrolytes", "mineral", "serving", "moderate", "low",
+         "Useful during heavy sweating, long training sessions, or hot climates.",
+         "During/after training; during hot days.",
+         "Read sodium content on labels if you're managing blood pressure."),
+        ("iron", "Iron", "mineral", "mg", "moderate", "moderate",
+         "Targeted use for diagnosed deficiency. Not recommended without bloodwork.",
+         "On an empty stomach when tolerated; with vitamin C aids absorption.",
+         "Excess iron is harmful. Do not supplement without a blood test."),
+        ("vitamin_b12", "Vitamin B12", "vitamin", "mcg", "moderate", "low",
+         "Particularly useful for vegans/vegetarians or adults over 50.",
+         "Any time.",
+         None),
+        ("beta_alanine", "Beta-Alanine", "performance", "g", "moderate", "low",
+         "May support repeated high-intensity efforts in the 1–4 minute range.",
+         "Split across the day to minimize tingling sensation.",
+         "Causes harmless paresthesia (tingling) at higher single doses."),
+    ]
+    try:
+        with Session(engine) as session:
+            existing_slugs = {
+                r.slug for r in session.exec(select(SupplementIngredient)).all()
+            }
+            added = 0
+            for (slug, name, cat, unit, evid, risk, desc, timing, safety) in seeds:
+                if slug in existing_slugs:
+                    continue
+                session.add(SupplementIngredient(
+                    slug=slug, name=name, category=cat, default_unit=unit,
+                    evidence_tier=evid, risk_tier=risk,
+                    description=desc, timing_notes=timing, safety_notes=safety,
+                ))
+                added += 1
+            if added:
+                session.commit()
+                print(f"[migration] seeded {added} supplement ingredients")
+    except Exception as e:
+        print(f"[migration] supplement ingredient seed failed (non-fatal): {e}")
+
+
+def _ensure_meal_consumed_at_column() -> None:
+    """Add `consumed_at` timestamp + new meal_type enum values.
+
+    `meal_type` is a Postgres enum and `ALTER TYPE ... ADD VALUE` is how
+    we grow it in-place. `consumed_at` is a plain nullable timestamptz
+    — existing rows get NULL and the client falls back to meal_date +
+    noon for display.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE meals ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_meals_consumed_at ON meals(user_id, consumed_at)"
+            ))
+            # PRE_WORKOUT / POST_WORKOUT aren't in the Postgres enum on
+            # existing DBs — add them. SAEnum serializes by member name
+            # (uppercase), so this is what Postgres expects.
+            for member in ("PRE_WORKOUT", "POST_WORKOUT"):
+                conn.execute(text(
+                    f"ALTER TYPE mealtype ADD VALUE IF NOT EXISTS '{member}'"
+                ))
+    except Exception as e:
+        print(f"[migration] meal consumed_at / meal_type add failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -376,9 +477,11 @@ def create_db_and_tables():
     _ensure_food_metadata_classifier_v2_columns()
     _ensure_daily_nutrition_metrics_v2_columns()
     _ensure_nutrition_v3_columns()
+    _ensure_meal_consumed_at_column()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()
+    _seed_supplement_ingredients()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:
         seed_equipment(session)   # must run before exercises (FK dependency)

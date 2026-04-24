@@ -114,6 +114,124 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
     return micros, len(items), with_micros
 
 
+# Supplement ingredient → micronutrient key mapping. Only ingredients
+# that meaningfully contribute to the Nutrition Score's micro coverage
+# land here; performance supps (creatine, beta-alanine, caffeine) are
+# intentionally excluded. Values are (micro_key, unit_converter) where
+# the converter maps the user's logged dose (in the supplement's
+# default_unit) to the RDA key's unit.
+#
+# e.g. vitamin_d3 is logged in IU, but the RDA key is vitamin_d_mcg —
+# 40 IU = 1 mcg for D3, so the converter divides by 40.
+_SUPPLEMENT_MICRO_MAP: dict[str, tuple[str, float]] = {
+    "vitamin_d3":      ("vitamin_d_mcg", 1.0 / 40.0),   # IU → mcg
+    "vitamin_b12":     ("vitamin_b12_mcg", 1.0),
+    "magnesium":       ("magnesium_mg", 1.0),
+    "iron":            ("iron_mg", 1.0),
+    "omega_3":         ("omega_3_mg", 1.0),
+}
+
+
+def _add_supplement_micros(db: Any, user_id: int, target_date: date, micros: dict) -> None:
+    """Credit today's non-skipped supplement logs toward micronutrient
+    coverage. Mutates `micros` in place. Doses are added on top of food
+    micros — the RDA ratio used by the score already handles over-
+    coverage correctly (capped at 100% per nutrient).
+
+    Macros (protein from whey, for example) are NOT credited here —
+    that would let the user "hit protein" without actually eating food,
+    which defeats the adherence signal. Only MICROS integrate.
+    """
+    from datetime import datetime, time, timezone
+    from sqlmodel import select
+    from app.models import SupplementLog, UserSupplementStack, SupplementIngredient
+
+    start = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+    end = datetime.combine(target_date, time.max, tzinfo=timezone.utc)
+    try:
+        logs = db.exec(
+            select(SupplementLog).where(
+                SupplementLog.user_id == user_id,
+                SupplementLog.taken_at >= start,
+                SupplementLog.taken_at <= end,
+                SupplementLog.skipped == False,  # noqa: E712
+            )
+        ).all()
+    except Exception:
+        return
+    if not logs:
+        return
+
+    # Cache stack + ingredient lookups to avoid N queries per log.
+    stack_ids = list({log.stack_item_id for log in logs})
+    stacks = (
+        db.exec(select(UserSupplementStack).where(UserSupplementStack.id.in_(stack_ids))).all()
+        if stack_ids else []
+    )
+    stack_by_id = {s.id: s for s in stacks}
+    ingredient_ids = [s.supplement_ingredient_id for s in stacks if s.supplement_ingredient_id]
+    ingredients = (
+        db.exec(select(SupplementIngredient).where(SupplementIngredient.id.in_(ingredient_ids))).all()
+        if ingredient_ids else []
+    )
+    ing_by_id = {i.id: i for i in ingredients}
+
+    for log in logs:
+        stack = stack_by_id.get(log.stack_item_id)
+        if not stack or not stack.supplement_ingredient_id:
+            continue
+        ing = ing_by_id.get(stack.supplement_ingredient_id)
+        if not ing:
+            continue
+        mapping = _SUPPLEMENT_MICRO_MAP.get(ing.slug)
+        if not mapping:
+            continue
+        micro_key, converter = mapping
+        dose = float(log.dose_amount if log.dose_amount is not None else stack.dose_amount or 0)
+        if dose <= 0:
+            continue
+        micros[micro_key] = micros.get(micro_key, 0.0) + dose * converter
+
+
+def _count_supplement_logs(db: Any, user_id: int, target_date: date, ingredient_slug: str) -> float:
+    """Count today's non-skipped supplement logs for a given ingredient
+    slug. Used to credit supplement taking against Food Quality signals
+    like omega-3 presence."""
+    from datetime import datetime, time, timezone
+    from sqlmodel import select
+    from app.models import SupplementLog, UserSupplementStack, SupplementIngredient
+    try:
+        ing = db.exec(
+            select(SupplementIngredient).where(SupplementIngredient.slug == ingredient_slug)
+        ).first()
+        if not ing:
+            return 0.0
+        stack_ids = [
+            s.id for s in db.exec(
+                select(UserSupplementStack).where(
+                    UserSupplementStack.user_id == user_id,
+                    UserSupplementStack.supplement_ingredient_id == ing.id,
+                )
+            ).all()
+        ]
+        if not stack_ids:
+            return 0.0
+        start = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+        end = datetime.combine(target_date, time.max, tzinfo=timezone.utc)
+        logs = db.exec(
+            select(SupplementLog).where(
+                SupplementLog.user_id == user_id,
+                SupplementLog.stack_item_id.in_(stack_ids),
+                SupplementLog.taken_at >= start,
+                SupplementLog.taken_at <= end,
+                SupplementLog.skipped == False,  # noqa: E712
+            )
+        ).all()
+        return float(len(logs))
+    except Exception:
+        return 0.0
+
+
 def build_indicators(
     db: Any, user_id: int, target_date: date,
 ) -> tuple[NutritionIndicators, str, str | None]:
@@ -140,6 +258,11 @@ def build_indicators(
     total_pro = sum(float(i.protein_g or 0) for i in items)
 
     micros, food_count, foods_with_micros = _aggregate_micros(db, items)
+    # Credit logged supplement doses toward the micro pool (vitamin D3,
+    # B12, iron, magnesium, omega-3). Food still counts fully; supps
+    # just add on top. Keeps the Score honest for users who fill a
+    # vitamin-D gap via a pill instead of salmon — both are valid.
+    _add_supplement_micros(db, user_id, target_date, micros)
 
     # Processing mix: minimally / ultra percentages from today's counts.
     processing = (metrics.processing_counts or {}) if metrics else {}
@@ -173,6 +296,12 @@ def build_indicators(
     except Exception:
         pass
 
+    # Omega-3 servings — count logged omega-3 supplement doses too so a
+    # user who takes EPA/DHA caps daily still shows as "omega-3 present"
+    # on the Food Quality score. 1 cap / day = 1 serving-equivalent.
+    supplemental_omega3 = _count_supplement_logs(db, user_id, target_date, "omega_3")
+    omega3_servings_today = (float(metrics.omega3_servings) if metrics else 0.0) + supplemental_omega3
+
     indicators = NutritionIndicators(
         calories_logged=total_cal,
         calories_target=cal_target,
@@ -185,7 +314,7 @@ def build_indicators(
         minimally_processed_pct=min_proc_pct,
         ultra_processed_pct=upf_pct,
         distinct_plant_foods=int(metrics.distinct_plant_foods) if metrics else 0,
-        omega3_servings=float(metrics.omega3_servings) if metrics else 0,
+        omega3_servings=omega3_servings_today,
         seafood_servings_weekly=seafood_week,
         meals_logged=len(meals),
         meals_expected=max(3, len(meals)),

@@ -627,6 +627,11 @@ class Meal(SQLModel, table=True):
     source: MealSource = Field(sa_column=Column(SAEnum(MealSource), nullable=False, default=MealSource.LOGGED))
     notes: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # When the user actually ate this meal. Separate from created_at so
+    # back-logging a breakfast at 2pm still shows "8am" on the timeline.
+    # Nullable because existing rows pre-migration won't have it; clients
+    # fall back to (meal_date + noon) when NULL.
+    consumed_at: datetime | None = Field(default=None, index=True)
 
 
 class MealItem(SQLModel, table=True):
@@ -644,6 +649,120 @@ class MealItem(SQLModel, table=True):
     protein_g: float
     carbs_g: float
     fat_g: float
+
+
+# ─── Saved Meals ──────────────────────────────────────────────────────────────
+#
+# A SavedMeal is a user-authored reusable bundle of foods — distinct from a
+# Routine (pinned/scheduled recurring meal) and from a Recipe (full
+# ingredients + cooking instructions + serving size math). Saved meals let
+# the user log the same combo again without retyping it.
+
+class SavedMeal(SQLModel, table=True):
+    __tablename__ = "saved_meals"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str
+    notes: str | None = Field(default=None)
+    # Snapshotted totals — lets the UI show macros/cals without joining
+    # items on every list render. Recomputed on save.
+    total_calories: float = Field(default=0.0)
+    total_protein_g: float = Field(default=0.0)
+    total_carbs_g: float = Field(default=0.0)
+    total_fat_g: float = Field(default=0.0)
+    # Items bundled inside — same shape as MealItem minus the meal_id.
+    # Stored as JSON so a saved-meal row is self-contained (no extra
+    # table for items). Shape: [{food_name, food_id, serving_id,
+    # quantity, unit, serving_grams, calories, protein_g, carbs_g, fat_g}, ...]
+    items: list = Field(default_factory=list, sa_column=Column(JSON))
+    times_logged: int = Field(default=0)
+    last_logged_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─── Supplement Stack ─────────────────────────────────────────────────────────
+#
+# V1 data model split across four tables so we can layer in product label
+# parsing later without migrating user stacks. Most V1 users will create
+# custom (ingredient-only) entries in UserSupplementStack; the
+# SupplementProduct/Ingredient tables seed common options and provide
+# evidence/risk metadata.
+
+class SupplementIngredient(SQLModel, table=True):
+    __tablename__ = "supplement_ingredients"
+    id: int | None = Field(default=None, primary_key=True)
+    slug: str = Field(default="", index=True, unique=True)
+    name: str = Field(unique=True, index=True)
+    category: str                         # "vitamin", "mineral", "performance", "amino_acid", "fatty_acid", "nootropic", "hormone_support", etc.
+    default_unit: str = Field(default="mg")
+    # "strong" | "moderate" | "limited" | "weak"
+    evidence_tier: str = Field(default="limited")
+    # "low" | "moderate" | "high"
+    risk_tier: str = Field(default="low")
+    description: str | None = Field(default=None)
+    timing_notes: str | None = Field(default=None)   # e.g. "Take with fat-containing meal"
+    safety_notes: str | None = Field(default=None)   # e.g. "Avoid if on blood thinners"
+
+
+class SupplementProduct(SQLModel, table=True):
+    __tablename__ = "supplement_products"
+    id: int | None = Field(default=None, primary_key=True)
+    brand: str
+    name: str
+    serving_size: str | None = Field(default=None)   # e.g. "1 scoop", "2 capsules"
+    third_party_tested: bool = Field(default=False)
+    label_source: str | None = Field(default=None)   # "seeded" | "user_scan" | "ocr"
+
+
+class SupplementProductIngredient(SQLModel, table=True):
+    __tablename__ = "supplement_product_ingredients"
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: int = Field(foreign_key="supplement_products.id", index=True)
+    ingredient_id: int = Field(foreign_key="supplement_ingredients.id", index=True)
+    amount: float
+    unit: str
+
+
+class UserSupplementStack(SQLModel, table=True):
+    __tablename__ = "user_supplement_stack"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # Either link to a product, an ingredient, or use custom_name.
+    # V1 mostly uses custom_name + ingredient_id — product label parsing
+    # comes later.
+    supplement_product_id: int | None = Field(default=None, foreign_key="supplement_products.id")
+    supplement_ingredient_id: int | None = Field(default=None, foreign_key="supplement_ingredients.id")
+    custom_name: str | None = Field(default=None)
+    category: str | None = Field(default=None)
+    goal: str | None = Field(default=None)                    # free-text: "strength / lean mass"
+    dose_amount: float
+    dose_unit: str = Field(default="mg")
+    frequency: str = Field(default="daily")                    # "daily" | "weekdays" | "pre_workout" | "as_needed"
+    timing: str | None = Field(default=None)                   # "morning" | "evening" | "pre_workout" | "with_meal"
+    taken_with_food: bool = Field(default=False)
+    active: bool = Field(default=True)
+    notes: str | None = Field(default=None)
+    # Denormalized from ingredient when available — keeps cards
+    # informative without a join on every render.
+    evidence_tier: str | None = Field(default=None)
+    risk_tier: str | None = Field(default=None)
+    timing_notes: str | None = Field(default=None)
+    safety_notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SupplementLog(SQLModel, table=True):
+    __tablename__ = "supplement_logs"
+    __table_args__ = (
+        Index('ix_supp_log_user_taken', 'user_id', 'taken_at'),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    stack_item_id: int = Field(foreign_key="user_supplement_stack.id", index=True)
+    taken_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    dose_amount: float | None = Field(default=None)
+    dose_unit: str | None = Field(default=None)
+    skipped: bool = Field(default=False)
 
 
 # ─── Gut health / longevity signals ───────────────────────────────────────────
@@ -886,6 +1005,9 @@ class MealCreate(SQLModel):
     source: MealSource = MealSource.LOGGED
     notes: str | None = None
     items: list[MealItemCreate]
+    # ISO timestamp for when the user actually ate this meal. Optional —
+    # server defaults to now() when omitted. Allows back-logging.
+    consumed_at: datetime | None = None
 
 
 # ─── Food schemas ────────────────────────────────────────────────────────────

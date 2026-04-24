@@ -28,10 +28,14 @@ class Gender(str, Enum):
 
 
 class MealType(str, Enum):
-    BREAKFAST = "breakfast"
-    LUNCH     = "lunch"
-    DINNER    = "dinner"
-    SNACK     = "snack"
+    BREAKFAST     = "breakfast"
+    LUNCH         = "lunch"
+    DINNER        = "dinner"
+    SNACK         = "snack"
+    # Timing-aware types unlock pre/post-workout fueling insights,
+    # caffeine-timing warnings, and fasting-window analytics.
+    PRE_WORKOUT   = "pre_workout"
+    POST_WORKOUT  = "post_workout"
 
 
 class EquipmentType(str, Enum):

@@ -14,7 +14,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.database import create_db_and_tables, engine
 from app.limiter import limiter
 from app.logging_setup import configure_logging, get_logger, new_request_id, set_request_context
-from app.routers import auth, profile, workouts, meals, meta, ai, coach
+from app.routers import auth, profile, workouts, meals, meta, ai, coach, saved_meals, supplements
 
 # Install JSON logging first so every subsequent log line is structured.
 configure_logging()
@@ -368,7 +368,13 @@ def on_shutdown():
 app.include_router(auth.router)
 app.include_router(profile.router)
 app.include_router(workouts.router)
+# IMPORTANT: saved_meals registers before meals because meals.router has
+# a catch-all `GET /meals/{meal_id}` that would swallow `/meals/saved`
+# (trying to parse "saved" as an int and 422'ing). Order-of-registration
+# is match-order in FastAPI.
+app.include_router(saved_meals.router)
 app.include_router(meals.router)
+app.include_router(supplements.router)
 app.include_router(meta.router)
 app.include_router(ai.router)
 app.include_router(coach.router)

@@ -182,6 +182,9 @@ class NutritionScore:
     adherence_breakdown: list[dict] = field(default_factory=list)
     quality_breakdown: list[dict] = field(default_factory=list)
     micro_breakdown: list[dict] = field(default_factory=list)
+    # Non-empty when one or more score caps applied — UI renders these
+    # below the headline number so users see *why* their 85 isn't a 92.
+    cap_reasons: list[str] = field(default_factory=list)
     score_version: int = SCORE_VERSION
 
 
@@ -362,6 +365,55 @@ def compute_nutrition_score(
     raw_total = adherence * w_adh + quality * w_qual + micro * w_micro
     total = round(min(100, max(0, raw_total * confidence_factor)))
 
+    # ── Score caps — meaningful-gap guardrails ───────────────────────
+    # The weighted blend alone can surface 90+ scores when macros land
+    # perfectly even though quality/micros are clearly poor. Users hate
+    # seeing a green 92 while an orange "added sugar high" banner sits
+    # right below it. These caps make the headline score honest:
+    #   • 3+ meaningful gaps ceiling 78
+    #   • 2+ meaningful gaps ceiling 85
+    #   • High sugar + high sat fat simultaneously ceiling 82
+    #   • High-adherence (macros on target) but poor food quality
+    #     ceiling 85 — prevents "I ate pop-tarts perfectly" 95s
+    cap_reasons: list[str] = []
+    meaningful_gaps = 0
+    if added_sugar_pct > 15:
+        meaningful_gaps += 1
+    if sat_fat_pct > 12:
+        meaningful_gaps += 1
+    if sodium > 3500:
+        meaningful_gaps += 1
+    if fiber_density < 8 and has_calories:
+        meaningful_gaps += 1
+    if plants < 2 and has_calories:
+        meaningful_gaps += 1
+    if flags.get("high_upf"):
+        meaningful_gaps += 1
+    if omega_pts < 5 and has_calories:
+        meaningful_gaps += 1
+
+    if meaningful_gaps >= 3:
+        if total > 78:
+            cap_reasons.append(f"{meaningful_gaps} meaningful nutrition gaps")
+            total = 78
+    elif meaningful_gaps >= 2:
+        if total > 85:
+            cap_reasons.append(f"{meaningful_gaps} meaningful nutrition gaps")
+            total = 85
+
+    # Specific pair-caps — the combo patterns that always read as
+    # misleading when the blend lets them through.
+    if added_sugar_pct > 12 and sat_fat_pct > 12 and total > 82:
+        cap_reasons.append("High added sugar + saturated fat")
+        total = 82
+    if fiber_density < 8 and has_calories and total > 80:
+        cap_reasons.append("Fiber density low")
+        total = 80
+    # Macros-OK-but-quality-poor: adherence is perfect but quality sub-60.
+    if adherence >= 85 and quality < 60 and total > 85:
+        cap_reasons.append("Quality score low despite hitting macros")
+        total = 85
+
     # ── Structured flags ─────────────────────────────────────────────
     flags = {
         "calorie_on_track": cal_align >= 0.75,
@@ -448,6 +500,7 @@ def compute_nutrition_score(
         adherence_breakdown=adherence_breakdown,
         quality_breakdown=quality_breakdown,
         micro_breakdown=micro_breakdown,
+        cap_reasons=cap_reasons,
         indicators={
             "calories_alignment": round(cal_align, 2),
             "protein_alignment": round(pro_align, 2),

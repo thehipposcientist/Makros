@@ -37,6 +37,15 @@ interface NutritionCardProps {
    *  Shuffles ingredients within the same nutrient envelope. */
   onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
   goal?: string;
+  /** Lowercase names of the user's Saved Meals. Used to show a
+   *  "✓ Saved" chip on meal rows whose name already lives in the
+   *  saved library (so users don't try to save the same bundle
+   *  twice). */
+  savedMealNames?: Set<string>;
+  /** Called when the user picks "Start from saved meal" on the add
+   *  button. When wired, the UI splits the "Add Meal" affordance into
+   *  a two-path menu (Empty meal / From saved meal). */
+  onAddFromSaved?: () => void;
 }
 
 export default function NutritionCard({
@@ -56,6 +65,8 @@ export default function NutritionCard({
   onMoveMeal,
   onShuffleMeal,
   goal,
+  savedMealNames,
+  onAddFromSaved,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
@@ -544,6 +555,7 @@ export default function NutritionCard({
               colors={colors}
               styles={styles}
               mealAccent={section}
+              isSaved={(savedMealNames ?? new Set<string>()).has((meal.meal || '').toLowerCase().trim())}
             />
           ))}
           {hiddenMeals.length > 0 && (
@@ -558,14 +570,35 @@ export default function NutritionCard({
               </View>
             </View>
           )}
-          {/* Inline "+ Add Meal" affordance at the bottom of the list,
-              replacing the old top-of-card header button. */}
-          {onAddSnack && (
+          {/* Add-meal footer. When the user has any saved meals the
+              button splits into two side-by-side paths: "Empty meal"
+              (original behavior) and "From saved". Keeps the single-
+              button treatment when there are no saved meals yet. */}
+          {onAddSnack && onAddFromSaved && (savedMealNames?.size ?? 0) > 0 ? (
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TouchableOpacity
+                style={[styles.addMealInline, { flex: 1, marginTop: 0 }]}
+                onPress={onAddSnack}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="add-circle-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
+                <Text style={styles.addMealInlineText}>Empty meal</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.addMealInline, { flex: 1, marginTop: 0 }]}
+                onPress={onAddFromSaved}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="albums-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
+                <Text style={styles.addMealInlineText}>From saved</Text>
+              </TouchableOpacity>
+            </View>
+          ) : onAddSnack ? (
             <TouchableOpacity style={styles.addMealInline} onPress={onAddSnack} activeOpacity={0.7}>
               <Ionicons name="add-circle-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
               <Text style={styles.addMealInlineText}>Add Meal</Text>
             </TouchableOpacity>
-          )}
+          ) : null}
         </View>
 
       </View>
@@ -608,7 +641,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, colors, styles, mealAccent }: {
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, colors, styles, mealAccent, isSaved }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -626,6 +659,10 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
+  /** True when this meal's name matches one of the user's Saved Meals.
+   *  Surfaces a small "Saved" chip in the header so users know they
+   *  already have this bundled for one-tap logging later. */
+  isSaved?: boolean;
 }) {
   const [itemsExpanded, setItemsExpanded] = useState(true);
   const [editingName, setEditingName] = useState(false);
@@ -770,6 +807,20 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                   )}
                 </TouchableOpacity>
               </>
+            )}
+            {/* Saved-meal indicator — informational only. Tells the
+                user this bundle already lives in their Saved Meals
+                library (Foods tab) so they don't accidentally save it
+                twice. Not tappable — it's a status, not an action. */}
+            {isSaved && (
+              <View style={[
+                styles.routineBadge,
+                { backgroundColor: '#22C55E22', borderColor: '#22C55E55' },
+              ]}>
+                <Text style={[styles.routineBadgeText, { color: '#22C55E' }]}>
+                  ✓ Saved
+                </Text>
+              </View>
             )}
             {/* Inline routine badge — small, beside the title, taps to
                 toggle. No more dedicated row. */}

@@ -698,3 +698,91 @@ def delete_account(
     session.add(current_user)
     session.commit()
     return {"ok": True, "deleted_user_id": current_user.id}
+
+
+# ─── Adaptive macro recommendations ──────────────────────────────────────────
+
+class AdaptiveMacroRequest(BaseModel):
+    """Client sends its local weight history so we can run the TDEE
+    estimator without needing a separate WeightEntry table. V1 keeps
+    weight storage on the client (AsyncStorage) — this endpoint just
+    consumes the data."""
+    weight_entries: list[dict] = []   # [{date: "YYYY-MM-DD", weight_lbs: float}, ...]
+
+
+@router.post("/adaptive-macros")
+def adaptive_macros(
+    body: AdaptiveMacroRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Return the weekly-check-in payload: estimated maintenance, the
+    user's current target, and the suggested new target with reasoning
+    + confidence. Deterministic — no AI. Client decides whether to
+    apply the suggested target."""
+    from app.services.nutrition.adaptive_macros import (
+        compute_adaptive_recommendation,
+    )
+
+    goal = session.exec(
+        select(UserGoal).where(UserGoal.user_id == current_user.id)
+    ).first()
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+
+    # Parse dates coming in as ISO strings.
+    from datetime import date as _d
+    entries_parsed: list[dict] = []
+    for e in body.weight_entries or []:
+        try:
+            d = _d.fromisoformat(str(e.get("date") or "").strip())
+            w = float(e.get("weight_lbs") or 0)
+            if w > 0:
+                entries_parsed.append({"date": d, "weight_lbs": w})
+        except (ValueError, TypeError):
+            continue
+
+    current_target = None
+    if profile:
+        # UserProfile doesn't currently store a computed calorie target
+        # in a uniform field. Pull it from the latest nutrition plan if
+        # available, else leave None and the UI will just show the
+        # suggested target on its own.
+        from app.models import NutritionPlan
+        np_row = session.exec(
+            select(NutritionPlan)
+            .where(NutritionPlan.user_id == current_user.id)
+            .where(NutritionPlan.is_active == True)  # noqa: E712
+            .order_by(NutritionPlan.created_at.desc())
+        ).first()
+        if np_row and np_row.plan_json:
+            try:
+                current_target = int(
+                    (np_row.plan_json.get("targets") or {}).get("calories")
+                    or (np_row.plan_json.get("macros") or {}).get("calories")
+                    or 0
+                ) or None
+            except Exception:
+                current_target = None
+
+    rec = compute_adaptive_recommendation(
+        session, current_user.id,
+        profile_goal=(goal.goal_type if goal else None),
+        current_target_kcal=current_target,
+        weight_entries=entries_parsed,
+    )
+    return {
+        "status": rec.status,
+        "estimated_tdee": rec.estimated_tdee,
+        "current_target": rec.current_target,
+        "suggested_target": rec.suggested_target,
+        "delta": rec.delta,
+        "avg_daily_calories": rec.avg_daily_calories,
+        "weekly_weight_change_lbs": rec.weekly_weight_change_lbs,
+        "days_logged": rec.days_logged,
+        "weigh_ins": rec.weigh_ins,
+        "confidence": rec.confidence,
+        "reason": rec.reason,
+        "goal_bucket": rec.goal_bucket,
+    }

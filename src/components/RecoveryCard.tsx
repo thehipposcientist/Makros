@@ -98,7 +98,9 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
   if (!data) return null;
 
-  const scoreColor = data.score >= 65 ? '#22C55E' : data.score >= 40 ? '#F59E0B' : '#EF4444';
+  // Score tier colors pulled from theme semantics so the card matches
+  // whatever palette the user has active (midnight/ocean/sandstone/…).
+  const scoreColor = data.score >= 65 ? tc.success : data.score >= 40 ? tc.warning : tc.error;
   // Fitness-themed iconography instead of battery. Flash = energized,
   // pulse = steady, hourglass = depleted (needs time).
   const iconName: any =
@@ -259,7 +261,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                     </Text>
                     {recovery.map((a, i) => (
                       <View key={`r-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
-                        <Ionicons name="leaf-outline" size={12} color="#22C55E" />
+                        <Ionicons name="leaf-outline" size={12} color={tc.success} />
                         <Text style={{ fontSize: 11, color: tc.textPrimary, flex: 1 }}>
                           {activityName(a)}
                           {a.duration_minutes ? ` · ${a.duration_minutes}m` : ''}
@@ -270,7 +272,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                     ))}
                     {proteinBonusOn && (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
-                        <Ionicons name="nutrition-outline" size={12} color="#22C55E" />
+                        <Ionicons name="nutrition-outline" size={12} color={tc.success} />
                         <Text style={{ fontSize: 11, color: tc.textPrimary, flex: 1 }}>
                           Protein intake ({data.nutritionContext!.protein_avg}g/day avg)
                         </Text>
@@ -313,21 +315,26 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
               </>
             );
           })()}
-          {data.nutritionContext?.message && (
+          {data.nutritionContext?.message && (() => {
+            // Protein-status → theme semantic color.
+            const ps = data.nutritionContext.protein_status;
+            const statusColor = (ps === 'excellent' || ps === 'good') ? tc.success
+              : ps === 'low' ? tc.warning
+              : ps === 'very_low' ? tc.error
+              : tc.textMuted;
+            return (
             <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: tc.border, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <Ionicons
-                name={data.nutritionContext.protein_status === 'excellent' ? 'nutrition' : data.nutritionContext.protein_status === 'good' ? 'nutrition-outline' : 'alert-circle-outline'}
+                name={ps === 'excellent' ? 'nutrition' : ps === 'good' ? 'nutrition-outline' : 'alert-circle-outline'}
                 size={14}
-                color={data.nutritionContext.protein_status === 'excellent' || data.nutritionContext.protein_status === 'good' ? '#22C55E' : data.nutritionContext.protein_status === 'low' ? '#F59E0B' : data.nutritionContext.protein_status === 'very_low' ? '#EF4444' : tc.textMuted}
+                color={statusColor}
               />
-              <Text style={{
-                fontSize: 10, fontWeight: '600', flex: 1,
-                color: data.nutritionContext.protein_status === 'excellent' || data.nutritionContext.protein_status === 'good' ? '#22C55E' : data.nutritionContext.protein_status === 'low' ? '#F59E0B' : data.nutritionContext.protein_status === 'very_low' ? '#EF4444' : tc.textMuted,
-              }}>
+              <Text style={{ fontSize: 10, fontWeight: '600', flex: 1, color: statusColor }}>
                 {data.nutritionContext.message}
               </Text>
             </View>
-          )}
+            );
+          })()}
         </View>
       )}
     </TouchableOpacity>

@@ -117,6 +117,26 @@ _RECOVERY_KEYWORDS = [
 ]
 
 
+def _strip_plus_cardio_suffix(text: str) -> str:
+    """Remove a trailing "+ cardio" / "+ finisher" / "with cardio" so
+    PLUS_CARDIO hybrid days ("Push + Cardio") resolve to the LIFT
+    family (push/pull/upper/full_body) instead of being swallowed by
+    the cardio keyword. The appended cardio on these hybrids is a
+    finisher — the primary stimulus is the lift, so the day should
+    count as the lift family for split + history purposes.
+    """
+    if " + cardio" in text or " and cardio" in text or text.endswith(" cardio"):
+        # Only strip when there's something BEFORE the cardio (otherwise
+        # a pure "Cardio" day would lose its bucket). Requires at least
+        # one of the lift keywords earlier in the string.
+        lift_seen = bool(re.search(r"\b(push|pull|upper|lower|legs?|full[- ]?body|chest|back|shoulders?|arms?)\b", text))
+        if lift_seen:
+            # Cut at the first occurrence of a cardio-separator pattern.
+            text = re.sub(r"\s*(\+|and|with|&)\s*cardio\b.*$", "", text)
+            text = re.sub(r"\s+cardio\b.*$", "", text)
+    return text
+
+
 def normalize_focus_to_bucket(raw_focus: Optional[str]) -> FocusBucket:
     """Collapse any focus label to one of six coarse training buckets.
 
@@ -125,14 +145,16 @@ def normalize_focus_to_bucket(raw_focus: Optional[str]) -> FocusBucket:
       - numbered variants: "Legs 1", "Upper 2", "Lower 3"
       - archetype emphasis subtitles: "Lower 2 — Hinge Bias",
         "Upper 1 — Horizontal Push/Pull", "Legs — Squat + Hinge"
+      - PLUS_CARDIO hybrids: "Push + Cardio", "Upper + Cardio"
+        (these bucket as the LIFT family — the cardio is a finisher)
       - parse-workouts labels: "Upper Body", "Leg Day", "Back & Biceps"
       - casing differences: "legs", "LEGS", "Legs"
       - composite focuses: "Back and Biceps", "Chest/Shoulders"
 
-    Precedence: more specific buckets first (cardio before upper, so
-    "Upper Intervals" buckets as cardio). Returns None for empty or
-    unrecognizable input so callers can distinguish "no recent data"
-    from "recent data, unknown bucket".
+    Precedence: PLUS_CARDIO suffix is stripped FIRST, then full_body,
+    then cardio/mobility/recovery, then body parts. Returns None for
+    empty or unrecognizable input so callers can distinguish "no recent
+    data" from "recent data, unknown bucket".
     """
     if not raw_focus or not isinstance(raw_focus, str):
         return None
@@ -149,6 +171,9 @@ def normalize_focus_to_bucket(raw_focus: Optional[str]) -> FocusBucket:
     # regex for "legs" still matches, so it's cosmetic, but it keeps
     # downstream logs cleaner.
     text = re.sub(r"\s+\d+\s*$", "", text)
+    # Strip trailing "+ cardio" so PLUS_CARDIO hybrids resolve to
+    # their lift family (the primary stimulus).
+    text = _strip_plus_cardio_suffix(text)
 
     # Check full-body FIRST so emphasis subtitles like
     # "Full Body A — Squat & Press" bucket as full_body instead of
@@ -211,6 +236,9 @@ def normalize_focus_to_family(raw_focus: Optional[str]) -> FocusBucket:
 
     # Drop trailing numbering
     text = re.sub(r"\s+\d+\s*$", "", text)
+    # PLUS_CARDIO hybrids count as their lift family — see the
+    # matching strip in normalize_focus_to_bucket for rationale.
+    text = _strip_plus_cardio_suffix(text)
 
     # Full body first (unambiguous)
     for pattern in _FULL_BODY_KEYWORDS:

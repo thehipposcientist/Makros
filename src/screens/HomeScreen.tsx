@@ -38,6 +38,8 @@ import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
 import IncompleteDayBanner from '../components/IncompleteDayBanner';
+import AdaptiveMacroCard from '../components/AdaptiveMacroCard';
+import SavedMealsSection from '../components/SavedMealsSection';
 import PlanSwapExerciseModal from '../components/PlanSwapExerciseModal';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
@@ -45,6 +47,7 @@ import { configureExpandAnimation } from '../utils/layoutAnim';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
+import SupplementStackScreen from '../components/SupplementStackScreen';
 import RecoveryCard from '../components/RecoveryCard';
 import WeeklyDigestCard from '../components/WeeklyDigestCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
@@ -2301,9 +2304,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const pLocal = (p as any)._localId;
             const pRoutine = (p as any)._routineId;
             const pSig = `${p.meal}__${Math.round(p.calories ?? 0)}`;
+            // Dedupe on true identity first — same localId / routineId
+            // means "this is the same meal being re-added in the overlay".
             if (pLocal && currentLocalIds.has(pLocal)) return false;
             if (pRoutine && currentRoutineIds.has(pRoutine)) return false;
-            if (currentSigs.has(pSig)) return false;
+            // Content-sig guard only applies when the preserved meal
+            // has NO stable id. User-created meals (with _localId) are
+            // explicit choices — logging the same saved meal twice
+            // should not be silently filtered just because the macros
+            // match. Without this refinement the second "Protein Shake"
+            // of the day vanished on reload. Template meals without
+            // ids still dedupe by sig so the auto-generated breakfast
+            // doesn't duplicate a preserved breakfast.
+            if (!pLocal && !pRoutine && currentSigs.has(pSig)) return false;
             return true;
           });
           if (toAdd.length > 0) {
@@ -3168,8 +3181,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [checkedMealsByDate, persistDayState, nutritionPlansByDate, authToken]);
 
-  const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
-    console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0}`);
+  const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion, opts?: { routineScope?: 'today' | 'all' }) => {
+    console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0} routineScope=${opts?.routineScope ?? '—'}`);
+    // Routine detach: when the editor opts into "Just today" scope on a
+    // routine-backed meal, strip the _routineId + tag a fresh _localId
+    // so applyRoutines on the next plan load leaves our edit alone.
+    const willDetach = opts?.routineScope === 'today' && !!(updated as any)._routineId;
+    if (willDetach) {
+      const { [`_routineId`]: _dropped, ...rest } = updated as any;
+      updated = {
+        ...rest,
+        _localId: (updated as any)._localId || `saved_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      } as MealSuggestion;
+      console.log('[handleMealSave] detached routine instance — _localId stamped');
+    }
     let nextPlan: DailyNutritionPlan | null = null;
     let savedMealType: string = mealType;
     let savedIdx = -1;
@@ -3232,11 +3257,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }).catch(err => console.log('[handleMealSave] meal-log background save failed:', err?.message));
     }
 
-    // Routine-backed meal edits must propagate to `mealRoutines` storage.
-    // Identified by `_routineId` on the saved meal — the user just edited
-    // a meal that was pinned, so we update the routine snapshot in place.
+    // Persist detached meals locally so they survive plan reload —
+    // applyRoutines would otherwise drop any meal without a linked
+    // routine. `_localId` is the escape hatch.
+    if (willDetach && savedIdx >= 0) {
+      try { await savePreservedMeal(date, `meal_${savedIdx}`, updated); } catch {}
+    }
+
+    // Routine-backed meal edits must propagate to `mealRoutines` storage
+    // ONLY when the user chose "Apply to every day". When scope is
+    // "today" we've already detached above so the routine template
+    // stays pristine. Legacy callers that don't pass a scope fall back
+    // to the old template-update behavior.
     const routineId = (updated as any)._routineId;
-    if (routineId) {
+    const shouldPropagateToRoutine = routineId && opts?.routineScope !== 'today';
+    if (shouldPropagateToRoutine) {
       const routines = await loadMealRoutines();
       const existing = routines.find(r => r.id === routineId);
       if (existing) {
@@ -3693,6 +3728,45 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Video modal target — carries the exercise name PLUS optional
   // metadata so the backend can rank results to the exact variant
   // (e.g. "Band Chest Press" excludes "Machine Chest Press" hits).
+  // Saved meal library — name set lets NutritionCard tag rows as
+  // "✓ Saved". List itself backs the add-from-saved picker on the
+  // day card. Reloaded whenever the user creates / deletes one so the
+  // chip stays in sync.
+  const [savedMealLibrary, setSavedMealLibrary] = useState<Array<{ id: number; name: string; items: any[]; total_calories: number; total_protein_g: number; total_carbs_g: number; total_fat_g: number }>>([]);
+  const savedMealNames = useMemo(
+    () => new Set(savedMealLibrary.map(m => (m.name || '').toLowerCase().trim())),
+    [savedMealLibrary],
+  );
+  const reloadSavedMeals = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const { listSavedMeals } = await import('../services/api');
+      const rows = await listSavedMeals(authToken);
+      setSavedMealLibrary(rows.map(r => ({
+        id: r.id, name: r.name, items: r.items || [],
+        total_calories: r.total_calories,
+        total_protein_g: r.total_protein_g,
+        total_carbs_g: r.total_carbs_g,
+        total_fat_g: r.total_fat_g,
+      })));
+    } catch {
+      // Network hiccup — leave existing library state alone.
+    }
+  }, [authToken]);
+  useEffect(() => { reloadSavedMeals(); }, [reloadSavedMeals]);
+
+  // When the add-from-saved picker fires on a day card we stash the
+  // target date so the quick-log modal knows where to paste.
+  const [addFromSavedFor, setAddFromSavedFor] = useState<string | null>(null);
+
+  // Template-mode meal editor target. When set, we render a
+  // MealEditModal hydrated from the saved meal's items and route save
+  // to `updateSavedMeal` (not to a day's plan). Past logs stay frozen
+  // — this only changes the template for future logs.
+  const [editingSavedMeal, setEditingSavedMeal] = useState<{
+    id: number; name: string; items: any[];
+  } | null>(null);
+
   const [videoModalTarget, setVideoModalTarget] = useState<{
     name: string;
     equipment?: string | null;
@@ -3918,7 +3992,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
             <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            <SubTabBtn label="Supps"   active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            {/* "Supplements" is full-width; "Supps" read as cheap/
+                truncated. If this overflows on very small screens we
+                can fall back to "Stack" — checked iPhone SE and it
+                fits at 4 equal-width segments. */}
+            <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
             <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
           </View>
         </View>
@@ -4823,7 +4901,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 below. The wrapper sets a solid background so the remount
                 frame (triggered by the `key` prop below) doesn't
                 flash-through to the previous tab's content. */}
-            {(mealsSubTab !== 'plan' && mealsSubTab !== 'history') && (
+            {/* Supplements sub-tab now has its own V1 screen — stack
+                CRUD, Today check-offs, Recommendations driven by food
+                gaps. Replaces the old EditProfileScreen-based view. */}
+            {mealsSubTab === 'supplements' && (
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+                <SupplementStackScreen
+                  authToken={authToken!}
+                  themeName={userProfile.themePreference}
+                />
+              </View>
+            )}
+
+            {(mealsSubTab !== 'plan' && mealsSubTab !== 'history' && mealsSubTab !== 'supplements') && (
               <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
                 {mealsSubTab === 'foods' && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
@@ -4850,9 +4940,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       </View>
                       <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
                     </TouchableOpacity>
+                    {/* Saved Meals — user-curated reusable bundles.
+                        Separate from Favorites (auto-detected from
+                        repeat eating) and Routines (scheduled). This
+                        is where a "Save as Meal" from the editor
+                        shows up for one-tap logging. */}
+                    {authToken && (
+                      <SavedMealsSection
+                        authToken={authToken}
+                        themeName={userProfile.themePreference}
+                        onLogged={() => {
+                          // Reload today's plan so the newly-logged
+                          // meal appears on the plan tab. `onWeeklyRefresh`
+                          // is the wrong callback here — it expects a
+                          // `{adherence, energy, notes}` review object
+                          // from the weekly check-in flow and crashes
+                          // when called empty.
+                          loadDayStatus();
+                          if (userProfile) loadPlans(userProfile);
+                        }}
+                        onEditTemplate={(sm) => {
+                          setEditingSavedMeal({
+                            id: sm.id,
+                            name: sm.name,
+                            items: sm.items || [],
+                          });
+                        }}
+                      />
+                    )}
                     {commonMeals.length > 0 && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
+                        <Text style={{ fontSize: 10, color: themeColors.textMuted, marginBottom: 6 }}>
+                          Meals you've eaten 2+ times. Auto-detected — no need to save them.
+                        </Text>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
                           {commonMeals.map(m => (
                             <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
@@ -4892,8 +5013,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (!seen.has(k)) { seen.add(k); days.push(k); }
               }
               const todayStr = todayKey();
+              // Past dates only. `nutritionPlansByDate` intentionally
+              // carries forward 7 days of plans for the Plan tab —
+              // those must NOT leak into history, or future days would
+              // appear with the "fully logged" treatment just because
+              // the plan exists (and maybe has auto-checks). History
+              // is PAST days only.
               const sorted = days
-                .filter(d => d !== todayStr)
+                .filter(d => d < todayStr)
                 .sort((a, b) => b.localeCompare(a))
                 .slice(0, 14);
               if (sorted.length === 0) {
@@ -4929,10 +5056,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 calendarDays.push({ date: key, score: sc });
               }
               const scoreColor = (s: number | null): string => {
+                // Pull from theme so the score tier colors match the
+                // active palette. All themes define success/warning/
+                // error semantics, so this is safe across every one.
                 if (s == null) return themeColors.border;
-                if (s >= 70) return '#22C55E';
-                if (s >= 45) return '#F59E0B';
-                return '#EF4444';
+                if (s >= 70) return themeColors.success;
+                if (s >= 45) return themeColors.warning;
+                return themeColors.error;
               };
               return (
                 <View style={{ gap: 10, marginBottom: 80 }}>
@@ -4981,11 +5111,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               alignItems: 'center',
                               justifyContent: 'center',
                               gap: 4,
-                              backgroundColor: fullyLogged && !isToday ? '#22C55E' + '22' : themeColors.surfaceRaised,
+                              backgroundColor: fullyLogged && !isToday ? themeColors.success + '22' : themeColors.surfaceRaised,
                               borderWidth: isSelected ? 2 : fullyLogged && !isToday ? 2 : 1,
                               borderColor: isSelected
                                 ? themeColors.primary
-                                : fullyLogged && !isToday ? '#22C55E' : themeColors.border,
+                                : fullyLogged && !isToday ? themeColors.success : themeColors.border,
                             }}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
                               <Text style={{ fontSize: 10, fontWeight: '700', color: isToday ? themeColors.primary : themeColors.textSecondary }}>
@@ -4996,7 +5126,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                   badge got clipped by parent overflow on
                                   some devices). */}
                               {fullyLogged && !isToday && (
-                                <Ionicons name="checkmark-circle" size={12} color="#22C55E" />
+                                <Ionicons name="checkmark-circle" size={12} color={themeColors.success} />
                               )}
                             </View>
                             <View style={{
@@ -5041,14 +5171,42 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const isExpanded = expandedHistoryDate === d;
                     const dateObj = new Date(d + 'T12:00:00');
                     const label = dateObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+                    // Mirror the Meals-tab "fully logged" rule so the
+                    // card gets the same green ring + badge treatment
+                    // as the calendar strip above. Either every planned
+                    // meal is checked OR at least 3 meals are checked
+                    // (covers manual loggers whose day didn't match the
+                    // plan meal-count exactly).
+                    const _historyActiveKeys = meals.map((_, i) => `meal_${i}`);
+                    const _historyAllChecked = _historyActiveKeys.length > 0 && _historyActiveKeys.every(k => !!checks[k]);
+                    const cardFullyLogged = _historyAllChecked || checkedCount >= 3;
                     return (
-                      <View key={d} style={{ backgroundColor: themeColors.surface, borderRadius: 14, borderWidth: 1, borderColor: themeColors.border }}>
+                      <View key={d} style={{
+                        backgroundColor: cardFullyLogged ? themeColors.success + '12' : themeColors.surface,
+                        borderRadius: 14, borderWidth: 1,
+                        borderColor: cardFullyLogged ? themeColors.success + '55' : themeColors.border,
+                      }}>
                         <TouchableOpacity
                           activeOpacity={0.85}
                           onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedHistoryDate(isExpanded ? null : d); }}
                           style={{ padding: 14 }}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{label}</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                              <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{label}</Text>
+                              {cardFullyLogged && (
+                                <View style={{
+                                  flexDirection: 'row', alignItems: 'center', gap: 3,
+                                  backgroundColor: themeColors.success + '22',
+                                  paddingHorizontal: 6, paddingVertical: 2,
+                                  borderRadius: 10,
+                                }}>
+                                  <Ionicons name="checkmark-circle" size={11} color={themeColors.success} />
+                                  <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.success, letterSpacing: 0.3 }}>
+                                    FULLY LOGGED
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                               <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
                                 {checkedCount}/{meals.length || '–'} logged
@@ -5263,6 +5421,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {mealsSubTab === 'plan' && !isFreeTier && authToken && (
               <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
+            {/* Weekly adaptive-TDEE check-in — surfaces when enough
+                nutrition + weight data exists to recompute maintenance
+                and suggest a target adjustment. Deterministic. */}
+            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
+              <AdaptiveMacroCard
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+                weightEntries={(userProfile.weightEntries ?? []).map(e => ({
+                  date: e.date,
+                  weight_lbs: e.weight_lbs,
+                }))}
+                onAccept={(newTarget) => {
+                  // Persist via onProfileUpdate — the profile store
+                  // holds customMacros which the plan generator reads
+                  // on next regen. Keeps the mutation lightweight; a
+                  // full plan regen happens on next natural trigger.
+                  onProfileUpdate?.({
+                    customMacros: {
+                      ...(userProfile.customMacros ?? {}),
+                      calories: newTarget,
+                    },
+                  } as any, true);
+                  Alert.alert(
+                    'Target updated',
+                    `Your new calorie target is ${newTarget} kcal/day. The plan will pick this up on your next regeneration.`,
+                  );
+                }}
+              />
+            )}
             {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
               let plan = nutritionPlansByDate[d.key];
               // Free tier: synthesize an empty plan frame so the user
@@ -5336,7 +5523,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     {(() => {
                       const ds = computeNutritionScore(plan, userProfile.goal ?? 'body_recomp');
                       if (!ds || ds.score <= 0) return null;
-                      const c = ds.score >= 70 ? '#22C55E' : ds.score >= 45 ? '#F59E0B' : '#EF4444';
+                      const c = ds.score >= 70 ? themeColors.success : ds.score >= 45 ? themeColors.warning : themeColors.error;
                       return (
                         <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: c + '18', alignItems: 'center', justifyContent: 'center', marginRight: 4 }}>
                           <Text style={{ fontSize: 11, fontWeight: '900', color: c }}>{ds.score}</Text>
@@ -5372,6 +5559,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
+                      savedMealNames={savedMealNames}
+                      onAddFromSaved={() => setAddFromSavedFor(d.key)}
                     />
                   </AnimatedCollapsible>
                 </View>
@@ -5723,6 +5912,84 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }}
       />
 
+      {/* Add-from-saved picker — surfaces from the day-card "From
+          saved" button. Logs the picked saved meal as a fresh Meal
+          row for the target date, then refreshes the plan so the new
+          row renders without requiring the user to re-open the day. */}
+      {addFromSavedFor && authToken && (
+        <Modal
+          visible={!!addFromSavedFor}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setAddFromSavedFor(null)}
+        >
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+            <View style={{
+              backgroundColor: themeColors.background,
+              borderTopLeftRadius: 20, borderTopRightRadius: 20,
+              padding: 16, paddingBottom: 30, maxHeight: '75%',
+            }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary }}>Add from Saved Meal</Text>
+                <TouchableOpacity onPress={() => setAddFromSavedFor(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Ionicons name="close" size={22} color={themeColors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 12, lineHeight: 15 }}>
+                Logs a full copy of the saved meal to {addFromSavedFor}. Tweak any details afterward by tapping the meal row.
+              </Text>
+              <ScrollView>
+                {savedMealLibrary.length === 0 ? (
+                  <View style={{ padding: 16, alignItems: 'center' }}>
+                    <Ionicons name="albums-outline" size={28} color={themeColors.textMuted} style={{ marginBottom: 8 }} />
+                    <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center' }}>No saved meals yet.</Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, textAlign: 'center', marginTop: 4, lineHeight: 16 }}>
+                      Edit any meal and tap "Save as Meal" to add it to your library.
+                    </Text>
+                  </View>
+                ) : savedMealLibrary.map(sm => (
+                  <TouchableOpacity
+                    key={sm.id}
+                    onPress={async () => {
+                      const dateKey = addFromSavedFor;
+                      setAddFromSavedFor(null);
+                      try {
+                        const { logSavedMeal } = await import('../services/api');
+                        // Default meal_type by time of day on the
+                        // server-side would need the current hour; we
+                        // just send "snack" so the user can re-type
+                        // via inline edit if needed.
+                        const h = new Date().getHours();
+                        const mt = h < 10 ? 'breakfast' : h < 14 ? 'lunch' : h < 17 ? 'snack' : h < 21 ? 'dinner' : 'snack';
+                        await logSavedMeal(authToken, sm.id, {
+                          meal_date: dateKey,
+                          meal_type: mt,
+                        });
+                        loadDayStatus();
+                        if (userProfile) loadPlans(userProfile);
+                      } catch (e: any) {
+                        Alert.alert('Could not log', String(e?.message ?? e));
+                      }
+                    }}
+                    style={{
+                      backgroundColor: themeColors.surface, borderRadius: 12, padding: 12, marginBottom: 8,
+                      borderWidth: 1, borderColor: themeColors.border,
+                    }}
+                  >
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>
+                      {sm.name}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                      {sm.items.length} item{sm.items.length === 1 ? '' : 's'} · {Math.round(sm.total_calories)} cal · {Math.round(sm.total_protein_g)}g P
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      )}
+
       {/* Meal edit modal */}
       {editingMeal && nutritionPlansByDate[editingMeal.dateKey] && (
         <MealEditModal
@@ -5741,8 +6008,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           dietaryPreference={userProfile.dietaryPreference}
           allergies={userProfile.allergies}
           onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
+          onSaveRoutine={(updated, scope) =>
+            handleMealSave(editingMeal.dateKey, editingMeal.type, updated, { routineScope: scope })
+          }
           onClose={() => setEditingMeal(null)}
           onToggleRoutine={() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type)}
+          onSaveAsMeal={async () => {
+            if (!authToken || !editingMeal) return;
+            const m = editingMeal.meal;
+            const items = (m.items ?? []).map((it: any) => ({
+              food_name: it.name || it.food_name || 'Item',
+              quantity: Number(it.quantity || it.qty || 1),
+              unit: String(it.unit || 'serving'),
+              calories: Number(it.calories || 0),
+              protein_g: Number(it.protein_g ?? it.protein ?? 0),
+              carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
+              fat_g: Number(it.fat_g ?? it.fat ?? 0),
+            }));
+            if (items.length === 0) {
+              Alert.alert('Nothing to save', 'Add some foods first, then save as a meal.');
+              return;
+            }
+            try {
+              const { createSavedMeal } = await import('../services/api');
+              await createSavedMeal(authToken, {
+                name: m.meal || m.name || 'My saved meal',
+                items: items as any,
+              });
+              // Refresh the library so the "✓ Saved" chip lights up
+              // on this row immediately (no cache miss, no stale set).
+              reloadSavedMeals();
+              Alert.alert('Saved', 'You can log this meal again from Foods → Saved Meals, or the "From saved" button on any day card.');
+            } catch (e: any) {
+              Alert.alert('Could not save', String(e?.message ?? e));
+            }
+          }}
           onAddCustomFood={(item) => {
             // Route through `onProfileUpdate` so the new food:
             //  1. Lands in React state (so `allFoodsWithCustom` picks it up
@@ -5758,6 +6058,97 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }}
         />
       )}
+
+      {/* Saved-meal template editor — opens from Foods → Saved Meals ⋯
+          menu. Reuses MealEditModal in template mode so the editing
+          experience is identical (foods picker, scan, macros). Save
+          writes to the saved-meal template; past logs stay frozen. */}
+      {editingSavedMeal && (() => {
+        // Hydrate a MealSuggestion from the saved meal's items.
+        const mappedItems = (editingSavedMeal.items || []).map((it: any) => {
+          const qty = Number(it.quantity || 1);
+          const cal = Number(it.calories || 0);
+          const pro = Number(it.protein_g || it.protein || 0);
+          const carbs = Number(it.carbs_g || it.carbs || 0);
+          const fat = Number(it.fat_g || it.fat || 0);
+          return {
+            name: String(it.food_name || it.name || 'Item'),
+            quantity: qty,
+            unit: String(it.unit || 'serving'),
+            calories: cal,
+            protein: pro,
+            carbs,
+            fat,
+            baseQuantity: qty > 0 ? qty : 1,
+            baseCalories: cal, baseProtein: pro, baseCarbs: carbs, baseFat: fat,
+          };
+        });
+        const totals = mappedItems.reduce(
+          (acc: any, it: any) => ({
+            calories: acc.calories + (it.calories || 0),
+            protein:  acc.protein  + (it.protein  || 0),
+            carbs:    acc.carbs    + (it.carbs    || 0),
+            fat:      acc.fat      + (it.fat      || 0),
+          }),
+          { calories: 0, protein: 0, carbs: 0, fat: 0 },
+        );
+        const scaffoldMeal = {
+          meal: editingSavedMeal.name,
+          items: mappedItems as any,
+          foods: mappedItems.map((i: any) => i.name),
+          amounts: mappedItems.map((i: any) => `${i.quantity} ${i.unit}`),
+          ...totals,
+        };
+        const scaffoldPlan = {
+          targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+          meals: [scaffoldMeal],
+        } as any;
+        return (
+          <MealEditModal
+            visible
+            mealType="meal_0"
+            meal={scaffoldMeal as any}
+            dateKey={undefined}
+            themeName={userProfile.themePreference}
+            nutritionPlan={scaffoldPlan}
+            allFoods={allFoodsWithCustom}
+            foodCategories={userFoodCategories}
+            savedMeals={[]}
+            authToken={authToken}
+            mode="template"
+            cookingSkill={userProfile.cookingSkill}
+            prepTimeMinutes={userProfile.prepTimeMinutes}
+            dietaryPreference={userProfile.dietaryPreference}
+            allergies={userProfile.allergies}
+            onClose={() => setEditingSavedMeal(null)}
+            onSave={async (updated) => {
+              // Map MealEditModal items (name/quantity/unit/calories/protein/carbs/fat)
+              // back into the SavedMealItem shape.
+              const items = (updated.items ?? []).map((it: any) => ({
+                food_name: it.name || 'Item',
+                quantity: Number(it.quantity || 1),
+                unit: String(it.unit || 'serving'),
+                calories: Number(it.calories || 0),
+                protein_g: Number(it.protein || 0),
+                carbs_g: Number(it.carbs || 0),
+                fat_g: Number(it.fat || 0),
+              }));
+              try {
+                const { updateSavedMeal } = await import('../services/api');
+                await updateSavedMeal(authToken!, editingSavedMeal.id, {
+                  name: updated.meal || editingSavedMeal.name,
+                  items: items as any,
+                });
+                reloadSavedMeals();
+                setEditingSavedMeal(null);
+                Alert.alert('Updated', 'Template updated. Future logs will use your new version.');
+              } catch (e: any) {
+                Alert.alert('Could not update', String(e?.message ?? e));
+              }
+            }}
+          />
+        );
+      })()}
 
       {/* Embedded form-video modal */}
       <FormVideoModal
@@ -7960,10 +8351,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                           const hasConflict = !!w?.conflict;
                           const lowReady = w?.readiness != null && w.readiness < 40;
                           const warned = hasConflict || lowReady;
-                          const tier = w?.readiness == null ? '#9CA3AF'
-                            : w.readiness >= 70 ? '#22C55E'
-                            : w.readiness >= 40 ? '#F59E0B'
-                            : '#EF4444';
+                          const tier = w?.readiness == null ? tc.textMuted
+                            : w.readiness >= 70 ? tc.success
+                            : w.readiness >= 40 ? tc.warning
+                            : tc.error;
                           const tierLabel = w?.readiness == null ? 'Unknown'
                             : w.readiness >= 70 ? 'Fresh'
                             : w.readiness >= 40 ? 'Moderate'
@@ -8005,7 +8396,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                                 // visual separation from the workout
                                 // card that sits directly below.
                                 borderRadius: 8,
-                                backgroundColor: warned ? '#F59E0B' + '10' : 'transparent',
+                                backgroundColor: warned ? tc.warning + '10' : 'transparent',
                               }}
                               onPress={handlePick}>
                               {/* Outer score dial — large, color-coded,
@@ -8054,7 +8445,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                               </Text>
                               {warned && (
                                 <View style={{ position: 'absolute', top: 2, right: 2 }}>
-                                  <Ionicons name="warning" size={12} color="#F59E0B" />
+                                  <Ionicons name="warning" size={12} color={tc.warning} />
                                 </View>
                               )}
                             </TouchableOpacity>

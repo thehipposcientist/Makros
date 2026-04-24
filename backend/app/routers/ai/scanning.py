@@ -922,6 +922,93 @@ def get_supplement_from_photo(
         raise HTTPException(status_code=502, detail=f"Supplement photo lookup failed: {str(e)}")
 
 
+@router.post("/scan-supplements")
+def scan_supplements_photo(
+    body: SupplementPhotoRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Identify MULTIPLE supplements in a single photo — user snaps
+    their whole stack on a counter and AI returns a list of detected
+    products with estimated dose + category for each. The client shows
+    a review step so users confirm / edit before everything lands in
+    their stack.
+
+    Response: {"supplements": [{name, category, dose, unit, evidence,
+    timing, safety}], "count": N}. Empty list when nothing is
+    recognizable.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    client = OpenAI(api_key=api_key)
+    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+    image_data_url = f"data:{_fmime};base64,{_fb64}"
+
+    _msgs = [
+        {
+            "role": "system",
+            "content": (
+                "You are a sports nutrition expert. Identify EVERY supplement "
+                "product visible in the photo (bottles, containers, packets). "
+                "Return a JSON array — even if only one is visible. Never return "
+                "lifestyle products (foods, drinks, medications). Always respond "
+                "with valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "List every supplement you can identify in this image. "
+                        'Return {"supplements": [...], "count": N} where each item is '
+                        '{"name": <short product name>, "category": <vitamin|mineral|'
+                        'performance|protein|stimulant|fatty_acid|amino_acid|other>, '
+                        '"dose_amount": <number>, "dose_unit": <mg|g|mcg|IU|capsule|serving>, '
+                        '"evidence_tier": <strong|moderate|limited|weak>, '
+                        '"risk_tier": <low|moderate|high>, '
+                        '"timing_notes": <string or null>, '
+                        '"safety_notes": <string or null>}. '
+                        'Use conservative evidence_tier and risk_tier. Prefer dose '
+                        'values visible on labels over guesses. If nothing is '
+                        'identifiable, return {"supplements": [], "count": 0}.'
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_image(), _msgs, max_tokens=900, timeout_secs=45)
+        response = _chat_create(client, **kwargs)
+        data = _extract_json(response.choices[0].message.content)
+        supps = data.get("supplements") if isinstance(data, dict) else None
+        if not isinstance(supps, list):
+            supps = []
+        # Defensive cleanup — AI sometimes nests or returns nulls.
+        cleaned = []
+        for s in supps:
+            if not isinstance(s, dict) or not s.get("name"):
+                continue
+            cleaned.append({
+                "name": str(s.get("name")).strip(),
+                "category": str(s.get("category") or "other"),
+                "dose_amount": float(s.get("dose_amount") or 0) or None,
+                "dose_unit": str(s.get("dose_unit") or "mg"),
+                "evidence_tier": str(s.get("evidence_tier") or "limited"),
+                "risk_tier": str(s.get("risk_tier") or "low"),
+                "timing_notes": s.get("timing_notes"),
+                "safety_notes": s.get("safety_notes"),
+            })
+        return {"supplements": cleaned, "count": len(cleaned)}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Multi-supplement scan failed: {str(e)}")
+
+
 @router.post("/scan-equipment")
 def scan_equipment_photo(
     body: FoodPhotoRequest,

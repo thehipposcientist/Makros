@@ -1764,6 +1764,30 @@ export async function lookupSupplementFromPhoto(
   });
 }
 
+export type ScannedSupplement = {
+  name: string;
+  category: string;
+  dose_amount: number | null;
+  dose_unit: string;
+  evidence_tier: 'strong' | 'moderate' | 'limited' | 'weak';
+  risk_tier: 'low' | 'moderate' | 'high';
+  timing_notes?: string | null;
+  safety_notes?: string | null;
+};
+
+/** Multi-supplement photo scan — AI identifies every bottle/container
+ *  visible and returns a list for the user to review + confirm. */
+export async function scanSupplementsMulti(
+  token: string,
+  payload: { image_base64: string; mime_type?: string },
+): Promise<{ supplements: ScannedSupplement[]; count: number }> {
+  return request('/ai/scan-supplements', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 60000);
+}
+
 export async function lookupSupplement(
   token: string,
   name: string,
@@ -2282,5 +2306,242 @@ export async function scanBody(
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   }, 45000);
+}
+
+
+// ─── Saved Meals ─────────────────────────────────────────────────────────────
+
+export type SavedMealItem = {
+  food_name: string;
+  food_id?: number | null;
+  serving_id?: number | null;
+  quantity: number;
+  unit: string;
+  serving_grams?: number | null;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+};
+
+export type SavedMeal = {
+  id: number;
+  user_id: number;
+  name: string;
+  notes?: string | null;
+  total_calories: number;
+  total_protein_g: number;
+  total_carbs_g: number;
+  total_fat_g: number;
+  items: SavedMealItem[];
+  times_logged: number;
+  last_logged_at?: string | null;
+  created_at: string;
+};
+
+export async function listSavedMeals(token: string): Promise<SavedMeal[]> {
+  return request('/meals/saved', { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function createSavedMeal(
+  token: string,
+  body: { name: string; notes?: string | null; items?: SavedMealItem[]; from_meal_id?: number },
+): Promise<SavedMeal> {
+  return request('/meals/saved', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteSavedMeal(token: string, savedId: number): Promise<void> {
+  await request(`/meals/saved/${savedId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Edit the saved-meal template. Past logs (meals already on your
+ *  calendar) are snapshots and DO NOT change. Only future logs pull
+ *  from the updated template. */
+export async function updateSavedMeal(
+  token: string,
+  savedId: number,
+  patch: { name?: string; notes?: string | null; items?: SavedMealItem[] },
+): Promise<SavedMeal> {
+  return request(`/meals/saved/${savedId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function logSavedMeal(
+  token: string,
+  savedId: number,
+  body: { meal_date?: string; meal_type?: string; consumed_at?: string },
+): Promise<{ meal_id: number; saved_meal_id: number; times_logged: number }> {
+  return request(`/meals/saved/${savedId}/log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+
+// ─── Meal editing (patch consumed_at / meal_type) ────────────────────────────
+
+export async function updateMeal(
+  token: string,
+  mealId: number,
+  patch: { meal_type?: string; consumed_at?: string | null; notes?: string | null; name?: string },
+): Promise<any> {
+  return request(`/meals/${mealId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(patch),
+  });
+}
+
+
+// ─── Supplements ────────────────────────────────────────────────────────────
+
+export type SupplementIngredient = {
+  id: number;
+  slug: string;
+  name: string;
+  category: string;
+  default_unit: string;
+  evidence_tier: 'strong' | 'moderate' | 'limited' | 'weak';
+  risk_tier: 'low' | 'moderate' | 'high';
+  description?: string | null;
+  timing_notes?: string | null;
+  safety_notes?: string | null;
+};
+
+export type StackItem = {
+  id: number;
+  user_id: number;
+  supplement_ingredient_id?: number | null;
+  supplement_product_id?: number | null;
+  custom_name?: string | null;
+  category?: string | null;
+  goal?: string | null;
+  dose_amount: number;
+  dose_unit: string;
+  frequency: string;
+  timing?: string | null;
+  taken_with_food: boolean;
+  active: boolean;
+  notes?: string | null;
+  evidence_tier?: string | null;
+  risk_tier?: string | null;
+  timing_notes?: string | null;
+  safety_notes?: string | null;
+  created_at: string;
+};
+
+export type TodayStackItem = StackItem & {
+  logs_today: Array<{ id: number; taken_at: string; skipped: boolean; dose_amount?: number | null }>;
+};
+
+export type SupplementRecommendation = {
+  slug: string | null;
+  title: string;
+  reason: string;
+  cautious_guidance: string;
+  evidence_tier: string;
+  risk_tier: string;
+  priority: 'high' | 'moderate' | 'low';
+};
+
+export async function listSupplementIngredients(): Promise<SupplementIngredient[]> {
+  return request('/supplements/ingredients');
+}
+
+export async function listStack(token: string, includeInactive = false): Promise<StackItem[]> {
+  const qs = includeInactive ? '?include_inactive=true' : '';
+  return request(`/supplements/stack${qs}`, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function addStackItem(token: string, body: Partial<StackItem> & { supplement_ingredient_id?: number; custom_name?: string; dose_amount: number; dose_unit: string }): Promise<StackItem> {
+  return request('/supplements/stack', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateStackItem(token: string, stackId: number, patch: Partial<StackItem>): Promise<StackItem> {
+  return request(`/supplements/stack/${stackId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteStackItem(token: string, stackId: number): Promise<void> {
+  await request(`/supplements/stack/${stackId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function logDose(
+  token: string,
+  stackId: number,
+  body: { taken_at?: string; skipped?: boolean; dose_amount?: number; dose_unit?: string } = {},
+): Promise<any> {
+  return request(`/supplements/stack/${stackId}/log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getTodaySupplements(token: string): Promise<TodayStackItem[]> {
+  return request('/supplements/today', { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function getSupplementRecommendations(token: string): Promise<{
+  recommendations: SupplementRecommendation[];
+  warnings: { duplicate_ingredient_ids: number[] };
+}> {
+  return request('/supplements/recommendations', { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function getSupplementInsights(token: string): Promise<{
+  insights: Array<{ key: string; severity: 'info' | 'warning'; title: string; body: string }>;
+}> {
+  return request('/supplements/insights', { headers: { Authorization: `Bearer ${token}` } });
+}
+
+
+// ─── Adaptive macros ────────────────────────────────────────────────────────
+
+export type AdaptiveMacroResult = {
+  status: 'ok' | 'need_more_data';
+  estimated_tdee: number | null;
+  current_target: number | null;
+  suggested_target: number | null;
+  delta: number | null;
+  avg_daily_calories: number | null;
+  weekly_weight_change_lbs: number | null;
+  days_logged: number;
+  weigh_ins: number;
+  confidence: 'low' | 'medium' | 'high';
+  reason: string;
+  goal_bucket: string | null;
+};
+
+export async function getAdaptiveMacros(
+  token: string,
+  weightEntries: Array<{ date: string; weight_lbs: number }>,
+): Promise<AdaptiveMacroResult> {
+  return request('/profile/adaptive-macros', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ weight_entries: weightEntries }),
+  });
 }
 

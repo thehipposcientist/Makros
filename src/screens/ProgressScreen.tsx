@@ -1910,17 +1910,28 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   ))}
 
-                  {/* Protein source breakdown */}
+                  {/* Protein source breakdown — daily averages, NOT
+                      raw window totals. The old label said "WEEKLY AVG"
+                      but showed sums ("72g plant · 581g animal") which
+                      made no sense. Now reads as a daily average that
+                      matches how users think about protein intake. */}
                   {(gutHealthWindow.plant_protein_g + gutHealthWindow.animal_protein_g) > 0 && (() => {
+                    const days = gutHealthWindow.days_with_data || 1;
+                    const avgPlant = (gutHealthWindow as any).avg_plant_protein_g
+                      ?? Math.round((gutHealthWindow.plant_protein_g / days) * 10) / 10;
+                    const avgAnimal = (gutHealthWindow as any).avg_animal_protein_g
+                      ?? Math.round((gutHealthWindow.animal_protein_g / days) * 10) / 10;
                     const total = gutHealthWindow.plant_protein_g + gutHealthWindow.animal_protein_g;
                     const plantPct = Math.round((gutHealthWindow.plant_protein_g / total) * 100);
                     const plantColor = plantPct >= 30 ? '#22C55E' : plantPct >= 15 ? '#F59E0B' : '#EF4444';
                     return (
                       <View style={{ marginBottom: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 6 }}>PROTEIN SOURCES (WEEKLY AVG)</Text>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 6 }}>
+                          PROTEIN SOURCES · {days}-DAY AVG
+                        </Text>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
                           <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
-                            {gutHealthWindow.plant_protein_g}g plant · {gutHealthWindow.animal_protein_g}g animal
+                            Daily avg: {Math.round(avgPlant)}g plant · {Math.round(avgAnimal)}g animal
                           </Text>
                           <Text style={{ fontSize: 11, fontWeight: '700', color: plantColor }}>{plantPct}% plant</Text>
                         </View>
@@ -1932,8 +1943,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>Plant</Text>
                           <Text style={{ fontSize: 9, color: tc.primary, fontWeight: '700' }}>Animal</Text>
                         </View>
+                        {/* Framed as a dietary-variety signal, not a
+                            moral judgement — some users thrive on
+                            higher-animal diets. */}
                         <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
-                          30%+ plant protein associated with reduced cardiovascular risk
+                          Mixing in plant proteins adds fiber and plant diversity. Aim for a mix that works for you.
                         </Text>
                       </View>
                     );

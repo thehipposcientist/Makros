@@ -190,8 +190,13 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
         "alcohol_servings": round(sum((getattr(r, "alcohol_servings", 0) or 0) for r in rows), 1),
         "processed_meat_servings": round(sum((getattr(r, "processed_meat_servings", 0) or 0) for r in rows), 1),
         "refined_grain_servings": round(sum((getattr(r, "refined_grain_servings", 0) or 0) for r in rows), 1),
+        # Raw sums kept for backwards-compat with old clients.
         "plant_protein_g": round(plant_p_sum, 1),
         "animal_protein_g": round(animal_p_sum, 1),
+        # Daily averages — the UI prefers these so "Xg plant" reads
+        # sanely ("10g plant / day" beats "72g plant total over 7 days").
+        "avg_plant_protein_g": round(plant_p_sum / n, 1),
+        "avg_animal_protein_g": round(animal_p_sum / n, 1),
         "plant_protein_pct": plant_protein_pct,
         "processing_counts": proc_totals,
         "calorie_stability_cv": round(cv, 3),
