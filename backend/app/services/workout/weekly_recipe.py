@@ -879,6 +879,70 @@ _GOALS_PREFERRING_HYBRID_CARDIO = frozenset({
 })
 
 
+# Direct hybrid injection — goal × days table. Used for pure-lifting
+# modes (muscle_gain, strength, general_health) that don't emit
+# dedicated cardio days. For those goals we directly promote N lift
+# days to PLUS_CARDIO based on training frequency.
+#
+# Values per the goal policy:
+#   muscle_gain: 0-1 cardio at 3-4d, 1 at 5d, 1-2 at 6-7d
+#   strength:    0-1 at 3-4d, 1 at 5-6d, 1 at 7d (easy only)
+#   general_health: 1-2 at 3d, 2 at 4d, 2-3 at 5d, 3 at 6-7d
+_DIRECT_PROMOTE_COUNT: dict[str, dict[int, int]] = {
+    "muscle_gain":    {3: 0, 4: 1, 5: 1, 6: 1, 7: 2},
+    "strength":       {3: 0, 4: 0, 5: 1, 6: 1, 7: 1},
+    "general_health": {3: 1, 4: 2, 5: 2, 6: 2, 7: 2},
+}
+
+
+def _inject_hybrid_cardio(
+    recipe: list[DayArchetype],
+    *,
+    profile: "GoalProfile",
+    days_per_week: int,
+) -> list[DayArchetype]:
+    """Promote N lift days to PLUS_CARDIO hybrids without requiring a
+    dedicated cardio day to exist. Used by pure-lifting modes so
+    muscle_gain / strength / general_health still get same-day cardio
+    at higher training frequencies.
+
+    Only promotes PUSH/PULL/UPPER/FULL_BODY family lifts — never LEGS.
+    Spreads promotions across the week (avoids back-to-back hybrids).
+    """
+    bucket = getattr(profile, "bucket", None)
+    table = _DIRECT_PROMOTE_COUNT.get(bucket or "", None)
+    if table is None:
+        return recipe
+    target = table.get(days_per_week, 0)
+    if target <= 0:
+        return recipe
+
+    out = list(recipe)
+    # Candidate indices: lift days with a mappable hybrid pair in the
+    # profile's allowed set. Exclude legs. Sort by index so we visit
+    # early days first (plans typically show Monday first).
+    def _can_promote(i: int) -> bool:
+        a = out[i]
+        hybrid = _HYBRID_PAIR.get(a)
+        return hybrid is not None and hybrid in profile.allowed_archetypes
+
+    promotable = [i for i in range(len(out)) if _can_promote(i)]
+    if not promotable:
+        return out
+
+    # Pick indices spread evenly across `promotable` to avoid clustering
+    # (e.g. for 5 lift days and target=2, pick indices 0 and 3, not 0/1).
+    if target >= len(promotable):
+        chosen = set(promotable)
+    else:
+        step = len(promotable) / target
+        chosen = {promotable[int(i * step)] for i in range(target)}
+
+    for i in chosen:
+        out[i] = _HYBRID_PAIR[out[i]]
+    return out
+
+
 def _promote_same_day_cardio(
     recipe: list[DayArchetype],
     *,
@@ -2690,6 +2754,16 @@ def generate_weekly_recipe(
         f"Recipe length {len(final)} != {days} after all passes "
         f"(mode={mode} split={lifting_split})"
     )
+
+    # Direct hybrid injection — for pure-lifting modes that don't emit
+    # dedicated cardio days (muscle_gain, strength, general_health),
+    # promote N lift days to PLUS_CARDIO per the goal × days table.
+    # Runs AFTER all adjacency repair + intensity spacing so the repair
+    # passes (which only swap pure-lift archetypes) don't trip over
+    # hybrid family changes. PLUS_CARDIO and its base lift share the
+    # same focus_family so adjacency state is preserved.
+    if mode in ("lifting", "strength", "maintain"):
+        final = _inject_hybrid_cardio(final, profile=profile, days_per_week=days)
 
     exposures = {"lift": 0, "cardio": 0, "mobility": 0, "recovery": 0, "hybrid": 0}
     for a in final:
