@@ -153,7 +153,6 @@ def get_or_create_metadata(
 
     normalized = normalize_name(raw_name)
     if not normalized:
-        # Return an in-memory unknown without caching empty keys.
         return FoodMetadata(
             normalized_name="", display_name=raw_name or "",
             classifier_version=CLASSIFIER_VERSION,
@@ -161,6 +160,8 @@ def get_or_create_metadata(
             fermented_flag=False, omega3_flag=False,
             processing_bucket="unknown", confidence=0.0, source="unknown",
             notes="empty name", protein_source="unknown", probiotic_flag=False,
+            seafood_flag=False, fruit_flag=False, vegetable_flag=False,
+            alcohol_flag=False, processed_meat_flag=False, refined_grain_flag=False,
         )
 
     existing = db.exec(
@@ -193,6 +194,12 @@ def get_or_create_metadata(
         notes=cls.notes,
         protein_source=cls.protein_source,
         probiotic_flag=cls.probiotic_flag,
+        seafood_flag=getattr(cls, "seafood_flag", False),
+        fruit_flag=getattr(cls, "fruit_flag", False),
+        vegetable_flag=getattr(cls, "vegetable_flag", False),
+        alcohol_flag=getattr(cls, "alcohol_flag", False),
+        processed_meat_flag=getattr(cls, "processed_meat_flag", False),
+        refined_grain_flag=getattr(cls, "refined_grain_flag", False),
     )
     db.add(row)
     try:

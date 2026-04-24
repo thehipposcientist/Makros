@@ -5,7 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-import { DailyNutritionPlan, MealSuggestion, MealMicronutrients, AppThemeName } from '../types';
+import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
@@ -135,7 +135,10 @@ export default function NutritionCard({
   }
   const hasMicros = microFieldSpec.some(s => dailyMicros[s.out] > 0);
 
-  const gutHealth = useMemo(
+  // Plan-preview gut facts. Surfaced on the Nutrition Overview modal as a
+  // descriptive "Gut signals" tile strip. Gut & Plants card handles the
+  // full drill-down (today + 7d rollup).
+  const _gutHealth = useMemo(
     () => computePlanGutHealth(allVisible.map(v => v.meal), dailyMicros, actual.calories),
     [allVisible, dailyMicros, actual.calories],
   );
@@ -178,6 +181,28 @@ export default function NutritionCard({
                 </View>
                 <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
               </View>
+              {/* 2–4 chips: biggest wins + biggest gaps. Overview stays
+                  tight — full breakdown is in the modal. */}
+              {(() => {
+                const chips: Array<{ text: string; win: boolean }> = [];
+                for (const w of dayScore.wins.slice(0, 2)) chips.push({ text: w, win: true });
+                for (const g of dayScore.improvements.slice(0, 4 - chips.length)) chips.push({ text: g, win: false });
+                if (chips.length === 0) return null;
+                return (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                    {chips.map((c, i) => (
+                      <View key={i} style={{
+                        paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12,
+                        backgroundColor: (c.win ? '#22C55E' : '#F59E0B') + '18',
+                      }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: c.win ? '#22C55E' : '#F59E0B' }}>
+                          {c.win ? '✓ ' : '⚠ '}{c.text}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })()}
             </TouchableOpacity>
           );
         })()}
@@ -267,107 +292,71 @@ export default function NutritionCard({
                   );
                 })()}
 
-                {/* ── Section 2: Macros ── */}
-                <View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}>
-                  <View style={styles.modalMacroRow}>
-                    <View style={[styles.modalMacroItem, { backgroundColor: colors.background }]}>
-                      <Text style={[styles.modalMacroVal, { color: section.strong }]}>{actual.calories}</Text>
-                      <Text style={styles.modalMacroLabel}>cal / {targets.calories}</Text>
-                    </View>
-                    <View style={[styles.modalMacroItem, { backgroundColor: colors.background }]}>
-                      <Text style={[styles.modalMacroVal, { color: colors.primary }]}>{actual.protein}g</Text>
-                      <Text style={styles.modalMacroLabel}>protein / {targets.protein}g</Text>
-                    </View>
-                    <View style={[styles.modalMacroItem, { backgroundColor: colors.background }]}>
-                      <Text style={[styles.modalMacroVal, { color: '#F59E0B' }]}>{actual.carbs}g</Text>
-                      <Text style={styles.modalMacroLabel}>carbs / {targets.carbs}g</Text>
-                    </View>
-                    <View style={[styles.modalMacroItem, { backgroundColor: colors.background }]}>
-                      <Text style={[styles.modalMacroVal, { color: '#A78BFA' }]}>{actual.fat}g</Text>
-                      <Text style={styles.modalMacroLabel}>fat / {targets.fat}g</Text>
-                    </View>
-                  </View>
-                </View>
+                {/* Macros removed from the modal — the main NutritionCard
+                    already shows the macro tracker grid. The modal is for
+                    score breakdowns only. */}
 
-                {/* ── Section 3: Gut & Longevity (plan-based) ── */}
-                {gutHealth.item_count > 0 && (
+                {/* ── Section 3: Food Quality breakdown (unified with backend) ── */}
+                {dayScore.quality_breakdown && dayScore.quality_breakdown.length > 0 && (
+                  <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <Ionicons name="nutrition-outline" size={16} color={colors.primary} />
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Food Quality</Text>
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textSecondary, marginLeft: 'auto' }}>
+                        {dayScore.quality}
+                      </Text>
+                    </View>
+                    {dayScore.quality_breakdown.map(b => {
+                      const c = b.on_track ? '#22C55E' : b.value_pct >= 50 ? '#F59E0B' : '#EF4444';
+                      return (
+                        <View key={b.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                          <Text style={{ width: 120, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>{b.label}</Text>
+                          <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: colors.border }}>
+                            <View style={{ width: `${Math.min(100, b.value_pct)}%` as any, height: 5, borderRadius: 3, backgroundColor: c }} />
+                          </View>
+                          <Text style={{ fontSize: 10, color: colors.textMuted, width: 58, textAlign: 'right' }}>
+                            {b.raw}{b.unit === '% cals' ? '%' : b.unit === 'mg' ? ` ${b.unit}` : b.unit ? ` ${b.unit}` : ''}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                    <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
+                      See the Gut & Plants card for plant diversity and processing mix details.
+                    </Text>
+                  </Animated.View>
+                )}
+
+                {/* ── Gut signals strip (facts, not scored). Shows
+                    probiotic / fermented / plants so the user has
+                    visibility into gut-support inputs without diluting
+                    Food Quality's scoring. */}
+                {_gutHealth.item_count > 0 && (
                   <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                       <Ionicons name="leaf-outline" size={16} color={colors.primary} />
-                      <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut & Longevity</Text>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut signals</Text>
+                      <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 'auto' }}>today</Text>
                     </View>
-                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
                       {[
-                        { label: 'Gut Support', value: gutHealth.gut_support_score },
-                        { label: 'Food Quality', value: gutHealth.food_quality_score },
-                        { label: 'Longevity', value: gutHealth.longevity_score },
-                      ].map(s => {
-                        const c = s.value >= 75 ? '#22C55E' : s.value >= 55 ? colors.primary : s.value >= 35 ? '#F59E0B' : '#EF4444';
-                        return (
-                          <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: c + '12', borderRadius: 10, paddingVertical: 8 }}>
-                            <Text style={{ fontSize: 18, fontWeight: '900', color: c }}>{Math.round(s.value)}</Text>
-                            <Text style={{ fontSize: 9, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>{s.label}</Text>
-                          </View>
-                        );
-                      })}
-                    </View>
-                    {[
-                      { label: 'Fiber', value: `${Math.round(gutHealth.fiber_g)}g`, detail: `${gutHealth.fiber_per_1000_kcal} per 1k cal` },
-                      { label: 'Plants', value: `${gutHealth.distinct_plant_foods}`, detail: 'distinct in plan' },
-                      { label: 'Fermented', value: `${gutHealth.fermented_servings}`, detail: 'servings' },
-                      { label: 'Probiotic', value: `${gutHealth.probiotic_servings}`, detail: 'servings' },
-                      { label: 'Omega-3', value: gutHealth.omega3_mg > 0 ? `${Math.round(gutHealth.omega3_mg)}mg` : '0', detail: gutHealth.omega3_mg >= 1600 ? 'on target' : 'target 1600mg' },
-                    ].map(row => (
-                      <View key={row.label} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: colors.border + '33' }}>
-                        <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>{row.label}</Text>
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textPrimary }}>{row.value}</Text>
-                        <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 6 }}>{row.detail}</Text>
-                      </View>
-                    ))}
-                    {(gutHealth.plant_protein_g + gutHealth.animal_protein_g) > 0 && (() => {
-                      const total = gutHealth.plant_protein_g + gutHealth.animal_protein_g;
-                      const plantPct = Math.round((gutHealth.plant_protein_g / total) * 100);
-                      return (
-                        <View style={{ marginTop: 10 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                            <Text style={{ width: 80, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>Protein</Text>
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textPrimary }}>
-                              {gutHealth.plant_protein_g}g plant · {gutHealth.animal_protein_g}g animal
-                            </Text>
-                          </View>
-                          <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: colors.border }}>
-                            {gutHealth.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />}
-                            {gutHealth.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: colors.primary }} />}
-                          </View>
-                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 3 }}>
-                            <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>{plantPct}% plant</Text>
-                            <Text style={{ fontSize: 9, color: colors.primary, fontWeight: '700' }}>{100 - plantPct}% animal</Text>
-                          </View>
+                        { label: 'Probiotic', value: Math.round(_gutHealth.probiotic_servings) },
+                        { label: 'Fermented', value: Math.round(_gutHealth.fermented_servings) },
+                        { label: 'Plants', value: _gutHealth.distinct_plant_foods },
+                        { label: 'Omega-3', value: _gutHealth.omega3_mg > 0 ? `${Math.round(_gutHealth.omega3_mg)}mg` : '0' },
+                      ].map(tile => (
+                        <View key={tile.label} style={{
+                          flex: 1, alignItems: 'center', backgroundColor: colors.background,
+                          borderRadius: 8, paddingVertical: 10,
+                        }}>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary }}>
+                            {tile.value}
+                          </Text>
+                          <Text style={{ fontSize: 9, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>
+                            {tile.label}
+                          </Text>
                         </View>
-                      );
-                    })()}
-                    {Object.values(gutHealth.processing_counts).some(v => v > 0) && (
-                      <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border + '33' }}>
-                        <Text style={{ fontSize: 9, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>PROCESSING MIX</Text>
-                        {['minimally_processed', 'processed', 'unknown'].map(b => {
-                          const count = gutHealth.processing_counts[b] ?? 0;
-                          if (count === 0) return null;
-                          const itemTotal = gutHealth.item_count || 1;
-                          const pct = Math.round(100 * count / itemTotal);
-                          const barColor = b === 'minimally_processed' ? '#22C55E' : b === 'processed' ? '#EF4444' : colors.textMuted;
-                          return (
-                            <View key={b} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: barColor }} />
-                              <Text style={{ width: 110, fontSize: 10, color: colors.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
-                              <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: colors.border }}>
-                                <View style={{ width: `${Math.max(3, pct)}%` as any, height: 5, borderRadius: 3, backgroundColor: barColor }} />
-                              </View>
-                              <Text style={{ width: 42, fontSize: 10, fontWeight: '600', color: colors.textSecondary, textAlign: 'right' }}>{pct}%</Text>
-                            </View>
-                          );
-                        })}
-                      </View>
-                    )}
+                      ))}
+                    </View>
                   </Animated.View>
                 )}
 
@@ -855,9 +844,10 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           ~30% of daily cap, meaning one meal alone is spiking them. */}
       {(() => {
         const fiber = Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0);
-        const sugar = Math.round(meal.sugar ?? meal.micronutrients?.sugar ?? 0);
-        const sodium = Math.round(meal.sodium ?? meal.micronutrients?.sodium ?? 0);
-        const highSugar = sugar >= 15;
+        const sugar = Math.round(meal.micronutrients?.sugar ?? 0);
+        const addedSugar = Math.round((meal.micronutrients as any)?.added_sugar ?? 0);
+        const sodium = Math.round((meal.micronutrients as any)?.sodium_mg ?? meal.micronutrients?.sodium ?? 0);
+        const highSugar = addedSugar > 0 ? addedSugar >= 10 : sugar >= 15;
         const highSodium = sodium >= 700;
         return (
           <View style={styles.mealBadges}>
@@ -866,7 +856,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
             <MacroPill label="c"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
             <MacroPill label="f"   value={Math.round(meal.fat ?? 0)}   color="#A78BFA"         styles={styles} />
             {fiber > 0 && <MacroPill label="fiber" value={fiber} color="#10B981" styles={styles} />}
-            {highSugar && <MacroPill label="sugar" value={sugar} color="#EF4444" styles={styles} />}
+            {highSugar && <MacroPill label={addedSugar > 0 ? 'added sugar' : 'sugar'} value={addedSugar > 0 ? addedSugar : sugar} color="#EF4444" styles={styles} />}
             {highSodium && <MacroPill label="sodium" value={sodium} color="#EF4444" styles={styles} />}
           </View>
         );

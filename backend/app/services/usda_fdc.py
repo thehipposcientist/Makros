@@ -30,6 +30,7 @@ _NUTRIENT_MAP: dict[int, str] = {
     1004: "fat",           # Total lipid (fat)
     1079: "fiber",         # Fiber, total dietary
     2000: "sugar",         # Sugars, total
+    1235: "added_sugar_g", # Added Sugars (FDA-required label field)
     1093: "sodium_mg",     # Sodium, Na
     1087: "calcium_mg",    # Calcium, Ca
     1089: "iron_mg",       # Iron, Fe
@@ -204,7 +205,8 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         }
 
         micros = {}
-        for nid_key in ("fiber", "sugar", "sodium_mg", "calcium_mg", "iron_mg",
+        for nid_key in ("fiber", "sugar", "added_sugar_g", "sodium_mg",
+                         "calcium_mg", "iron_mg",
                          "magnesium_mg", "potassium_mg", "vitamin_d_mcg",
                          "vitamin_b12_mcg", "vitamin_c_mg", "vitamin_e_mg",
                          "vitamin_a_mcg", "saturated_fat", "cholesterol_mg"):

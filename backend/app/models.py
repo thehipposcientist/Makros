@@ -410,6 +410,10 @@ class FoodNutrition(SQLModel, table=True):
     fat: float = Field(default=0)
     fiber: float | None = Field(default=None)
     sugar: float | None = Field(default=None)
+    # Added sugars (FDA/USDA nutrient #1235). Distinct from total `sugar` —
+    # fruit sugar has sugar but no added sugar. The Food Quality sub-score
+    # uses added sugar, not total sugar, because the health signal lives here.
+    added_sugar_g: float | None = Field(default=None)
     sodium_mg: float | None = Field(default=None)
     extra_nutrients: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -662,6 +666,14 @@ class FoodMetadata(SQLModel, table=True):
     # kombucha, natto). Tempeh + miso excluded because they're usually
     # cooked before consumption.
     probiotic_flag: bool = Field(default=False)
+    # Classifier v3 — descriptive tags used for weekly pattern metrics.
+    # Not scored directly; feed drill-down facts and the omega-3 signal.
+    seafood_flag: bool = Field(default=False)
+    fruit_flag: bool = Field(default=False)
+    vegetable_flag: bool = Field(default=False)
+    alcohol_flag: bool = Field(default=False)
+    processed_meat_flag: bool = Field(default=False)
+    refined_grain_flag: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -695,10 +707,32 @@ class DailyNutritionMetrics(SQLModel, table=True):
     # Processing mix (counts of items by bucket):
     processing_counts: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     saturated_fat_g: float = Field(default=0)
-    # Derived 0-100 scores:
+    # Derived 0-100 scores — LEGACY, DEPRECATED. Nutrition Score lives in
+    # the unified pipeline (nutrition_score.py) via Score API. These columns
+    # are kept so existing rows can be read without migration, but new rows
+    # no longer populate them.
     gut_support_score: float = Field(default=0)
     food_quality_score: float = Field(default=0)
     longevity_signals_score: float = Field(default=0)
+    # v3 — per-item descriptive tag aggregates
+    added_sugar_g: float = Field(default=0)
+    sodium_mg: float = Field(default=0)
+    seafood_servings: float = Field(default=0)
+    fruit_servings: float = Field(default=0)
+    vegetable_servings: float = Field(default=0)
+    alcohol_servings: float = Field(default=0)
+    processed_meat_servings: float = Field(default=0)
+    refined_grain_servings: float = Field(default=0)
+    # Max % of daily protein concentrated in a single meal — flags the
+    # "all protein at dinner" pattern for muscle-gain users.
+    max_meal_protein_pct: float = Field(default=0)
+    # Energy availability estimate (kcal per kg FFM). Populated only when
+    # activity kcal + FFM are derivable; null-sentinel 0 means unknown.
+    energy_availability: float = Field(default=0)
+    # Fueling + recovery flags, stored as JSON so the shape can evolve
+    # without schema churn. Keys: under_fueling, low_fat, recovery_nutrients,
+    # thyroid_support. Each value is one of green / amber / red / not_enough_data.
+    recovery_flags: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     # Plant slugs seen today (for weekly rollup dedup):
     plant_slugs: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     # How many items fell into each classification bucket:

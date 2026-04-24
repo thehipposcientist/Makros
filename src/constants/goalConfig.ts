@@ -30,7 +30,7 @@ export const GOAL_CATEGORIES: GoalCategory[] = [
   { id: 'strength',              label: 'Compound Strength',       icon: 'trophy-outline' },
   { id: 'cardio_endurance',      label: 'Cardio & Endurance',      icon: 'heart-outline' },
   { id: 'athletic_performance',  label: 'Athletic Performance',    icon: 'flash-outline' },
-  { id: 'health_longevity',      label: 'Health & Longevity',      icon: 'leaf-outline' },
+  { id: 'health_longevity',      label: 'Health & Healthspan',     icon: 'leaf-outline' },
   { id: 'lifestyle_consistency', label: 'Lifestyle & Consistency', icon: 'checkmark-circle-outline' },
 ];
 
@@ -117,7 +117,7 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
 
   // ── Health & Longevity ─────────────────────────────────────────────────────
   { id: 'general_health',      label: 'General Health',             category: 'health_longevity', description: 'Balanced mix of strength, cardio, and mobility. No extreme goals — just consistent, well-rounded fitness for feeling good.',  launch: false },
-  { id: 'longevity',           label: 'Longevity',                  category: 'health_longevity', description: 'Train to stay strong and mobile into old age. Emphasises bone density, muscle preservation, balance, and heart health. The "train for the next 50 years" goal.',  launch: true },
+  { id: 'longevity',           label: 'Healthspan',                 category: 'health_longevity', description: 'Train to stay strong and mobile into old age. Emphasises bone density, muscle preservation, balance, and heart health. The "train for the next 50 years" goal.',  launch: true },
   { id: 'healthy_aging',       label: 'Healthy Aging',              category: 'health_longevity', description: 'Age-appropriate exercise with joint-friendly movements, balance work, and progressive resistance. Stay independent and active as you age.',  launch: false },
   { id: 'heart_health',        label: 'Improve Heart Health',       category: 'health_longevity', description: 'Cardio 4-5x/week at moderate intensity. Lowers blood pressure, improves cholesterol, and strengthens the heart muscle.',  launch: false },
   { id: 'metabolic_health',    label: 'Improve Metabolic Health',   category: 'health_longevity', description: 'Resistance training + walking to improve insulin sensitivity, blood sugar regulation, and metabolic rate. Great for pre-diabetic or metabolic syndrome.',  launch: false },

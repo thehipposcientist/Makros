@@ -88,6 +88,18 @@ def _build_meal_response(meal: Meal, db: Session) -> dict:
     return {**meal.model_dump(), "items": [i.model_dump() for i in items]}
 
 
+def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
+    """Recompute DailyNutritionMetrics for the given user + date. Called
+    after any write that changes what meals exist on that day so the
+    Nutrition Score reflects reality on the next /meals/score fetch.
+    Non-blocking — failures here never break the caller."""
+    try:
+        from app.services.nutrition.gut_health import compute_daily_metrics
+        compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=False)
+    except Exception:
+        pass
+
+
 # ─── Create ───────────────────────────────────────────────────────────────────
 
 @router.post("", status_code=201)
@@ -112,6 +124,7 @@ def create_meal(
 
     db.commit()
     db.refresh(meal)
+    _refresh_daily_metrics(db, current_user.id, meal.meal_date)
     return _build_meal_response(meal, db)
 
 
@@ -185,13 +198,7 @@ def log_checked_meal(
         source=body.source or "plan_check",
         db=db,
     )
-    # Incrementally refresh today's derived gut-health metrics. Non-blocking
-    # semantics — failures here should never break logging a meal.
-    try:
-        from app.services.nutrition.gut_health import compute_daily_metrics
-        compute_daily_metrics(db, user_id=current_user.id, metric_date=meal_date, allow_ai=False)
-    except Exception:
-        pass
+    _refresh_daily_metrics(db, current_user.id, meal_date)
     return result
 
 
@@ -261,10 +268,10 @@ def gut_health_signals(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Return derived gut-health + longevity signals for today + the rolling
-    window. Reads from DailyNutritionMetrics (regenerable) so this endpoint
-    is cheap; computes today on-the-fly in case the background pass hasn't
-    caught up yet."""
+    """Return descriptive Gut & Plants facts for today + the rolling window.
+    Returns facts only — plant diversity, fermented/probiotic servings,
+    omega-3 foods, processing mix, protein source split. No scores.
+    The unified Nutrition Score lives at /meals/score."""
     from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
 
     today = date.today()
@@ -278,36 +285,133 @@ def gut_health_signals(
     if today_row is None:
         return {"today": None, "window": rollup}
 
+    plant_p = getattr(today_row, "plant_protein_g", 0) or 0
+    animal_p = getattr(today_row, "animal_protein_g", 0) or 0
+    total_p = plant_p + animal_p
+
     return {
         "today": {
             "date": str(today_row.metric_date),
             "calories_total": today_row.calories_total,
             "fiber_total_g": today_row.fiber_total_g,
             "fiber_per_1000_kcal": today_row.fiber_per_1000_kcal,
+            "added_sugar_g": getattr(today_row, "added_sugar_g", 0) or 0,
+            "sodium_mg": getattr(today_row, "sodium_mg", 0) or 0,
+            "saturated_fat_g": today_row.saturated_fat_g,
             "distinct_plant_foods": today_row.distinct_plant_foods,
             "fermented_servings": today_row.fermented_servings,
             "probiotic_servings": getattr(today_row, "probiotic_servings", 0) or 0,
             "omega3_servings": today_row.omega3_servings,
-            "plant_protein_g": getattr(today_row, "plant_protein_g", 0) or 0,
-            "animal_protein_g": getattr(today_row, "animal_protein_g", 0) or 0,
-            "plant_protein_pct": (
-                round(100 * (getattr(today_row, "plant_protein_g", 0) or 0) /
-                      max(1e-6, (getattr(today_row, "plant_protein_g", 0) or 0)
-                             + (getattr(today_row, "animal_protein_g", 0) or 0)))
-                if ((getattr(today_row, "plant_protein_g", 0) or 0)
-                    + (getattr(today_row, "animal_protein_g", 0) or 0)) > 0
-                else 0
-            ),
+            "seafood_servings": getattr(today_row, "seafood_servings", 0) or 0,
+            "fruit_servings": getattr(today_row, "fruit_servings", 0) or 0,
+            "vegetable_servings": getattr(today_row, "vegetable_servings", 0) or 0,
+            "alcohol_servings": getattr(today_row, "alcohol_servings", 0) or 0,
+            "processed_meat_servings": getattr(today_row, "processed_meat_servings", 0) or 0,
+            "refined_grain_servings": getattr(today_row, "refined_grain_servings", 0) or 0,
+            "plant_protein_g": plant_p,
+            "animal_protein_g": animal_p,
+            "plant_protein_pct": round(100 * plant_p / total_p) if total_p > 0 else 0,
             "processing_counts": today_row.processing_counts or {},
-            "saturated_fat_g": today_row.saturated_fat_g,
-            "gut_support_score": today_row.gut_support_score,
-            "food_quality_score": today_row.food_quality_score,
-            "longevity_signals_score": today_row.longevity_signals_score,
+            "max_meal_protein_pct": getattr(today_row, "max_meal_protein_pct", 0) or 0,
             "classified_item_count": today_row.classified_item_count,
             "item_count": today_row.item_count,
         },
         "window": rollup,
     }
+
+
+class HydrationLogBody(BaseModel):
+    ounces: float
+    log_date: Optional[str] = None   # YYYY-MM-DD, defaults to today
+
+
+@router.post("/hydration")
+def log_hydration(
+    body: HydrationLogBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Log hydration for a given day. Stored on UserDayState.nutrition_plan
+    under _hydration_oz — lightweight, survives app kill via existing sync."""
+    from datetime import date as _date
+    try:
+        d = _date.fromisoformat(body.log_date) if body.log_date else _date.today()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid log_date")
+
+    state = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id)
+        .where(UserDayState.day_key == d)
+    ).first()
+    if state is None:
+        state = UserDayState(user_id=current_user.id, day_key=d)
+        db.add(state)
+    plan = dict(state.nutrition_plan or {})
+    plan["_hydration_oz"] = max(0.0, float(body.ounces))
+    state.nutrition_plan = plan
+    db.commit()
+    return {"date": str(d), "ounces": plan["_hydration_oz"]}
+
+
+@router.get("/hydration")
+def get_hydration(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Today's logged ounces + suggested target derived from weight."""
+    from datetime import date as _date
+    from app.models import UserProfile
+    d = _date.today()
+    state = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id)
+        .where(UserDayState.day_key == d)
+    ).first()
+    oz = 0.0
+    if state and state.nutrition_plan:
+        try:
+            oz = float((state.nutrition_plan or {}).get("_hydration_oz", 0) or 0)
+        except Exception:
+            oz = 0.0
+    profile = db.exec(select(UserProfile).where(UserProfile.user_id == current_user.id)).first()
+    # Target: half bodyweight in oz (mirrors client hydration.ts).
+    target_oz = round((profile.weight_lbs / 2.0) if profile else 64.0)
+    return {"date": str(d), "ounces": round(oz, 1), "target_ounces": target_oz}
+
+
+@router.get("/score")
+def nutrition_score_endpoint(
+    days: int = Query(default=7, ge=1, le=30),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Authoritative Nutrition Score for today + the rolling window.
+    This is the server-side source of truth; the client renders it verbatim."""
+    from app.services.nutrition.score_builder import compute_today_score, compute_weekly_score
+
+    today = compute_today_score(db, current_user.id)
+    weekly = compute_weekly_score(db, current_user.id, days=days)
+    return {"today": today, "weekly": weekly}
+
+
+@router.get("/recovery-flags")
+def recovery_flags_endpoint(
+    days: int = Query(default=7, ge=5, le=30),
+    thyroid_opt_in: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Fueling & Recovery Signals. Flag-based (green/amber/red/not_enough_data).
+    Never a score. Never hormone-named. Returns a list of flags the client
+    renders as a conditional chip strip or dedicated drill-down."""
+    from app.services.nutrition.recovery_flags import (
+        compute_flags, flags_to_dict,
+    )
+    flags = compute_flags(db, current_user.id, days=days, thyroid_opt_in=thyroid_opt_in)
+    payload = flags_to_dict(flags)
+    payload["any_actionable"] = any(f.state in ("amber", "red") for f in flags)
+    return payload
 
 
 # ─── Get one ──────────────────────────────────────────────────────────────────
@@ -373,7 +477,9 @@ def delete_meal(
     meal = db.get(Meal, meal_id)
     if not meal or meal.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Meal not found")
+    affected_date = meal.meal_date
     for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
         db.delete(item)
     db.delete(meal)
     db.commit()
+    _refresh_daily_metrics(db, current_user.id, affected_date)

@@ -11,7 +11,9 @@ from pydantic import BaseModel as _PydanticBaseModel
 
 
 def _attach_food_classification(item: dict) -> dict:
-    """Attach gut-health classification fields to a food item dict."""
+    """Attach food classification fields to a food item dict. Used by food
+    search + scan paths so the client gets classifier-derived tags without
+    a second round-trip."""
     try:
         from app.services.nutrition.food_classifier import classify_food
         name = item.get("name") or ""
@@ -23,6 +25,12 @@ def _attach_food_classification(item: dict) -> dict:
         item["probiotic"] = cls.probiotic_flag
         item["omega3_rich"] = cls.omega3_flag
         item["plant_count"] = cls.plant_count_value
+        item["seafood"] = cls.seafood_flag
+        item["fruit"] = cls.fruit_flag
+        item["vegetable"] = cls.vegetable_flag
+        item["alcohol"] = cls.alcohol_flag
+        item["processed_meat"] = cls.processed_meat_flag
+        item["refined_grain"] = cls.refined_grain_flag
         if not item.get("food_quality"):
             bucket = cls.processing_bucket
             item["food_quality"] = (
@@ -30,6 +38,7 @@ def _attach_food_classification(item: dict) -> dict:
                 else "processed" if bucket in ("processed", "ultra_processed")
                 else "unknown"
             )
+            item["processing_bucket"] = bucket
     except Exception:
         pass
     return item

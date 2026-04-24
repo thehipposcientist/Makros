@@ -184,6 +184,46 @@ def _ensure_daily_nutrition_metrics_v2_columns() -> None:
         print(f"[migration] daily_nutrition_metrics v2 columns add failed (non-fatal): {e}")
 
 
+def _ensure_nutrition_v3_columns() -> None:
+    """v3: added_sugar_g on food_nutrition; seafood/fruit/vegetable/alcohol
+    /processed_meat/refined_grain flags on food_metadata; per-day tag
+    aggregates, recovery_flags JSON, energy_availability, and
+    max_meal_protein_pct on daily_nutrition_metrics. All idempotent — safe
+    to run on existing DBs, populated on next classify + metrics recompute."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE food_nutrition "
+                "ADD COLUMN IF NOT EXISTS added_sugar_g DOUBLE PRECISION"
+            ))
+            for flag in (
+                "seafood_flag", "fruit_flag", "vegetable_flag",
+                "alcohol_flag", "processed_meat_flag", "refined_grain_flag",
+            ):
+                conn.execute(text(
+                    f"ALTER TABLE food_metadata "
+                    f"ADD COLUMN IF NOT EXISTS {flag} BOOLEAN DEFAULT FALSE"
+                ))
+            for col in (
+                "ADD COLUMN IF NOT EXISTS added_sugar_g DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS sodium_mg DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS seafood_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS fruit_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS vegetable_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS alcohol_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS processed_meat_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS refined_grain_servings DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS max_meal_protein_pct DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS energy_availability DOUBLE PRECISION DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS recovery_flags JSONB",
+            ):
+                conn.execute(text(f"ALTER TABLE daily_nutrition_metrics {col}"))
+    except Exception as e:
+        print(f"[migration] nutrition v3 columns add failed (non-fatal): {e}")
+
+
 def _backfill_custom_food_micronutrients() -> None:
     """One-shot backfill: walk every FoodNutrition row whose `extra_nutrients`
     is NULL/empty, look the food name up in the seed micronutrient table,
@@ -231,7 +271,7 @@ def _backfill_custom_food_micronutrients() -> None:
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -242,6 +282,7 @@ def create_db_and_tables():
     _ensure_exercise_tracking_mode_column()
     _ensure_food_metadata_classifier_v2_columns()
     _ensure_daily_nutrition_metrics_v2_columns()
+    _ensure_nutrition_v3_columns()
     _backfill_custom_food_micronutrients()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:

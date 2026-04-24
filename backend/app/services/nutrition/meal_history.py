@@ -216,9 +216,11 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
             day_data["carbs_g"] += it.carbs_g
             day_data["fat_g"] += it.fat_g
 
-    # Use the full window as the denominator so that days with no data
-    # count as zero, giving a true daily average over the period.
-    denom = max(window, 1)
+    # Adaptive denominator: divide by actual days-with-data so a user with 6
+    # days of logs in a 14-day window gets a true "6-day average" (not a
+    # /14 dilution). Sparse logs no longer read as fake low calories.
+    # Falls back to 1 if there's no data (returns zeroes cleanly).
+    denom = max(len(daily), 1)
 
     return {
         "window_days": window,

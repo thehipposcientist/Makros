@@ -186,6 +186,7 @@ def create_food(
     fat: float = 0,
     fiber: float | None = None,
     sugar: float | None = None,
+    added_sugar_g: float | None = None,
     sodium_mg: float | None = None,
     brand: str | None = None,
     external_id: str | None = None,
@@ -237,12 +238,19 @@ def create_food(
         if sodium_mg == 0 and "sodium_mg" in top:
             sodium_mg = top["sodium_mg"]
 
+    if added_sugar_g is None and panel and "added_sugar_g" in (panel or {}):
+        added_sugar_g = panel.get("added_sugar_g")
+    if added_sugar_g is None and extras_json and "added_sugar" in extras_json:
+        try:
+            added_sugar_g = float(extras_json["added_sugar"])
+        except Exception:
+            pass
     db.add(FoodNutrition(
         food_id=food.id,
         reference_unit=unit,
         reference_grams=serving_grams,
         calories=calories, protein=protein, carbs=carbs, fat=fat,
-        fiber=fiber, sugar=sugar, sodium_mg=sodium_mg,
+        fiber=fiber, sugar=sugar, added_sugar_g=added_sugar_g, sodium_mg=sodium_mg,
         extra_nutrients=extras_json,
     ))
     db.add(FoodServing(

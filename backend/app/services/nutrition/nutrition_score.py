@@ -1,111 +1,95 @@
-"""Daily nutrition scoring — deterministic, goal-aware, confidence-aware.
+"""Daily Nutrition Score — unified scoring pipeline.
 
-Produces a 0-100 Nutrition Score from three dimensions:
-  1. Adherence (35-40%): calorie/protein alignment against targets
-  2. Food Quality (35-40%): whole-food %, fiber, produce, processed penalty
-  3. Micronutrient Coverage (20-30%): estimated coverage with confidence gating
-
-Also produces:
-  - user-facing tags (wins + improvements)
-  - daily indicators (boolean/numeric)
-  - confidence level (low/medium/high)
-  - goal-aware weight adjustments
+Produces a single 0-100 Nutrition Score from three sub-scores:
+  1. Adherence (30-45%): calorie + protein alignment against targets
+  2. Food Quality (30-40%): fiber, added sugar, sat fat, sodium, processing,
+     plant diversity, omega-3 signal
+  3. Micronutrient Coverage (20-30%): priority-6 micros (D, calcium, iron,
+     potassium, magnesium, B12)
 
 Design principles:
   - Missing data reduces confidence, not score
   - Incomplete logging is acknowledged, not punished as poor eating
   - Micronutrient estimates are presented as estimated, not precise
-  - The score should feel fair, understandable, and motivating
+  - Reads precomputed gut-derived signals (processing mix, plant diversity,
+    omega-3 servings) from DailyNutritionMetrics instead of recomputing —
+    so Food Quality never contradicts the Gut & Plants insight card
+
+Bump SCORE_VERSION when the formula changes so the client can invalidate
+cached scores.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
+SCORE_VERSION = 3   # bumped at unified-score rewrite
+
 
 # ─── RDA targets (adults, general) ───────────────────────────────────────────
 
 RDA = {
-    "fiber_g": 28,        # FDA daily value
+    "fiber_g": 28,
     "calcium_mg": 1000,
-    "iron_mg": 18,        # female RDA; male=8 — using higher to avoid false negatives
+    "iron_mg": 18,           # female RDA; male=8 via sex override
     "potassium_mg": 4700,
     "magnesium_mg": 420,
     "vitamin_d_mcg": 20,
-    "vitamin_c_mg": 90,
-    "vitamin_a_mcg": 900,
     "vitamin_b12_mcg": 2.4,
     "omega_3_g": 1.6,
     "zinc_mg": 11,
+    "selenium_mcg": 55,
+    "folate_mcg": 400,
+    # Kept for display only — not in priority-6
+    "vitamin_c_mg": 90,
+    "vitamin_a_mcg": 900,
 }
 
-# Key micros checked for coverage gaps
-KEY_MICROS = ["calcium_mg", "iron_mg", "potassium_mg", "magnesium_mg", "vitamin_d_mcg", "vitamin_c_mg"]
+# Priority-6 micros checked for the coverage score. Vitamin C dropped because
+# it's trivially hit and tells us nothing actionable.
+KEY_MICROS = [
+    "calcium_mg", "iron_mg", "potassium_mg", "magnesium_mg",
+    "vitamin_d_mcg", "vitamin_b12_mcg",
+]
 
-
-# ─── Food quality classification ─────────────────────────────────────────────
-
-WHOLE_FOOD_CATEGORIES = {"proteins", "plant_proteins", "vegetables", "fruits", "grains_carbs", "dairy", "fats_oils"}
-PROCESSED_INDICATORS = {"processed", "packaged", "canned"}
-LOW_CONFIDENCE_SOURCES = {"ai", "user", "barcode"}
-
-
-def classify_food_quality(food: dict) -> str:
-    """Classify a food item as 'whole', 'processed', or 'unknown'.
-
-    Single source of truth for food quality classification.
-    Uses category + prep_state + source + name as signals.
-    """
-    category = (food.get("category") or "").lower()
-    prep = (food.get("prep_state") or "").lower()
-    source = (food.get("source") or "").lower()
-    name = (food.get("name") or "").lower()
-
-    if prep in PROCESSED_INDICATORS:
-        return "processed"
-    if any(w in name for w in (
-        "protein bar", "granola bar", "energy bar", "cereal", "chips", "candy",
-        "soda", "energy drink", "instant", "frozen dinner", "pizza", "hot dog",
-        "nugget", "bacon", "sausage", "deli", "ham", "salami", "pepperoni",
-        "granola", "rice cake", "bagel", "english muffin", "tortilla",
-        "bread (white", "trail mix", "dark chocolate", "cracker", "pretzel",
-    )):
-        return "processed"
-
-    if category == "supplements":
-        return "supplement"
-
-    if category in ("condiments", "beverages"):
-        return "unknown"
-
-    if source in LOW_CONFIDENCE_SOURCES and category not in WHOLE_FOOD_CATEGORIES:
-        return "unknown"
-
-    if category in WHOLE_FOOD_CATEGORIES:
-        return "whole"
-
-    return "unknown"
+# Resilience-flag micros — surfaced via the recovery_flags service, not the
+# main Nutrition Score. Listed here so RDA lookups stay in one place.
+RESILIENCE_MICROS = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg"]
 
 
 # ─── Daily nutrition indicators ──────────────────────────────────────────────
 
 @dataclass
 class NutritionIndicators:
-    """Raw daily indicators before scoring."""
+    """Raw daily indicators before scoring.
+
+    Macro + logging fields come from meal totals; the processing/diversity
+    /omega-3 signals come pre-computed from DailyNutritionMetrics. Any value
+    left at its default is treated as "missing" by the scorer, which pulls
+    that sub-pillar toward neutral rather than penalizing.
+    """
+    # Macros
     calories_logged: float = 0
     calories_target: float = 0
     protein_logged: float = 0
     protein_target: float = 0
-    fiber_logged: float = 0
-    fruit_veg_servings: float = 0
+    # Food Quality inputs
+    fiber_g: float = 0
+    added_sugar_g: float = 0
+    saturated_fat_g: float = 0
+    sodium_mg: float = 0
+    minimally_processed_pct: float = 0      # 0-100
+    ultra_processed_pct: float = 0          # 0-100
+    distinct_plant_foods: int = 0
+    omega3_servings: float = 0
+    seafood_servings_weekly: float = 0      # rolled in from 7d window
+    # Logging + micro coverage
     meals_logged: int = 0
     meals_expected: int = 3
-    whole_food_pct: float = 0     # 0-100
-    processed_food_pct: float = 0 # 0-100
-    hydration_logged: bool = False
     micronutrients: dict[str, float] = field(default_factory=dict)
     food_count: int = 0
     foods_with_micros: int = 0
+    hydration_logged: bool = False
 
     @property
     def logging_completeness(self) -> float:
@@ -115,8 +99,7 @@ class NutritionIndicators:
 
     @property
     def calorie_alignment(self) -> float:
-        """0.0 (way off) to 1.0 (on target).
-        Within ±10% = perfect score. Degrades linearly to 0 at ±40%."""
+        """0.0 to 1.0. Within +/-10% = perfect, degrades to 0 at +/-40%."""
         if self.calories_target <= 0:
             return 0.5
         ratio = self.calories_logged / self.calories_target
@@ -127,20 +110,33 @@ class NutritionIndicators:
 
     @property
     def protein_alignment(self) -> float:
-        """Full credit at 100%+ of target. Degrades below that."""
+        """Full credit at >=95% of target (relaxed from 100% to avoid
+        false penalties when the user is 5g under). Below that, linear."""
         if self.protein_target <= 0:
             return 0.5
         ratio = self.protein_logged / self.protein_target
-        if ratio >= 1.0:
+        if ratio >= 0.95:
             return 1.0
-        return max(0.0, ratio)
+        return max(0.0, ratio / 0.95)
 
     @property
-    def fiber_alignment(self) -> float:
-        target = RDA["fiber_g"]
-        if self.fiber_logged >= target:
-            return 1.0
-        return max(0.0, self.fiber_logged / target)
+    def fiber_density(self) -> float:
+        """Fiber g per 1000 kcal. 14 g/1000 kcal is the clinical target."""
+        if self.calories_logged <= 0:
+            return 0.0
+        return self.fiber_g / self.calories_logged * 1000.0
+
+    @property
+    def added_sugar_pct_cals(self) -> float:
+        if self.calories_logged <= 0:
+            return 0.0
+        return (self.added_sugar_g * 4.0) / self.calories_logged * 100.0
+
+    @property
+    def saturated_fat_pct_cals(self) -> float:
+        if self.calories_logged <= 0:
+            return 0.0
+        return (self.saturated_fat_g * 9.0) / self.calories_logged * 100.0
 
     @property
     def micro_confidence(self) -> str:
@@ -154,38 +150,70 @@ class NutritionIndicators:
         return "low"
 
 
-# ─── Scoring ─────────────────────────────────────────────────────────────────
+# ─── Score output ────────────────────────────────────────────────────────────
+
+@dataclass
+class SubscoreBreakdown:
+    """Per-input contribution for a sub-score — used to render the Score
+    Breakdown modal. Each input carries the 0-100 scaled value, the raw
+    measurement, and the target so the UI can show a bar + a number."""
+    label: str
+    value_pct: int          # 0-100 for bar rendering
+    raw: float              # actual measurement
+    target: float | None    # target for context (None when not applicable)
+    unit: str               # "g", "mg", "%", "servings", ""
+    on_track: bool
+
 
 @dataclass
 class NutritionScore:
-    total: int                    # 0-100
-    adherence_score: int          # 0-100 (sub-score before weighting)
-    quality_score: int            # 0-100
-    micro_score: int              # 0-100
-    confidence: str               # low / medium / high
-    tags: list[str]               # user-facing indicator tags
-    wins: list[str]               # positive highlights
-    improvements: list[str]       # actionable suggestions
-    likely_gaps: list[str]        # micronutrient gaps
-    indicators: dict[str, Any]    # raw indicator values for UI
-    # Structured flags for programmatic use (not display strings)
+    total: int                         # 0-100 overall Nutrition Score
+    adherence_score: int               # 0-100 sub-score
+    quality_score: int                 # 0-100 sub-score
+    micro_score: int                   # 0-100 sub-score
+    confidence: str                    # low / medium / high
+    tags: list[str]
+    wins: list[str]
+    improvements: list[str]
+    likely_gaps: list[str]
+    indicators: dict[str, Any]
     flags: dict[str, bool] = field(default_factory=dict)
+    # Rendered-ready breakdown for the Score Breakdown modal
+    adherence_breakdown: list[dict] = field(default_factory=list)
+    quality_breakdown: list[dict] = field(default_factory=list)
+    micro_breakdown: list[dict] = field(default_factory=list)
+    score_version: int = SCORE_VERSION
 
 
-# Goal-aware weight adjustments
+# Goal-aware weight adjustments for the unified score.
+# (adherence, quality, micro) — sums to 1.0
 _GOAL_WEIGHTS: dict[str, tuple[float, float, float]] = {
-    # (adherence_weight, quality_weight, micro_weight)
-    "muscle_gain":          (0.40, 0.35, 0.25),
-    "strength":             (0.40, 0.35, 0.25),
-    "fat_loss":             (0.40, 0.40, 0.20),
-    "body_recomp":          (0.38, 0.37, 0.25),
-    "endurance":            (0.35, 0.35, 0.30),
-    "athletic_performance": (0.35, 0.35, 0.30),
-    "hyrox":                (0.35, 0.35, 0.30),
-    "general_health":       (0.30, 0.35, 0.35),
-    "maintain":             (0.30, 0.35, 0.35),
+    "fat_loss":             (0.45, 0.35, 0.20),
+    "muscle_gain":          (0.45, 0.30, 0.25),
+    "strength":             (0.45, 0.30, 0.25),
+    "body_recomp":          (0.40, 0.35, 0.25),
+    "endurance":            (0.40, 0.35, 0.25),
+    "athletic_performance": (0.40, 0.35, 0.25),
+    "hyrox":                (0.40, 0.35, 0.25),
+    "general_health":       (0.30, 0.40, 0.30),
+    "maintain":             (0.30, 0.40, 0.30),
+    "longevity":            (0.30, 0.40, 0.30),   # aliased via goal mapping
+    "healthy_aging":        (0.30, 0.40, 0.30),
+    "heart_health":         (0.30, 0.40, 0.30),
+    "toning":               (0.45, 0.35, 0.20),
 }
-_DEFAULT_WEIGHTS = (0.35, 0.40, 0.25)
+_DEFAULT_WEIGHTS = (0.40, 0.35, 0.25)
+
+
+def _bd(label: str, value_pct: int, raw: float, target: float | None, unit: str, on_track: bool) -> dict:
+    return {
+        "label": label,
+        "value_pct": int(max(0, min(100, round(value_pct)))),
+        "raw": round(raw, 1),
+        "target": target,
+        "unit": unit,
+        "on_track": on_track,
+    }
 
 
 def compute_nutrition_score(
@@ -193,12 +221,7 @@ def compute_nutrition_score(
     goal: str = "body_recomp",
     sex: str | None = None,
 ) -> NutritionScore:
-    """Compute a daily nutrition score from indicators.
-
-    Args:
-        sex: "male" or "female". When "male", iron RDA is 8mg instead of 18mg.
-             Defaults to 18mg (female RDA) when unknown to avoid false negatives.
-    """
+    """Compute the unified daily Nutrition Score."""
 
     w_adh, w_qual, w_micro = _GOAL_WEIGHTS.get(goal, _DEFAULT_WEIGHTS)
 
@@ -207,56 +230,127 @@ def compute_nutrition_score(
     if sex and sex.lower() == "male":
         rda["iron_mg"] = 8
 
+    has_calories = indicators.calories_logged > 0
+
     # ── Adherence (0-100) ────────────────────────────────────────────
-    # Logging completeness affects confidence, not the adherence score directly.
-    # Someone who logs 1 meal should not look like they ate badly.
-    cal_pts = indicators.calorie_alignment * 50       # 0-50
-    pro_pts = indicators.protein_alignment * 50       # 0-50
+    cal_align = indicators.calorie_alignment
+    pro_align = indicators.protein_alignment
+    cal_pts = cal_align * 50
+    pro_pts = pro_align * 50
     adherence = round(min(100, cal_pts + pro_pts))
 
-    # ── Food Quality (0-100) ─────────────────────────────────────────
-    whole_pts = min(35, indicators.whole_food_pct / 100 * 35)
-    processed_penalty = min(20, indicators.processed_food_pct / 100 * 20)
-    fiber_pts = indicators.fiber_alignment * 20                       # 0-20
-    fv_pts = min(15, (indicators.fruit_veg_servings / 5) * 15)       # 5 servings = full
-    hydration_pts = 10 if indicators.hydration_logged else 0          # 0-10
-    quality = round(min(100, max(0, whole_pts - processed_penalty + fiber_pts + fv_pts + hydration_pts)))
+    adherence_breakdown = [
+        _bd(
+            "Calories",
+            int(cal_align * 100),
+            indicators.calories_logged,
+            indicators.calories_target,
+            "kcal",
+            cal_align >= 0.9,
+        ),
+        _bd(
+            "Protein",
+            int(pro_align * 100),
+            indicators.protein_logged,
+            indicators.protein_target,
+            "g",
+            pro_align >= 0.95,
+        ),
+    ]
 
-    # ── Micronutrient Coverage (0-100) ────────────────────────────────
+    # ── Food Quality (0-100) ─────────────────────────────────────────
+    # 7-input model. Each input contributes its own max points.
+    # No input double-counts — processing ≠ plant diversity ≠ fiber.
+    fiber_density = indicators.fiber_density
+    fiber_pts = _curve(fiber_density, low=6, mid=10, target=14.0, out_of=20)
+
+    added_sugar_pct = indicators.added_sugar_pct_cals
+    if added_sugar_pct <= 5:      added_sugar_pts = 15.0
+    elif added_sugar_pct <= 10:   added_sugar_pts = 15.0 - (added_sugar_pct - 5) * 0.6   # linear to 12
+    elif added_sugar_pct <= 15:   added_sugar_pts = 12.0 - (added_sugar_pct - 10) * 1.2  # 12→6
+    else:                          added_sugar_pts = max(0.0, 6.0 - (added_sugar_pct - 15) * 0.4)
+
+    sat_fat_pct = indicators.saturated_fat_pct_cals
+    if sat_fat_pct <= 7:          sat_fat_pts = 15.0
+    elif sat_fat_pct <= 10:       sat_fat_pts = 15.0 - (sat_fat_pct - 7) * 1.0         # 15→12
+    elif sat_fat_pct <= 14:       sat_fat_pts = 12.0 - (sat_fat_pct - 10) * 1.5        # 12→6
+    else:                          sat_fat_pts = max(0.0, 6.0 - (sat_fat_pct - 14) * 0.5)
+
+    # Sodium: target <2300 mg/day. Athletes benefit from more, so we use a
+    # generous curve — <=2300 full, 2300-3500 graded, >=4500 zero.
+    sodium = indicators.sodium_mg
+    if sodium <= 0:               sodium_pts = 5.0   # no data → neutral
+    elif sodium <= 2300:          sodium_pts = 10.0
+    elif sodium <= 3500:          sodium_pts = 10.0 - (sodium - 2300) / 1200.0 * 4.0   # 10→6
+    elif sodium <= 4500:          sodium_pts = 6.0 - (sodium - 3500) / 1000.0 * 6.0    # 6→0
+    else:                          sodium_pts = 0.0
+
+    # Minimally-processed % (from daily metrics, not recomputed)
+    min_proc = indicators.minimally_processed_pct / 100.0
+    upf = indicators.ultra_processed_pct / 100.0
+    processed_pts = max(0.0, 20.0 * (min_proc - 0.5 * upf))
+
+    # Plant diversity: 5 distinct plants today = full credit
+    plants = indicators.distinct_plant_foods
+    if plants <= 0:      plant_pts = 0.0
+    elif plants >= 5:    plant_pts = 10.0
+    else:                plant_pts = (plants / 5.0) * 10.0
+
+    # Omega-3 signal: daily omega-3 food OR seafood 2x/wk rolling
+    omega_pts = 0.0
+    if indicators.omega3_servings >= 1.0:
+        omega_pts = 10.0
+    elif indicators.seafood_servings_weekly >= 2.0:
+        omega_pts = 10.0
+    elif indicators.omega3_servings > 0 or indicators.seafood_servings_weekly > 0:
+        omega_pts = 5.0
+
+    quality_raw = fiber_pts + added_sugar_pts + sat_fat_pts + sodium_pts + processed_pts + plant_pts + omega_pts
+    quality = round(min(100, max(0, quality_raw)))
+
+    quality_breakdown = [
+        _bd("Fiber density", int(fiber_pts / 20 * 100), fiber_density, 14.0, "g/1000kcal", fiber_pts >= 14),
+        _bd("Added sugar", int(added_sugar_pts / 15 * 100), added_sugar_pct, 10.0, "% cals", added_sugar_pts >= 12),
+        _bd("Saturated fat", int(sat_fat_pts / 15 * 100), sat_fat_pct, 10.0, "% cals", sat_fat_pts >= 12),
+        _bd("Sodium", int(sodium_pts / 10 * 100), sodium, 2300.0, "mg", sodium_pts >= 8),
+        _bd("Minimally processed", int(processed_pts / 20 * 100), indicators.minimally_processed_pct, 70.0, "%", processed_pts >= 14),
+        _bd("Plant diversity", int(plant_pts / 10 * 100), float(plants), 5.0, "foods", plant_pts >= 8),
+        _bd("Omega-3", int(omega_pts / 10 * 100), indicators.omega3_servings, 1.0, "servings", omega_pts >= 8),
+    ]
+
+    # ── Micronutrient Coverage (0-100) ──────────────────────────────
     micro_conf = indicators.micro_confidence
+    gaps: list[str] = []
+    micro_breakdown: list[dict] = []
     if micro_conf == "none":
-        micro = 50  # neutral when no data — no fake precision
+        micro = 50
     else:
         hits = 0
         checked = 0
-        gaps = []
         for key in KEY_MICROS:
             rda_val = rda.get(key, 0)
             if rda_val <= 0:
                 continue
             checked += 1
             logged = indicators.micronutrients.get(key, 0)
-            ratio = logged / rda_val
-            if ratio >= 0.7:
+            ratio = logged / rda_val if rda_val else 0
+            pct = int(min(100, ratio * 100))
+            on_track = ratio >= 0.7
+            gap_name = _display_name(key)
+            if on_track:
                 hits += 1
             elif ratio < 0.4:
-                gap_name = key.replace("_mg", "").replace("_mcg", "").replace("_g", "").replace("_", " ").title()
                 gaps.append(gap_name)
-
-        if checked > 0:
-            micro = round((hits / checked) * 100)
-        else:
-            micro = 50
-
-        # Low confidence: pull toward neutral to avoid false precision
+            micro_breakdown.append(
+                _bd(gap_name, pct, logged, rda_val, _display_unit(key), on_track)
+            )
+        micro = round((hits / checked) * 100) if checked > 0 else 50
         if micro_conf == "low":
-            micro = round(micro * 0.5 + 25)  # compress range toward 50
+            micro = round(micro * 0.5 + 25)
         elif micro_conf == "medium":
-            micro = round(micro * 0.75 + 12.5)  # mild pull toward neutral
+            micro = round(micro * 0.75 + 12.5)
 
-    likely_gaps = gaps if micro_conf != "none" else []
-
-    # ── Confidence (based on logging completeness + micro quality) ────
+    # ── Confidence ───────────────────────────────────────────────────
     if indicators.logging_completeness < 0.3:
         confidence = "low"
     elif indicators.logging_completeness < 0.7 or micro_conf == "low":
@@ -264,59 +358,64 @@ def compute_nutrition_score(
     else:
         confidence = "high"
 
-    # ── Weighted total ───────────────────────────────────────────────
-    # Scale sub-scores by confidence so partial data doesn't over-inflate
     confidence_factor = {"high": 1.0, "medium": 0.9, "low": 0.75}.get(confidence, 0.75)
     raw_total = adherence * w_adh + quality * w_qual + micro * w_micro
     total = round(min(100, max(0, raw_total * confidence_factor)))
 
-    # ── Structured flags (for programmatic use) ──────────────────────
+    # ── Structured flags ─────────────────────────────────────────────
     flags = {
-        "calorie_on_track": indicators.calorie_alignment >= 0.75,
-        "protein_on_track": indicators.protein_alignment >= 0.85,
-        "fiber_on_track": indicators.fiber_alignment >= 0.8,
-        "produce_on_track": indicators.fruit_veg_servings >= 4,
-        "mostly_whole_foods": indicators.whole_food_pct >= 70,
-        "high_processed": indicators.processed_food_pct > 50,
+        "calorie_on_track": cal_align >= 0.75,
+        "protein_on_track": pro_align >= 0.85,
+        "fiber_on_track": fiber_pts >= 14,
+        "added_sugar_on_track": added_sugar_pts >= 12,
+        "sat_fat_on_track": sat_fat_pts >= 12,
+        "sodium_on_track": sodium_pts >= 8,
+        "mostly_whole_foods": indicators.minimally_processed_pct >= 70,
+        "high_upf": indicators.ultra_processed_pct >= 35,
+        "plant_diverse": plants >= 5,
+        "omega3_present": omega_pts >= 8,
         "micro_coverage_strong": micro >= 70,
     }
 
     # ── Tags + Wins + Improvements ───────────────────────────────────
-    tags = []
-    wins = []
-    improvements = []
+    tags: list[str] = []
+    wins: list[str] = []
+    improvements: list[str] = []
 
     if flags["calorie_on_track"]:
-        tags.append("Calories on track")
-        wins.append("Calories on track")
-    elif indicators.calories_logged > 0:
+        tags.append("Calories on track"); wins.append("Calories on track")
+    elif has_calories:
         improvements.append("Calories off target")
 
     if flags["protein_on_track"]:
-        tags.append("Protein on track")
-        wins.append("Protein on track")
+        tags.append("Protein on track"); wins.append("Protein on track")
     elif indicators.protein_logged > 0:
-        improvements.append("Protein below target")
+        gap = int(round(indicators.protein_target - indicators.protein_logged))
+        if gap > 0:
+            improvements.append(f"Protein {gap}g below target")
 
     if flags["fiber_on_track"]:
-        tags.append("Fiber on track")
-        wins.append("Fiber on track")
-    elif indicators.fiber_logged > 0 and indicators.fiber_logged < RDA["fiber_g"] * 0.5:
+        tags.append("Fiber on track"); wins.append("Fiber on track")
+    elif has_calories and fiber_density < 8:
         improvements.append("Fiber low")
 
-    if flags["produce_on_track"]:
-        tags.append("Produce goal hit")
-        wins.append("Good produce intake")
-    elif indicators.fruit_veg_servings < 2:
-        improvements.append("More fruits and vegetables")
-
     if flags["mostly_whole_foods"]:
-        tags.append("Mostly whole foods")
-        wins.append("Mostly whole foods")
+        tags.append("Mostly whole foods"); wins.append("Mostly whole foods")
+    if flags["high_upf"]:
+        improvements.append("Ultra-processed food intake high")
 
-    if flags["high_processed"]:
-        tags.append("High processed-food day")
-        improvements.append("High processed food intake")
+    if not flags["added_sugar_on_track"] and added_sugar_pct > 10:
+        improvements.append(f"Added sugar {added_sugar_pct:.0f}% of calories")
+    if not flags["sat_fat_on_track"] and sat_fat_pct > 10:
+        improvements.append(f"Saturated fat {sat_fat_pct:.0f}% of calories")
+
+    if flags["plant_diverse"]:
+        wins.append(f"{plants} distinct plants")
+    elif has_calories and plants < 3:
+        improvements.append("Add more plant variety")
+
+    if flags["omega3_present"]:
+        wins.append("Omega-3 source included")
 
     if indicators.hydration_logged:
         tags.append("Hydration logged")
@@ -329,9 +428,8 @@ def compute_nutrition_score(
         else:
             tags.append("Micronutrient coverage: low (est.)")
 
-    for gap in likely_gaps[:3]:
-        tags.append(f"Likely low {gap.lower()}")
-        improvements.append(f"Likely low {gap.lower()}")
+    for gap in gaps[:3]:
+        improvements.append(f"Low {gap.lower()}")
 
     if confidence == "low":
         improvements.append("Log more meals for a better score")
@@ -343,34 +441,82 @@ def compute_nutrition_score(
         micro_score=micro,
         confidence=confidence,
         tags=tags,
-        wins=wins[:3],
-        improvements=improvements[:3],
-        likely_gaps=likely_gaps,
+        wins=wins[:4],
+        improvements=improvements[:4],
+        likely_gaps=gaps,
         flags=flags,
+        adherence_breakdown=adherence_breakdown,
+        quality_breakdown=quality_breakdown,
+        micro_breakdown=micro_breakdown,
         indicators={
-            "calories_alignment": round(indicators.calorie_alignment, 2),
-            "protein_alignment": round(indicators.protein_alignment, 2),
-            "fiber_alignment": round(indicators.fiber_alignment, 2),
+            "calories_alignment": round(cal_align, 2),
+            "protein_alignment": round(pro_align, 2),
+            "fiber_density": round(fiber_density, 1),
+            "added_sugar_pct_cals": round(added_sugar_pct, 1),
+            "sat_fat_pct_cals": round(sat_fat_pct, 1),
+            "sodium_mg": round(indicators.sodium_mg),
+            "minimally_processed_pct": round(indicators.minimally_processed_pct),
+            "ultra_processed_pct": round(indicators.ultra_processed_pct),
+            "distinct_plant_foods": plants,
+            "omega3_servings": round(indicators.omega3_servings, 1),
+            "seafood_servings_weekly": round(indicators.seafood_servings_weekly, 1),
             "logging_completeness": round(indicators.logging_completeness, 2),
-            "whole_food_pct": round(indicators.whole_food_pct),
-            "processed_food_pct": round(indicators.processed_food_pct),
-            "fruit_veg_servings": round(indicators.fruit_veg_servings, 1),
             "micro_confidence": micro_conf,
         },
     )
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _curve(value: float, *, low: float, mid: float, target: float, out_of: float) -> float:
+    """Piecewise linear: 0 at low, out_of*0.6 at mid, out_of at target."""
+    if value <= low:
+        return 0.0
+    if value >= target:
+        return out_of
+    if value <= mid:
+        return out_of * 0.6 * (value - low) / (mid - low)
+    return out_of * 0.6 + (out_of * 0.4) * (value - mid) / (target - mid)
+
+
+_MICRO_DISPLAY_NAMES = {
+    "calcium_mg": "Calcium",
+    "iron_mg": "Iron",
+    "potassium_mg": "Potassium",
+    "magnesium_mg": "Magnesium",
+    "vitamin_d_mcg": "Vitamin D",
+    "vitamin_c_mg": "Vitamin C",
+    "vitamin_a_mcg": "Vitamin A",
+    "vitamin_b12_mcg": "Vitamin B12",
+    "zinc_mg": "Zinc",
+    "selenium_mcg": "Selenium",
+    "folate_mcg": "Folate",
+    "fiber_g": "Fiber",
+}
+
+
+def _display_name(key: str) -> str:
+    return _MICRO_DISPLAY_NAMES.get(key, key.replace("_", " ").title())
+
+
+def _display_unit(key: str) -> str:
+    if key.endswith("_mg"): return "mg"
+    if key.endswith("_mcg"): return "mcg"
+    if key.endswith("_g"): return "g"
+    return ""
 
 
 # ─── Overall health score ────────────────────────────────────────────────────
 
 @dataclass
 class OverallHealthScore:
-    total: int              # 0-100
-    nutrition: int          # 0-100 (nutrition score)
-    activity: int           # 0-100 (fitness/workout score)
-    sleep: int              # 0-100
-    recovery: int           # 0-100
-    available_domains: int  # how many of 4 domains have data
-    confidence: str         # low / medium / high
+    total: int
+    nutrition: int
+    activity: int
+    sleep: int
+    recovery: int
+    available_domains: int
+    confidence: str
 
 
 def compute_overall_health_score(
@@ -379,11 +525,6 @@ def compute_overall_health_score(
     sleep_score: int | None = None,
     recovery_score: int | None = None,
 ) -> OverallHealthScore:
-    """Combine available health domains into an overall score.
-
-    Weights normalize across available domains so users without
-    Apple Health aren't penalized vs users who have it.
-    """
     domains: list[tuple[str, int, float]] = []
     if nutrition_score is not None:
         domains.append(("nutrition", nutrition_score, 0.30))
@@ -414,7 +555,7 @@ def compute_overall_health_score(
     )
 
 
-# ─── Weekly trend ─────────────────────────────────────────────────────────────
+# ─── Weekly trend ────────────────────────────────────────────────────────────
 
 @dataclass
 class WeeklyNutritionTrend:
@@ -423,11 +564,10 @@ class WeeklyNutritionTrend:
     avg_quality: int
     day_count: int
     patterns: list[str]
-    trend_direction: str       # "improving" / "stable" / "declining"
+    trend_direction: str
 
 
 def compute_weekly_trend(daily_scores: list[NutritionScore]) -> WeeklyNutritionTrend:
-    """Compute 7-day rolling trend from a list of daily scores."""
     if not daily_scores:
         return WeeklyNutritionTrend(avg_score=0, avg_adherence=0, avg_quality=0, day_count=0, patterns=[], trend_direction="stable")
 
@@ -436,31 +576,26 @@ def compute_weekly_trend(daily_scores: list[NutritionScore]) -> WeeklyNutritionT
     avg_adh = round(sum(s.adherence_score for s in recent) / len(recent))
     avg_qual = round(sum(s.quality_score for s in recent) / len(recent))
 
-    patterns = []
     if len(recent) >= 5:
-        first_half = sum(s.total for s in recent[:len(recent)//2]) / max(1, len(recent)//2)
-        second_half = sum(s.total for s in recent[len(recent)//2:]) / max(1, len(recent) - len(recent)//2)
+        mid = len(recent) // 2
+        first_half = sum(s.total for s in recent[:mid]) / max(1, mid)
+        second_half = sum(s.total for s in recent[mid:]) / max(1, len(recent) - mid)
         diff = second_half - first_half
-        if diff > 5:
-            trend = "improving"
-        elif diff < -5:
-            trend = "declining"
-        else:
-            trend = "stable"
+        trend = "improving" if diff > 5 else "declining" if diff < -5 else "stable"
     else:
         trend = "stable"
 
-    # Use structured flags instead of tag strings
+    patterns: list[str] = []
     protein_hits = sum(1 for s in recent if s.flags.get("protein_on_track", False))
     fiber_hits = sum(1 for s in recent if s.flags.get("fiber_on_track", False))
-    processed_days = sum(1 for s in recent if s.flags.get("high_processed", False))
+    upf_days = sum(1 for s in recent if s.flags.get("high_upf", False))
 
     if protein_hits >= len(recent) * 0.7:
         patterns.append("Protein consistently on track")
     if fiber_hits < len(recent) * 0.3:
         patterns.append("Fiber intake inconsistent")
-    if processed_days >= len(recent) * 0.5:
-        patterns.append("Processed food intake elevated this week")
+    if upf_days >= len(recent) * 0.5:
+        patterns.append("Ultra-processed food intake elevated")
 
     return WeeklyNutritionTrend(
         avg_score=avg_score,
@@ -470,15 +605,3 @@ def compute_weekly_trend(daily_scores: list[NutritionScore]) -> WeeklyNutritionT
         patterns=patterns,
         trend_direction=trend,
     )
-
-
-# ─── V2 Extensions (workout-aware) ──────────────────────────────────────────
-#
-# Planned lightweight extensions for workout-day nutrition:
-#   1. Protein support: +5 adherence bonus if protein >= 100% on lifting days
-#   2. Carb support: +5 quality bonus if carbs >= 55% of cals on endurance days
-#   3. Hydration flag: surface "hydrate extra" tag on intense cardio days
-#   4. Pre/post window: tag meals within 2h of workout as "peri-workout"
-#
-# These are additive bonuses, not penalties. A user who doesn't time their
-# nutrition doesn't lose points — one who does gets a small boost.

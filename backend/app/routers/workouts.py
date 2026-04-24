@@ -1362,36 +1362,43 @@ def get_fatigue_score(
     snapshot = compute_rolling_fatigue(completions)
     logger.debug(f"[fatigue] readiness={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
 
-    # Nutrition recovery bonus: good protein intake accelerates recovery
+    # Nutrition recovery bonus — scales to % of user's protein target instead
+    # of absolute grams so users at every bodyweight are evaluated fairly.
     nutrition_context = {"protein_avg": 0, "protein_status": "unknown", "message": None, "recovery_bonus_applied": False}
     try:
         from app.services.nutrition.meal_history import get_rolling_averages
+        from app.services.nutrition.score_builder import _get_profile_and_goal, _compute_targets
         avg = get_rolling_averages(current_user.id, window=3, db=db)
+        profile, goal = _get_profile_and_goal(db, current_user.id)
+        _cal_target, pro_target, _goal_id, _sex = _compute_targets(profile, goal)
+        pro_target = max(1, pro_target)
+
         if avg and avg.get("days_with_data", 0) > 0:
             protein = avg.get("avg_protein_g", 0)
             calories = avg.get("avg_calories", 0)
             nutrition_context["protein_avg"] = round(protein)
             nutrition_context["calories_avg"] = round(calories)
 
-            if protein >= 130:
+            ratio = protein / pro_target if pro_target else 0
+            if ratio >= 0.95:
                 nutrition_context["protein_status"] = "excellent"
-                nutrition_context["message"] = f"Protein intake strong ({round(protein)}g avg) — accelerating recovery"
-            elif protein >= 100:
+                nutrition_context["message"] = f"Protein on target ({round(protein)}g avg) — supporting recovery"
+            elif ratio >= 0.80:
                 nutrition_context["protein_status"] = "good"
-                nutrition_context["message"] = f"Protein adequate ({round(protein)}g avg) — supporting recovery"
-            elif protein >= 50:
+                nutrition_context["message"] = f"Protein adequate ({round(protein)}g avg) — near target of {pro_target}g"
+            elif ratio >= 0.60:
                 nutrition_context["protein_status"] = "low"
-                nutrition_context["message"] = f"Protein low ({round(protein)}g avg) — recovery is slower. Aim for 130g+"
+                nutrition_context["message"] = f"Protein low ({round(protein)}g avg of {pro_target}g target) — recovery is slower"
             elif protein > 0:
                 nutrition_context["protein_status"] = "very_low"
-                nutrition_context["message"] = f"Protein very low ({round(protein)}g avg) — significantly slowing recovery"
+                nutrition_context["message"] = f"Protein very low ({round(protein)}g avg of {pro_target}g target)"
             else:
                 nutrition_context["protein_status"] = "no_data"
                 nutrition_context["message"] = "Log meals to unlock nutrition-powered recovery insights"
 
-            if protein >= 100:
-                protein_factor = min(1.0, protein / 150)
-                recovery_bonus = 0.05 * protein_factor
+            if ratio >= 0.95:
+                bonus_factor = min(1.0, (ratio - 0.80) / 0.40)
+                recovery_bonus = 0.05 * bonus_factor
                 for muscle in ("chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "core"):
                     current = snapshot.muscle_fatigue.get(muscle)
                     if current > 0:
@@ -1399,9 +1406,8 @@ def get_fatigue_score(
                 from app.services.workout.activity_impact import recompute_readiness
                 snapshot.readiness_score, snapshot.focus_readiness = recompute_readiness(snapshot.muscle_fatigue)
                 nutrition_context["recovery_bonus_applied"] = True
-                logger.debug(f"[fatigue] nutrition bonus: protein={protein:.0f}g bonus={recovery_bonus:.3f} readiness={snapshot.readiness_score}%")
-            elif protein >= 50:
-                # Low protein: apply a small PENALTY (slower recovery)
+                logger.debug(f"[fatigue] nutrition bonus: protein_ratio={ratio:.2f} bonus={recovery_bonus:.3f} readiness={snapshot.readiness_score}%")
+            elif ratio >= 0.60 and ratio < 0.80:
                 penalty = 0.03
                 for muscle in ("chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "core"):
                     current = snapshot.muscle_fatigue.get(muscle)
@@ -1409,7 +1415,7 @@ def get_fatigue_score(
                         snapshot.muscle_fatigue.add(muscle, current * penalty)
                 from app.services.workout.activity_impact import recompute_readiness as _recompute
                 snapshot.readiness_score, snapshot.focus_readiness = _recompute(snapshot.muscle_fatigue)
-                logger.debug(f"[fatigue] low protein penalty: protein={protein:.0f}g readiness={snapshot.readiness_score}%")
+                logger.debug(f"[fatigue] low protein penalty: protein_ratio={ratio:.2f} readiness={snapshot.readiness_score}%")
     except Exception as e:
         logger.debug(f"[fatigue] nutrition recovery check failed (non-fatal): {e}")
 

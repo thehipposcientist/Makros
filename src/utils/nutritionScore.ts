@@ -1,19 +1,24 @@
+// Client-side Nutrition Score — plan-preview ONLY.
+//
+// For logged meals, the authoritative score comes from the backend at
+// /meals/score via `getNutritionScore(token)`. Use `computeNutritionScore`
+// here when you need a best-effort number BEFORE meals are logged (e.g. plan
+// generation preview). The shape mirrors the backend so the UI can render
+// either source without branching.
+//
+// Classification is NOT done here anymore — we read `food_quality` directly
+// from backend-enriched meal items. That ends the drift between the two
+// keyword lists we used to maintain.
+
 import { DailyNutritionPlan, MealItem, MealSuggestion } from '../types';
 
-export interface PlanGutHealth {
-  fiber_g: number;
-  fiber_per_1000_kcal: number;
-  omega3_mg: number;
-  distinct_plant_foods: number;
-  fermented_servings: number;
-  probiotic_servings: number;
-  plant_protein_g: number;
-  animal_protein_g: number;
-  gut_support_score: number;
-  food_quality_score: number;
-  longevity_score: number;
-  processing_counts: Record<string, number>;
-  item_count: number;
+export interface NutritionScoreBreakdownItem {
+  label: string;
+  value_pct: number;
+  raw: number;
+  target: number | null;
+  unit: string;
+  on_track: boolean;
 }
 
 export interface NutritionScoreResult {
@@ -21,14 +26,33 @@ export interface NutritionScoreResult {
   adherence: number;
   quality: number;
   micro: number;
-  confidence: string;
+  confidence: 'low' | 'medium' | 'high';
   tags: string[];
   wins: string[];
   improvements: string[];
   likely_gaps: string[];
   indicators: Record<string, any>;
+  adherence_breakdown: NutritionScoreBreakdownItem[];
+  quality_breakdown: NutritionScoreBreakdownItem[];
+  micro_breakdown: NutritionScoreBreakdownItem[];
 }
 
+// Plan-preview gut facts — reported as descriptive info (no scores).
+export interface PlanGutHealth {
+  fiber_g: number;
+  fiber_per_1000_kcal: number;
+  omega3_mg: number;
+  distinct_plant_foods: number;
+  fermented_servings: number;
+  probiotic_servings: number;
+  seafood_servings: number;
+  plant_protein_g: number;
+  animal_protein_g: number;
+  processing_counts: Record<string, number>;
+  item_count: number;
+}
+
+// RDA targets used for preview-time micro scoring
 const RDA: Record<string, number> = {
   fiber: 28,
   calcium: 1000,
@@ -36,186 +60,53 @@ const RDA: Record<string, number> = {
   potassium: 4700,
   magnesium: 420,
   vitamin_d: 20,
-  vitamin_c: 90,
-  vitamin_a: 900,
   vitamin_b12: 2.4,
   zinc: 11,
+  selenium: 55,
+  folate: 400,
 };
 
-const KEY_MICROS = ['calcium', 'iron', 'potassium', 'magnesium', 'vitamin_d', 'vitamin_c'];
+// Priority-6 — matches backend KEY_MICROS. Vitamin C dropped.
+const KEY_MICROS = ['calcium', 'iron', 'potassium', 'magnesium', 'vitamin_d', 'vitamin_b12'];
 
 const MICRO_ALIASES: Record<string, string> = {
   calcium_mg: 'calcium', iron_mg: 'iron', potassium_mg: 'potassium',
-  magnesium_mg: 'magnesium', vitamin_d_mcg: 'vitamin_d', vitamin_c_mg: 'vitamin_c',
-  vitamin_a_mcg: 'vitamin_a', vitamin_b12_mcg: 'vitamin_b12', zinc_mg: 'zinc',
-  fiber_g: 'fiber',
-  vitaminD: 'vitamin_d', vitaminC: 'vitamin_c', vitaminA: 'vitamin_a',
-  vitaminB12: 'vitamin_b12',
+  magnesium_mg: 'magnesium', vitamin_d_mcg: 'vitamin_d',
+  vitamin_b12_mcg: 'vitamin_b12', zinc_mg: 'zinc',
+  fiber_g: 'fiber', selenium_mcg: 'selenium', folate_mcg: 'folate',
+  folate_b9: 'folate',
+  vitaminD: 'vitamin_d', vitaminB12: 'vitamin_b12',
 };
 
 function normalizeMicroKey(key: string): string {
   return MICRO_ALIASES[key] ?? key;
 }
 
-const WHOLE_FOOD_KEYWORDS = [
-  // Proteins
-  'chicken', 'turkey', 'beef', 'pork', 'lamb', 'bison', 'venison', 'steak',
-  'salmon', 'tuna', 'fish', 'shrimp', 'cod', 'tilapia', 'halibut', 'sardine',
-  'mackerel', 'trout', 'bass', 'crab', 'lobster', 'scallop', 'clam', 'mussel',
-  'egg', 'whey', 'casein',
-  // Grains & carbs
-  'rice', 'oats', 'oatmeal', 'quinoa', 'sweet potato', 'potato', 'bread',
-  'pasta', 'noodle', 'tortilla', 'wrap', 'couscous', 'barley', 'buckwheat',
-  'corn', 'polenta', 'farro', 'millet',
-  // Vegetables
-  'broccoli', 'spinach', 'kale', 'lettuce', 'tomato', 'pepper', 'carrot',
-  'cucumber', 'zucchini', 'asparagus', 'green bean', 'pea', 'onion',
-  'mushroom', 'cauliflower', 'celery', 'cabbage', 'beet', 'squash',
-  'eggplant', 'artichoke', 'brussels', 'radish', 'turnip', 'bok choy',
-  'edamame', 'okra', 'arugula', 'watercress', 'collard', 'chard',
-  // Fruits
-  'apple', 'banana', 'berries', 'orange', 'avocado', 'mango', 'grape',
-  'peach', 'pear', 'melon', 'watermelon', 'pineapple', 'strawberr',
-  'blueberr', 'raspberry', 'cherry', 'plum', 'fig', 'date', 'kiwi',
-  'papaya', 'coconut', 'pomegranate', 'lemon', 'lime', 'grapefruit',
-  // Dairy
-  'milk', 'yogurt', 'greek yogurt', 'cheese', 'cottage cheese', 'cream cheese',
-  'mozzarella', 'cheddar', 'parmesan', 'feta', 'ricotta', 'kefir', 'skyr',
-  // Legumes & plant protein
-  'beans', 'lentils', 'tofu', 'tempeh', 'chickpeas', 'hummus', 'peanut butter',
-  'almond butter', 'soy', 'seitan',
-  // Fats & oils
-  'olive oil', 'coconut oil', 'butter', 'ghee', 'nuts', 'almond', 'peanut',
-  'walnut', 'cashew', 'pecan', 'pistachio', 'macadamia', 'flax', 'chia',
-  'hemp seed', 'sunflower seed', 'pumpkin seed', 'sesame',
-  // Other whole foods
-  'honey', 'maple syrup', 'salsa', 'guacamole', 'sauerkraut', 'kimchi',
-];
-
-const PROCESSED_KEYWORDS = [
-  'protein bar', 'granola bar', 'energy bar', 'cereal', 'chips', 'candy',
-  'soda', 'energy drink', 'sport drink', 'instant', 'frozen dinner',
-  'frozen pizza', 'pizza', 'hot dog', 'nugget', 'fries', 'french fries',
-  'donut', 'doughnut', 'cookie', 'cake', 'ice cream', 'pastry', 'muffin',
-  'pop tart', 'ramen', 'corn dog', 'bagel bite', 'croissant',
-  'cracker', 'pretzel', 'popcorn', 'brownie', 'waffle', 'pancake mix',
-  'mac and cheese', 'macaroni and cheese', 'canned soup', 'packaged',
-  'microwave', 'toaster', 'processed', 'deli meat', 'bacon', 'sausage',
-  'salami', 'pepperoni', 'jerky', 'slim jim',
-  'granola', 'rice cake', 'bagel', 'english muffin', 'flour tortilla',
-  'trail mix', 'dark chocolate',
-];
-
-const FRUIT_VEG_KEYWORDS = [
-  // Vegetables
-  'broccoli', 'spinach', 'kale', 'lettuce', 'tomato', 'pepper', 'carrot',
-  'cucumber', 'zucchini', 'asparagus', 'green bean', 'pea', 'corn',
-  'onion', 'mushroom', 'cauliflower', 'celery', 'cabbage', 'beet',
-  'squash', 'eggplant', 'artichoke', 'brussels', 'radish', 'bok choy',
-  'edamame', 'okra', 'arugula', 'watercress', 'collard', 'chard',
-  'salad', 'mixed greens', 'coleslaw',
-  // Fruits
-  'apple', 'banana', 'berries', 'blueberr', 'strawberr', 'raspberry',
-  'orange', 'mango', 'pineapple', 'grape', 'peach', 'pear', 'melon',
-  'watermelon', 'avocado', 'cherry', 'plum', 'fig', 'kiwi', 'papaya',
-  'pomegranate', 'grapefruit', 'lemon', 'lime', 'date',
-];
-
 const GOAL_WEIGHTS: Record<string, [number, number, number]> = {
-  muscle_gain: [0.40, 0.35, 0.25],
-  strength: [0.40, 0.35, 0.25],
-  fat_loss: [0.40, 0.40, 0.20],
-  body_recomp: [0.38, 0.37, 0.25],
-  endurance: [0.35, 0.35, 0.30],
-  athletic_performance: [0.35, 0.35, 0.30],
-  hyrox: [0.35, 0.35, 0.30],
-  general_health: [0.30, 0.35, 0.35],
-  maintain: [0.30, 0.35, 0.35],
+  fat_loss: [0.45, 0.35, 0.20],
+  muscle_gain: [0.45, 0.30, 0.25],
+  strength: [0.45, 0.30, 0.25],
+  body_recomp: [0.40, 0.35, 0.25],
+  endurance: [0.40, 0.35, 0.25],
+  athletic_performance: [0.40, 0.35, 0.25],
+  hyrox: [0.40, 0.35, 0.25],
+  general_health: [0.30, 0.40, 0.30],
+  maintain: [0.30, 0.40, 0.30],
+  longevity: [0.30, 0.40, 0.30],
+  healthy_aging: [0.30, 0.40, 0.30],
+  heart_health: [0.30, 0.40, 0.30],
+  toning: [0.45, 0.35, 0.20],
 };
 
-export function classifyFood(name: string, persisted?: 'whole' | 'processed' | 'unknown'): 'whole' | 'processed' | 'unknown' {
-  if (persisted) return persisted;
-  const lower = name.toLowerCase();
-  if (PROCESSED_KEYWORDS.some(k => lower.includes(k))) return 'processed';
-  if (WHOLE_FOOD_KEYWORDS.some(k => lower.includes(k))) return 'whole';
-  return 'unknown';
+function bd(label: string, valuePct: number, raw: number, target: number | null, unit: string, onTrack: boolean): NutritionScoreBreakdownItem {
+  return { label, value_pct: Math.max(0, Math.min(100, Math.round(valuePct))), raw: Math.round(raw * 10) / 10, target, unit, on_track: onTrack };
 }
 
-function isFruitOrVeg(name: string): boolean {
-  const lower = name.toLowerCase();
-  return FRUIT_VEG_KEYWORDS.some(k => lower.includes(k));
-}
-
-export function computePlanGutHealth(
-  meals: MealSuggestion[],
-  dailyMicros: Record<string, number>,
-  totalCalories: number,
-): PlanGutHealth {
-  const items: MealItem[] = meals.flatMap(m => m.items ?? []);
-
-  const fiber_g = dailyMicros.fiber || 0;
-  const fiber_per_1000_kcal = totalCalories > 0
-    ? Math.round(fiber_g / totalCalories * 1000 * 10) / 10 : 0;
-  const omega3_mg = dailyMicros.omega3 || 0;
-
-  let distinct_plant_foods = 0;
-  let fermented_servings = 0;
-  let probiotic_servings = 0;
-  let plant_protein_g = 0;
-  let animal_protein_g = 0;
-  const processing_counts: Record<string, number> = {
-    minimally_processed: 0, processed: 0, unknown: 0,
-  };
-
-  for (const it of items) {
-    distinct_plant_foods += it.plant_count ?? 0;
-    if (it.fermented) fermented_servings++;
-    if (it.probiotic) probiotic_servings++;
-
-    const prot = it.protein ?? 0;
-    const src = it.protein_source;
-    if (src === 'plant') plant_protein_g += prot;
-    else if (src === 'animal') animal_protein_g += prot;
-    else if (src === 'mixed') { plant_protein_g += prot * 0.4; animal_protein_g += prot * 0.6; }
-
-    const q = it.food_quality;
-    if (q === 'whole') processing_counts.minimally_processed++;
-    else if (q === 'processed') processing_counts.processed++;
-    else processing_counts.unknown++;
-  }
-
-  const totalFoods = Math.max(1, items.length);
-  const wholePct = processing_counts.minimally_processed / totalFoods;
-
-  const fiberScore = Math.min(100, (fiber_g / 28) * 100);
-  const fermentedScore = Math.min(100, ((fermented_servings + probiotic_servings) / 3) * 100);
-  const diversityScore = Math.min(100, (distinct_plant_foods / 12) * 100);
-  const gut_support_score = Math.round(
-    fiberScore * 0.4 + fermentedScore * 0.3 + diversityScore * 0.3
-  );
-
-  const produceScore = Math.min(100, (distinct_plant_foods / 5) * 100);
-  const processedPenalty = Math.min(100, (processing_counts.processed / totalFoods) * 100);
-  const food_quality_score = Math.round(Math.max(0,
-    (wholePct * 100) * 0.4 + produceScore * 0.3 - processedPenalty * 0.3
-  ));
-
-  const omega3Score = Math.min(100, (omega3_mg / 1600) * 100);
-  const fiberDensityScore = Math.min(100, (fiber_per_1000_kcal / 14) * 100);
-  const longevity_score = Math.round(
-    omega3Score * 0.25 + fiberDensityScore * 0.25 +
-    diversityScore * 0.2 + (wholePct * 100) * 0.3
-  );
-
-  return {
-    fiber_g, fiber_per_1000_kcal, omega3_mg,
-    distinct_plant_foods,
-    fermented_servings, probiotic_servings,
-    plant_protein_g: Math.round(plant_protein_g),
-    animal_protein_g: Math.round(animal_protein_g),
-    gut_support_score, food_quality_score, longevity_score,
-    processing_counts, item_count: items.length,
-  };
+function curve(value: number, low: number, mid: number, target: number, outOf: number): number {
+  if (value <= low) return 0;
+  if (value >= target) return outOf;
+  if (value <= mid) return outOf * 0.6 * (value - low) / (mid - low);
+  return outOf * 0.6 + outOf * 0.4 * (value - mid) / (target - mid);
 }
 
 function collectAllItems(plan: DailyNutritionPlan): MealItem[] {
@@ -225,23 +116,71 @@ function collectAllItems(plan: DailyNutritionPlan): MealItem[] {
     .flatMap(m => m.items ?? []);
 }
 
+export function computePlanGutHealth(
+  meals: MealSuggestion[],
+  dailyMicros: Record<string, number>,
+  totalCalories: number,
+): PlanGutHealth {
+  const items: MealItem[] = meals.flatMap(m => m.items ?? []);
+  const fiber_g = dailyMicros.fiber || 0;
+  const fiber_per_1000_kcal = totalCalories > 0
+    ? Math.round(fiber_g / totalCalories * 1000 * 10) / 10 : 0;
+  const omega3_mg = dailyMicros.omega3 || 0;
+
+  let distinct_plant_foods = 0;
+  let fermented_servings = 0;
+  let probiotic_servings = 0;
+  let seafood_servings = 0;
+  let plant_protein_g = 0;
+  let animal_protein_g = 0;
+  const processing_counts: Record<string, number> = {
+    minimally_processed: 0, processed: 0, ultra_processed: 0, unknown: 0,
+  };
+
+  for (const it of items) {
+    distinct_plant_foods += (it as any).plant_count ?? 0;
+    if ((it as any).fermented) fermented_servings++;
+    if ((it as any).probiotic) probiotic_servings++;
+    if ((it as any).seafood) seafood_servings++;
+
+    const prot = (it as any).protein ?? 0;
+    const src = (it as any).protein_source;
+    if (src === 'plant') plant_protein_g += prot;
+    else if (src === 'animal') animal_protein_g += prot;
+    else if (src === 'mixed') { plant_protein_g += prot * 0.5; animal_protein_g += prot * 0.5; }
+
+    const bucket = (it as any).processing_bucket
+      ?? ((it as any).food_quality === 'whole' ? 'minimally_processed'
+        : (it as any).food_quality === 'processed' ? 'processed'
+        : 'unknown');
+    processing_counts[bucket] = (processing_counts[bucket] || 0) + 1;
+  }
+
+  return {
+    fiber_g, fiber_per_1000_kcal, omega3_mg,
+    distinct_plant_foods,
+    fermented_servings, probiotic_servings, seafood_servings,
+    plant_protein_g: Math.round(plant_protein_g),
+    animal_protein_g: Math.round(animal_protein_g),
+    processing_counts, item_count: items.length,
+  };
+}
+
 export function computeNutritionScore(
   plan: DailyNutritionPlan | null,
   goal: string = 'body_recomp',
   sex?: string,
 ): NutritionScoreResult {
   const empty: NutritionScoreResult = {
-    score: 0, adherence: 0, quality: 0, micro: 0,
-    confidence: 'low', tags: [], wins: [], improvements: ['Add meals to your plan'],
+    score: 0, adherence: 0, quality: 0, micro: 0, confidence: 'low',
+    tags: [], wins: [], improvements: ['Add meals to your plan'],
     likely_gaps: [], indicators: {},
+    adherence_breakdown: [], quality_breakdown: [], micro_breakdown: [],
   };
   if (!plan || !plan.meals.length) return empty;
 
-  // Sex-aware iron RDA: male = 8mg, female/unknown = 18mg
   const effectiveRDA = { ...RDA };
-  if (sex && sex.toLowerCase() === 'male') {
-    effectiveRDA.iron = 8;
-  }
+  if (sex && sex.toLowerCase() === 'male') effectiveRDA.iron = 8;
 
   const targets = plan.targets;
   const removed = new Set(plan.removedMealIds ?? []);
@@ -250,24 +189,21 @@ export function computeNutritionScore(
 
   const totalCal = activeMeals.reduce((s, m) => s + (m.calories || 0), 0);
   const totalPro = activeMeals.reduce((s, m) => s + (m.protein || 0), 0);
-  const totalFiber = activeMeals.reduce((s, m) => s + (m.fiber || 0), 0);
 
-  // Collect micronutrients — normalize keys to canonical names
   const micros: Record<string, number> = {};
   for (const it of items) {
-    if (it.micronutrients) {
-      for (const [k, v] of Object.entries(it.micronutrients)) {
+    if ((it as any).micronutrients) {
+      for (const [k, v] of Object.entries((it as any).micronutrients as Record<string, number>)) {
         const canonical = normalizeMicroKey(k);
         micros[canonical] = (micros[canonical] || 0) + (v || 0);
       }
     }
   }
-  // Meal-level micronutrients as fallback (avoid double-counting)
-  const itemsHaveMicros = items.some(it => it.micronutrients && Object.keys(it.micronutrients).length > 0);
+  const itemsHaveMicros = items.some(it => (it as any).micronutrients && Object.keys((it as any).micronutrients).length > 0);
   for (const m of activeMeals) {
-    const mealMicros = m.micronutrients;
-    if (mealMicros && typeof mealMicros === 'object' && !itemsHaveMicros) {
-      for (const [k, v] of Object.entries(mealMicros)) {
+    const mm = (m as any).micronutrients;
+    if (mm && typeof mm === 'object' && !itemsHaveMicros) {
+      for (const [k, v] of Object.entries(mm as Record<string, number>)) {
         if (typeof v === 'number') {
           const canonical = normalizeMicroKey(k);
           micros[canonical] = (micros[canonical] || 0) + v;
@@ -276,63 +212,116 @@ export function computeNutritionScore(
     }
   }
 
-  // Food classification — uses persisted quality from backend when available
-  let wholeCount = 0, processedCount = 0, fvServings = 0;
+  const fiber_g = micros['fiber'] ?? activeMeals.reduce((s, m) => s + ((m as any).fiber || 0), 0);
+  const added_sugar_g = micros['added_sugar'] ?? 0;
+  const sodium_mg = micros['sodium_mg'] ?? micros['sodium'] ?? 0;
+  const sat_fat_g = micros['saturated_fat'] ?? 0;
+
+  // Processing mix + plant diversity + omega-3 from per-item flags
+  let minProc = 0, upf = 0, totalClassified = 0;
+  let plantCount = 0;
+  let omega3Servings = 0;
+  let seafoodServings = 0;
+  const seenPlants = new Set<string>();
   for (const it of items) {
-    const cls = classifyFood(it.name, it.food_quality);
-    if (cls === 'whole') wholeCount++;
-    else if (cls === 'processed') processedCount++;
-    if (isFruitOrVeg(it.name)) fvServings++;
+    const fq = (it as any).food_quality;
+    const bucket = (it as any).processing_bucket ??
+      (fq === 'whole' ? 'minimally_processed' : fq === 'processed' ? 'processed' : null);
+    if (bucket === 'minimally_processed') minProc++;
+    else if (bucket === 'ultra_processed') upf++;
+    if (bucket) totalClassified++;
+    if ((it as any).plant_count) {
+      for (let i = 0; i < ((it as any).plant_count as number); i++) seenPlants.add(`${it.name}-${i}`);
+    }
+    if ((it as any).omega3_rich) omega3Servings++;
+    if ((it as any).seafood) seafoodServings++;
   }
-  const totalFoods = Math.max(1, items.length);
-  const wholePct = (wholeCount / totalFoods) * 100;
-  const processedPct = (processedCount / totalFoods) * 100;
+  plantCount = seenPlants.size;
+  const minProcPct = totalClassified > 0 ? (minProc / totalClassified) * 100 : 0;
+  const upfPct = totalClassified > 0 ? (upf / totalClassified) * 100 : 0;
 
-  const mealsLogged = activeMeals.length;
-  const mealsExpected = Math.max(1, plan.meals.length);
-  const loggingCompleteness = Math.min(1, mealsLogged / mealsExpected);
-
-  // Calorie alignment: within ±10% = perfect, degrades to 0 at ±40%
+  // Adherence
   const calAlignment = targets.calories > 0
     ? (() => {
-        const deviation = Math.abs(1 - totalCal / targets.calories);
-        if (deviation <= 0.10) return 1.0;
-        return Math.max(0, 1 - (deviation - 0.10) / 0.30);
+        const dev = Math.abs(1 - totalCal / targets.calories);
+        if (dev <= 0.10) return 1.0;
+        return Math.max(0, 1 - (dev - 0.10) / 0.30);
       })()
     : 0.5;
-
-  // Protein alignment: full credit at 100%+ of target
   const proRatio = targets.protein > 0 ? totalPro / targets.protein : 0.5;
-  const proAlignment = proRatio >= 1.0 ? 1.0 : Math.max(0, proRatio);
+  const proAlignment = proRatio >= 0.95 ? 1.0 : Math.max(0, proRatio / 0.95);
 
-  const effectiveFiber = (micros['fiber'] || 0) > 0 ? micros['fiber'] : totalFiber;
-  const fiberAlignment = effectiveFiber >= RDA.fiber ? 1.0 : Math.max(0, effectiveFiber / RDA.fiber);
+  const adherence = Math.round(Math.min(100, calAlignment * 50 + proAlignment * 50));
+  const adherence_breakdown: NutritionScoreBreakdownItem[] = [
+    bd('Calories', calAlignment * 100, totalCal, targets.calories, 'kcal', calAlignment >= 0.9),
+    bd('Protein', proAlignment * 100, totalPro, targets.protein, 'g', proAlignment >= 0.95),
+  ];
 
-  // ── Adherence (0-100) ──
-  // Logging completeness affects confidence, not adherence directly.
-  // Someone who logs 1 meal shouldn't look like they ate badly.
-  const calPts = calAlignment * 50;
-  const proPts = proAlignment * 50;
-  const adherence = Math.round(Math.min(100, calPts + proPts));
+  // Food Quality — 7 inputs
+  const fiberDensity = totalCal > 0 ? (fiber_g / totalCal) * 1000 : 0;
+  const fiberPts = curve(fiberDensity, 6, 10, 14, 20);
+  const addedSugarPct = totalCal > 0 ? (added_sugar_g * 4 / totalCal) * 100 : 0;
+  let addedSugarPts: number;
+  if (addedSugarPct <= 5) addedSugarPts = 15;
+  else if (addedSugarPct <= 10) addedSugarPts = 15 - (addedSugarPct - 5) * 0.6;
+  else if (addedSugarPct <= 15) addedSugarPts = 12 - (addedSugarPct - 10) * 1.2;
+  else addedSugarPts = Math.max(0, 6 - (addedSugarPct - 15) * 0.4);
 
-  // ── Quality (0-100) ──
-  const wholePts = Math.min(35, wholePct / 100 * 35);
-  const processedPenalty = Math.min(20, processedPct / 100 * 20);
-  const fiberPts = fiberAlignment * 20;
-  const fvPts = Math.min(15, (fvServings / 5) * 15);
-  // Hydration bonus (0-10 pts) — infrastructure for when client-side tracking is added
-  const hydrationPts = 0;
-  const quality = Math.round(Math.min(100, Math.max(0, wholePts - processedPenalty + fiberPts + fvPts + hydrationPts)));
+  const satFatPct = totalCal > 0 ? (sat_fat_g * 9 / totalCal) * 100 : 0;
+  let satFatPts: number;
+  if (satFatPct <= 7) satFatPts = 15;
+  else if (satFatPct <= 10) satFatPts = 15 - (satFatPct - 7) * 1.0;
+  else if (satFatPct <= 14) satFatPts = 12 - (satFatPct - 10) * 1.5;
+  else satFatPts = Math.max(0, 6 - (satFatPct - 14) * 0.5);
 
-  // ── Micronutrient Coverage (0-100) ──
-  const foodsWithMicros = items.filter(it => it.micronutrients && Object.keys(it.micronutrients).length > 0).length;
+  let sodiumPts: number;
+  if (sodium_mg <= 0) sodiumPts = 5;
+  else if (sodium_mg <= 2300) sodiumPts = 10;
+  else if (sodium_mg <= 3500) sodiumPts = 10 - (sodium_mg - 2300) / 1200 * 4;
+  else if (sodium_mg <= 4500) sodiumPts = 6 - (sodium_mg - 3500) / 1000 * 6;
+  else sodiumPts = 0;
+
+  const processedPts = Math.max(0, 20 * (minProcPct / 100 - 0.5 * upfPct / 100));
+  const plantPts = plantCount >= 5 ? 10 : (plantCount / 5) * 10;
+  let omegaPts = 0;
+  if (omega3Servings >= 1) omegaPts = 10;
+  else if (seafoodServings >= 1) omegaPts = 7;
+  else omegaPts = 0;
+
+  const qualityRaw = fiberPts + addedSugarPts + satFatPts + sodiumPts + processedPts + plantPts + omegaPts;
+  const quality = Math.round(Math.min(100, Math.max(0, qualityRaw)));
+
+  const quality_breakdown: NutritionScoreBreakdownItem[] = [
+    bd('Fiber density', fiberPts / 20 * 100, fiberDensity, 14, 'g/1000kcal', fiberPts >= 14),
+    bd('Added sugar', addedSugarPts / 15 * 100, addedSugarPct, 10, '% cals', addedSugarPts >= 12),
+    bd('Saturated fat', satFatPts / 15 * 100, satFatPct, 10, '% cals', satFatPts >= 12),
+    bd('Sodium', sodiumPts / 10 * 100, sodium_mg, 2300, 'mg', sodiumPts >= 8),
+    bd('Minimally processed', processedPts / 20 * 100, minProcPct, 70, '%', processedPts >= 14),
+    bd('Plant diversity', plantPts / 10 * 100, plantCount, 5, 'foods', plantPts >= 8),
+    bd('Omega-3', omegaPts / 10 * 100, omega3Servings, 1, 'servings', omegaPts >= 8),
+  ];
+
+  // Micronutrient Coverage — priority 6
+  const foodsWithMicros = items.filter(it => (it as any).micronutrients && Object.keys((it as any).micronutrients).length > 0).length;
   const hasMealLevelMicros = Object.keys(micros).length > 0;
-  const microConfidence = totalFoods === 0 && !hasMealLevelMicros ? 'none'
-    : (foodsWithMicros / totalFoods) >= 0.7 ? 'high'
-    : (foodsWithMicros / totalFoods) >= 0.4 || hasMealLevelMicros ? 'medium' : 'low';
+  const totalFoods = Math.max(1, items.length);
+  const microConfidence: 'none' | 'low' | 'medium' | 'high' =
+    totalFoods === 0 && !hasMealLevelMicros ? 'none'
+      : (foodsWithMicros / totalFoods) >= 0.7 ? 'high'
+      : (foodsWithMicros / totalFoods) >= 0.4 || hasMealLevelMicros ? 'medium' : 'low';
+
+  const microDisplay: Record<string, string> = {
+    calcium: 'Calcium', iron: 'Iron', potassium: 'Potassium',
+    magnesium: 'Magnesium', vitamin_d: 'Vitamin D', vitamin_b12: 'Vitamin B12',
+  };
+  const microUnit: Record<string, string> = {
+    calcium: 'mg', iron: 'mg', potassium: 'mg', magnesium: 'mg',
+    vitamin_d: 'mcg', vitamin_b12: 'mcg',
+  };
 
   let micro = 50;
   const gaps: string[] = [];
+  const micro_breakdown: NutritionScoreBreakdownItem[] = [];
   if (microConfidence !== 'none') {
     let hits = 0, checked = 0;
     for (const key of KEY_MICROS) {
@@ -341,86 +330,79 @@ export function computeNutritionScore(
       checked++;
       const logged = micros[key] || 0;
       const ratio = logged / rdaVal;
-      if (ratio >= 0.7) hits++;
-      else if (ratio < 0.4) {
-        gaps.push(key.replace(/_/g, ' '));
-      }
+      const onTrack = ratio >= 0.7;
+      if (onTrack) hits++;
+      else if (ratio < 0.4) gaps.push(microDisplay[key] || key);
+      micro_breakdown.push(bd(microDisplay[key] || key, Math.min(100, ratio * 100), logged, rdaVal, microUnit[key] || '', onTrack));
     }
-    if (checked > 0) micro = Math.round((hits / checked) * 100);
-    // Low confidence: compress toward neutral to avoid false precision
+    micro = checked > 0 ? Math.round((hits / checked) * 100) : 50;
     if (microConfidence === 'low') micro = Math.round(micro * 0.5 + 25);
     else if (microConfidence === 'medium') micro = Math.round(micro * 0.75 + 12.5);
   }
 
-  // ── Confidence ──
-  const confidence = loggingCompleteness < 0.3 ? 'low'
-    : (loggingCompleteness < 0.7 || microConfidence === 'low') ? 'medium' : 'high';
-
-  // ── Weighted total ──
-  // Scale by confidence so partial data doesn't over-inflate
+  // Confidence
+  const mealsLogged = activeMeals.length;
+  const mealsExpected = Math.max(1, plan.meals.length);
+  const loggingCompleteness = Math.min(1, mealsLogged / mealsExpected);
+  const confidence: 'low' | 'medium' | 'high' =
+    loggingCompleteness < 0.3 ? 'low'
+      : (loggingCompleteness < 0.7 || microConfidence === 'low') ? 'medium' : 'high';
   const confidenceFactor = confidence === 'high' ? 1.0 : confidence === 'medium' ? 0.9 : 0.75;
-  const [wAdh, wQual, wMicro] = GOAL_WEIGHTS[goal] ?? [0.35, 0.40, 0.25];
+
+  const [wAdh, wQual, wMicro] = GOAL_WEIGHTS[goal] ?? [0.40, 0.35, 0.25];
   const rawTotal = adherence * wAdh + quality * wQual + micro * wMicro;
   const score = Math.round(Math.min(100, Math.max(0, rawTotal * confidenceFactor)));
 
-  // ── Tags + Wins + Improvements ──
+  // Tags + wins + improvements
   const tags: string[] = [];
   const wins: string[] = [];
   const improvements: string[] = [];
-
-  // Use actual ratio for directional messaging, not just alignment score
   const calRatio = targets.calories > 0 ? totalCal / targets.calories : 1;
   const proRatio2 = targets.protein > 0 ? totalPro / targets.protein : 1;
 
-  if (calRatio >= 0.90 && calRatio <= 1.10) {
+  if (calRatio >= 0.9 && calRatio <= 1.1) {
     tags.push('Calories on target'); wins.push('Calories on target');
-  } else if (calRatio > 1.10) {
-    const over = Math.round((calRatio - 1) * 100);
-    improvements.push(`Calories ${over}% over target`);
+  } else if (calRatio > 1.1) {
+    improvements.push(`Calories ${Math.round((calRatio - 1) * 100)}% over target`);
   } else if (totalCal > 0) {
-    const under = Math.round((1 - calRatio) * 100);
-    improvements.push(`Calories ${under}% under target — add ${Math.round(targets.calories - totalCal)} cal`);
+    improvements.push(`Calories ${Math.round((1 - calRatio) * 100)}% under target`);
   }
 
-  if (proRatio2 >= 0.90) {
-    tags.push('Protein on target'); wins.push('Protein on target');
-  } else if (totalPro > 0) {
-    const gap = Math.round(targets.protein - totalPro);
-    improvements.push(`Protein ${gap}g below target — need more`);
-  }
+  if (proRatio2 >= 0.9) { tags.push('Protein on target'); wins.push('Protein on target'); }
+  else if (totalPro > 0) improvements.push(`Protein ${Math.round(targets.protein - totalPro)}g below target`);
 
-  if (fiberAlignment >= 0.8) { tags.push('Fiber on track'); wins.push('Fiber on track'); }
-  else if (effectiveFiber > 0 && effectiveFiber < RDA.fiber * 0.5) improvements.push('Fiber low');
+  if (fiberPts >= 14) { tags.push('Fiber on track'); wins.push('Fiber on track'); }
+  else if (fiberDensity < 8 && totalCal > 0) improvements.push('Fiber low');
 
-  if (fvServings >= 4) { tags.push('Produce goal hit'); wins.push('Good produce intake'); }
-  else if (fvServings < 2) improvements.push('More fruits and vegetables');
+  if (minProcPct >= 70) { tags.push('Mostly whole foods'); wins.push('Mostly whole foods'); }
+  if (upfPct >= 35) improvements.push('Ultra-processed food intake high');
+  if (addedSugarPct > 10) improvements.push(`Added sugar ${Math.round(addedSugarPct)}% of calories`);
+  if (satFatPct > 10) improvements.push(`Saturated fat ${Math.round(satFatPct)}% of calories`);
+  if (plantCount >= 5) wins.push(`${plantCount} distinct plants`);
+  else if (plantCount < 3 && totalCal > 0) improvements.push('Add more plant variety');
+  if (omegaPts >= 8) wins.push('Omega-3 source included');
 
-  if (wholePct >= 70) { tags.push('Mostly whole foods'); wins.push('Mostly whole foods'); }
-  if (processedPct > 50) { tags.push('High processed-food day'); improvements.push('High processed food intake'); }
-
-  if (micro >= 70) tags.push('Micronutrient coverage: strong (est.)');
-  else if (micro >= 45) tags.push('Micronutrient coverage: decent (est.)');
-  else tags.push('Micronutrient coverage: low (est.)');
-
-  for (const gap of gaps.slice(0, 3)) {
-    tags.push(`Likely low ${gap}`);
-    improvements.push(`Likely low ${gap}`);
-  }
-
+  for (const gap of gaps.slice(0, 3)) improvements.push(`Low ${gap.toLowerCase()}`);
   if (confidence === 'low') improvements.push('Log more meals for a better score');
 
   return {
     score, adherence, quality, micro, confidence,
-    tags, wins: wins.slice(0, 3), improvements: improvements.slice(0, 3),
+    tags, wins: wins.slice(0, 4), improvements: improvements.slice(0, 4),
     likely_gaps: gaps,
+    adherence_breakdown, quality_breakdown, micro_breakdown,
     indicators: {
       calories_alignment: Math.round(calAlignment * 100) / 100,
       protein_alignment: Math.round(proAlignment * 100) / 100,
-      fiber_alignment: Math.round(fiberAlignment * 100) / 100,
+      fiber_density: Math.round(fiberDensity * 10) / 10,
+      added_sugar_pct_cals: Math.round(addedSugarPct * 10) / 10,
+      sat_fat_pct_cals: Math.round(satFatPct * 10) / 10,
+      sodium_mg: Math.round(sodium_mg),
+      minimally_processed_pct: Math.round(minProcPct),
+      ultra_processed_pct: Math.round(upfPct),
+      distinct_plant_foods: plantCount,
+      omega3_servings: omega3Servings,
+      seafood_servings_weekly: seafoodServings,
       logging_completeness: Math.round(loggingCompleteness * 100) / 100,
-      whole_food_pct: Math.round(wholePct),
-      processed_food_pct: Math.round(processedPct),
-      fruit_veg_servings: Math.round(fvServings * 10) / 10,
       micro_confidence: microConfidence,
       total_calories: totalCal,
       target_calories: targets.calories,
@@ -428,4 +410,10 @@ export function computeNutritionScore(
       target_protein: targets.protein,
     },
   };
+}
+
+// Legacy export kept for callers that still expect a boolean classifier.
+// Returns the persisted quality if provided, else 'unknown'. Never guesses.
+export function classifyFood(_name: string, persisted?: 'whole' | 'processed' | 'unknown'): 'whole' | 'processed' | 'unknown' {
+  return persisted ?? 'unknown';
 }

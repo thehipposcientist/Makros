@@ -239,7 +239,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
       );
       import('../services/api').then(({ getGutHealth }) =>
-        getGutHealth(authToken, 7).then(r => {
+        getGutHealth(authToken, 14).then(r => {
           setGutHealthWindow(r.window);
         }).catch(() => null)
       );
@@ -1780,43 +1780,44 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
-          {/* Longevity & Nutrition Deep Dive — weekly rolling averages */}
+          {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
           {(gutHealthWindow || mealAverages) && (
             <View style={[styles.vitalsCard, { marginTop: 0 }]}>
               <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
                 <Ionicons name="leaf-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Longevity & Nutrition</Text>
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition & Gut Facts</Text>
                 {gutHealthWindow && (
                   <Text style={{ fontSize: 10, color: tc.textMuted }}>{gutHealthWindow.days_with_data}d data</Text>
                 )}
               </View>
 
-              {/* Weekly composite scores */}
+              {/* Averages over actual logged days (adaptive, up to 14). */}
               {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
                 <View style={{ marginBottom: 14 }}>
-                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>WEEKLY AVERAGES</Text>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
+                    {gutHealthWindow.days_with_data}-DAY AVERAGES
+                  </Text>
                   <View style={{ flexDirection: 'row', gap: 8 }}>
                     {[
-                      { label: 'Gut Support', value: gutHealthWindow.avg_gut_support_score },
-                      { label: 'Food Quality', value: gutHealthWindow.avg_food_quality_score },
-                      { label: 'Longevity', value: gutHealthWindow.avg_longevity_signals_score },
-                    ].map(s => {
-                      const c = s.value >= 75 ? '#22C55E' : s.value >= 55 ? tc.primary : s.value >= 35 ? '#F59E0B' : '#EF4444';
-                      return (
-                        <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: c + '12', borderRadius: 10, paddingVertical: 8 }}>
-                          <Text style={{ fontSize: 22, fontWeight: '900', color: c }}>{Math.round(s.value)}</Text>
-                          <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
-                        </View>
-                      );
-                    })}
+                      { label: 'Fiber/day', value: `${gutHealthWindow.avg_fiber_g}g` },
+                      { label: 'Added sugar/day', value: `${Math.round(gutHealthWindow.avg_added_sugar_g ?? 0)}g` },
+                      { label: 'Plants total', value: `${gutHealthWindow.distinct_plant_foods_week}` },
+                    ].map(s => (
+                      <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 8 }}>
+                        <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{s.value}</Text>
+                        <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
+                      </View>
+                    ))}
                   </View>
                 </View>
               )}
 
-              {/* Nutrition averages (14d) */}
+              {/* Nutrition macros — avg over actual logged days (adaptive). */}
               {mealAverages && mealAverages.days_with_data >= 2 && (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
-                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>NUTRITION ({mealAverages.days_with_data}D AVG)</Text>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
+                    MACROS ({mealAverages.days_with_data}-DAY AVG)
+                  </Text>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     {[
                       { label: 'Calories', value: Math.round(mealAverages.avg_calories), color: tc.primary },
@@ -1839,7 +1840,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {/* Gut health metrics — weekly rolling */}
               {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
                 <View style={{ paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
-                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 10 }}>GUT HEALTH ({gutHealthWindow.window_days}D)</Text>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 10 }}>
+                    GUT HEALTH ({gutHealthWindow.days_with_data}-DAY)
+                  </Text>
 
                   {/* Fiber */}
                   {(() => {
@@ -2014,17 +2017,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               )}
             </View>
           )}
-        </ScrollView>
-      ) : tab === 'body' ? (
-        /* ── Body Tab ───────────────────────────────────────────────── */
-        <ScrollView contentContainerStyle={styles.content}>
-          {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
-              all 12 muscle groups with the full expanded bars. */}
-          {muscleFatigue && (
-            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
-          )}
 
-          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
+          {/* Muscle Balance — volume distribution across muscle groups (14d).
+              Lives under Health because it reads as recovery/balance context,
+              paired with Readiness + Fueling flags. */}
           {muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);
             const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
@@ -2075,6 +2071,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
+        </ScrollView>
+      ) : tab === 'body' ? (
+        /* ── Body Tab ───────────────────────────────────────────────── */
+        <ScrollView contentContainerStyle={styles.content}>
+          {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
+              all 12 muscle groups with the full expanded bars. */}
+          {muscleFatigue && (
+            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
+          )}
 
           {/* Weight Trend */}
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>

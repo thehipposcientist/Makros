@@ -1179,6 +1179,13 @@ export interface FatigueScore {
     focus: string;
     intensity: string;
   }>;
+  nutrition_context?: {
+    protein_avg: number;
+    protein_status: 'excellent' | 'good' | 'low' | 'very_low' | 'no_data' | 'unknown';
+    message?: string | null;
+    recovery_bonus_applied: boolean;
+    calories_avg?: number;
+  };
 }
 
 export async function getFatigueScore(token: string): Promise<FatigueScore> {
@@ -1200,7 +1207,9 @@ export interface NutritionScoreResult {
   indicators: Record<string, any>;
 }
 
-export async function getNutritionScore(token: string): Promise<NutritionScoreResult> {
+// Legacy — kept for backward compat with older Progress screen paths.
+// New code should call `getNutritionScore` (returns today + weekly unified payload).
+export async function getLegacyNutritionScore(token: string): Promise<NutritionScoreResult> {
   return request<NutritionScoreResult>('/profile/nutrition-score', {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1977,18 +1986,24 @@ export interface GutHealthToday {
   calories_total: number;
   fiber_total_g: number;
   fiber_per_1000_kcal: number;
+  added_sugar_g: number;
+  sodium_mg: number;
+  saturated_fat_g: number;
   distinct_plant_foods: number;
   fermented_servings: number;
   probiotic_servings: number;
   omega3_servings: number;
+  seafood_servings: number;
+  fruit_servings: number;
+  vegetable_servings: number;
+  alcohol_servings: number;
+  processed_meat_servings: number;
+  refined_grain_servings: number;
   plant_protein_g: number;
   animal_protein_g: number;
-  plant_protein_pct: number;   // 0-100
+  plant_protein_pct: number;
   processing_counts: Record<string, number>;
-  saturated_fat_g: number;
-  gut_support_score: number;
-  food_quality_score: number;
-  longevity_signals_score: number;
+  max_meal_protein_pct: number;
   classified_item_count: number;
   item_count: number;
 }
@@ -1996,25 +2011,133 @@ export interface GutHealthToday {
 export interface GutHealthWindow {
   days_with_data: number;
   window_days: number;
+  avg_calories: number;
   avg_fiber_g: number;
   avg_fiber_per_1000_kcal: number;
+  avg_added_sugar_g: number;
+  avg_sodium_mg: number;
+  avg_saturated_fat_g: number;
   pct_days_fiber_target: number;
   distinct_plant_foods_week: number;
   fermented_servings: number;
   probiotic_servings: number;
   omega3_servings: number;
+  seafood_servings: number;
+  fruit_servings: number;
+  vegetable_servings: number;
+  alcohol_servings: number;
+  processed_meat_servings: number;
+  refined_grain_servings: number;
   plant_protein_g: number;
   animal_protein_g: number;
   plant_protein_pct: number;
   processing_counts: Record<string, number>;
-  avg_gut_support_score: number;
-  avg_food_quality_score: number;
-  avg_longevity_signals_score: number;
+  calorie_stability_cv: number;
 }
 
 export async function getGutHealth(token: string, days = 7): Promise<{ today: GutHealthToday | null; window: GutHealthWindow }> {
   return request(`/meals/gut-health?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// Unified Nutrition Score — server-side authority.
+export interface NutritionScoreBreakdownItem {
+  label: string;
+  value_pct: number;     // 0-100 for bar
+  raw: number;
+  target: number | null;
+  unit: string;
+  on_track: boolean;
+}
+
+export interface NutritionScoreToday {
+  date: string;
+  score: number;
+  adherence: number;
+  quality: number;
+  micro: number;
+  confidence: 'low' | 'medium' | 'high';
+  wins: string[];
+  improvements: string[];
+  tags: string[];
+  likely_gaps: string[];
+  flags: Record<string, boolean>;
+  indicators: Record<string, any>;
+  adherence_breakdown: NutritionScoreBreakdownItem[];
+  quality_breakdown: NutritionScoreBreakdownItem[];
+  micro_breakdown: NutritionScoreBreakdownItem[];
+  targets: { calories: number; protein_g: number };
+  totals: { calories: number; protein_g: number };
+  goal: string;
+  score_version: number;
+}
+
+export interface NutritionScoreWeeklyDay {
+  date: string;
+  score: number | null;
+  adherence?: number;
+  quality?: number;
+  micro?: number;
+  logged: boolean;
+}
+
+export interface NutritionScoreWeekly {
+  window_days: number;
+  days_with_data: number;
+  end_date: string;
+  avg_score: number;
+  daily: NutritionScoreWeeklyDay[];
+  days_hit_protein: number;
+  days_hit_fiber: number;
+  days_hit_calories: number;
+  calorie_stability_cv: number;
+  energy_availability: {
+    avg_ea_kcal_per_kg_ffm: number;
+    ffm_kg: number;
+    days_with_data: number;
+    daily: Array<{ date: string; ea: number | null; logged: boolean; intake_kcal?: number; exercise_kcal?: number }>;
+  } | null;
+  rollup: GutHealthWindow;
+}
+
+export async function getNutritionScore(token: string, days = 7): Promise<{ today: NutritionScoreToday; weekly: NutritionScoreWeekly }> {
+  return request(`/meals/score?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// Fueling & Recovery Signals — flag-based, not scored.
+export interface RecoveryFlag {
+  key: string;
+  state: 'green' | 'amber' | 'red' | 'not_enough_data';
+  label: string;
+  detail: string;
+  action: string | null;
+  numbers: Record<string, any> | null;
+}
+
+export async function getRecoveryFlags(
+  token: string,
+  opts: { days?: number; thyroid_opt_in?: boolean } = {},
+): Promise<{ flags: RecoveryFlag[]; any_actionable: boolean }> {
+  const days = opts.days ?? 7;
+  const thy = opts.thyroid_opt_in ? '&thyroid_opt_in=true' : '';
+  return request(`/meals/recovery-flags?days=${days}${thy}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// Hydration — daily log + target (half bodyweight in oz by default).
+export async function getHydration(token: string): Promise<{ date: string; ounces: number; target_ounces: number }> {
+  return request('/meals/hydration', { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function logHydration(token: string, ounces: number): Promise<{ date: string; ounces: number }> {
+  return request('/meals/hydration', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ounces }),
   });
 }
 

@@ -36,6 +36,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
+import GutHealthCard from '../components/GutHealthCard';
+import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
+import IncompleteDayBanner from '../components/IncompleteDayBanner';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -5037,6 +5040,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </FadeInView>
             )}
 
+            {/* Incomplete-yesterday nudge — soft, dismissable, persists
+                dismissal per date so it doesn't re-prompt. Only shows when
+                yesterday has <50% of target calories logged. */}
+            {mealsSubTab === 'plan' && !isFreeTier && authToken && (() => {
+              const todayPlanForTarget = nutritionPlansByDate[mealDays[0]?.key];
+              const target = todayPlanForTarget?.targets?.calories ?? 0;
+              if (target <= 0) return null;
+              return (
+                <IncompleteDayBanner
+                  authToken={authToken}
+                  themeName={userProfile.themePreference}
+                  targetCalories={target}
+                  onFillIn={() => setMealsSubTab('foods' as any)}
+                />
+              );
+            })()}
+            {/* Fueling & Recovery Signals — hidden when all green. Mounted
+                above the day cards so amber/red flags catch attention before
+                the user scrolls into individual meals. */}
+            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
+              <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
+            )}
+            {/* Gut & Plants — descriptive, unscored. Today's 4 tiles +
+                expandable 7-day rollup. */}
+            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
+              <GutHealthCard authToken={authToken} themeName={userProfile.themePreference} />
+            )}
             {mealsSubTab === 'plan' && !isFreeTier && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
               if (!plan) return (

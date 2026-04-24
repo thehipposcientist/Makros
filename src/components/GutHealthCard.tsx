@@ -1,7 +1,9 @@
-// Gut health / longevity signals card. Reads from /meals/gut-health and shows
-// the three derived scores (Gut Support / Food Quality / Longevity Signals)
-// plus raw drivers (fiber, plant diversity, fermented, omega-3). Collapsed
-// by default; expandable for drivers.
+// Gut & Plants — descriptive insight card, NO scores.
+//
+// Facts only: fiber, plant diversity, fermented / probiotic / omega-3 foods,
+// seafood, processing mix, plant-vs-animal protein split. Today and the
+// rolling 7-day window are visually separated so users can tell which
+// number to act on.
 
 import { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
@@ -25,10 +27,6 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
 
   const [today, setToday] = useState<GutHealthToday | null>(null);
   const [week, setWeek] = useState<GutHealthWindow | null>(null);
-  // Default to expanded so the key longevity details (probiotic, fermented,
-  // plant-vs-animal protein ratio, fiber, omega-3) are visible immediately
-  // without the user having to tap to reveal. They're the whole reason the
-  // card exists — hiding them behind a tap was a mistake.
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
 
@@ -50,14 +48,11 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
   if (loading) {
     return (
       <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: tc.border }}>
-        <Text style={{ fontSize: 12, color: tc.textMuted }}>Loading gut-health signals…</Text>
+        <Text style={{ fontSize: 12, color: tc.textMuted }}>Loading gut & plants…</Text>
       </View>
     );
   }
 
-  // "No meals yet" placeholder — keeps the card visible so users can see
-  // the feature exists + what metrics they'll get once they log a meal.
-  // Still shows any weekly context if the last N days had data.
   if (!today || today.item_count === 0) {
     const weeklyHasData = week && week.days_with_data > 0;
     return (
@@ -68,11 +63,11 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <Ionicons name="leaf-outline" size={16} color={tc.primary} />
           <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
-            Gut & Longevity Signals
+            Gut & Plants
           </Text>
         </View>
         <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-          Log a meal to see today's fiber, plant diversity, fermented / probiotic servings, omega-3 foods, and plant-vs-animal protein ratio.
+          Log a meal to see fiber, plant diversity, fermented and omega-3 foods, and processing mix.
         </Text>
         {weeklyHasData && (
           <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
@@ -80,18 +75,10 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
               LAST {week!.days_with_data} DAY{week!.days_with_data === 1 ? '' : 'S'}
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
-                Avg fiber: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.avg_fiber_g}g</Text>
-              </Text>
-              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
-                Plants: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.distinct_plant_foods_week}</Text>
-              </Text>
-              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
-                Fermented: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.fermented_servings}</Text>
-              </Text>
-              <Text style={{ fontSize: 11, color: tc.textSecondary }}>
-                Protein mix: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{week!.plant_protein_pct ?? 0}% plant</Text>
-              </Text>
+              <WeekFact label="Fiber" value={`${week!.avg_fiber_g}g/day`} tc={tc} />
+              <WeekFact label="Plants" value={`${week!.distinct_plant_foods_week}`} tc={tc} />
+              <WeekFact label="Fermented" value={`${week!.fermented_servings}`} tc={tc} />
+              <WeekFact label="Plant protein" value={`${week!.plant_protein_pct ?? 0}%`} tc={tc} />
             </View>
           </View>
         )}
@@ -107,11 +94,6 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
     setExpanded(e => !e);
   };
 
-  const scoreColor = (v: number) =>
-    v >= 75 ? tc.success :
-    v >= 55 ? tc.primary :
-    v >= 35 ? tc.warning : tc.error;
-
   return (
     <TouchableOpacity
       activeOpacity={0.85}
@@ -124,91 +106,67 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <Ionicons name="leaf-outline" size={16} color={tc.primary} />
         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
-          Gut & Longevity Signals
+          Gut & Plants
         </Text>
         <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color={tc.textMuted} />
       </View>
-      <View style={{ flexDirection: 'row', gap: 8 }}>
-        {[
-          { label: 'Gut Support', value: today.gut_support_score },
-          { label: 'Food Quality', value: today.food_quality_score },
-          { label: 'Longevity', value: today.longevity_signals_score },
-        ].map(s => (
-          <View key={s.label} style={{
-            flex: 1, alignItems: 'center',
-            backgroundColor: tc.background, borderRadius: 10, padding: 8,
-          }}>
-            <Text style={{ fontSize: 20, fontWeight: '900', color: scoreColor(s.value) }}>
-              {Math.round(s.value)}
-            </Text>
-            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
-          </View>
-        ))}
+
+      {/* Today headline — 4 tiles so probiotic (live cultures) is visible
+          without expanding the card. */}
+      <View style={{ flexDirection: 'row', gap: 6 }}>
+        <Headline label="Plants" value={String(today.distinct_plant_foods)} tc={tc} />
+        <Headline label="Fiber" value={`${Math.round(today.fiber_total_g)}g`} tc={tc} />
+        <Headline label="Fermented" value={String(Math.round(today.fermented_servings))} tc={tc} />
+        <Headline label="Probiotic" value={String(Math.round(today.probiotic_servings))} tc={tc} />
       </View>
 
       {low && (
         <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 8, fontStyle: 'italic' }}>
-          Low food-classification coverage today — scores may be conservative.
+          Low food-classification coverage today — numbers may be conservative.
         </Text>
       )}
 
       {expanded && (
-        <View style={{ marginTop: 12, gap: 6 }}>
-          {[
-            ['Fiber',           `${today.fiber_total_g}g`, `${today.fiber_per_1000_kcal} per 1000 kcal`],
-            ['Plant diversity', `${today.distinct_plant_foods} today`, week ? `${week.distinct_plant_foods_week} this week` : ''],
-            ['Fermented',       `${today.fermented_servings} today`, week ? `${week.fermented_servings} this week` : ''],
-            ['Probiotic (live)',`${today.probiotic_servings ?? 0} today`, week ? `${week.probiotic_servings ?? 0} this week` : ''],
-            ['Omega-3 foods',   `${today.omega3_servings} today`, week ? `${week.omega3_servings} this week` : ''],
-          ].map(([label, main, detail]) => (
-            <View key={label as string} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label}</Text>
-              <Text style={{ flex: 1, fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{main}</Text>
-              <Text style={{ fontSize: 10, color: tc.textMuted }}>{detail as string}</Text>
-            </View>
-          ))}
+        <View style={{ marginTop: 14, gap: 10 }}>
+          {/* TODAY section */}
+          <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>
+            TODAY
+          </Text>
+          <FactRow label="Fiber" main={`${today.fiber_total_g}g`} aux={`${today.fiber_per_1000_kcal} per 1000 kcal`} tc={tc} />
+          <FactRow label="Plant diversity" main={`${today.distinct_plant_foods} distinct`} aux="" tc={tc} />
+          <FactRow label="Fermented" main={`${today.fermented_servings}`} aux="" tc={tc} />
+          <FactRow label="Probiotic (live)" main={`${today.probiotic_servings}`} aux="" tc={tc} />
+          <FactRow label="Omega-3 foods" main={`${today.omega3_servings}`} aux="" tc={tc} />
+          <FactRow label="Seafood" main={`${today.seafood_servings}`} aux="" tc={tc} />
+          <FactRow label="Added sugar" main={`${Math.round(today.added_sugar_g)}g`} aux="" tc={tc} />
 
-          {/* Plant-vs-animal protein — rendered as a stacked bar so the
-              ratio is immediately legible. Targets ~30%+ plant protein
-              for most longevity-style diets; no hard target because it's
-              goal-dependent. */}
+          {/* Protein source split */}
           {(today.plant_protein_g + today.animal_protein_g) > 0 && (() => {
             const total = today.plant_protein_g + today.animal_protein_g;
             const plantPct = Math.round((today.plant_protein_g / total) * 100);
             return (
-              <View style={{ marginTop: 8 }}>
+              <View style={{ marginTop: 4 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
+                  <Text style={{ width: 120, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                     Protein source
                   </Text>
                   <Text style={{ flex: 1, fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>
-                    {today.plant_protein_g}g plant · {today.animal_protein_g}g animal
+                    {Math.round(today.plant_protein_g)}g plant · {Math.round(today.animal_protein_g)}g animal
                   </Text>
                 </View>
-                <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: tc.border }}>
-                  {today.plant_protein_g > 0 && (
-                    <View style={{ width: `${plantPct}%` as any, backgroundColor: tc.success }} />
-                  )}
-                  {today.animal_protein_g > 0 && (
-                    <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: tc.primary }} />
-                  )}
+                <View style={{ flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden', backgroundColor: tc.border }}>
+                  {today.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: tc.success }} />}
+                  {today.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: tc.primary }} />}
                 </View>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                  <Text style={{ fontSize: 10, color: tc.success, fontWeight: '700' }}>{plantPct}% plant</Text>
-                  <Text style={{ fontSize: 10, color: tc.primary, fontWeight: '700' }}>{100 - plantPct}% animal</Text>
-                </View>
-                {week && week.plant_protein_pct != null && (
-                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
-                    Weekly mix: {week.plant_protein_pct}% plant
-                  </Text>
-                )}
               </View>
             );
           })()}
+
+          {/* Processing mix */}
           {today.processing_counts && Object.keys(today.processing_counts).length > 0 && (
-            <View style={{ marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
-              <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
-                PROCESSING MIX TODAY
+            <View>
+              <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginTop: 6, marginBottom: 4 }}>
+                PROCESSING MIX
               </Text>
               {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map(b => {
                 const count = today.processing_counts[b] ?? 0;
@@ -231,8 +189,53 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
               })}
             </View>
           )}
+
+          {/* THIS WEEK section (visually separated) */}
+          {week && week.days_with_data > 0 && (
+            <View style={{ marginTop: 6, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '66' }}>
+              <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                THIS WEEK ({week.days_with_data}d logged)
+              </Text>
+              <FactRow label="Fiber avg" main={`${week.avg_fiber_g}g/day`} aux={`${week.pct_days_fiber_target}% days hit 28g`} tc={tc} />
+              <FactRow label="Plants" main={`${week.distinct_plant_foods_week} distinct`} aux="" tc={tc} />
+              <FactRow label="Fermented" main={`${week.fermented_servings}`} aux="" tc={tc} />
+              <FactRow label="Omega-3 foods" main={`${week.omega3_servings}`} aux="" tc={tc} />
+              <FactRow label="Seafood" main={`${week.seafood_servings}`} aux={week.seafood_servings >= 2 ? 'on target' : 'aim for 2+/wk'} tc={tc} />
+              <FactRow label="Alcohol" main={`${week.alcohol_servings}`} aux="" tc={tc} />
+              <FactRow label="Processed meat" main={`${week.processed_meat_servings}`} aux="" tc={tc} />
+              <FactRow label="Refined grain" main={`${week.refined_grain_servings}`} aux="" tc={tc} />
+              <FactRow label="Plant protein" main={`${week.plant_protein_pct}%`} aux="" tc={tc} />
+            </View>
+          )}
         </View>
       )}
     </TouchableOpacity>
+  );
+}
+
+function Headline({ label, value, tc }: { label: string; value: string; tc: any }) {
+  return (
+    <View style={{ flex: 1, alignItems: 'center', backgroundColor: tc.background, borderRadius: 10, padding: 8 }}>
+      <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{value}</Text>
+      <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{label}</Text>
+    </View>
+  );
+}
+
+function FactRow({ label, main, aux, tc }: { label: string; main: string; aux: string; tc: any }) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Text style={{ width: 120, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label}</Text>
+      <Text style={{ flex: 1, fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{main}</Text>
+      {aux ? <Text style={{ fontSize: 10, color: tc.textMuted }}>{aux}</Text> : null}
+    </View>
+  );
+}
+
+function WeekFact({ label, value, tc }: { label: string; value: string; tc: any }) {
+  return (
+    <Text style={{ fontSize: 11, color: tc.textSecondary }}>
+      {label}: <Text style={{ color: tc.textPrimary, fontWeight: '700' }}>{value}</Text>
+    </Text>
   );
 }

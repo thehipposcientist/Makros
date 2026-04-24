@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 2   # bumped when protein_source + probiotic_flag were added
+CLASSIFIER_VERSION = 3   # bumped for seafood/fruit/veg/alcohol/processed_meat/refined_grain
 
 Source = Literal["deterministic", "heuristic", "ai", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]
@@ -29,24 +29,25 @@ ProteinSource = Literal["plant", "animal", "mixed", "none", "unknown"]
 class FoodClassification:
     normalized_name: str
     display_name: str
-    likely_plant_foods: list[str]   # coarse slugs; [] = no plant detected
+    likely_plant_foods: list[str]
     plant_count_value: int
     fermented_flag: bool
     omega3_flag: bool
     processing_bucket: ProcessingBucket
-    confidence: float               # 0..1
+    confidence: float
     source: Source
     notes: str | None = None
-    # Dominant protein source in the item. Drives the plant-vs-animal
-    # protein ratio on the longevity card. "mixed" for composite items
-    # that clearly contain both (e.g. "chicken caesar salad"). "none" for
-    # items with negligible protein (fruit, vegetables on their own).
     protein_source: ProteinSource = "unknown"
-    # Subset of `fermented_flag` — true only for items where live probiotic
-    # cultures are reliably present in the consumer form (yogurt, kefir,
-    # kimchi, sauerkraut, kombucha, natto). Excludes tempeh + miso which
-    # are typically heat-treated before consumption.
     probiotic_flag: bool = False
+    # v3 additions — drive weekly pattern metrics (seafood 2x/wk signal
+    # for omega-3, produce counts, alcohol log, processed-meat freq,
+    # refined-grain freq). All facts, not scored directly.
+    seafood_flag: bool = False
+    fruit_flag: bool = False
+    vegetable_flag: bool = False
+    alcohol_flag: bool = False
+    processed_meat_flag: bool = False
+    refined_grain_flag: bool = False
 
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -248,6 +249,68 @@ _OMEGA3_WHOLE = [
 _OMEGA3_SUPPLEMENT = ["fish oil", "omega 3", "omega-3", "cod liver oil", "krill oil", "algae oil"]
 
 
+# ── Seafood / fruit / vegetable / alcohol / processed-meat / refined-grain ──
+
+_SEAFOOD_FRAGMENTS = [
+    "salmon", "tuna", "cod", "tilapia", "halibut", "sardine", "anchovy",
+    "mackerel", "herring", "trout", "bass", "snapper", "flounder", "fish",
+    "shrimp", "prawn", "crab", "lobster", "scallop", "mussel", "clam",
+    "oyster", "octopus", "squid", "calamari", "sushi", "sashimi", "poke",
+]
+
+_FRUIT_FRAGMENTS = [
+    "apple", "banana", "berry", "berries", "blueberry", "raspberry",
+    "strawberry", "blackberry", "cherry", "grape", "orange", "peach",
+    "pear", "plum", "mango", "pineapple", "kiwi", "watermelon", "melon",
+    "cantaloupe", "pomegranate", "fig", "date fruit", " date ",
+    "papaya", "apricot", "nectarine", "lychee", "guava", "passion fruit",
+    "cranberry", "grapefruit",
+]
+
+_VEGETABLE_FRAGMENTS = [
+    "spinach", "kale", "arugula", "lettuce", "romaine", "broccoli",
+    "cauliflower", "carrot", "tomato", "cucumber", "bell pepper",
+    "red pepper", "yellow pepper", "green pepper", "onion", "shallot",
+    "garlic", "zucchini", "squash", "sweet potato", "mushroom", "celery",
+    "asparagus", "brussels sprout", "cabbage", "eggplant", "aubergine",
+    "beet", "green bean", "snap pea", "snow pea", "edamame", "okra",
+    "bok choy", "collard", "chard", "watercress", "leek", "fennel",
+    "artichoke", "radish", "turnip",
+]
+
+_ALCOHOL_FRAGMENTS = [
+    "beer", "wine", "champagne", "prosecco", "cocktail", "whiskey", "whisky",
+    "bourbon", "vodka", "gin", "rum", "tequila", "mezcal", "scotch",
+    "margarita", "mojito", "martini", "old fashioned", "cider", "sake",
+    "liqueur", "brandy", "shot of", "ipa", "lager", "stout", "pilsner",
+    "rosé", "rose wine", "mimosa", "bloody mary", "moscow mule",
+    "negroni", "aperol", "spritz", "hard seltzer", "white claw",
+]
+
+_PROCESSED_MEAT_FRAGMENTS = [
+    "bacon", "sausage", "hot dog", "salami", "pepperoni", "deli meat",
+    "lunch meat", "ham", "prosciutto", "pastrami", "corned beef",
+    "cured", "chorizo", "bratwurst", "kielbasa", "mortadella",
+    "spam", "jerky", "slim jim", "beef stick", "meat stick", "bologna",
+    "liverwurst", "breakfast sausage",
+]
+
+_REFINED_GRAIN_FRAGMENTS = [
+    "white bread", "white rice", "white flour", "white pasta", "all-purpose flour",
+    "baguette", "ciabatta", "croissant", "bagel", "english muffin",
+    "tortilla", "flour tortilla", "pita",
+    "pretzel", "cracker", "saltine", "cereal", "corn flakes",
+    "instant rice", "instant noodle", "ramen",
+]
+
+# If any of these appear, we know it's NOT a refined grain even though it
+# contains a refined-grain keyword (e.g. "whole wheat pasta").
+_REFINED_GRAIN_NEGATIVES = [
+    "whole wheat", "whole grain", "whole-wheat", "whole-grain",
+    "brown rice", "sprouted",
+]
+
+
 # ── Processing buckets ───────────────────────────────────────────────────────
 # NOVA-inspired, simplified. Strongest signals first.
 
@@ -299,6 +362,15 @@ def classify_food(raw_name: str) -> FoodClassification:
     bucket = _detect_processing(normalized, plants=plants, fermented=fermented)
     protein_source = _detect_protein_source(normalized)
     probiotic = _detect_probiotic(normalized)
+    seafood = any(frag in normalized for frag in _SEAFOOD_FRAGMENTS)
+    fruit = any(frag in normalized for frag in _FRUIT_FRAGMENTS)
+    vegetable = any(frag in normalized for frag in _VEGETABLE_FRAGMENTS)
+    alcohol = any(frag in normalized for frag in _ALCOHOL_FRAGMENTS)
+    processed_meat = any(frag in normalized for frag in _PROCESSED_MEAT_FRAGMENTS)
+    refined_grain = (
+        not any(neg in normalized for neg in _REFINED_GRAIN_NEGATIVES)
+        and any(frag in normalized for frag in _REFINED_GRAIN_FRAGMENTS)
+    )
     source, confidence, notes = _score_source(normalized, plants, fermented, omega3, bucket)
 
     return FoodClassification(
@@ -314,6 +386,12 @@ def classify_food(raw_name: str) -> FoodClassification:
         notes=notes,
         protein_source=protein_source,
         probiotic_flag=probiotic,
+        seafood_flag=seafood,
+        fruit_flag=fruit,
+        vegetable_flag=vegetable,
+        alcohol_flag=alcohol,
+        processed_meat_flag=processed_meat,
+        refined_grain_flag=refined_grain,
     )
 
 
@@ -399,6 +477,9 @@ def _detect_processing(n: str, *, plants: list[str], fermented: bool) -> Process
     simple_tokens = {
         "chicken", "beef", "turkey", "pork", "lamb", "egg", "fish",
         "rice", "milk", "water", "coffee", "tea",
+        "salmon", "tuna", "cod", "tilapia", "halibut", "sardine",
+        "anchovy", "mackerel", "herring", "trout", "bass", "shrimp",
+        "crab", "lobster", "scallop",
     }
     tokens = set(n.split())
     if simple_tokens & tokens:
