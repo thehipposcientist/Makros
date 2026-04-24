@@ -30,6 +30,8 @@ export type WatchWorkoutPayload = {
   durationMinutes: number;
   dateISO: string;
   status: WatchWorkoutStatus;
+  readiness: number | null;
+  readinessLabel: string | null;
   exercises: WatchExercise[];
   syncedAtMs: number;
 };
@@ -48,6 +50,7 @@ export type WatchMealsPayload = {
   dateISO: string;
   targets: { calories: number; proteinG: number; carbsG: number; fatG: number };
   actual:  { calories: number; proteinG: number; carbsG: number; fatG: number };
+  score: number | null;
   meals: WatchMealItem[];
   syncedAtMs: number;
 };

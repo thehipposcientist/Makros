@@ -313,11 +313,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Goal (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
-  // When a user taps a goal card we now open a preview modal that shows
-  // the full description, rather than selecting on tap. Nothing changes
-  // until they hit Confirm, which guards against accidental macro/target
-  // resets caused by a single stray tap on the grid.
+  // Preview modal removed — matches onboarding's direct-select UX so
+  // editing your goal feels the same as setting it up originally.
+  // Goals are persisted on Save, so a stray tap doesn't actually
+  // commit a change until the user confirms at save time anyway.
   const [goalPreviewId, setGoalPreviewId] = useState<string | null>(null);
+  // AI goal matcher — same as onboarding. User types a sentence, AI
+  // picks the best-fit launch goal and explains why.
+  const [goalQuery, setGoalQuery] = useState('');
+  const [goalMatchLoading, setGoalMatchLoading] = useState(false);
+  const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<string>(profile.priorityRegion ?? 'balanced');
   // Advanced-goal UI removed — only the 8 launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
@@ -1401,6 +1406,81 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <FadeInView delay={0}>
             <Text style={styles.sectionLabel}>Goal</Text>
           </FadeInView>
+          {/* AI matcher — mirrors the onboarding goal screen so
+              editing your goal feels like the same flow you used
+              during signup. Type a sentence → AI picks the best
+              launch goal + reason. */}
+          <View style={{
+            marginBottom: 16,
+            backgroundColor: tc.primary + '10',
+            borderRadius: 14,
+            borderWidth: 1.5,
+            borderColor: tc.primary + '55',
+            padding: 14,
+          }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+              <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
+              <Text style={{ fontSize: 12, fontWeight: '800', color: tc.primary, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+                Describe your goal
+              </Text>
+            </View>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: 10, lineHeight: 16 }}>
+              Tell Thallo what you want in your own words. The AI picks the best-fit goal for you.
+            </Text>
+            <TextInput
+              style={{
+                backgroundColor: tc.surface, borderRadius: 10,
+                paddingHorizontal: 14, paddingVertical: 14, fontSize: 15,
+                color: tc.textPrimary, borderWidth: 1.5, borderColor: tc.primary + '88',
+                minHeight: 90, textAlignVertical: 'top',
+                marginBottom: 10,
+              }}
+              placeholder="e.g. I want to lose my belly but keep muscle, train 4 days a week, and feel athletic"
+              placeholderTextColor={tc.textMuted}
+              value={goalQuery}
+              onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); }}
+              multiline
+              scrollEnabled
+            />
+            <TouchableOpacity
+              style={{
+                backgroundColor: tc.primary, borderRadius: 10,
+                paddingVertical: 12, alignItems: 'center', justifyContent: 'center',
+                flexDirection: 'row', gap: 6,
+                opacity: goalMatchLoading || !goalQuery.trim() ? 0.5 : 1,
+              }}
+              disabled={goalMatchLoading || !goalQuery.trim()}
+              onPress={async () => {
+                if (!goalQuery.trim()) return;
+                setGoalMatchLoading(true);
+                try {
+                  const { matchGoal } = await import('../services/api');
+                  const res = await matchGoal(goalQuery.trim());
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  setSelectedGoal(res.goal_id);
+                  setSelectedModifiers([]);
+                  setPace('moderate');
+                  setGoalMatchReason(res.reason);
+                } catch {}
+                setGoalMatchLoading(false);
+              }}>
+              {goalMatchLoading
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <>
+                    <Ionicons name="sparkles" size={14} color="#fff" />
+                    <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find my goal</Text>
+                  </>
+              }
+            </TouchableOpacity>
+            {goalMatchReason && (
+              <Text style={{ fontSize: 12, color: tc.primary, marginTop: 8, fontStyle: 'italic' }}>
+                {goalMatchReason}
+              </Text>
+            )}
+          </View>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, marginBottom: 8, letterSpacing: 0.5 }}>
+            OR PICK ONE DIRECTLY
+          </Text>
           <View style={[styles.goalGrid, { marginBottom: 6 }]}>
             {LAUNCH_GOALS.map((g, idx) => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
@@ -1412,6 +1492,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   active={active}
                   style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
                   onPress={() => {
+                    // Direct select — matches onboarding's UX. No
+                    // preview modal before committing; the value only
+                    // persists when the user hits Save at the bottom.
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     setSelectedGoal(g.id);
                     setSelectedModifiers([]);

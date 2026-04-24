@@ -1,55 +1,89 @@
-// Active workout screen. Two tabs (TabView with page style) so the
-// user can swipe between:
-//   • EXERCISE — current exercise, set counter, recommendation line,
-//     rest timer with Start / Skip Rest buttons
-//   • HEART    — live heart rate + zone
-// Phone mirrors state via WatchConnectivity `progress` messages so the
-// set counter / rest remaining / recommendation stay in sync even if
-// the user taps "Done Set" on the phone.
+// Active workout screen — standalone. The watch owns the flow state
+// (current exercise, current set, rest countdown) so users can run
+// a full session from the wrist without touching the phone. Every
+// logged set fires a command to the phone so its history stays in
+// sync, but the watch doesn't WAIT for the phone to advance.
+//
+// Layout: TabView with two pages (swipe left/right):
+//   • EXERCISE — current slot, set counter, Crown-driven weight +
+//                reps inputs, Log Set button, rest timer, up-next
+//                preview during rest.
+//   • HEART    — live bpm + zone.
+//
+// End workout button writes to HealthKit (HeartRateStore.end calls
+// HKWorkoutBuilder.finishWorkout) and tells the phone to finalize.
 
 import SwiftUI
 import Combine
 import WatchKit
 
+// ─── Flow state owned by the watch ─────────────────────────────────
+
 final class ActiveWorkoutState: ObservableObject {
     @Published var exerciseIndex: Int = 0
-    @Published var setNumber: Int = 1
-    @Published var restRemaining: Int? = nil      // seconds
-    @Published var recommendation: String? = nil
+    @Published var setNumber: Int = 1          // 1-indexed within the current exercise
+    @Published var restRemaining: Int? = nil   // seconds; nil = not resting
+    @Published var paused: Bool = false
+    // Log-set inputs. Seeded from the exercise's planned target on
+    // entry so a first-time user already has a reasonable number.
+    @Published var pendingWeight: Double = 0
+    @Published var pendingReps: Int = 0
+    // Cache of per-set logs so the user can see "last set: 135×8"
+    // when dialing in the next set's weight.
+    @Published var lastLoggedWeight: Double? = nil
+    @Published var lastLoggedReps: Int? = nil
+
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
+        // Still listen to phone progress pushes so if a user logs
+        // a set on the phone the watch advances too.
         NotificationCenter.default.publisher(for: .watchProgressUpdate)
             .sink { [weak self] note in
                 guard let self, let info = note.userInfo else { return }
                 if let idx = info["exerciseIndex"] as? Int { self.exerciseIndex = idx }
                 if let setN = info["setNumber"] as? Int { self.setNumber = setN }
                 if let rest = info["restRemainingSec"] as? Int { self.restRemaining = rest }
-                else if (info["restRemainingSec"] as? NSNull) != nil { self.restRemaining = nil }
-                if let rec = info["recommendation"] as? String { self.recommendation = rec }
             }
             .store(in: &cancellables)
     }
 
-    // Local 1hz tick — decrements restRemaining so the watch doesn't
-    // depend on the phone pushing every second (saves battery). When
-    // the timer hits zero we fire a haptic so the user knows rest is
-    // up without needing to look at the watch. `notification` gives
-    // the strongest cue available on watchOS.
+    /// Prime the weight / reps inputs for the current exercise.
+    /// Called when advancing to a new exercise so the user doesn't
+    /// have to dial from zero.
+    func seed(for ex: WatchExercise) {
+        if pendingWeight == 0, let w = ex.plannedTargetWeightLbs {
+            pendingWeight = w
+        }
+        if pendingReps == 0 {
+            // Parse "5-8" → 6, "8" → 8, "30s" → 30, fall back to 8.
+            let s = ex.reps.lowercased()
+            let clean = s.replacingOccurrences(of: "s", with: "")
+            if let dash = clean.firstIndex(of: "-") {
+                let lo = Int(clean[clean.startIndex..<dash].trimmingCharacters(in: .whitespaces)) ?? 8
+                let hi = Int(clean[clean.index(after: dash)...].trimmingCharacters(in: .whitespaces)) ?? lo
+                pendingReps = (lo + hi) / 2
+            } else {
+                pendingReps = Int(clean.trimmingCharacters(in: .whitespaces)) ?? 8
+            }
+        }
+    }
+
+    // ─── Rest countdown (watch-owned) ─────────────────────────────
+
     private var timer: AnyCancellable?
-    private var lastRestTickFired: Int? = nil
     func startTick() {
         timer?.cancel()
         timer = Timer.publish(every: 1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self else { return }
+                guard let self, !self.paused else { return }
                 guard let r = self.restRemaining, r > 0 else { return }
                 let next = r - 1
                 self.restRemaining = next
                 if next == 0 {
-                    // Rest is up — double-tap haptic that Apple's own
-                    // Workout app uses for interval transitions.
+                    // Rest over — double-notification haptic. Same
+                    // pattern Apple Workout uses on interval ends.
                     WKInterfaceDevice.current().play(.notification)
                 }
             }
@@ -57,23 +91,16 @@ final class ActiveWorkoutState: ObservableObject {
     func stopTick() { timer?.cancel(); timer = nil }
 }
 
+// ─── Root ──────────────────────────────────────────────────────────
+
 struct ActiveWorkoutView: View {
     let workout: WatchWorkout
     @ObservedObject var hr: HeartRateStore
-    /// End the workout everywhere (watch + phone).
     let onEndWorkout: () -> Void
-    /// Close just the watch UI; phone keeps tracking. Lets the user
-    /// fall back to Apple's native Workout app without losing their
-    /// phone-side logged sets.
-    let onCloseWatchOnly: () -> Void
+    let onCancelWorkout: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
     @StateObject private var state = ActiveWorkoutState()
-
-    var currentExercise: WatchExercise? {
-        workout.exercises.indices.contains(state.exerciseIndex)
-            ? workout.exercises[state.exerciseIndex] : nil
-    }
 
     var body: some View {
         TabView {
@@ -81,30 +108,58 @@ struct ActiveWorkoutView: View {
                 workout: workout,
                 state: state,
                 onEndWorkout: onEndWorkout,
-                onCloseWatchOnly: onCloseWatchOnly
+                onCancelWorkout: onCancelWorkout,
             )
             HeartRateTab(hr: hr)
         }
         .tabViewStyle(.page)
-        .onAppear { state.startTick() }
+        .onAppear {
+            state.startTick()
+            if let ex = workout.exercises.first {
+                state.seed(for: ex)
+            }
+        }
         .onDisappear { state.stopTick() }
     }
 }
 
-// ─── Exercise tab ───────────────────────────────────────────────────
+// ─── Exercise tab ──────────────────────────────────────────────────
 
 private struct ExerciseTab: View {
     let workout: WatchWorkout
     @ObservedObject var state: ActiveWorkoutState
     let onEndWorkout: () -> Void
-    let onCloseWatchOnly: () -> Void
+    let onCancelWorkout: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
     @EnvironmentObject var conn: ConnectivityStore
 
+    // Digital-crown focus flags. Only one receives Crown input at a
+    // time; tapping the label swaps focus so the user can switch
+    // between weight and reps without buttons.
+    @State private var crownTarget: CrownTarget = .weight
+    @State private var showMenu: Bool = false
+
+    enum CrownTarget { case weight, reps }
+
     var currentExercise: WatchExercise? {
         workout.exercises.indices.contains(state.exerciseIndex)
             ? workout.exercises[state.exerciseIndex] : nil
+    }
+
+    var nextExercise: WatchExercise? {
+        let idx = state.exerciseIndex + 1
+        return workout.exercises.indices.contains(idx)
+            ? workout.exercises[idx] : nil
+    }
+
+    var isLastSet: Bool {
+        guard let ex = currentExercise else { return false }
+        return state.setNumber >= ex.sets
+    }
+
+    var isLastExercise: Bool {
+        state.exerciseIndex >= workout.exercises.count - 1
     }
 
     var body: some View {
@@ -113,147 +168,338 @@ private struct ExerciseTab: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if let ex = currentExercise {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("EXERCISE \(state.exerciseIndex + 1) / \(workout.exercises.count)")
-                                .font(.system(size: 9, weight: .bold))
-                                .tracking(1)
-                                .foregroundColor(theme.textMuted)
-                            Text(ex.name)
-                                .font(.system(size: 17, weight: .heavy))
-                                .foregroundColor(theme.textPrimary)
-                                .lineLimit(2)
-                            HStack(spacing: 4) {
-                                Text("SET")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(theme.textMuted)
-                                Text("\(state.setNumber) of \(ex.sets)")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(theme.textPrimary)
-                                Text("·")
-                                    .foregroundColor(theme.textMuted)
-                                Text(ex.reps)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(theme.textSecondary)
-                            }
-
-                            if let rec = state.recommendation {
-                                Text(rec)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(theme.primary)
-                                    .lineLimit(3)
-                                    .padding(.top, 3)
-                            }
+                        header(ex)
+                        // Either the rest timer OR the set input
+                        // panel — never both; less visual noise.
+                        if let rest = state.restRemaining, rest > 0 {
+                            restCard(rest: rest)
+                        } else {
+                            logSetCard(ex)
                         }
-
-                        // Rest timer card.
-                        RestTimerCard(
-                            restRemaining: state.restRemaining,
-                            defaultRest: ex.restSeconds,
-                            onStartRest: { conn.sendCommand("start_rest", payload: ["seconds": ex.restSeconds]) },
-                            onSkipRest:  { conn.sendCommand("skip_rest") },
-                            onDoneSet:   { conn.sendCommand("log_set") }
-                        )
-
-                        // Two exit paths:
-                        //   • End workout — stops HR session on the
-                        //     watch AND tells the phone to end.
-                        //   • Close watch — dismisses the watch UI,
-                        //     stops the watch HR session, but the
-                        //     phone's workout keeps running. Lets the
-                        //     user switch to Apple's Workout app
-                        //     without losing logged sets.
-                        HStack(spacing: 6) {
-                            Button(action: onCloseWatchOnly) {
-                                HStack {
-                                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                                    Text("Close watch")
-                                        .font(.system(size: 11, weight: .semibold))
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.vertical, 8)
-                            .background(theme.surfaceRaised)
-                            .foregroundColor(theme.textSecondary)
-                            .cornerRadius(10)
-                            Button(action: onEndWorkout) {
-                                HStack {
-                                    Image(systemName: "stop.fill")
-                                    Text("End")
-                                        .font(.system(size: 11, weight: .semibold))
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.vertical, 8)
-                            .background(theme.surfaceRaised)
-                            .foregroundColor(theme.error)
-                            .cornerRadius(10)
-                        }
+                        footer()
+                    } else {
+                        Text("Workout done")
+                            .font(.headline)
+                            .foregroundColor(theme.textPrimary)
                     }
                 }
                 .padding(10)
             }
         }
+        .confirmationDialog("Exercise options", isPresented: $showMenu) {
+            Button("Skip exercise", role: .destructive) { advanceExercise() }
+            Button("Cancel", role: .cancel) {}
+        }
     }
-}
 
-private struct RestTimerCard: View {
-    let restRemaining: Int?
-    let defaultRest: Int
-    let onStartRest: () -> Void
-    let onSkipRest: () -> Void
-    let onDoneSet: () -> Void
+    private func header(_ ex: WatchExercise) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text("EXERCISE \(state.exerciseIndex + 1) / \(workout.exercises.count)")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(1)
+                    .foregroundColor(theme.textMuted)
+                if let role = ex.slotRole, !role.isEmpty, role != "primary" {
+                    Text(role.uppercased())
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(0.6)
+                        .foregroundColor(theme.warning)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(theme.warning.opacity(0.15))
+                        .cornerRadius(4)
+                }
+            }
+            // Long-press opens the skip/swap menu — can't add swap
+            // yet without a library sync to the watch, but skip is
+            // the most-requested escape hatch.
+            Text(ex.name)
+                .font(.system(size: 17, weight: .heavy))
+                .foregroundColor(theme.textPrimary)
+                .lineLimit(2)
+                .onLongPressGesture { showMenu = true }
+            HStack(spacing: 4) {
+                Text("SET")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(theme.textMuted)
+                Text("\(state.setNumber) of \(ex.sets)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(theme.textPrimary)
+                Text("·")
+                    .foregroundColor(theme.textMuted)
+                Text(ex.reps)
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.textSecondary)
+                if state.paused {
+                    Text("PAUSED")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundColor(theme.warning)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(theme.warning.opacity(0.15))
+                        .cornerRadius(4)
+                }
+            }
+            if let rec = ex.recommendation {
+                Text(rec)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.primary)
+                    .lineLimit(2)
+            }
+            if let lw = state.lastLoggedWeight, let lr = state.lastLoggedReps {
+                Text("Last: \(Int(lw)) lb × \(lr)")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.textMuted)
+            }
+        }
+    }
 
-    @EnvironmentObject var theme: ThemeStore
+    // ─── Log-set card (Crown → weight or reps) ─────────────────────
 
-    var body: some View {
+    private func logSetCard(_ ex: WatchExercise) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                crownPill("Weight", value: "\(Int(state.pendingWeight)) lb", active: crownTarget == .weight) {
+                    crownTarget = .weight
+                }
+                crownPill("Reps", value: "\(state.pendingReps)", active: crownTarget == .reps) {
+                    crownTarget = .reps
+                }
+            }
+            Button(action: logSet) {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text(isLastSet ? "Log & next exercise" : "Log set")
+                        .fontWeight(.bold)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 9)
+            .background(theme.primary)
+            .foregroundColor(theme.background)
+            .cornerRadius(10)
+        }
+        .padding(10)
+        .background(theme.surface)
+        .cornerRadius(12)
+        // Bind Crown to whichever input is active. Weight moves in
+        // 2.5 lb increments (dumbbell granularity); reps in 1.
+        .focusable(true)
+        .digitalCrownRotation(
+            crownTarget == .weight
+              ? Binding(get: { state.pendingWeight }, set: { state.pendingWeight = max(0, $0) })
+              : Binding(get: { Double(state.pendingReps) },
+                        set: { state.pendingReps = max(0, Int($0.rounded())) }),
+            from: 0,
+            through: crownTarget == .weight ? 1000 : 50,
+            by: crownTarget == .weight ? 2.5 : 1,
+            sensitivity: .low,
+            isContinuous: false,
+            isHapticFeedbackEnabled: true
+        )
+    }
+
+    private func crownPill(_ label: String, value: String, active: Bool, onTap: @escaping () -> Void) -> some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label.uppercased())
+                    .font(.system(size: 9, weight: .heavy))
+                    .tracking(0.5)
+                    .foregroundColor(active ? theme.primary : theme.textMuted)
+                Text(value)
+                    .font(.system(size: 18, weight: .heavy, design: .rounded))
+                    .foregroundColor(theme.textPrimary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(active ? theme.primary.opacity(0.15) : theme.surfaceRaised)
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(active ? theme.primary : Color.clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ─── Rest timer card (with up-next) ───────────────────────────
+
+    private func restCard(rest: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let r = restRemaining, r > 0 {
-                VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
                     Text("RESTING")
                         .font(.system(size: 9, weight: .bold))
                         .tracking(1)
                         .foregroundColor(theme.warning)
-                    Text(formatTime(r))
-                        .font(.system(size: 32, weight: .heavy, design: .rounded))
-                        .foregroundColor(theme.textPrimary)
+                    if state.paused {
+                        Text("PAUSED")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundColor(theme.textMuted)
+                    }
                 }
-                Button(action: onSkipRest) {
+                Text(formatTime(rest))
+                    .font(.system(size: 36, weight: .heavy, design: .rounded))
+                    .foregroundColor(theme.textPrimary)
+            }
+
+            // Up-next preview. Shows "Next set: reps target" OR (if
+            // this was the last set of the exercise) "Next: exercise".
+            upNextLine()
+                .font(.system(size: 10))
+                .foregroundColor(theme.textSecondary)
+
+            HStack(spacing: 6) {
+                Button(action: togglePause) {
+                    Image(systemName: state.paused ? "play.fill" : "pause.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 8)
+                .background(theme.surfaceRaised)
+                .foregroundColor(theme.textSecondary)
+                .cornerRadius(8)
+                Button(action: skipRest) {
                     Text("Skip rest")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.plain)
-                .padding(.vertical, 7)
-                .background(theme.surfaceRaised)
-                .foregroundColor(theme.textSecondary)
+                .padding(.vertical, 8)
+                .background(theme.primary)
+                .foregroundColor(theme.background)
                 .cornerRadius(8)
-            } else {
-                HStack(spacing: 6) {
-                    Button(action: onDoneSet) {
-                        Text("Done set")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 8)
-                    .background(theme.primary)
-                    .foregroundColor(theme.background)
-                    .cornerRadius(8)
-                    Button(action: onStartRest) {
-                        Text("+\(defaultRest)s")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 8)
-                    .background(theme.surfaceRaised)
-                    .foregroundColor(theme.textSecondary)
-                    .cornerRadius(8)
-                }
             }
         }
         .padding(10)
         .background(theme.surface)
         .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private func upNextLine() -> some View {
+        if isLastSet, let next = nextExercise {
+            Text("Up next: \(next.name) · \(next.sets) × \(next.reps)")
+                .lineLimit(2)
+        } else if let ex = currentExercise {
+            Text("Up next: set \(state.setNumber + 1) of \(ex.sets) · \(ex.reps)")
+                .lineLimit(1)
+        } else {
+            Text("")
+        }
+    }
+
+    // ─── Footer (End / Cancel workout) ─────────────────────────────
+
+    @State private var showCancelConfirm: Bool = false
+
+    private func footer() -> some View {
+        VStack(spacing: 6) {
+            Button(action: onEndWorkout) {
+                HStack {
+                    Image(systemName: "stop.fill")
+                    Text("End workout")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 8)
+            .background(theme.surfaceRaised)
+            .foregroundColor(theme.error)
+            .cornerRadius(10)
+            // Cancel — distinct from End. End LOGS the workout (writes
+            // to Health, saves history); Cancel DISCARDS everything so
+            // a misstart / accidental tap doesn't muddy the record.
+            Button(role: .destructive) {
+                showCancelConfirm = true
+            } label: {
+                Text("Cancel workout")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 6)
+            .foregroundColor(theme.textMuted)
+        }
+        .padding(.top, 4)
+        .confirmationDialog(
+            "Cancel this workout? Sets you've logged will be discarded.",
+            isPresented: $showCancelConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Discard workout", role: .destructive) {
+                // Failure haptic so the user knows this was destructive
+                // by feel alone. Parent handler sends cancel_workout
+                // and tears down the watch's HR session + UI without
+                // logging anything to Health.
+                WKInterfaceDevice.current().play(.failure)
+                onCancelWorkout()
+            }
+            Button("Keep going", role: .cancel) {}
+        }
+    }
+
+    // ─── Actions ───────────────────────────────────────────────────
+
+    private func logSet() {
+        guard let ex = currentExercise else { return }
+        // Haptic click — different from the rest-end notification so
+        // the two are distinguishable by feel.
+        WKInterfaceDevice.current().play(.click)
+
+        // Ship the log to the phone so history + recommendations stay
+        // aligned. Phone handler parses and feeds the deterministic
+        // weight-rec engine for the next set.
+        conn.sendCommand("log_set", payload: [
+            "exerciseIndex": state.exerciseIndex,
+            "setNumber": state.setNumber,
+            "weightLbs": state.pendingWeight,
+            "reps": state.pendingReps,
+            "exerciseName": ex.name,
+        ])
+        state.lastLoggedWeight = state.pendingWeight
+        state.lastLoggedReps = state.pendingReps
+
+        if state.setNumber >= ex.sets {
+            // Last set of this exercise → advance to next exercise.
+            advanceExercise()
+        } else {
+            // Next set of same exercise → start rest.
+            state.setNumber += 1
+            state.restRemaining = ex.restSeconds
+        }
+    }
+
+    private func advanceExercise() {
+        if isLastExercise {
+            // Finished the whole workout — auto-end. Phone writes to
+            // Health via HKWorkoutBuilder.finishWorkout().
+            onEndWorkout()
+            return
+        }
+        let nextIdx = state.exerciseIndex + 1
+        state.exerciseIndex = nextIdx
+        state.setNumber = 1
+        state.restRemaining = nil
+        // Seed weight/reps for the new exercise so Crown starts at
+        // a useful value.
+        state.pendingWeight = 0
+        state.pendingReps = 0
+        if workout.exercises.indices.contains(nextIdx) {
+            state.seed(for: workout.exercises[nextIdx])
+        }
+        WKInterfaceDevice.current().play(.success)
+    }
+
+    private func skipRest() {
+        state.restRemaining = nil
+        WKInterfaceDevice.current().play(.click)
+    }
+
+    private func togglePause() {
+        state.paused.toggle()
+        WKInterfaceDevice.current().play(.click)
     }
 
     private func formatTime(_ s: Int) -> String {
@@ -263,11 +509,12 @@ private struct RestTimerCard: View {
     }
 }
 
-// ─── Heart rate tab ─────────────────────────────────────────────────
+// ─── Heart rate tab ────────────────────────────────────────────────
 
 private struct HeartRateTab: View {
     @ObservedObject var hr: HeartRateStore
     @EnvironmentObject var theme: ThemeStore
+    @Environment(\.isLuminanceReduced) private var dim
 
     var body: some View {
         ZStack {
@@ -282,6 +529,9 @@ private struct HeartRateTab: View {
                     Text(hr.heartRate.map { "\($0)" } ?? "—")
                         .font(.system(size: 52, weight: .heavy, design: .rounded))
                         .foregroundColor(zoneColor)
+                        // Always-on dim: drop opacity to keep the
+                        // numeral legible but not burn-in risky.
+                        .opacity(dim ? 0.55 : 1)
                     Text("bpm")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(theme.textSecondary)

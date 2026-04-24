@@ -96,6 +96,20 @@ final class HeartRateStore: NSObject, ObservableObject {
         }
     }
 
+    /// Teardown-without-save. Used when the user cancels a workout —
+    /// we stop the HK session but DO NOT call `finishWorkout`, so
+    /// nothing lands in the Health app. Rolls back HR / session refs
+    /// so the next `start()` begins cleanly.
+    func discard() {
+        session?.end()
+        builder?.discardWorkout()
+        heartRate = nil
+        zone = nil
+        running = false
+        session = nil
+        builder = nil
+    }
+
     private func computeZone(for bpm: Int) -> Int {
         let pct = Double(bpm) / Double(maxHR)
         if pct < 0.60 { return 1 }

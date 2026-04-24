@@ -16,6 +16,10 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let equipment: String?
     let plannedTargetWeightLbs: Double?
     let recommendation: String?
+    /// "warmup" | "primary" | "secondary" | "isolation" | "core" | "cooldown"
+    /// — shown as a badge on the active card so the user knows to
+    /// dial intensity up or down for that slot. Optional for back-compat.
+    let slotRole: String?
 }
 
 /// Lifecycle state of today's workout — the watch renders different
@@ -35,6 +39,12 @@ struct WatchWorkout: Codable, Equatable {
     let durationMinutes: Int
     let dateISO: String
     let status: WatchWorkoutStatus
+    /// 0-100 readiness score pushed from the phone's preparedness
+    /// engine. Nil when HealthKit data is too thin to score.
+    let readiness: Int?
+    /// "Primed" / "Ready" / "Moderate" / "Fatigued" — same label the
+    /// iOS TrainingReadinessCard uses. Shown on Today view as a chip.
+    let readinessLabel: String?
     let exercises: [WatchExercise]
     let syncedAtMs: Double
 }
@@ -63,6 +73,10 @@ struct WatchMealsDay: Codable, Equatable {
     let dateISO: String
     let targets: WatchMealTargets
     let actual: WatchMealTargets
+    /// 0-100 unified Nutrition Score (adherence + quality + micro).
+    /// Matches what /meals/score returns on the phone. Nil when the
+    /// day has no logged meals yet.
+    let score: Int?
     let meals: [WatchMealItem]
     let syncedAtMs: Double
 }

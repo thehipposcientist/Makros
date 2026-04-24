@@ -38,23 +38,31 @@ export type WatchExerciseClient = {
  *  was the source of the "watch shows push even though I skipped" bug. */
 export function buildWatchWorkoutPayload(
   day: WorkoutDay | null | undefined,
-  opts: { dateISO?: string; status: WatchWorkoutStatus },
+  opts: {
+    dateISO?: string;
+    status: WatchWorkoutStatus;
+    readiness?: number | null;
+    readinessLabel?: string | null;
+  },
 ): WatchWorkoutPayload | null {
   if (!day) {
-    // Rest day — still send so watch knows today's status, even
-    // though there's no exercise list.
     if (opts.status === 'rest') {
       return {
         focus: 'Rest',
         durationMinutes: 0,
         dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
         status: 'rest',
+        readiness: opts.readiness ?? null,
+        readinessLabel: opts.readinessLabel ?? null,
         exercises: [],
         syncedAtMs: Date.now(),
       };
     }
     return null;
   }
+  // Every exercise is shipped (including warmup slots — the watch's
+  // active-workout view treats warmup as its own sequence step and
+  // badges it so users know to dial intensity down).
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => ({
     name: String(e.name || 'Exercise'),
     sets: Number(e.sets || 3),
@@ -63,12 +71,15 @@ export function buildWatchWorkoutPayload(
     equipment: e.equipment ?? null,
     plannedTargetWeightLbs: e.plannedTargetWeightLbs ?? e.weight ?? null,
     recommendation: e.recommendation ?? null,
+    slotRole: e.slot_role ?? e.slotRole ?? null,
   }));
   return {
     focus: String(day.focus || 'Workout'),
     durationMinutes: Number((day as any).durationMinutes ?? (day as any).duration ?? 60),
     dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
     status: opts.status,
+    readiness: opts.readiness ?? null,
+    readinessLabel: opts.readinessLabel ?? null,
     exercises,
     syncedAtMs: Date.now(),
   };
@@ -94,7 +105,12 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
 /** Push today's workout with its current lifecycle status. */
 export async function pushWorkoutToWatch(
   day: WorkoutDay | null,
-  opts: { dateISO?: string; status: WatchWorkoutStatus },
+  opts: {
+    dateISO?: string;
+    status: WatchWorkoutStatus;
+    readiness?: number | null;
+    readinessLabel?: string | null;
+  },
 ): Promise<boolean> {
   const payload = buildWatchWorkoutPayload(day, opts);
   if (!payload) return false;
@@ -113,11 +129,13 @@ export async function pushProgressToWatch(progress: WatchProgress) {
   return WatchBridge.updateProgress(progress);
 }
 
-/** Push today's meals (targets + actual + per-meal check state). */
+/** Push today's meals (targets + actual + per-meal check state +
+ *  optional nutrition score). */
 export async function pushMealsToWatch(
   plan: DailyNutritionPlan | null | undefined,
   checkedMeals: Record<string, boolean> | null | undefined,
   dateISO?: string,
+  score?: number | null,
 ): Promise<boolean> {
   if (!plan) return false;
   if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
@@ -163,6 +181,7 @@ export async function pushMealsToWatch(
       carbsG:   Math.round(actCarb),
       fatG:     Math.round(actFat),
     },
+    score: score ?? null,
     meals: items,
     syncedAtMs: Date.now(),
   };

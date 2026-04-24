@@ -1811,11 +1811,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
           : 'scheduled';
-        await pushWorkoutToWatch(todayWorkout, { dateISO: todayISO, status });
+        await pushWorkoutToWatch(todayWorkout, {
+          dateISO: todayISO,
+          status,
+          readiness: readinessScore?.score ?? null,
+          readinessLabel: readinessScore?.label ?? null,
+        });
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
           ?? (Object.values(nutritionPlansByDate)[0] as any);
-        await pushMealsToWatch(todayPlan, checkedMealsByDate[todayISO], todayISO);
+        await pushMealsToWatch(
+          todayPlan,
+          checkedMealsByDate[todayISO],
+          todayISO,
+          nutritionScoreData?.total ?? null,
+        );
       } catch { /* watch bridge optional — silent failure is fine */ }
     })();
   // `schedule` is derived every render so we key on its first-item
@@ -1825,6 +1835,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [
     workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
     nutritionPlansByDate, checkedMealsByDate,
+    readinessScore, nutritionScoreData,
   ]);
 
   // Listen for commands the user taps on the watch. Routes each to
@@ -1846,6 +1857,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const mealType = String(payload?.mealType || '');
             const todayISO = new Date().toISOString().slice(0, 10);
             if (mealType) handleToggleMeal(todayISO, mealType);
+          } else if (command === 'cancel_workout') {
+            // Watch-originated cancel — drop any in-progress phone-side
+            // workout state. We don't persist anything: past AsyncStorage
+            // keys for active sessions get cleared so the user doesn't
+            // resume into a stale half-done session next time.
+            (async () => {
+              try {
+                const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+                const keys = await AsyncStorage.getAllKeys();
+                const sessionKeys = keys.filter(k => k.startsWith('workoutSessionState_') || k.startsWith('activeWorkoutLogs_'));
+                if (sessionKeys.length > 0) await AsyncStorage.multiRemove(sessionKeys);
+              } catch { /* non-fatal */ }
+            })();
           }
           // Rest / set / end commands only fire inside an active
           // workout; ActiveWorkoutScreen owns those handlers.

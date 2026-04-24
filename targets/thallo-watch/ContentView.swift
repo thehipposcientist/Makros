@@ -31,21 +31,21 @@ struct ContentView: View {
                     workout: workout,
                     hr: heartRate,
                     onEndWorkout: {
-                        // End everywhere — stops the HK session here
-                        // AND tells the phone to end its workout.
+                        // End workout — writes to Health AND tells the
+                        // phone to finalize its workout state (logs
+                        // completed sets, shows completion banner).
                         active = false
                         heartRate.end()
                         conn.sendCommand("end_workout")
                     },
-                    onCloseWatchOnly: {
-                        // User prefers Apple's native Workout app (or
-                        // just doesn't want the watch UI running).
-                        // Stop the HR session locally so we're not
-                        // double-recording, but DO NOT tell the phone
-                        // to end — its workout keeps running.
+                    onCancelWorkout: {
+                        // Cancel — discard the session on both ends.
+                        // Tear down HR without finishWorkout() so
+                        // nothing lands in Health, and tell the phone
+                        // to drop its in-progress state.
                         active = false
-                        heartRate.end()
-                        conn.sendCommand("close_watch")
+                        heartRate.discard()
+                        conn.sendCommand("cancel_workout")
                     }
                 )
             } else {
@@ -181,6 +181,26 @@ private struct TodayView: View {
                         .font(.system(size: 11))
                 }
                 .foregroundColor(theme.textSecondary)
+                // Readiness chip — pulled from phone's preparedness
+                // engine. Colored by tier so a glance tells the user
+                // whether to push today or back off.
+                if let r = workout.readiness {
+                    let color = r >= 70 ? theme.success
+                        : r >= 40 ? theme.warning : theme.error
+                    HStack(spacing: 5) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 9))
+                        Text("\(r)% \(workout.readinessLabel ?? "READY")")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(0.3)
+                    }
+                    .foregroundColor(color)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(color.opacity(0.15))
+                    .cornerRadius(6)
+                    .padding(.top, 2)
+                }
             }
         }
     }
@@ -391,6 +411,20 @@ private struct MealsView: View {
                 Text("/ \(meals.targets.calories) kcal")
                     .font(.system(size: 10))
                     .foregroundColor(theme.textMuted)
+                Spacer()
+                // Nutrition Score chip — same tier thresholds as the
+                // phone's NutritionCard: 70+/45+/else.
+                if let s = meals.score {
+                    let color = s >= 70 ? theme.success
+                        : s >= 45 ? theme.warning : theme.error
+                    Text("\(s)")
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundColor(color)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(color.opacity(0.18))
+                        .cornerRadius(6)
+                }
             }
             HStack(spacing: 10) {
                 macroLine(label: "P", actual: meals.actual.proteinG, target: meals.targets.proteinG, color: theme.primary)
