@@ -7,14 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		047C23889D7C6E2485EC065B /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9038711B9170457527DC25E /* ExpoModulesProvider.swift */; };
+		05A8D26933FC76ADF699F5B2 /* libPods-Thallo.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E84FBA526152888C376DAF83 /* libPods-Thallo.a */; };
+		0CDEC8F3A10AB07D6D1C8C83 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5776DBE3459C014DE0244EF6 /* PrivacyInfo.xcprivacy */; };
+		0F6504C8E008D310F599D15F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5776DBE3459C014DE0244EF6 /* PrivacyInfo.xcprivacy */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
-		190BAB2F0DF806D6E72C776E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B7C8C5F05525204E039472CD /* PrivacyInfo.xcprivacy */; };
-		25921181BEE3E5C8EC06A19A /* libPods-Thallo.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 184AAD7C6D69F790176D3041 /* libPods-Thallo.a */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
-		7F8C0C47147D712DECEA2FFE /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC20899166AC645E5AAEACF5 /* ExpoModulesProvider.swift */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
-		F8E3BFE0FA3917526DAF130F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B7C8C5F05525204E039472CD /* PrivacyInfo.xcprivacy */; };
 		XX12B55A1EDABF083C3B51XX /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XX470101BAEB8E0BBC8B0DXX /* WidgetKit.framework */; };
 		XX1A6800511A685AB346D2XX /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XXA12889081EB894481655XX /* AppIntents.framework */; };
 		XX3C562DEF346B45594832XX /* ActivityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XXCAF23C3FC41F82140FA1XX /* ActivityKit.framework */; };
@@ -69,16 +69,16 @@
 		13B07F961A680F5B00A75B9A /* Thallo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; fileEncoding = 4; includeInIndex = 0; path = Thallo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = Thallo/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = text.plist.xml; name = Info.plist; path = Thallo/Info.plist; sourceTree = "<group>"; };
-		184AAD7C6D69F790176D3041 /* libPods-Thallo.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Thallo.a"; sourceTree = BUILT_PRODUCTS_DIR; };
-		1988F7981E7FFB4B74B7B037 /* Pods-Thallo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Thallo.debug.xcconfig"; path = "Target Support Files/Pods-Thallo/Pods-Thallo.debug.xcconfig"; sourceTree = "<group>"; };
-		691F7936D9B0BC2798880D1F /* Pods-Thallo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Thallo.release.xcconfig"; path = "Target Support Files/Pods-Thallo/Pods-Thallo.release.xcconfig"; sourceTree = "<group>"; };
+		5776DBE3459C014DE0244EF6 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = Thallo/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		715709ADA82A56C0D77F1C69 /* Pods-Thallo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Thallo.release.xcconfig"; path = "Target Support Files/Pods-Thallo/Pods-Thallo.release.xcconfig"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = Thallo/SplashScreen.storyboard; sourceTree = "<group>"; };
-		AC20899166AC645E5AAEACF5 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Thallo/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
-		B7C8C5F05525204E039472CD /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = Thallo/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		E84FBA526152888C376DAF83 /* libPods-Thallo.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Thallo.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = undefined; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Thallo/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Thallo-Bridging-Header.h */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.c.h; name = "Thallo-Bridging-Header.h"; path = "Thallo/Thallo-Bridging-Header.h"; sourceTree = "<group>"; };
+		F9038711B9170457527DC25E /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Thallo/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
+		FDF81E643DC4CD41AB7C4DCE /* Pods-Thallo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Thallo.debug.xcconfig"; path = "Target Support Files/Pods-Thallo/Pods-Thallo.debug.xcconfig"; sourceTree = "<group>"; };
 		XX28DCEECD70C334C7621DXX /* ThalloWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; fileEncoding = 4; includeInIndex = 0; path = ThalloWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		XX470101BAEB8E0BBC8B0DXX /* WidgetKit.framework */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = undefined; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		XX4DFF38D47332D6BF0183XX /* SwiftUI.framework */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = undefined; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
@@ -138,7 +138,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				25921181BEE3E5C8EC06A19A /* libPods-Thallo.a in Frameworks */,
+				05A8D26933FC76ADF699F5B2 /* libPods-Thallo.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -156,6 +156,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		0E97D1E7B4FA979052DED2B9 /* ExpoModulesProviders */ = {
+			isa = PBXGroup;
+			children = (
+				D928053845DA968C3C2ABDF3 /* Thallo */,
+			);
+			name = ExpoModulesProviders;
+			sourceTree = "<group>";
+		};
 		13B07FAE1A68108700A75B9A /* Thallo */ = {
 			isa = PBXGroup;
 			children = (
@@ -165,15 +173,7 @@
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */,
-				B7C8C5F05525204E039472CD /* PrivacyInfo.xcprivacy */,
-			);
-			name = Thallo;
-			sourceTree = "<group>";
-		};
-		2C704154E29B4917668743BA /* Thallo */ = {
-			isa = PBXGroup;
-			children = (
-				AC20899166AC645E5AAEACF5 /* ExpoModulesProvider.swift */,
+				5776DBE3459C014DE0244EF6 /* PrivacyInfo.xcprivacy */,
 			);
 			name = Thallo;
 			sourceTree = "<group>";
@@ -186,17 +186,9 @@
 				XX4DFF38D47332D6BF0183XX /* SwiftUI.framework */,
 				XXCAF23C3FC41F82140FA1XX /* ActivityKit.framework */,
 				XXA12889081EB894481655XX /* AppIntents.framework */,
-				184AAD7C6D69F790176D3041 /* libPods-Thallo.a */,
+				E84FBA526152888C376DAF83 /* libPods-Thallo.a */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		4B18F1A4FD10BB6A4B9893CD /* ExpoModulesProviders */ = {
-			isa = PBXGroup;
-			children = (
-				2C704154E29B4917668743BA /* Thallo */,
-			);
-			name = ExpoModulesProviders;
 			sourceTree = "<group>";
 		};
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
@@ -214,8 +206,8 @@
 				832341AE1AAA6A7D00B99B32 /* Libraries */,
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
-				F3160C4F8F9FF33B75D90AA7 /* Pods */,
-				4B18F1A4FD10BB6A4B9893CD /* ExpoModulesProviders */,
+				8D17EACD5D01E2B4C9400D64 /* Pods */,
+				0E97D1E7B4FA979052DED2B9 /* ExpoModulesProviders */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -232,6 +224,16 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		8D17EACD5D01E2B4C9400D64 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				FDF81E643DC4CD41AB7C4DCE /* Pods-Thallo.debug.xcconfig */,
+				715709ADA82A56C0D77F1C69 /* Pods-Thallo.release.xcconfig */,
+			);
+			name = Pods;
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		BB2F792B24A3F905000567C9 /* Supporting */ = {
 			isa = PBXGroup;
 			children = (
@@ -241,14 +243,12 @@
 			path = Thallo/Supporting;
 			sourceTree = "<group>";
 		};
-		F3160C4F8F9FF33B75D90AA7 /* Pods */ = {
+		D928053845DA968C3C2ABDF3 /* Thallo */ = {
 			isa = PBXGroup;
 			children = (
-				1988F7981E7FFB4B74B7B037 /* Pods-Thallo.debug.xcconfig */,
-				691F7936D9B0BC2798880D1F /* Pods-Thallo.release.xcconfig */,
+				F9038711B9170457527DC25E /* ExpoModulesProvider.swift */,
 			);
-			name = Pods;
-			path = Pods;
+			name = Thallo;
 			sourceTree = "<group>";
 		};
 		XX3E41C1850246162C0061XX /* expo:targets */ = {
@@ -269,7 +269,7 @@
 			buildConfigurationList = 13B07F931A680F5B00A75B9A /* Build configuration list for PBXNativeTarget "Thallo" */;
 			buildPhases = (
 				08A4A3CD28434E44B6B9DE2E /* [CP] Check Pods Manifest.lock */,
-				A17AFCDDAAD8CCC7C5A451F3 /* [Expo] Configure project */,
+				112BC41D186DCDB2D20BEE26 /* [Expo] Configure project */,
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
@@ -277,7 +277,7 @@
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
 				XX72A8CFBF0FBA13A79902XX /* Embed Foundation Extensions */,
 				XX81D5C67C94C2E1F9007EXX /* Embed Watch Content */,
-				138D9C5F9990D968DB3614C0 /* [CP] Embed Pods Frameworks */,
+				278861DA1E0B9C599FE2D48D /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -380,7 +380,7 @@
 				BB2F792D24A3F905000567C9 /* Expo.plist in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
-				F8E3BFE0FA3917526DAF130F /* PrivacyInfo.xcprivacy in Resources */,
+				0F6504C8E008D310F599D15F /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -388,7 +388,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				190BAB2F0DF806D6E72C776E /* PrivacyInfo.xcprivacy in Resources */,
+				0CDEC8F3A10AB07D6D1C8C83 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -445,7 +445,31 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		138D9C5F9990D968DB3614C0 /* [CP] Embed Pods Frameworks */ = {
+		112BC41D186DCDB2D20BEE26 /* [Expo] Configure project */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/.xcode.env",
+				"$(SRCROOT)/.xcode.env.local",
+				"$(SRCROOT)/Thallo/Thallo.entitlements",
+				"$(SRCROOT)/Pods/Target Support Files/Pods-Thallo/expo-configure-project.sh",
+			);
+			name = "[Expo] Configure project";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Pods/Target Support Files/Pods-Thallo/ExpoModulesProvider.swift",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# This script configures Expo modules and generates the modules provider file.\nbash -l -c \"./Pods/Target\\ Support\\ Files/Pods-Thallo/expo-configure-project.sh\"\n";
+		};
+		278861DA1E0B9C599FE2D48D /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -505,30 +529,6 @@
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Thallo/Pods-Thallo-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
-		A17AFCDDAAD8CCC7C5A451F3 /* [Expo] Configure project */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-				"$(SRCROOT)/.xcode.env",
-				"$(SRCROOT)/.xcode.env.local",
-				"$(SRCROOT)/Thallo/Thallo.entitlements",
-				"$(SRCROOT)/Pods/Target Support Files/Pods-Thallo/expo-configure-project.sh",
-			);
-			name = "[Expo] Configure project";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(SRCROOT)/Pods/Target Support Files/Pods-Thallo/ExpoModulesProvider.swift",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# This script configures Expo modules and generates the modules provider file.\nbash -l -c \"./Pods/Target\\ Support\\ Files/Pods-Thallo/expo-configure-project.sh\"\n";
-		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -537,7 +537,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
-				7F8C0C47147D712DECEA2FFE /* ExpoModulesProvider.swift in Sources */,
+				047C23889D7C6E2485EC065B /* ExpoModulesProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -573,7 +573,7 @@
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 1988F7981E7FFB4B74B7B037 /* Pods-Thallo.debug.xcconfig */;
+			baseConfigurationReference = FDF81E643DC4CD41AB7C4DCE /* Pods-Thallo.debug.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -610,7 +610,7 @@
 		};
 		13B07F951A680F5B00A75B9A /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 691F7936D9B0BC2798880D1F /* Pods-Thallo.release.xcconfig */;
+			baseConfigurationReference = 715709ADA82A56C0D77F1C69 /* Pods-Thallo.release.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
