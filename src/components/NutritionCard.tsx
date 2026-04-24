@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+import { configureExpandAnimation } from '../utils/layoutAnim';
 import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
@@ -807,13 +808,13 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
       {/* Item list — collapsed by default, tap to expand */}
       {itemRows.length > 0 && !itemsExpanded ? (
-        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3, paddingLeft: 32 }}>
+        <TouchableOpacity onPress={() => { configureExpandAnimation(300); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3, paddingLeft: 32 }}>
           <Text style={{ fontSize: 12, color: colors.textSecondary, fontWeight: '500' }}>
             {itemRows.length} item{itemRows.length !== 1 ? 's' : ''} · tap to see details
           </Text>
         </TouchableOpacity>
       ) : itemRows.length > 0 ? (
-        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setItemsExpanded(false); }} activeOpacity={0.9}>
+        <TouchableOpacity onPress={() => { configureExpandAnimation(300); setItemsExpanded(false); }} activeOpacity={0.9}>
           <View style={styles.mealFoodsDetail}>
             {itemRows.map(r => (
               <View key={r.key} style={styles.mealFoodRow}>

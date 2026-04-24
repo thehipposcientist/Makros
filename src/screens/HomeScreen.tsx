@@ -36,7 +36,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
-import GutHealthCard from '../components/GutHealthCard';
 import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
 import IncompleteDayBanner from '../components/IncompleteDayBanner';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
@@ -3834,7 +3833,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           goals/progress/profile render their own inline pages below. */}
       {(activeTab === 'workout' || activeTab === 'meals') && (
       <ErrorBoundary>
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContentBelowSubTab} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContentBelowSubTab}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        onScrollBeginDrag={Keyboard.dismiss}
+        showsVerticalScrollIndicator={false}
+        overScrollMode="never"
+      >
         {activeTab === 'workout' ? (
           (isWorkoutUpdating && !isNutritionUpdating) ? (
             <View style={[styles.tabPlanLoadingFull, { backgroundColor: themeColors.background }]}>
@@ -4672,7 +4679,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     {commonMeals.length > 0 && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
-                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
                           {commonMeals.map(m => (
                             <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
                               <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>{m.name}</Text>
@@ -5061,11 +5068,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 the user scrolls into individual meals. */}
             {mealsSubTab === 'plan' && !isFreeTier && authToken && (
               <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
-            )}
-            {/* Gut & Plants — descriptive, unscored. Today's 4 tiles +
-                expandable 7-day rollup. */}
-            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
-              <GutHealthCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
             {mealsSubTab === 'plan' && !isFreeTier && mealDays.map((d, idx) => {
               const plan = nutritionPlansByDate[d.key];
@@ -5851,7 +5853,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </View>
                   )}
 
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
                     <TouchableOpacity
                       style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
                       onPress={() => setExerciseMuscleFilter('all')}>
@@ -5867,7 +5869,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ))}
                   </ScrollView>
 
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
                     <TouchableOpacity
                       style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
                       onPress={() => setExerciseEquipmentFilter('all')}>

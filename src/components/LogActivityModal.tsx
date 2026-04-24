@@ -1,10 +1,11 @@
 import { useState, useCallback } from 'react';
 import {
   View, Text, Modal, TouchableOpacity, TextInput, ScrollView,
-  StyleSheet, Alert, LayoutAnimation, UIManager, Platform,
+  StyleSheet, Alert, UIManager, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme } from '../constants/theme';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 import {
   AppThemeName, WorkoutSession,
   ActivityCategory, ActivityIntensity, CardioStyle,
@@ -166,7 +167,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
   }, []);
 
   const selectCategory = (cat: ActivityCategory) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    configureExpandAnimation(300);
     setCategory(cat);
     setSubtype('');
     setCustomSubtype('');
@@ -177,7 +178,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
   };
 
   const goBack = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    configureExpandAnimation(300);
     setStep(1);
   };
 
@@ -430,7 +431,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
                 {/* Advanced toggle */}
                 <TouchableOpacity
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, alignSelf: 'flex-start' }}
-                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setShowAdvanced(!showAdvanced); }}>
+                  onPress={() => { configureExpandAnimation(300); setShowAdvanced(!showAdvanced); }}>
                   <Ionicons name={showAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
                   <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textMuted }}>Advanced details</Text>
                 </TouchableOpacity>

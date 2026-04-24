@@ -9,7 +9,8 @@
 //   - local workout history (yesterday's training minutes)
 
 import { useCallback, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, UIManager } from 'react-native';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
@@ -104,7 +105,7 @@ export default function PreparednessCard({
     result.label === 'Moderate'  ? tc.warning : tc.error;
 
   const toggle = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    configureExpandAnimation(320);
     setExpanded(e => !e);
   };
 

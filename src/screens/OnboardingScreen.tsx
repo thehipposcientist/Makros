@@ -422,6 +422,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const selectGoal = (goalId: string) => {
     if (goalId !== selectedGoal) {
+      import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
       setSelectedGoal(goalId);
       setSelectedModifiers([]);
       setSelectedRegion('balanced');
@@ -1305,7 +1306,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
       {/* Quick-start templates */}
       <Text style={styles.sectionHeading}>Quick select by gym type</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
         {EQUIPMENT_TEMPLATES.map(t => {
           const active = selectedEquipTemplate === t.id;
           return (
@@ -1466,7 +1467,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
       {/* Quick diet presets */}
       <Text style={styles.sectionHeading}>Quick start by diet type</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
         {FOOD_PRESETS.map(p => {
           const active = selectedFoodPreset === p.id;
           return (
@@ -1879,7 +1880,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           ))}
         </View>
 
-        {renderStep()}
+        {/* Keyed fade on every step change so content transitions feel
+            intentional instead of snapping. Short duration (220ms) —
+            keeps the onboarding flow brisk. */}
+        <FadeInView key={currentStepKey} duration={220} slideDistance={10}>
+          {renderStep()}
+        </FadeInView>
 
         <View style={styles.buttons}>
           {currentStep > 0 ? (

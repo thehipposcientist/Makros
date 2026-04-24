@@ -6,11 +6,12 @@
 // number to act on.
 
 import { useCallback, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, UIManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { getGutHealth, GutHealthToday, GutHealthWindow } from '../services/api';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -90,7 +91,7 @@ export default function GutHealthCard({ authToken, themeName }: Props) {
   const low = coverage < 0.5;
 
   const toggle = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    configureExpandAnimation(320);
     setExpanded(e => !e);
   };
 

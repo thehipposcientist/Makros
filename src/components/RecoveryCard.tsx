@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation, Animated, Easing } from 'react-native';
+import { View, Text, TouchableOpacity, Animated, Easing } from 'react-native';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -120,7 +121,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
       activeOpacity={defaultExpanded ? 1 : 0.7}
       onPress={() => {
         if (defaultExpanded) return;
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        configureExpandAnimation(320);
         setExpanded(v => !v);
       }}
       style={{

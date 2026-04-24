@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, UIManager } from 'react-native';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -102,7 +103,7 @@ export default function NutritionInsightCard({ insight, themeColors, meals }: Pr
   return (
     <TouchableOpacity
       activeOpacity={0.7}
-      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpanded(!expanded); }}
+      onPress={() => { configureExpandAnimation(320); setExpanded(!expanded); }}
       style={[styles.card, { backgroundColor: themeColors.surface, borderLeftColor: accent, borderColor: themeColors.border }]}>
       <View style={styles.header}>
         <Text style={[styles.label, { color: themeColors.textPrimary }]}>

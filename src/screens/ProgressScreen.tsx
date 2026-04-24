@@ -10,6 +10,7 @@ import FadeInView from '../components/FadeInView';
 import StreakCounter from '../components/StreakCounter';
 import AnimatedNumber from '../components/AnimatedNumber';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -478,8 +479,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         ] as const).map(([key, label]) => (
           <TouchableOpacity
             key={key}
+            activeOpacity={0.7}
             style={[styles.tab, tab === key && styles.tabActive]}
-            onPress={() => setTab(key as typeof tab)}>
+            onPress={() => {
+              if (tab === key) return;
+              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+              setTab(key as typeof tab);
+            }}>
             <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
           </TouchableOpacity>
         ))}
@@ -489,7 +495,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         <View style={styles.center}>
           <ActivityIndicator color={colors.primary} />
         </View>
-      ) : tab === 'charts' ? (
+      ) : (
+      <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
+      {tab === 'charts' ? (
         <ScrollView contentContainerStyle={styles.content}>
           {prs.length === 0 ? (
             <View style={styles.emptyBox}>
@@ -501,7 +509,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <>
               {/* Exercise selector */}
               <Text style={styles.sectionLabel}>Select exercise</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
                 {prs.map((pr, i) => (
                   <TouchableOpacity
                     key={i}
@@ -998,7 +1006,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     key={session.id ?? i}
                     style={styles.sessionCard}
                     activeOpacity={0.8}
-                    onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`)); }}>
+                    onPress={() => { configureExpandAnimation(300); setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`)); }}>
                     <View style={styles.sessionHeader}>
                       <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -2042,7 +2050,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <TouchableOpacity
                   activeOpacity={0.7}
-                  onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setMuscleBalanceExpanded(prev => !prev); }}
+                  onPress={() => { configureExpandAnimation(300); setMuscleBalanceExpanded(prev => !prev); }}
                 >
                   <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
                     <Ionicons name="body-outline" size={16} color={tc.primary} />
@@ -2386,6 +2394,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : null}
+      </FadeInView>
+      )}
       {/* Weight Log Modal */}
       {weightInputVisible && (
         <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
