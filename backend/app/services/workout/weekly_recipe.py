@@ -409,7 +409,37 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
             # pattern the old blind-cycle produced.
             extras_pool = [DayArchetype.LIFT_LEGS, DayArchetype.LIFT_PULL, DayArchetype.LIFT_PUSH]
         extras_needed = days - len(seq)
-        return seq + [extras_pool[i % len(extras_pool)] for i in range(extras_needed)]
+        # Pick extras one at a time, skipping any choice whose family
+        # would create back-to-back leg fatigue with the previous day.
+        # `legs` (PPL) and `lower` (U/L) both hammer the same muscles
+        # — placing one right after the other is the exact bug we're
+        # avoiding. The repair pass downstream also catches this, but
+        # picking the right extra up front is cheaper and keeps the
+        # final layout closer to the user's expected PPL+UL pattern.
+        from .archetypes import archetype_to_focus_family as _fam
+        _LOWER_OVERLAP = {"legs", "lower"}
+        out: list[DayArchetype] = list(seq)
+        pool_idx = 0
+        for _ in range(extras_needed):
+            chosen: DayArchetype | None = None
+            prev_fam = _fam(out[-1]) if out else None
+            # Walk the pool in order, starting at the rotating cursor.
+            for step in range(len(extras_pool)):
+                cand = extras_pool[(pool_idx + step) % len(extras_pool)]
+                cand_fam = _fam(cand)
+                if prev_fam in _LOWER_OVERLAP and cand_fam in _LOWER_OVERLAP:
+                    continue  # would stack leg fatigue
+                chosen = cand
+                pool_idx = (pool_idx + step + 1) % len(extras_pool)
+                break
+            if chosen is None:
+                # Every pool option clashes (shouldn't happen with
+                # current pools, but stay safe) — fall back to the
+                # rotating pick so the week still has the right day count.
+                chosen = extras_pool[pool_idx % len(extras_pool)]
+                pool_idx += 1
+            out.append(chosen)
+        return out
 
     if split == SPLIT_BRO:
         seq = [
@@ -1170,11 +1200,25 @@ def _repair_adjacent_duplicates(
     """
     from .archetypes import archetype_to_focus_family
 
+    # Adjacency-equivalence groups: fine families that share too much
+    # muscle load to sit next to each other even though their split
+    # identity differs. `legs` (PPL) + `lower` (U/L) both hit the full
+    # lower body — back-to-back = two leg sessions in 48h. Same logic
+    # for upper-split overlaps on U/L hybrid weeks: UPPER recaps what
+    # PUSH/PULL just did, so UPPER should not sit next to PUSH or PULL.
+    # Collapsing them here means the repair treats them as the "same"
+    # for spacing without forcing them to be the same archetype.
+    _ADJACENCY_COLLAPSE = {
+        "legs":  "lower_body_full",
+        "lower": "lower_body_full",
+    }
+
     def _b(a):
         try:
-            return archetype_to_focus_family(a)
+            fam = archetype_to_focus_family(a)
         except KeyError:
             return None
+        return _ADJACENCY_COLLAPSE.get(fam, fam)
 
     def _total_dups(lst) -> int:
         return sum(1 for i in range(1, len(lst)) if _b(lst[i]) == _b(lst[i - 1]))

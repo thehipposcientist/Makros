@@ -44,6 +44,25 @@ class UserStateBody(BaseModel):
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 
+def _derive_age(birthdate: date | None, today: date | None = None) -> int | None:
+    """Integer age from a birthdate. Returns None when birthdate is None.
+    Uses a simple year-diff minus-one-if-birthday-hasn't-happened-yet.
+    Centralised so every callsite agrees on the math."""
+    if birthdate is None:
+        return None
+    today = today or date.today()
+    years = today.year - birthdate.year
+    if (today.month, today.day) < (birthdate.month, birthdate.day):
+        years -= 1
+    return max(0, years)
+
+
+class BirthdateUpdate(BaseModel):
+    """Soft-prompt backfill: existing users supply just their birthday
+    without having to re-enter the rest of their physical stats."""
+    birthdate: date
+
+
 @router.get("/calorie-ranges")
 def get_calorie_ranges(
     current_user: User = Depends(get_current_user),
@@ -127,15 +146,30 @@ def sync_onboarding(
     profile = session.exec(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
     ).first()
+    # Age is derived from birthdate when present so it stays accurate
+    # years later. Fall back to the explicit `age` int only when the
+    # client couldn't collect a birthday (older onboarding flow).
+    derived_age = _derive_age(body.profile.birthdate) or body.profile.age
+    if derived_age is None:
+        raise HTTPException(status_code=422, detail="birthdate or age required")
     if profile:
         profile.weight_lbs    = body.profile.weight_lbs
         profile.height_feet   = body.profile.height_feet
         profile.height_inches = body.profile.height_inches
-        profile.age           = body.profile.age
+        profile.age           = derived_age
+        profile.birthdate     = body.profile.birthdate
         profile.gender        = body.profile.gender
         profile.updated_at    = now
     else:
-        profile = UserProfile(user_id=current_user.id, **body.profile.model_dump())
+        profile = UserProfile(
+            user_id=current_user.id,
+            weight_lbs=body.profile.weight_lbs,
+            height_feet=body.profile.height_feet,
+            height_inches=body.profile.height_inches,
+            age=derived_age,
+            birthdate=body.profile.birthdate,
+            gender=body.profile.gender,
+        )
     session.add(profile)
 
     # Deactivate previous goals, insert new one
@@ -179,15 +213,45 @@ def update_physical_stats(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
+    derived_age = _derive_age(body.birthdate) or body.age
+    if derived_age is None:
+        raise HTTPException(status_code=422, detail="birthdate or age required")
     profile.weight_lbs    = body.weight_lbs
     profile.height_feet   = body.height_feet
     profile.height_inches = body.height_inches
-    profile.age           = body.age
+    profile.age           = derived_age
+    profile.birthdate     = body.birthdate if body.birthdate is not None else profile.birthdate
     profile.gender        = body.gender
     profile.updated_at    = now
     session.add(profile)
     session.commit()
     return {"status": "ok"}
+
+
+@router.put("/birthdate")
+def update_birthdate(
+    body: BirthdateUpdate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """One-shot backfill: stores birthdate and re-derives the cached age
+    so downstream consumers see the right number immediately. Used by the
+    HomeScreen soft prompt for users who signed up before birthday
+    collection existed."""
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    age = _derive_age(body.birthdate)
+    if age is None:
+        raise HTTPException(status_code=422, detail="invalid birthdate")
+    profile.birthdate  = body.birthdate
+    profile.age        = age
+    profile.updated_at = datetime.now(timezone.utc)
+    session.add(profile)
+    session.commit()
+    return {"status": "ok", "age": age}
 
 
 @router.get("/me")
@@ -207,6 +271,17 @@ def get_my_profile(
 
     if not profile or not goal or not prefs:
         raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Re-derive age from birthdate on every read. If the user had a
+    # birthday since the last write, the cached int is stale — fix it
+    # in place so downstream consumers (TDEE, HR zones, progression)
+    # always see the accurate number without needing another write.
+    if profile.birthdate is not None:
+        fresh_age = _derive_age(profile.birthdate)
+        if fresh_age is not None and fresh_age != profile.age:
+            profile.age = fresh_age
+            profile.updated_at = datetime.now(timezone.utc)
+            session.add(profile)
 
     coaching = _coaching_state(session, current_user.id)
     session.add(coaching)

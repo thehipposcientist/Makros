@@ -9,6 +9,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
+import BirthdateInput from '../components/BirthdateInput';
+import { deriveAge } from '../utils/age';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -352,6 +354,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   );
   const [bodyHeightInches, setBodyHeightInches] = useState<string>(
     profile.physicalStats.heightInches != null ? String(profile.physicalStats.heightInches) : ''
+  );
+  // Birthdate is the source of truth. Age falls back to the cached int
+  // when the user hasn't backfilled their birthday yet.
+  const [bodyBirthdate, setBodyBirthdate] = useState<string | null>(
+    profile.physicalStats.birthdate ?? null
   );
   const [bodyAge, setBodyAge] = useState<string>(
     profile.physicalStats.age ? String(profile.physicalStats.age) : ''
@@ -1145,17 +1152,28 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     const w = parseFloat(currentWeight);
     const hf = parseInt(bodyHeightFeet, 10);
     const hi = parseInt(bodyHeightInches, 10);
-    const a = parseInt(bodyAge, 10);
+    // Prefer birthdate → derive age. Fall back to the typed-in age int
+    // for backward compatibility with users who haven't backfilled yet.
+    const { deriveAge, validateBirthdate } = await import('../utils/age');
+    let a: number;
+    if (bodyBirthdate) {
+      const err = validateBirthdate(bodyBirthdate);
+      if (err) { Alert.alert('Invalid birthday', err); return; }
+      a = deriveAge(bodyBirthdate)!;
+    } else {
+      a = parseInt(bodyAge, 10);
+    }
     if (!w || w <= 0) { Alert.alert('Invalid weight', 'Enter a valid weight in pounds.'); return; }
     if (!hf || hf < 3 || hf > 8) { Alert.alert('Invalid height', 'Enter a valid height (feet).'); return; }
     if (isNaN(hi) || hi < 0 || hi > 11) { Alert.alert('Invalid height', 'Inches must be 0-11.'); return; }
-    if (!a || a < 10 || a > 120) { Alert.alert('Invalid age', 'Enter a valid age.'); return; }
+    if (!a || a < 10 || a > 120) { Alert.alert('Invalid age', 'Enter a valid age or birthday.'); return; }
 
     setBodySaving(true);
     try {
       const { updatePhysicalStats } = await import('../services/api');
       await updatePhysicalStats(authToken, {
-        weightLbs: w, heightFeet: hf, heightInches: hi, age: a, gender: bodyGender,
+        weightLbs: w, heightFeet: hf, heightInches: hi, age: a,
+        birthdate: bodyBirthdate ?? undefined, gender: bodyGender,
       });
       if (w !== profile.physicalStats.weightLbs && w > 0) {
         const { saveWeightEntry } = await import('../utils/weightHistory');
@@ -1163,7 +1181,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       }
       onSave({
         ...profile,
-        physicalStats: { weightLbs: w, heightFeet: hf, heightInches: hi, age: a, gender: bodyGender },
+        physicalStats: {
+          weightLbs: w, heightFeet: hf, heightInches: hi,
+          age: a, birthdate: bodyBirthdate ?? undefined, gender: bodyGender,
+        },
       });
     } catch (e: any) {
       Alert.alert('Save failed', e?.message ?? 'Could not update stats. Try again.');
@@ -2517,15 +2538,23 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
 
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Age</Text>
-            <TextInput
-              style={[styles.macroFieldInput, { textAlign: 'left', paddingHorizontal: 14 }]}
-              value={bodyAge}
-              onChangeText={setBodyAge}
-              keyboardType="number-pad"
-              placeholder="e.g. 27"
-              placeholderTextColor={tc.textMuted}
-              maxLength={3}
+            <Text style={styles.sectionLabel}>Birthday</Text>
+            <BirthdateInput
+              value={bodyBirthdate}
+              onChange={setBodyBirthdate}
+              themeName={profile.themePreference}
+              label=""
+              hint={(() => {
+                // Show a live "(age N)" preview once the three fields
+                // form a valid date so users see what's actually going
+                // to be saved. Falls back to the stored age when empty.
+                const age = bodyBirthdate
+                  ? deriveAge(bodyBirthdate)
+                  : (bodyAge ? parseInt(bodyAge, 10) : null);
+                return age
+                  ? `Age ${age} — used for HR zones, calorie math, and readiness.`
+                  : 'Used for HR zones, calorie math, and readiness.';
+              })()}
             />
           </View>
 

@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text
+from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text, Date
 from datetime import datetime, date, timezone
 
 from app.enums import (
@@ -33,7 +33,12 @@ class UserProfile(SQLModel, table=True):
     weight_lbs: float
     height_feet: int
     height_inches: int
+    # `age` stays as a materialized int so every existing consumer keeps
+    # working without touching date math. When `birthdate` is set, the
+    # profile router re-derives age on every read + write so the cached
+    # int stays in sync as users age over time.
     age: int
+    birthdate: date | None = Field(default=None, sa_column=Column(Date, nullable=True))
     gender: Gender = Field(sa_column=Column(SAEnum(Gender), nullable=False))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -919,7 +924,11 @@ class ProfileUpsert(SQLModel):
     weight_lbs: float
     height_feet: int
     height_inches: int
-    age: int
+    # Either `birthdate` or `age` is required — birthdate wins when both
+    # are present (router derives age from it so cached age stays fresh
+    # as users age over multi-year windows).
+    age: int | None = None
+    birthdate: date | None = None
     gender: Gender
 
 class GoalUpsert(SQLModel):

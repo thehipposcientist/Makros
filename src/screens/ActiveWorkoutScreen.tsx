@@ -2497,14 +2497,36 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const thumbUri = exerciseThumbSmall(ex as any);
                   return thumbUri ? (
-                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
-                      <Image source={{ uri: thumbUri }} style={{ width: 40, height: 40 }} resizeMode="cover" />
-                      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                        <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
-                          <Ionicons name="play" size={9} color="#fff" style={{ marginLeft: 1 }} />
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      // Nested Touchable — inner captures the tap so the
+                      // outer exerciseHeader doesn't also expand/collapse
+                      // when the user wants the form video.
+                      onPress={() => {
+                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        setFormVideoExerciseName(ex.name);
+                      }}
+                      style={{
+                        width: 46, height: 46, borderRadius: 10, marginRight: 10,
+                        backgroundColor: themeColors.surfaceRaised,
+                        borderWidth: 1.5, borderColor: themeColors.primary,
+                        position: 'relative',
+                        shadowColor: themeColors.primary,
+                        shadowOffset: { width: 0, height: 0 },
+                        shadowOpacity: 0.75,
+                        shadowRadius: 8,
+                        elevation: 6,
+                      }}>
+                      <View style={{ width: '100%', height: '100%', borderRadius: 8, overflow: 'hidden' }}>
+                        <Image source={{ uri: thumbUri }} style={{ width: 40, height: 40 }} resizeMode="cover" />
+                        <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.18)' }} />
+                        <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                          <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' }}>
+                            <Ionicons name="play" size={9} color="#fff" style={{ marginLeft: 1 }} />
+                          </View>
                         </View>
                       </View>
-                    </View>
+                    </TouchableOpacity>
                   ) : null;
                 })()}
                 <View style={{ flex: 1 }}>
@@ -3183,14 +3205,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const thumbUri = mEx ? exerciseThumbSmall(mEx as any) : null;
                   return thumbUri ? (
-                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
-                      <Image source={{ uri: thumbUri }} style={{ width: 64, height: 64 }} resizeMode="cover" />
-                      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                        <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
-                          <Ionicons name="play" size={12} color="#fff" style={{ marginLeft: 1 }} />
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        if (!mEx?.name) return;
+                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        setFormVideoExerciseName(mEx.name);
+                      }}
+                      style={{
+                        width: 70, height: 70, borderRadius: 16, marginBottom: 12,
+                        backgroundColor: themeColors.surfaceRaised,
+                        borderWidth: 1.5, borderColor: themeColors.primary,
+                        position: 'relative',
+                        shadowColor: themeColors.primary,
+                        shadowOffset: { width: 0, height: 0 },
+                        shadowOpacity: 0.75,
+                        shadowRadius: 10,
+                        elevation: 8,
+                      }}>
+                      <View style={{ width: '100%', height: '100%', borderRadius: 14, overflow: 'hidden' }}>
+                        <Image source={{ uri: thumbUri }} style={{ width: 64, height: 64 }} resizeMode="cover" />
+                        <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.18)' }} />
+                        <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                          <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' }}>
+                            <Ionicons name="play" size={12} color="#fff" style={{ marginLeft: 1 }} />
+                          </View>
                         </View>
                       </View>
-                    </View>
+                    </TouchableOpacity>
                   ) : null;
                 })()}
                 <Text style={[styles.timerModalExerciseName, { color: themeColors.textSecondary }]} numberOfLines={2}>

@@ -36,7 +36,13 @@ export interface PhysicalStats {
   weightLbs: number;
   heightFeet: number;
   heightInches: number;
+  /** Cached integer age. Derived from `birthdate` when it's set so the
+   *  value stays accurate year-over-year without the user re-entering. */
   age: number;
+  /** ISO date (YYYY-MM-DD). Source of truth once collected. Optional so
+   *  existing users who signed up before birthday collection can still
+   *  load their profile — a soft prompt backfills them over time. */
+  birthdate?: string;
   gender: Gender;
 }
 

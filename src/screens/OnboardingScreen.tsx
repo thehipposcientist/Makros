@@ -19,6 +19,8 @@ import { Ionicons } from '@expo/vector-icons';
 import Animated, { LinearTransition } from 'react-native-reanimated';
 import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
+import BirthdateInput from '../components/BirthdateInput';
+import { deriveAge, validateBirthdate } from '../utils/age';
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
 import {
@@ -360,7 +362,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [weightLbs, setWeightLbs] = useState('');
   const [heightFeet, setHeightFeet] = useState('');
   const [heightInches, setHeightInches] = useState('');
-  const [age, setAge] = useState('');
+  // Birthdate is the source of truth. `age` is derived for legacy
+  // consumers (HRmax, TDEE) via the deriveAge helper so the cached int
+  // stays accurate as users age.
+  const [birthdate, setBirthdate] = useState<string | null>(null);
   const [gender, setGender] = useState<Gender | ''>('');
 
   // Step 4 — Training days
@@ -476,11 +481,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         const w = parseFloat(weightLbs);
         const hf = parseInt(heightFeet);
         const hi = parseInt(heightInches);
-        const a = parseInt(age);
         if (isNaN(w) || w < 50 || w > 600) return 'Enter a valid weight (50–600 lbs)';
         if (isNaN(hf) || hf < 3 || hf > 8) return 'Enter a valid height';
         if (isNaN(hi) || hi < 0 || hi > 11) return 'Inches must be between 0–11';
-        if (isNaN(a) || a < 13 || a > 100) return 'Enter a valid age (13–100)';
+        const birthErr = validateBirthdate(birthdate);
+        if (birthErr) return birthErr;
         if (!gender) return 'Please select a biological sex option';
         return null;
       }
@@ -538,11 +543,13 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       targetEvent: targetEvent.trim() || undefined,
     };
 
+    const derivedAge = deriveAge(birthdate) ?? 30;
     const physicalStats: PhysicalStats = {
       weightLbs:    parseFloat(weightLbs),
       heightFeet:   parseInt(heightFeet),
       heightInches: parseInt(heightInches),
-      age:          parseInt(age),
+      age:          derivedAge,
+      birthdate:    birthdate ?? undefined,
       gender:       gender as Gender,
     };
 
@@ -1085,19 +1092,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </View>
 
       <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Age</Text>
-        <View style={styles.inlineInput}>
-          <TextInput
-            style={[styles.input, { flex: 1 }]}
-            placeholder="e.g. 27"
-            placeholderTextColor={colors.textMuted}
-            keyboardType="number-pad"
-            value={age}
-            onChangeText={setAge}
-            maxLength={3}
-          />
-          <Text style={styles.unit}>yrs</Text>
-        </View>
+        <BirthdateInput
+          value={birthdate}
+          onChange={setBirthdate}
+          label="Birthday"
+          hint="We use this to dial in your HR zones and calorie math — and to keep both accurate as you age."
+        />
       </View>
 
       <View style={styles.fieldGroup}>

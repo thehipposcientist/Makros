@@ -218,19 +218,51 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
           );
         }
         const inner = (
-          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 2, borderColor: c.border, position: 'relative' }}>
-            <Image source={{ uri: thumbUri }} style={{ width: 44, height: 44 }} resizeMode="cover" />
+          <View style={{
+            width: 58, height: 58, borderRadius: 14,
+            backgroundColor: c.surfaceRaised,
+            borderWidth: 1.5, borderColor: c.primary,
+            position: 'relative',
+            // Glow: shadow color matches the themed border so the tile
+            // gets a soft coloured halo around it on dark backgrounds.
+            // iOS reads shadow*; Android uses elevation (colourless but
+            // lifts the tile visually the same way).
+            shadowColor: c.primary,
+            shadowOffset: { width: 0, height: 0 },
+            shadowOpacity: 0.75,
+            shadowRadius: 8,
+            elevation: 6,
+          }}>
+            {/* Inner clip — the outer View can't use overflow:hidden
+                because that would chop the glow shadow. Clip here
+                instead so the image still stays inside the rounded
+                border while the halo can render outside. */}
             <View style={{
+              width: '100%', height: '100%', borderRadius: 8,
+              overflow: 'hidden',
+            }}>
+            <Image source={{ uri: thumbUri }} style={{ width: 46, height: 46 }} resizeMode="cover" />
+            {/* Brightness lift — YouTube thumbnails often capture gym
+                interiors that are dim; a subtle white wash keeps the
+                content legible on dark themes without washing out the
+                colors. pointerEvents=none so the tap still reaches the
+                underlying TouchableOpacity wrapper. */}
+            <View pointerEvents="none" style={{
+              position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: 'rgba(255,255,255,0.18)',
+            }} />
+            <View pointerEvents="none" style={{
               position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
               alignItems: 'center', justifyContent: 'center',
             }}>
               <View style={{
-                width: 18, height: 18, borderRadius: 9,
-                backgroundColor: 'rgba(0,0,0,0.55)',
+                width: 20, height: 20, borderRadius: 10,
+                backgroundColor: 'rgba(0,0,0,0.6)',
                 alignItems: 'center', justifyContent: 'center',
               }}>
-                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+                <Ionicons name="play" size={11} color="#fff" style={{ marginLeft: 1 }} />
               </View>
+            </View>
             </View>
           </View>
         );

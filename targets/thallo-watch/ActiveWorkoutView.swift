@@ -107,6 +107,7 @@ struct ActiveWorkoutView: View {
             ExerciseTab(
                 workout: workout,
                 state: state,
+                hr: hr,
                 onEndWorkout: onEndWorkout,
                 onCancelWorkout: onCancelWorkout,
             )
@@ -128,6 +129,7 @@ struct ActiveWorkoutView: View {
 private struct ExerciseTab: View {
     let workout: WatchWorkout
     @ObservedObject var state: ActiveWorkoutState
+    @ObservedObject var hr: HeartRateStore
     let onEndWorkout: () -> Void
     let onCancelWorkout: () -> Void
 
@@ -160,6 +162,20 @@ private struct ExerciseTab: View {
 
     var isLastExercise: Bool {
         state.exerciseIndex >= workout.exercises.count - 1
+    }
+
+    // Small HR chip color mirrors the HR tab's zone palette so the two
+    // views read consistently. Falls back to muted when no zone yet.
+    var hrChipColor: Color {
+        guard let z = hr.zone else { return theme.error }
+        switch z {
+        case 1: return theme.textMuted
+        case 2: return theme.success
+        case 3: return theme.primary
+        case 4: return theme.warning
+        case 5: return theme.error
+        default: return theme.textSecondary
+        }
     }
 
     var body: some View {
@@ -208,6 +224,23 @@ private struct ExerciseTab: View {
                         .padding(.vertical, 1)
                         .background(theme.warning.opacity(0.15))
                         .cornerRadius(4)
+                }
+                Spacer(minLength: 0)
+                // Persistent HR chip — always visible while a reading
+                // exists so users don't have to swipe to the HR tab
+                // just to glance at their bpm mid-set.
+                if let bpm = hr.heartRate {
+                    HStack(spacing: 3) {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 8))
+                        Text("\(bpm)")
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    }
+                    .foregroundColor(hrChipColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(hrChipColor.opacity(0.15))
+                    .cornerRadius(5)
                 }
             }
             // Long-press opens the skip/swap menu — can't add swap

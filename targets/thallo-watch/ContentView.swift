@@ -93,6 +93,11 @@ private struct TodayView: View {
     let onSkip: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
+    // Pull meals from the same store so we can render a nutrition
+    // score chip below the readiness chip without needing another
+    // payload. The meals day carries a `score: Int?` populated by
+    // the phone's /meals/score endpoint.
+    @EnvironmentObject var conn: ConnectivityStore
 
     var body: some View {
         ScrollView {
@@ -181,26 +186,46 @@ private struct TodayView: View {
                         .font(.system(size: 11))
                 }
                 .foregroundColor(theme.textSecondary)
-                // Readiness chip — pulled from phone's preparedness
-                // engine. Colored by tier so a glance tells the user
-                // whether to push today or back off.
-                if let r = workout.readiness {
-                    let color = r >= 70 ? theme.success
-                        : r >= 40 ? theme.warning : theme.error
-                    HStack(spacing: 5) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 9))
-                        Text("\(r)% \(workout.readinessLabel ?? "READY")")
-                            .font(.system(size: 10, weight: .heavy))
-                            .tracking(0.3)
+                // Readiness + Nutrition chips — side-by-side compact
+                // row. Each is color-coded by tier so a glance tells
+                // the user whether to push training / how their
+                // nutrition is trending today. Both are optional —
+                // chips hide when data isn't available.
+                HStack(spacing: 6) {
+                    if let r = workout.readiness {
+                        let color = r >= 70 ? theme.success
+                            : r >= 40 ? theme.warning : theme.error
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 9))
+                            Text("\(r) READY")
+                                .font(.system(size: 10, weight: .heavy))
+                                .tracking(0.3)
+                        }
+                        .foregroundColor(color)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(color.opacity(0.15))
+                        .cornerRadius(6)
                     }
-                    .foregroundColor(color)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(color.opacity(0.15))
-                    .cornerRadius(6)
-                    .padding(.top, 2)
+                    if let n = conn.meals?.score {
+                        let color = n >= 70 ? theme.success
+                            : n >= 45 ? theme.warning : theme.error
+                        HStack(spacing: 4) {
+                            Image(systemName: "fork.knife")
+                                .font(.system(size: 9))
+                            Text("\(n) FUEL")
+                                .font(.system(size: 10, weight: .heavy))
+                                .tracking(0.3)
+                        }
+                        .foregroundColor(color)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(color.opacity(0.15))
+                        .cornerRadius(6)
+                    }
                 }
+                .padding(.top, 2)
             }
         }
     }

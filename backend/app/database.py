@@ -525,6 +525,22 @@ def _ensure_meal_consumed_at_column() -> None:
         print(f"[migration] meal consumed_at / meal_type add failed (non-fatal): {e}")
 
 
+def _ensure_user_profile_birthdate_column() -> None:
+    """Add nullable `birthdate` to user_profiles. Existing rows get NULL;
+    the profile router treats a NULL birthdate as "not filled in" and
+    falls back to the stored `age` int. A soft-prompt on the client
+    backfills it on next app open."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS birthdate DATE"
+            ))
+    except Exception as e:
+        print(f"[migration] user_profiles birthdate add failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog
@@ -541,6 +557,7 @@ def create_db_and_tables():
     _ensure_daily_nutrition_metrics_v2_columns()
     _ensure_nutrition_v3_columns()
     _ensure_meal_consumed_at_column()
+    _ensure_user_profile_birthdate_column()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

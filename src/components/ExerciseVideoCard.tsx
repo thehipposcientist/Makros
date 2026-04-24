@@ -53,7 +53,7 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
       onPress={onPress}
       style={{
         borderRadius: radius.lg, overflow: 'hidden',
-        backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
+        backgroundColor: tc.surface, borderWidth: 3, borderColor: tc.primary,
         marginBottom: 12,
       }}
     >

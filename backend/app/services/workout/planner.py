@@ -1272,6 +1272,24 @@ def generate_workout_plan(
             slots, inputs.session_minutes, category=meta.category,
         )
         templates.append((name, slots, archetype, None))
+
+    # ─── Intentional core programming ────────────────────────────
+    # Replaces the old "Slot('Core', 'anti_extension', ...) on every
+    # lift day" pattern with a goal/days/duration/history-aware
+    # decider. See core_programmer.py for rules:
+    #   • weekly frequency target by goal × days
+    #   • skip heavy lower / dense sessions
+    #   • rotate categories (anti-ext / anti-rot / lateral / flexion /
+    #     carry) so users don't do the same plank every session
+    #   • core always placed at END of the day's slot list
+    from .core_programmer import program_core_across_week
+    templates = program_core_across_week(
+        templates=templates,
+        goal=profile.bucket,
+        days_per_week=inputs.days_per_week,
+        session_minutes=inputs.session_minutes,
+        seed=inputs.rng_seed or 0,
+    )
     targets = weekly_set_targets(inputs)
     # Injury-aware movement-pattern blocklist. Built once from the
     # user's injury tags and passed into every slot pick.

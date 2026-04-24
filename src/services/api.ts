@@ -150,6 +150,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         heightFeet:   data.profile.height_feet,
         heightInches: data.profile.height_inches,
         age:          data.profile.age,
+        birthdate:    data.profile.birthdate ?? undefined,
         gender:       data.profile.gender,
       },
       daysPerWeek:            data.preferences.days_per_week,
@@ -885,6 +886,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
         height_feet:   profile.physicalStats.heightFeet,
         height_inches: profile.physicalStats.heightInches,
         age:           profile.physicalStats.age,
+        birthdate:     profile.physicalStats.birthdate ?? null,
         gender:        profile.physicalStats.gender,
       },
       goal: {
@@ -904,7 +906,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
 
 export async function updatePhysicalStats(
   token: string,
-  stats: { weightLbs: number; heightFeet: number; heightInches: number; age: number; gender: string },
+  stats: { weightLbs: number; heightFeet: number; heightInches: number; age: number; birthdate?: string; gender: string },
 ) {
   return request('/profile/physical-stats', {
     method: 'PUT',
@@ -914,8 +916,21 @@ export async function updatePhysicalStats(
       height_feet:   stats.heightFeet,
       height_inches: stats.heightInches,
       age:           stats.age,
+      birthdate:     stats.birthdate ?? null,
       gender:        stats.gender,
     }),
+  });
+}
+
+/** Backfill endpoint for existing users — stores the birthdate and
+ *  re-derives the cached `age` int server-side. Used by the HomeScreen
+ *  soft prompt so users who signed up before birthday collection can
+ *  add it without re-entering the rest of their stats. */
+export async function updateBirthdate(token: string, birthdate: string): Promise<{ status: string; age: number }> {
+  return request<{ status: string; age: number }>('/profile/birthdate', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ birthdate }),
   });
 }
 

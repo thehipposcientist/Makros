@@ -51,6 +51,7 @@ import SupplementStackScreen from '../components/SupplementStackScreen';
 import RecoveryCard from '../components/RecoveryCard';
 import WeeklyDigestCard from '../components/WeeklyDigestCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
+import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
 import CyclePhaseCard from '../components/CyclePhaseCard';
 import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
@@ -4426,6 +4427,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
               );
             })()}
+
+            {/* Birthday backfill nudge (existing users only — hides once
+                profile.birthdate is set or after user dismisses). Keeps
+                HR zones / calorie math accurate as users age. */}
+            {workoutSubTab === 'plan' && authToken && (
+              <BirthdateBackfillCard
+                authToken={authToken}
+                existingBirthdate={userProfile.physicalStats?.birthdate ?? null}
+                themeName={userProfile.themePreference}
+                onSaved={(bd, age) => {
+                  // Mutate via onProfileUpdate so AsyncStorage cache
+                  // and backend mirror stay consistent — same channel
+                  // every other profile-mutating UI uses.
+                  onProfileUpdate?.({
+                    physicalStats: {
+                      ...userProfile.physicalStats,
+                      birthdate: bd,
+                      age,
+                    },
+                  } as any, true);
+                }}
+              />
+            )}
 
             {/* Streak + consistency widget (Feature 8) */}
             {workoutSubTab === 'plan' && authToken && (

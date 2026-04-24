@@ -260,7 +260,7 @@ export default function FormVideoModal({
                             styles.thumbCard,
                             {
                               backgroundColor: colors.surfaceRaised,
-                              borderColor: opt.recommended ? colors.primary : colors.border,
+                              borderColor: colors.primary,
                               borderWidth: opt.recommended ? 1.5 : 1,
                             },
                           ]}
