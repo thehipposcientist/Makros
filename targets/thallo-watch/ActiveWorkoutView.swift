@@ -20,22 +20,28 @@ import WatchKit
 // ─── Flow state owned by the watch ─────────────────────────────────
 
 final class ActiveWorkoutState: ObservableObject {
-    @Published var exerciseIndex: Int = 0
-    @Published var setNumber: Int = 1          // 1-indexed within the current exercise
-    @Published var restRemaining: Int? = nil   // seconds; nil = not resting
-    @Published var paused: Bool = false
+    @Published var exerciseIndex: Int = 0 { didSet { persist() } }
+    @Published var setNumber: Int = 1 { didSet { persist() } }   // 1-indexed within the current exercise
+    @Published var restRemaining: Int? = nil { didSet { persist() } }   // seconds; nil = not resting
+    @Published var paused: Bool = false { didSet { persist() } }
     // Log-set inputs. Seeded from the exercise's planned target on
     // entry so a first-time user already has a reasonable number.
-    @Published var pendingWeight: Double = 0
-    @Published var pendingReps: Int = 0
+    @Published var pendingWeight: Double = 0 { didSet { persist() } }
+    @Published var pendingReps: Int = 0 { didSet { persist() } }
     // Cache of per-set logs so the user can see "last set: 135×8"
     // when dialing in the next set's weight.
-    @Published var lastLoggedWeight: Double? = nil
-    @Published var lastLoggedReps: Int? = nil
+    @Published var lastLoggedWeight: Double? = nil { didSet { persist() } }
+    @Published var lastLoggedReps: Int? = nil { didSet { persist() } }
 
     private var cancellables: Set<AnyCancellable> = []
+    // Defaults key — persists across watch-app background / kill so
+    // users mid-workout don't lose their place when iOS reclaims
+    // memory or they background to glance at a notification.
+    private static let kPersistKey = "thallo.activeWorkoutState"
+    private var hydrating = false
 
     init() {
+        hydrate()
         // Still listen to phone progress pushes so if a user logs
         // a set on the phone the watch advances too.
         NotificationCenter.default.publisher(for: .watchProgressUpdate)
@@ -46,6 +52,46 @@ final class ActiveWorkoutState: ObservableObject {
                 if let rest = info["restRemainingSec"] as? Int { self.restRemaining = rest }
             }
             .store(in: &cancellables)
+    }
+
+    /// Persist the in-memory flow state to UserDefaults. Called
+    /// implicitly by every `@Published` setter via `didSet`. We
+    /// intentionally serialise the whole struct on each change rather
+    /// than diffing — the payload is tiny (~80 bytes) and watchOS
+    /// background terminations can happen between any two writes.
+    private func persist() {
+        if hydrating { return }
+        let blob: [String: Any] = [
+            "exerciseIndex": exerciseIndex,
+            "setNumber": setNumber,
+            "restRemaining": restRemaining as Any,
+            "paused": paused,
+            "pendingWeight": pendingWeight,
+            "pendingReps": pendingReps,
+            "lastLoggedWeight": lastLoggedWeight as Any,
+            "lastLoggedReps": lastLoggedReps as Any,
+        ]
+        UserDefaults.standard.set(blob, forKey: Self.kPersistKey)
+    }
+
+    private func hydrate() {
+        guard let blob = UserDefaults.standard.dictionary(forKey: Self.kPersistKey) else { return }
+        hydrating = true
+        if let v = blob["exerciseIndex"] as? Int { exerciseIndex = v }
+        if let v = blob["setNumber"] as? Int { setNumber = v }
+        if let v = blob["restRemaining"] as? Int { restRemaining = v }
+        if let v = blob["paused"] as? Bool { paused = v }
+        if let v = blob["pendingWeight"] as? Double { pendingWeight = v }
+        if let v = blob["pendingReps"] as? Int { pendingReps = v }
+        if let v = blob["lastLoggedWeight"] as? Double { lastLoggedWeight = v }
+        if let v = blob["lastLoggedReps"] as? Int { lastLoggedReps = v }
+        hydrating = false
+    }
+
+    /// Wipe persisted state — call on workout end / cancel so the
+    /// next workout starts from a clean slate.
+    func clearPersisted() {
+        UserDefaults.standard.removeObject(forKey: Self.kPersistKey)
     }
 
     /// Prime the weight / reps inputs for the current exercise.

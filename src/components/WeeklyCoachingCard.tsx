@@ -23,7 +23,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import {
-  getWeeklyReview, WeeklyReviewResponse, PlanRecommendation, MuscleVolumeRow,
+  getWeeklyReview, applyRecommendationAction,
+  WeeklyReviewResponse, PlanRecommendation, MuscleVolumeRow,
 } from '../services/api';
 
 interface Props {
@@ -269,20 +270,31 @@ export default function WeeklyCoachingCard({
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
                       <TouchableOpacity
-                        onPress={() => {
+                        onPress={async () => {
                           if (rec.action.type === 'noop') {
                             dismissRec(rec.key);
                             return;
                           }
-                          if (onAcceptRecommendation) {
-                            acceptRec(rec);
-                          } else {
-                            // No handler wired yet — confirm so the
-                            // user knows we heard them, then dismiss.
+                          // Route every accept through the apply path
+                          // — backend maps action.type to durable user
+                          // state (days/week, calorie adjustment, day
+                          // state). No client-side plan mutation.
+                          try {
+                            const result = await applyRecommendationAction(
+                              authToken, rec.action, rec.key,
+                            );
+                            // Hand back to the parent so HomeScreen
+                            // can kick plan regen when needs_regen=true.
+                            onAcceptRecommendation?.(rec);
                             Alert.alert(
-                              'Got it',
-                              "We'll factor this into next week's plan. (Auto-apply for this action is coming.)",
+                              result.applied ? 'Applied' : 'Acknowledged',
+                              result.summary,
                               [{ text: 'OK', onPress: () => dismissRec(rec.key) }],
+                            );
+                          } catch (e: any) {
+                            Alert.alert(
+                              'Could not apply',
+                              e?.message ?? 'Something went wrong. Try again.',
                             );
                           }
                         }}

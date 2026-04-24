@@ -59,6 +59,34 @@ class CheckinRequest(BaseModel):
     dry_run: bool = False   # if true, don't persist AIDecision or apply delta
 
 
+class ApplyActionBody(BaseModel):
+    """Apply a single recommendation action returned by the weekly
+    review or quick-intent router. Maps to durable user state
+    (UserPreferences / UserCoachingState / UserDayState) — same path
+    a manual settings change would take. No ad-hoc plan mutation."""
+    action: dict
+    rec_key: str | None = None
+
+
+@router.post("/apply-action")
+def apply_recommendation_action(
+    body: ApplyActionBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Translate a recommendation action into durable user state.
+
+    Architectural rule: AI / weekly review can only do what the user
+    can do via existing app UI. Applying a rec mutates the same
+    settings (days/week, calorie adjustment, day-state, etc.) that the
+    user can change manually — the next plan regen picks them up via
+    the normal pipeline. We never mutate the active plan_json directly.
+    """
+    from app.services.coach.apply_action import apply_action
+    result = apply_action(db, current_user.id, body.action, rec_key=body.rec_key)
+    return result.to_dict()
+
+
 @router.post("/recompute")
 def recompute(
     as_of: date | None = Query(default=None, description="Defaults to today"),
@@ -199,6 +227,47 @@ def post_checkin(
         payload = build_weekly_payload(db, current_user.id, feedback_dict)
     else:
         payload = build_micro_payload(db, current_user.id, feedback_dict)
+
+    # 2a. Pull the deterministic weekly review into the payload so the
+    # AI sees the same data the user just saw on the modal's "Trainer's
+    # Read" block. Without this the AI was flying blind to the volume,
+    # cardio, and recommendations the user is reacting to. Now the
+    # response can explicitly accept / soften / defer specific recs by
+    # name instead of generic "great week!" filler.
+    try:
+        from app.services.workout.plan_review_v2 import compute_weekly_review
+        review = compute_weekly_review(db, current_user.id, days=7)
+        # Trim down to what the AI actually needs — full volume.by_muscle
+        # is verbose and the headline + recs are the high-signal bits.
+        payload["weekly_review"] = {
+            "headline": review.headline,
+            "goal": review.goal,
+            "sessions_completed": review.sessions_completed,
+            "sessions_planned": review.sessions_planned,
+            "adherence_pct": review.adherence_pct,
+            "cardio_minutes": review.cardio_minutes,
+            "zone2_minutes": review.zone2_minutes,
+            "total_hard_sets": review.volume.total_hard_sets,
+            "muscles_low": review.volume.muscles_low(),
+            "muscles_high": review.volume.muscles_high(),
+            "weight_trend_direction": review.weight_trend_direction,
+            "avg_protein_g": review.avg_protein_g,
+            "avg_fiber_g": review.avg_fiber_g,
+            "days_logged": review.days_logged,
+            "recommendations": [
+                {
+                    "key": r.key,
+                    "title": r.title,
+                    "priority": r.priority,
+                    "area": r.area,
+                    "detail": r.detail,
+                }
+                for r in review.recommendations[:5]  # cap so prompt stays small
+            ],
+        }
+    except Exception as e:
+        # Non-fatal — checkin still works without the review payload.
+        print(f"[coach/checkin] weekly_review attach failed: {e}")
 
     # 2b. Deterministic weekly evaluation — pulls prior commitments from
     # CoachMemory (event_type="commitment") and grades them against actual

@@ -1626,6 +1626,11 @@ export async function askTrainerQuestion(
   updated_injuries?: any[] | null;
   injury_clarification_needed?: boolean;
   logged_workouts?: Array<{ date: string; focus: string; durationSeconds: number; exercises: any[] }> | null;
+  /** Quick-intent router output — when present, the answer was a
+   *  canned response for one of the 12 known intents, and the action
+   *  dict can be passed directly to applyRecommendationAction. */
+  intent?: string | null;
+  action?: Record<string, any> | null;
 }> {
   console.log('[askTrainerQuestion] SEND →', {
     mode: payload.mode,
@@ -1646,6 +1651,8 @@ export async function askTrainerQuestion(
     updated_nutrition_plan?: any | null;
     updated_injuries?: any[] | null;
     injury_clarification_needed?: boolean;
+    intent?: string | null;
+    action?: Record<string, any> | null;
   }>('/ai/trainer-question', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -2673,6 +2680,32 @@ export async function getWeeklyReview(
   return request<WeeklyReviewResponse>(`/workouts/weekly-review${qs ? `?${qs}` : ''}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export interface ApplyActionResult {
+  applied: boolean;
+  summary: string;
+  needs_regen: boolean;
+  changed_fields: Record<string, any>;
+  descriptive_only: boolean;
+  error: string | null;
+}
+
+/** Apply a recommendation action to durable user state. The backend
+ *  maps action types to existing user-facing settings (days/week,
+ *  calorie adjustment, day-state) — same path the user would take
+ *  manually through Edit Profile / Switch Day / etc. Caller is
+ *  responsible for kicking plan regen when `needs_regen=true`. */
+export async function applyRecommendationAction(
+  token: string,
+  action: Record<string, any>,
+  rec_key?: string,
+): Promise<ApplyActionResult> {
+  return request<ApplyActionResult>('/coach/apply-action', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ action, rec_key: rec_key ?? null }),
   });
 }
 

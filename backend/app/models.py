@@ -613,6 +613,13 @@ class ExerciseSet(SQLModel, table=True):
     actual_reps: int | None = Field(default=None)
     actual_weight_lbs: float | None = Field(default=None)
     rpe: int | None = Field(default=None)                # logged RPE
+    # Reps in reserve at the end of the set (0 = failure, 3+ = easy).
+    # Captured from the in-workout coach + Switch Day flow. Drives
+    # rolling e1RM (rolling_e1rm.py) and the in_workout_review's
+    # progression decisions. Stored separately from rpe because RIR
+    # is a forward-looking signal (how much was left in the tank)
+    # vs RPE which is the user's perceived exertion in the moment.
+    actual_rir: float | None = Field(default=None)
     completed: bool = Field(default=False)
     completed_at: datetime | None = Field(default=None)
 

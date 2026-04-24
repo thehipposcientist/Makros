@@ -414,6 +414,53 @@ fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, h
 ## Supported Splits
 PPL, Upper/Lower, Full Body, PPL+UL hybrid, Bro split (auto-selected based on goal + days).
 
+## AI Apply Path (architectural rule)
+
+**Rule**: AI / weekly-review can only do what the user can do via existing app UI. Recommendations don't directly mutate the active `WorkoutPlan` — they mutate the user-facing settings (UserPreferences, UserCoachingState, UserGoal, UserDayState) that the planner already reacts to on regen. The next regen picks up the changes.
+
+- **Endpoint**: `POST /coach/apply-action` body `{action, rec_key?}`.
+- **Implementation**: `backend/app/services/coach/apply_action.py::apply_action`.
+- **Supported action types** (mutate durable state):
+  - `change_days_per_week` → `UserPreferences.days_per_week` (capped ±1 per apply)
+  - `raise_calories` / `lower_calories` → `UserCoachingState.calorie_adjustment` (capped ±250 kcal per apply)
+  - `hold_calorie_adjustment` → records explicit user signal in CoachMemory
+  - `swap_to_recovery` → tomorrow's `UserDayState.skipped_focus = "recovery"`
+  - `noop` → ack only
+- **Descriptive-only actions** (record in CoachMemory, no state mutation): `reduce_muscle_volume`, `add_muscle_volume`, `hold_muscle_volume`, `add_cardio_session`, `add_zone2_session`, `reduce_cardio`, `schedule_deload`, `set_core_frequency`, `shorten_workout`, `reduce_intensity`, `carb_bump_today`, `raise_protein_target`, `raise_fiber_target`, `rebalance_week`, `strength_preservation`, `swap_to_recovery_or_reduce`. The next regen factors them via existing volume / focus rotation logic.
+- **Wiring**: `WeeklyCoachingCard` (Progress → Health), `CoachCheckinModal` (inline rec pills), trainer chat (`HomeScreen.tsx` quick-intent "Apply" button on assistant messages) all route through this single endpoint.
+
+## actual_rir + Rolling e1RM (P1 from rep/weight audit)
+
+- **Column**: `ExerciseSet.actual_rir DOUBLE PRECISION` (idempotent migration `_ensure_exercise_set_actual_rir_column`). Stored separately from `rpe` because RIR is forward-looking ("how many left in the tank") vs RPE which is perceived exertion.
+- **Helper**: `backend/app/services/workout/rolling_e1rm.py::compute_rolling_e1rm(sets, role)`.
+- **Math**: `set_e1rm = w * (1 + (reps + actual_rir) / 30)` (Epley with RIR), recency-weighted via `exp(-days_since * ln(2) / 14)` (14-day half-life), then weighted median across the last 6–10 usable sets.
+- **Filters**: `completed=True`, not warmup, role-aware rep band (compound 3–10 / isolation 6–15), RIR in [0, 4], weight > 0.
+- **Returns** `E1RMEstimate(e1rm_lbs, sample_count, confidence)` with confidence = high / med / low based on n + spread. Returns `None` with <3 usable sets — caller falls back to best-ever 1RM or AI starting weight.
+- **Why median not mean**: a single hot session shouldn't lock in a too-high baseline for weeks.
+
+## Watch Active-State Persistence (#148)
+
+- `targets/thallo-watch/ActiveWorkoutView.swift::ActiveWorkoutState` persists `exerciseIndex` / `setNumber` / `restRemaining` / `paused` / `pendingWeight` / `pendingReps` / `lastLoggedWeight` / `lastLoggedReps` to UserDefaults via `didSet` on every `@Published`.
+- `hydrate()` runs in `init` so a backgrounded watch app re-mounting picks up exactly where it left off.
+- `clearPersisted()` called on workout end/cancel so the next session starts from a clean slate.
+- Hydrate guard (`hydrating = true`) prevents the initial restore from looping back through `persist()`.
+
+## Smart Weekly Check-in
+
+`POST /coach/checkin` now ALSO loads `compute_weekly_review` and attaches a trimmed `weekly_review` field to the AI payload (headline, sessions, cardio, zone2, total_hard_sets, muscles_low/high, weight trend, avg protein/fiber, top 5 recommendations). The `SYSTEM_PROMPT` in `checkin_ai.py` is rewritten to require the AI to reference at least one specific number from the review and at least one rec by short name — no more generic "great week!" filler.
+
+The check-in modal (`CoachCheckinModal.tsx`) leads with a "TRAINER'S READ · THIS WEEK" block + inline `Apply` pills on each rec that route through `/coach/apply-action`. The 4-tap rating form stays but is now framed as "confirm/refine the trainer's read" rather than "tell us from scratch."
+
+## Test Suite (#149)
+
+New pure-function tests added to `backend/tests/run_all.py`:
+- `tests.test_weekly_volume` — `_classify` band logic, spike detection, range sanity.
+- `tests.test_carb_distribution` — protein invariant, carb shifts, per-goal caps, ±5 kcal preservation, 40g floor.
+- `tests.test_quick_intents` — all 12 intents match positive cases, no false-positives on generic Q&A, handlers return structured actions.
+- `tests.test_rolling_e1rm` — <3 sample fallback, basic Epley+RIR, recency weighting (3 recent vs stale), warmup filtering, role-aware rep band, RIR fallback to target, confidence tier.
+
+Run via `make test` or `docker exec thallo-backend python -m tests.run_all`.
+
 ## Recommended Next Improvements
 
 ### Performance / observability

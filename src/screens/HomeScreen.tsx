@@ -122,6 +122,13 @@ interface MealDay {
 interface TrainerChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** Set when the assistant message came from a quick-intent handler.
+   *  Lets the chat UI render an "Apply" button that routes through
+   *  applyRecommendationAction → durable settings change. */
+  intent?: string | null;
+  action?: Record<string, any> | null;
+  /** Becomes true after the user accepts so we can hide the button. */
+  applied?: boolean;
 }
 
 interface PendingPlanUpdate {
@@ -3140,8 +3147,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         resp.safety_note ? `\nSafety: ${resp.safety_note}` : '',
       ].join('');
 
-      // Show the answer immediately — don't wait for plan application
-      setActiveChat(prev => [...prev, { role: 'assistant', content: combined }]);
+      // Show the answer immediately — don't wait for plan application.
+      // Quick-intent responses carry an `action` dict; we surface it
+      // so the chat row gets an "Apply" button that hits the same
+      // durable-state apply path as the weekly review card.
+      setActiveChat(prev => [...prev, {
+        role: 'assistant',
+        content: combined,
+        intent: (resp as any).intent ?? null,
+        action: (resp as any).action ?? null,
+      }]);
       setTrainerLoading(false);
 
       // Unified coach can update both workout and nutrition
@@ -7215,6 +7230,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     {visibleChat.map((m, idx) => (
                       <View key={idx} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
                         <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
+                        {/* Quick-intent action — when the assistant
+                            response carries a structured action, show
+                            an "Apply" pill that routes through the
+                            same durable-state path the weekly review
+                            card uses. Hidden after accept. */}
+                        {m.role === 'assistant' && m.action && !m.applied && m.action.type !== 'noop' && authToken && (
+                          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+                            <TouchableOpacity
+                              onPress={async () => {
+                                try {
+                                  const { applyRecommendationAction } = await import('../services/api');
+                                  const r = await applyRecommendationAction(authToken, m.action!, m.intent ?? undefined);
+                                  setWorkoutChat(prev => prev.map((x, i) => i === idx ? { ...x, applied: true } : x));
+                                  setWorkoutChat(prev => [...prev, {
+                                    role: 'assistant',
+                                    content: r.summary,
+                                  }]);
+                                } catch { /* swallow */ }
+                              }}
+                              style={{
+                                paddingHorizontal: 10, paddingVertical: 5,
+                                borderRadius: 8,
+                                backgroundColor: themeColors.primary,
+                              }}>
+                              <Text style={{ fontSize: 11, fontWeight: '800', color: themeColors.background }}>
+                                Apply
+                              </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setWorkoutChat(prev => prev.map((x, i) => i === idx ? { ...x, applied: true } : x));
+                              }}
+                              style={{
+                                paddingHorizontal: 10, paddingVertical: 5,
+                                borderRadius: 8,
+                                backgroundColor: themeColors.surface,
+                                borderWidth: 1, borderColor: themeColors.border,
+                              }}>
+                              <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textSecondary }}>
+                                Dismiss
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
                       </View>
                     ))}
                   </>

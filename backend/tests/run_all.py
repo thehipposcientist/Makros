@@ -52,6 +52,11 @@ _TEST_MODULES = (
     "tests.test_pr_detection",
     # Weekly digest: 7-day review with sessions/volume/PRs/nutrition.
     "tests.test_weekly_digest",
+    # Pure-function tests for the new deterministic services.
+    "tests.test_weekly_volume",
+    "tests.test_carb_distribution",
+    "tests.test_quick_intents",
+    "tests.test_rolling_e1rm",
     # Plateau detection: 4-week flat 1RM → suggestion.
     "tests.test_plateau_detection",
     # Streak + compliance coaching.

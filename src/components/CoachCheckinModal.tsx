@@ -20,6 +20,7 @@ import {
   CoachCheckinResponse,
   getWeeklyReview,
   WeeklyReviewResponse,
+  applyRecommendationAction,
 } from '../services/api';
 
 /**
@@ -270,6 +271,39 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
                                 <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2, lineHeight: 15 }}>
                                   {rec.detail}
                                 </Text>
+                                {/* Inline apply — same path as the
+                                    Progress tab's coaching card. Maps
+                                    to durable user settings, not
+                                    plan_json. */}
+                                {rec.action.type !== 'noop' && (
+                                  <TouchableOpacity
+                                    onPress={async () => {
+                                      try {
+                                        const r = await applyRecommendationAction(authToken, rec.action, rec.key);
+                                        // Show concise feedback then
+                                        // remove the rec from view so
+                                        // it's clear it was handled.
+                                        setReview(prev => prev ? {
+                                          ...prev,
+                                          recommendations: prev.recommendations.filter(x => x.key !== rec.key),
+                                        } : prev);
+                                        // Lightweight inline note —
+                                        // we don't open an Alert so
+                                        // the check-in flow stays smooth.
+                                      } catch { /* swallow */ }
+                                    }}
+                                    style={{
+                                      alignSelf: 'flex-start',
+                                      marginTop: 6,
+                                      paddingHorizontal: 10, paddingVertical: 4,
+                                      borderRadius: 6,
+                                      backgroundColor: rec.priority === 'warn' ? colors.error : rec.priority === 'suggest' ? colors.warning : colors.primary,
+                                    }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#fff' }}>
+                                      Apply
+                                    </Text>
+                                  </TouchableOpacity>
+                                )}
                               </View>
                             </View>
                           ))

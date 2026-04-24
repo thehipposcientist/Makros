@@ -65,12 +65,12 @@ struct ContentView: View {
                     SupplementsView()
                 }
                 .tabViewStyle(.page)
-                // `.always` keeps the page dots visible at the bottom
-                // so users discover they can swipe between Today /
-                // Meals / Supps without guessing. Default .automatic
-                // fades them out after a beat — fine on iOS, confusing
-                // on a small watch screen.
-                .indexViewStyle(.page(backgroundDisplayMode: .always))
+                // watchOS doesn't expose `.indexViewStyle(.page(backgroundDisplayMode:))`
+                // (that API is iOS-only). The default page-style
+                // TabView already shows page indicators on watchOS.
+                // The swipe-hint pill below covers first-run
+                // discoverability, which is the whole reason that
+                // modifier was here in the first place.
                 .overlay(alignment: .top) {
                     if showSwipeHint {
                         SwipeHintPill()

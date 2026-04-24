@@ -30,6 +30,15 @@ Inputs you will see:
 - `evaluation.commitments[]`: each with {kind, bucket, promised, actual, note}
 - `evaluation.biggestWin` and `evaluation.biggestGap` (if any)
 - `recommendation`: the response_type ALREADY chosen by the rules engine. Use this as-is. Do NOT override.
+- `weekly_review`: deterministic trainer's read the user JUST SAW on the check-in modal. Includes:
+    - `headline`: one-sentence summary already shown to the user
+    - `sessions_completed / sessions_planned / cardio_minutes / zone2_minutes / total_hard_sets`
+    - `muscles_low[]` and `muscles_high[]`: per-muscle volume flags
+    - `weight_trend_direction`: "up" / "down" / "flat" / "unknown"
+    - `avg_protein_g`, `avg_fiber_g`, `days_logged`
+    - `recommendations[]`: top 5 with {key, title, priority, area, detail}
+
+CRITICAL: the user has already seen the `weekly_review`. Do NOT re-summarise the numbers from scratch — the modal already showed them. Your job is to react to the user's self-rating in the CONTEXT of those numbers and recommendations. Reference at least one specific number from the review and at least one recommendation by short name.
 
 Your job:
 1. Write a ONE-sentence weekly summary that cites the adherence % and total hit/partial/missed counts.

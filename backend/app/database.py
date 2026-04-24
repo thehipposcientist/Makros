@@ -525,6 +525,20 @@ def _ensure_meal_consumed_at_column() -> None:
         print(f"[migration] meal consumed_at / meal_type add failed (non-fatal): {e}")
 
 
+def _ensure_exercise_set_actual_rir_column() -> None:
+    """Add `actual_rir` to exercise_sets — drives rolling e1RM + the
+    in-workout coach's progression decisions. Idempotent."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS actual_rir DOUBLE PRECISION",
+            ))
+    except Exception as e:
+        print(f"[migration] exercise_sets actual_rir add failed (non-fatal): {e}")
+
+
 def _ensure_food_metadata_amounts_columns() -> None:
     """Add AI-estimated amount columns to food_metadata.
 
@@ -595,6 +609,7 @@ def create_db_and_tables():
     _ensure_meal_consumed_at_column()
     _ensure_user_profile_birthdate_column()
     _ensure_food_metadata_amounts_columns()
+    _ensure_exercise_set_actual_rir_column()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()
