@@ -11,6 +11,7 @@ import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
+import LiveActivityTracker from '../components/LiveActivityTracker';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
@@ -1526,6 +1527,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [nutritionScoreExpanded, setNutritionScoreExpanded] = useState(false);
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
+  const [showLiveTracker, setShowLiveTracker] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
 
   // Next-day unlogged-meals prompt. Populated once per day when yesterday
@@ -1838,6 +1840,78 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     nutritionPlansByDate, checkedMealsByDate,
     readinessScore, nutritionScoreData,
   ]);
+
+  // Re-push the full snapshot (workout + meals + theme) whenever the
+  // watch app becomes reachable. Without this, a watch that was
+  // closed when the phone last pushed would only see the stale
+  // applicationContext queued by iOS — opening the watch app after
+  // the phone already started a workout wouldn't reflect the active
+  // state. With this, the moment reachability flips true we send a
+  // fresh snapshot so the UI on the wrist matches the phone within
+  // a second or two.
+  //
+  // Refs keep the listener idempotent — we register once but always
+  // read the latest state when re-pushing.
+  const rePushStateRef = useRef({
+    schedule: [] as any[],
+    themePreference: undefined as any,
+    todayDone: false,
+    skippedDates: new Set<string>(),
+    nutritionPlansByDate: {} as any,
+    checkedMealsByDate: {} as any,
+    readinessScore: null as any,
+    nutritionScoreData: null as any,
+  });
+  useEffect(() => {
+    rePushStateRef.current = {
+      schedule: schedule as any[],
+      themePreference: userProfile?.themePreference,
+      todayDone,
+      skippedDates,
+      nutritionPlansByDate,
+      checkedMealsByDate,
+      readinessScore,
+      nutritionScoreData,
+    };
+  });
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    (async () => {
+      try {
+        const { onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch } =
+          await import('../utils/watchSync');
+        unsubscribe = onWatchReachabilityChange((info) => {
+          if (!info.reachable) return;
+          const s = rePushStateRef.current;
+          const todayISO = new Date().toISOString().slice(0, 10);
+          const todayItem = (s.schedule as any[])?.[0] ?? null;
+          const todayWorkout = todayItem?.workout ?? null;
+          const status: 'scheduled' | 'completed' | 'skipped' | 'rest' =
+            s.todayDone ? 'completed'
+            : s.skippedDates.has(todayKey()) ? 'skipped'
+            : todayItem?.isRest ? 'rest'
+            : 'scheduled';
+          console.log('[watch] reachable — re-pushing home snapshot', { status });
+          pushWorkoutToWatch(todayWorkout, {
+            dateISO: todayISO,
+            status,
+            readiness: s.readinessScore?.score ?? null,
+            readinessLabel: s.readinessScore?.label ?? null,
+          }).catch(() => {});
+          pushThemeToWatch(s.themePreference).catch(() => {});
+          const todayPlan = s.nutritionPlansByDate[todayISO]
+            ?? (Object.values(s.nutritionPlansByDate)[0] as any);
+          pushMealsToWatch(
+            todayPlan,
+            s.checkedMealsByDate[todayISO],
+            todayISO,
+            s.nutritionScoreData?.score ?? null,
+          ).catch(() => {});
+        });
+      } catch { /* bridge optional */ }
+    })();
+    return () => { if (unsubscribe) unsubscribe(); };
+  }, []);
 
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
@@ -4663,6 +4737,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
+                  style={[styles.planNoteLink, { borderColor: themeColors.primary + '44' }]}
+                  onPress={() => setShowLiveTracker(true)}
+                  activeOpacity={0.7}>
+                  <Ionicons name="play-circle-outline" size={14} color={themeColors.primary} />
+                  <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]}>
+                    Start Workout
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
                   style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44' }]}
                   onPress={() => setWorkoutSubTab('equipment')}
                   activeOpacity={0.7}>
@@ -6048,6 +6131,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             } catch {}
           }
           import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+        }}
+      />
+
+      {/* Live tracker — open-ended run/ride/hike/yoga timer with HR
+          polling. Saves via LogActivityModal on Finish so the session
+          flows through the same fatigue + history path as any other
+          manual activity. */}
+      <LiveActivityTracker
+        visible={showLiveTracker}
+        onClose={() => setShowLiveTracker(false)}
+        themeName={userProfile.themePreference}
+        onSaved={() => {
+          // Bump history so the streak / recent-sessions widgets pick
+          // up the new row without needing a tab switch.
+          (async () => {
+            try {
+              const { loadWorkoutHistory } = await import('../utils/workoutHistory');
+              const fresh = await loadWorkoutHistory();
+              setWorkoutHistoryList(fresh);
+            } catch { /* non-fatal */ }
+          })();
         }}
       />
 

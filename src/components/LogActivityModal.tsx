@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, Modal, TouchableOpacity, TextInput, ScrollView,
   StyleSheet, Alert, UIManager, Platform,
@@ -124,14 +124,38 @@ function getLegacyFocus(category: ActivityCategory, subtype: string, custom?: st
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+/** Optional seed values. Used by the Apple Health detected-workouts
+ *  flow to pre-fill the modal from HK metadata so the user only has
+ *  to confirm the classification + adjust intensity. `externalId`,
+ *  when supplied, is used as the session id so the same HK workout
+ *  can't be imported twice (matches the `hk_<startMs>` format that
+ *  `workoutAutoImport.detectUnloggedWorkouts` filters on). */
+export interface LogActivityPrefill {
+  externalId?: string;
+  dateISO?: string;
+  durationMin?: number;
+  category?: ActivityCategory;
+  subtype?: string;
+  cardioStyle?: CardioStyle;
+  distanceMiles?: number | null;
+  caloriesBurned?: number | null;
+  avgHeartRate?: number | null;
+  startedAtISO?: string;
+  endedAtISO?: string;
+}
+
 interface Props {
   visible: boolean;
   onClose: () => void;
   onSave: (session: WorkoutSession) => Promise<void>;
   themeName?: AppThemeName;
+  /** Pre-populate the form from external data (Apple Health import,
+   *  finishing a live-tracker session, etc). When present the user
+   *  lands directly on the classification step. */
+  prefill?: LogActivityPrefill | null;
 }
 
-export default function LogActivityModal({ visible, onClose, onSave, themeName }: Props) {
+export default function LogActivityModal({ visible, onClose, onSave, themeName, prefill }: Props) {
   const tc = getTheme(themeName).colors;
 
   const [step, setStep] = useState<1 | 2>(1);
@@ -165,6 +189,39 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
     setCalories('');
     setHeartRate('');
   }, []);
+
+  // Seed state from prefill when the modal opens. Only runs on
+  // visibility transition so it doesn't clobber user edits mid-flow.
+  useEffect(() => {
+    if (!visible) return;
+    if (!prefill) return;
+    if (prefill.category) {
+      setCategory(prefill.category);
+      setStep(2); // skip the category picker — AH already told us
+    }
+    if (prefill.subtype) setSubtype(prefill.subtype);
+    if (prefill.cardioStyle) setCardioStyle(prefill.cardioStyle);
+    if (typeof prefill.durationMin === 'number' && prefill.durationMin > 0) {
+      setDurationMin(Math.round(prefill.durationMin));
+    }
+    if (prefill.dateISO) {
+      const then = new Date(prefill.dateISO);
+      const now = new Date();
+      // Compute offset in days (negative = past).
+      const msPerDay = 86400 * 1000;
+      const offset = Math.round((then.getTime() - now.setHours(0, 0, 0, 0)) / msPerDay);
+      setDateOffset(Math.max(-14, Math.min(0, offset)));
+    }
+    if (prefill.distanceMiles != null) setDistance(String(prefill.distanceMiles));
+    if (prefill.caloriesBurned != null) setCalories(String(Math.round(prefill.caloriesBurned)));
+    if (prefill.avgHeartRate != null) setHeartRate(String(Math.round(prefill.avgHeartRate)));
+    // Show "Advanced" when any of its fields are pre-filled so the user
+    // sees the imported metrics rather than them hiding behind the
+    // collapsible.
+    if (prefill.distanceMiles != null || prefill.caloriesBurned != null || prefill.avgHeartRate != null) {
+      setShowAdvanced(true);
+    }
+  }, [visible, prefill]);
 
   const selectCategory = (cat: ActivityCategory) => {
     configureExpandAnimation(300);
@@ -217,10 +274,19 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
       const date = getDateForOffset(dateOffset);
       const legacyFocus = getLegacyFocus(category, subtype, customSubtype);
       const session: WorkoutSession = {
-        id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        // Keep the HK externalId (or whatever the caller passed) as
+        // the session id so a re-import of the same workout dedupes
+        // via `alreadyImportedIds` in detectUnloggedWorkouts.
+        id: prefill?.externalId
+          ?? `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         date: date.toISOString(),
         focus: legacyFocus,
         durationSeconds: durationMin * 60,
+        // When an import or live-tracker gave us exact timestamps
+        // carry them through — the fatigue model + overlap-dedupe
+        // both benefit from real intervals instead of synthesized ones.
+        ...(prefill?.startedAtISO ? { startedAt: prefill.startedAtISO } : {}),
+        ...(prefill?.endedAtISO ? { endedAt: prefill.endedAtISO } : {}),
         exercises: [],
         completed: true,
         manualActivity: {
@@ -232,6 +298,11 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName }
           ...(distance ? { distanceMiles: parseFloat(distance) } : {}),
           ...(calories ? { caloriesBurned: parseFloat(calories) } : {}),
           ...(heartRate ? { avgHeartRate: parseInt(heartRate, 10) } : {}),
+          // Tag the source so the UI + analytics can distinguish
+          // imported HK workouts, live-tracker sessions, and plain
+          // manual-retro entries.
+          ...(prefill?.externalId?.startsWith('hk_') ? { source: 'apple_health' as any } : {}),
+          ...(prefill?.externalId?.startsWith('live_') ? { source: 'live_tracker' as any } : {}),
         },
       };
       await onSave(session);

@@ -123,4 +123,25 @@ export const WatchBridge = {
       try { sub?.remove?.(); } catch { /* no-op */ }
     };
   },
+
+  /** Fires whenever WCSession reachability flips (watch app opened /
+   *  closed) or on initial session activation. Callers use this to
+   *  re-push the current state snapshot so the watch wakes up with
+   *  fresh data instead of whatever was queued last. */
+  addReachabilityListener(
+    cb: (info: { reachable: boolean; paired: boolean; installed: boolean }) => void,
+  ): () => void {
+    if (!native) return () => {};
+    const handler = (evt: { reachable?: boolean; paired?: boolean; installed?: boolean }) => {
+      cb({
+        reachable: !!evt?.reachable,
+        paired: !!evt?.paired,
+        installed: !!evt?.installed,
+      });
+    };
+    const sub = native.addListener('reachabilityChanged', handler);
+    return () => {
+      try { sub?.remove?.(); } catch { /* no-op */ }
+    };
+  },
 };

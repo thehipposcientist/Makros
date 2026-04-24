@@ -102,6 +102,28 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
   };
 }
 
+// The `isPaired` gate used to silently drop every push if the WC
+// session reported unpaired — which happens transiently during
+// activation, after a reboot, etc. We now only gate on platform
+// availability (iOS + bridge compiled in) and let WCSession itself
+// decide whether to enqueue via updateApplicationContext /
+// transferUserInfo. That gives the payload a real chance to queue
+// even if `isPaired` is briefly false.
+function canPush(): boolean {
+  return WatchBridge.isAvailable();
+}
+
+function wsLog(fn: string, extra?: Record<string, any>): void {
+  // Wraps console.log so we can grep Metro logs for every watch
+  // push. Kept deliberately chatty during sync debugging — trim
+  // once the flow is stable.
+  // eslint-disable-next-line no-console
+  console.log(
+    `[watchSync] ${fn} reachable=${WatchBridge.isReachable()} paired=${WatchBridge.isPaired()}`,
+    extra ?? '',
+  );
+}
+
 /** Push today's workout with its current lifecycle status. */
 export async function pushWorkoutToWatch(
   day: WorkoutDay | null,
@@ -114,18 +136,20 @@ export async function pushWorkoutToWatch(
 ): Promise<boolean> {
   const payload = buildWatchWorkoutPayload(day, opts);
   if (!payload) return false;
-  if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
+  if (!canPush()) { wsLog('pushWorkoutToWatch skipped — bridge unavailable'); return false; }
+  wsLog('pushWorkoutToWatch', { status: opts.status, focus: payload.focus });
   return WatchBridge.syncWorkout(payload);
 }
 
 export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
   const palette = buildWatchPalette(themeName);
-  if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
+  if (!canPush()) return false;
   return WatchBridge.syncTheme(palette);
 }
 
 export async function pushProgressToWatch(progress: WatchProgress) {
-  if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
+  if (!canPush()) return false;
+  wsLog('pushProgressToWatch', progress);
   return WatchBridge.updateProgress(progress);
 }
 
@@ -138,7 +162,7 @@ export async function pushMealsToWatch(
   score?: number | null,
 ): Promise<boolean> {
   if (!plan) return false;
-  if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
+  if (!canPush()) return false;
 
   const targets = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
   const mealArr = plan.meals ?? [];
@@ -195,4 +219,22 @@ export function onWatchCommand(
 ): () => void {
   if (!WatchBridge.isAvailable()) return () => {};
   return WatchBridge.addCommandListener(cb);
+}
+
+/** Subscribe to WCSession reachability changes. Fires whenever the
+ *  watch app opens / closes (or right after session activation, so
+ *  listeners that mount mid-session still see the current state).
+ *  Callers re-push their current snapshot on `reachable=true` so the
+ *  watch gets fresh data the moment the user opens Thallo. */
+export function onWatchReachabilityChange(
+  cb: (info: { reachable: boolean; paired: boolean; installed: boolean }) => void,
+): () => void {
+  if (!WatchBridge.isAvailable()) return () => {};
+  return WatchBridge.addReachabilityListener(cb);
+}
+
+/** Convenience: returns a plain boolean the UI can read to decide
+ *  whether to show an "Open Thallo on your watch" nudge. */
+export function isWatchReachable(): boolean {
+  return WatchBridge.isAvailable() && WatchBridge.isReachable();
 }

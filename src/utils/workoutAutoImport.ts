@@ -22,10 +22,21 @@ function externalIdFor(w: WorkoutDetail): string {
   return `hk_${new Date(w.startDate).getTime()}`;
 }
 
-// Compare HKWorkouts against local history with a ±15 min tolerance.
-// A Thallo-logged session within that window of a HKWorkout is assumed to
-// already cover it.
-const MATCH_WINDOW_MS = 15 * 60 * 1000;
+// ±5 min buffer on each end of a local session's window. Anything Apple
+// Health recorded that overlaps (with the buffer) a Thallo session is
+// treated as already-covered. Buffer exists because a user may start
+// their watch workout a minute or two before/after starting in Thallo;
+// those should still dedupe.
+const OVERLAP_BUFFER_MS = 5 * 60 * 1000;
+
+interface LocalInterval {
+  start: number;
+  end: number;
+}
+
+function intervalsOverlap(a: LocalInterval, b: LocalInterval): boolean {
+  return a.start < b.end && b.start < a.end;
+}
 
 export async function detectUnloggedWorkouts(
   appleWorkouts: WorkoutDetail[],
@@ -36,13 +47,28 @@ export async function detectUnloggedWorkouts(
   const history = await loadWorkoutHistory().catch(() => []);
   const cutoff = Date.now() - lookbackDays * 86400000;
 
-  // Build a list of local session start times for matching.
-  const localTimes: number[] = [];
+  // Build time INTERVALS (start + end) for each local session so we can
+  // do proper overlap checks instead of a crude start-time window. The
+  // old ±15-min start-match dropped obvious dupes like "Thallo started
+  // 8:00, Apple Health logged 8:20 for the same session" because the
+  // watch started recording late. Interval overlap catches those.
+  const localIntervals: LocalInterval[] = [];
   for (const s of history) {
     if (s.skipped) continue;
-    const t = s.startedAt ? new Date(s.startedAt).getTime() : new Date(s.date).getTime();
-    if (t > 0 && t > cutoff) localTimes.push(t);
-    // Also track alreadyImported externalIds.
+    const startMs = s.startedAt
+      ? new Date(s.startedAt).getTime()
+      : new Date(s.date).getTime();
+    if (!(startMs > cutoff)) continue;
+    const endMs = s.endedAt
+      ? new Date(s.endedAt).getTime()
+      : startMs + (Number(s.durationSeconds) || 0) * 1000;
+    // Fallback for sessions that have no end/duration: treat as a 30-min
+    // nominal window so we still dedupe simple taps.
+    const safeEnd = endMs > startMs ? endMs : startMs + 30 * 60_000;
+    localIntervals.push({
+      start: startMs - OVERLAP_BUFFER_MS,
+      end: safeEnd + OVERLAP_BUFFER_MS,
+    });
   }
   const alreadyImportedIds = new Set(
     history.map(s => s.id).filter(id => id.startsWith('hk_')),
@@ -50,12 +76,17 @@ export async function detectUnloggedWorkouts(
 
   const candidates: ImportCandidate[] = [];
   for (const w of appleWorkouts) {
-    const start = new Date(w.startDate).getTime();
-    if (!(start > cutoff)) continue;
+    const startMs = new Date(w.startDate).getTime();
+    const endMs = new Date(w.endDate).getTime();
+    if (!(startMs > cutoff)) continue;
     const extId = externalIdFor(w);
     if (alreadyImportedIds.has(extId)) continue;
-    const hasMatch = localTimes.some(t => Math.abs(t - start) <= MATCH_WINDOW_MS);
-    if (hasMatch) continue;
+    const hkInterval: LocalInterval = {
+      start: startMs,
+      end: endMs > startMs ? endMs : startMs + (w.duration || 0) * 60_000,
+    };
+    const overlapsExisting = localIntervals.some(iv => intervalsOverlap(iv, hkInterval));
+    if (overlapsExisting) continue;
     candidates.push({
       externalId: extId,
       activityName: w.activityName ?? 'Workout',

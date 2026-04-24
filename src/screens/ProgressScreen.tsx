@@ -21,6 +21,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
+import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -1373,6 +1374,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Detected Apple Health workouts — only shows when there's
+              at least one HK workout that doesn't already overlap an
+              existing Thallo session. Classifying it here lets
+              activity_impact.py factor the workout into fatigue. */}
+          {isHealthKitAvailable() && (
+            <DetectedWorkoutsCard
+              themeName={userProfile.themePreference}
+              appleWorkouts={healthSummary?.workoutDetails ?? null}
+              onAfterImport={() => {
+                // Reload local history so the just-imported session
+                // shows up in the streak / consistency widgets.
+                (async () => {
+                  try {
+                    const { loadWorkoutHistory } = await import('../utils/workoutHistory');
+                    const fresh = await loadWorkoutHistory();
+                    setHistory(fresh);
+                  } catch { /* non-fatal */ }
+                })();
+              }}
+            />
+          )}
           {/* Apple Health vitals */}
           {isHealthKitAvailable() && (() => {
             const hs = healthSummary;

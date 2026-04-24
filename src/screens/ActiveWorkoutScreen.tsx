@@ -477,22 +477,38 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     });
   }, []);
-  // Phone↔watch active-state sync. On mount (user started from phone)
-  // we push `status: 'active'` so the watch flips into its active view.
-  // On unmount (finish, cancel, background kill) the HomeScreen's own
-  // sync effect takes over and pushes the next lifecycle state — no
-  // cleanup push is needed here because the active-state source of
-  // truth has already changed by then.
+  // Phone↔watch active-state sync. On mount we push `status: 'active'`
+  // AND subscribe to WCSession reachability changes — when the user
+  // opens Thallo on their watch, reachability flips to true and we
+  // re-push the same payload so the watch wakes up with the current
+  // active state instead of whatever stale payload it had cached.
+  // Without the re-push, a watch that was closed during the phone
+  // workout start would show yesterday's (scheduled) state because
+  // iOS only delivers the latest applicationContext once, when the
+  // watch app next opens — and even that delivery can race the UI.
   useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
     (async () => {
       try {
-        const { pushWorkoutToWatch } = await import('../utils/watchSync');
-        await pushWorkoutToWatch(workout as any, {
+        const { pushWorkoutToWatch, onWatchReachabilityChange } = await import('../utils/watchSync');
+        const pushActive = () => pushWorkoutToWatch(workout as any, {
           dateISO: new Date().toISOString().slice(0, 10),
           status: 'active',
+        }).catch(() => {});
+        // Initial push on mount.
+        pushActive();
+        // Re-push whenever the watch becomes reachable. Idempotent:
+        // pushWorkoutToWatch merges into applicationContext + races
+        // sendMessage if reachable, so extra fires are harmless.
+        unsubscribe = onWatchReachabilityChange((info) => {
+          if (info.reachable) {
+            console.log('[watch] reachable — re-pushing active workout');
+            pushActive();
+          }
         });
       } catch { /* watch bridge optional */ }
     })();
+    return () => { if (unsubscribe) unsubscribe(); };
   }, [workout]);
 
   // Watch→phone command handler. The watch is a remote control for the

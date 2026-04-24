@@ -12,7 +12,14 @@ public class ThalloWatchBridgeModule: Module {
     public func definition() -> ModuleDefinition {
         Name("ThalloWatchBridgeModule")
 
-        Events("command")
+        // `command` carries watch→phone taps (Start / Skip / Log set
+        // / etc). `reachabilityChanged` fires when the WCSession
+        // reachability flips — used by the JS side to re-push the
+        // current app state the moment the watch app becomes
+        // available, so opening the watch app gets an immediate
+        // refresh instead of having to wait for the next state
+        // change on the phone.
+        Events("command", "reachabilityChanged")
 
         OnCreate {
             self.sessionHolder.activate { [weak self] name, body in
@@ -109,7 +116,31 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     // MARK: WCSessionDelegate
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {}
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        // Fire a reachability event on activation too so the JS side
+        // can push a fresh snapshot even if reachability was already
+        // true by the time the listener wired up.
+        DispatchQueue.main.async {
+            self.dispatchEvent?("reachabilityChanged", [
+                "reachable": session.isReachable,
+                "paired": session.isPaired,
+                "installed": session.isWatchAppInstalled,
+            ])
+        }
+    }
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        // The watch app just opened / closed. When reachable, JS
+        // re-pushes the current workout + meals + theme so the watch
+        // wakes up with the latest state instead of whatever was
+        // queued last.
+        DispatchQueue.main.async {
+            self.dispatchEvent?("reachabilityChanged", [
+                "reachable": session.isReachable,
+                "paired": session.isPaired,
+                "installed": session.isWatchAppInstalled,
+            ])
+        }
+    }
     func sessionDidBecomeInactive(_ session: WCSession) {}
     func sessionDidDeactivate(_ session: WCSession) {
         // Rare — iOS calls this after a watch swap. Reactivate.
