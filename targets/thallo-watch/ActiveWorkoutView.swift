@@ -101,19 +101,33 @@ struct ActiveWorkoutView: View {
 
     @EnvironmentObject var theme: ThemeStore
     @StateObject private var state = ActiveWorkoutState()
+    @State private var showCountdown: Bool = true
 
     var body: some View {
-        TabView {
-            ExerciseTab(
-                workout: workout,
-                state: state,
-                hr: hr,
-                onEndWorkout: onEndWorkout,
-                onCancelWorkout: onCancelWorkout,
-            )
-            HeartRateTab(hr: hr)
+        ZStack {
+            TabView {
+                ExerciseTab(
+                    workout: workout,
+                    state: state,
+                    hr: hr,
+                    onEndWorkout: onEndWorkout,
+                    onCancelWorkout: onCancelWorkout,
+                )
+                HeartRateTab(hr: hr)
+            }
+            .tabViewStyle(.page)
+            if showCountdown {
+                StartCountdownOverlay(onComplete: {
+                    // Fade the overlay out — withAnimation lets the
+                    // opacity transition inside the overlay run before
+                    // the view is removed.
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        showCountdown = false
+                    }
+                })
+                .transition(.opacity)
+            }
         }
-        .tabViewStyle(.page)
         .onAppear {
             state.startTick()
             if let ex = workout.exercises.first {
@@ -121,6 +135,120 @@ struct ActiveWorkoutView: View {
             }
         }
         .onDisappear { state.stopTick() }
+    }
+}
+
+// ─── Start countdown overlay ───────────────────────────────────────
+
+/// 3-2-1-go intro shown when the active workout view first mounts.
+/// Mirrors the phone overlay (see `StartCountdownOverlay.tsx`) so the
+/// two surfaces feel synchronised when a workout is started from the
+/// wrist — phone countdown runs locally as soon as the phone flips the
+/// watch to `.active`, watch runs its own.
+private struct StartCountdownOverlay: View {
+    let onComplete: () -> Void
+    @EnvironmentObject var theme: ThemeStore
+
+    // Ticks match the phone side's cadence: 3 / 2 / 1 at 700ms each,
+    // resolved by the motivational phrase for 1100ms.
+    //
+    // ⚠️ Keep this pool in sync with `src/constants/startPhrases.ts`.
+    // Swift + TS don't share modules so the list is duplicated by
+    // hand — the header comment in the TS file calls this out too.
+    private static let phrases = [
+        "LET'S GO!", "LIGHTS OUT.", "LOCK IN.", "SHOW UP.", "EARN IT.",
+        "GAME TIME.", "DIG IN.", "RISE UP.", "YOUR MOVE.", "MAKE IT COUNT.",
+        "NO EXCUSES.", "LEAVE IT ALL.", "BEAST MODE.", "FULL SEND.", "STAY HUNGRY.",
+        "GRIND ON.", "BREAK LIMITS.", "OWN IT.", "ATTACK.", "NO MERCY.",
+        "DOMINATE.", "FOCUS UP.", "LEVEL UP.", "WORK.", "PUSH HARDER.",
+        "HEART IN.", "BRING HEAT.", "GO TIME.", "CLAIM IT.", "NO QUIT.",
+        "OUTWORK.", "SEND IT.", "WAR MODE.", "NEXT REP.", "UNLEASH.",
+        "RAW POWER.", "STAY SHARP.", "BE RUTHLESS.", "ALL IN.", "TRUST IT.",
+        "TUNE IN.", "DRIVE.", "KEEP GOING.", "EVERY REP.", "EARN TODAY.",
+        "FUEL UP.", "OUTLAST.", "WIN REPS.", "CRUSH IT.", "OWN THE HOUR.",
+        "LIGHT IT UP.", "KEEP PUSHING.", "SWEAT NOW.", "NO OFF DAYS.", "RAISE THE BAR.",
+        "HEAD DOWN.", "CHIN UP.", "STAY STRONG.", "HOLD THE LINE.", "OUTGRIND.",
+        "FIRE UP.", "BE THE WORK.", "NO COMFORT.", "HUSTLE.", "SAVAGE.",
+        "GO BIG.", "ONE MORE.", "EFFORT FIRST.", "BEAT YESTERDAY.", "MAKE MOVES.",
+        "PROVE IT.", "STACK WINS.", "MOVE WEIGHT.", "BUILD IT.", "OWN THE DAY.",
+        "DIAL IN.", "RAISE HELL.", "UNBROKEN.", "BURN IT.", "SET PACE.",
+        "SPARK UP.", "GO HEAVIER.", "NO STEP BACK.", "PRIDE ON.", "NOTHING EASY.",
+        "FORGE ON.", "RUN IT UP.", "WORK SPEAKS.", "KEEP EDGE.", "BREAKTHROUGH.",
+        "HEAT CHECK.", "GO AGAIN.", "FULL BORE.", "GAME ON.", "DO THE WORK.",
+        "REP FOR REP.", "RISE TO IT.", "MAKE THEM LOOK.", "STRONGER TODAY.",
+        "FINISH STRONG.", "NO BLINKING.",
+    ]
+    private static let ticks: [(label: String, ms: Int, isFinal: Bool)] = [
+        ("3", 700, false),
+        ("2", 700, false),
+        ("1", 700, false),
+        (phrases.randomElement() ?? "LET'S GO!", 1100, true),
+    ]
+
+    @State private var idx: Int = 0
+    @State private var scale: CGFloat = 1.35
+    @State private var opacity: Double = 0
+
+    var body: some View {
+        let tick = Self.ticks[min(idx, Self.ticks.count - 1)]
+        ZStack {
+            // Near-opaque themed backdrop so the underlying workout
+            // view doesn't leak through mid-animation.
+            theme.background.opacity(0.95).ignoresSafeArea()
+            // Coloured halo — matches the phone version's ring behind
+            // the numeral. Same primary @ 10% fill + 33% border.
+            Circle()
+                .fill(theme.primary.opacity(0.1))
+                .overlay(
+                    Circle().stroke(theme.primary.opacity(0.33), lineWidth: 2)
+                )
+                .frame(width: 140, height: 140)
+            VStack(spacing: 6) {
+                Text(tick.label)
+                    .font(.system(size: tick.isFinal ? 26 : 70, weight: .black, design: .rounded))
+                    .foregroundColor(theme.primary)
+                    .minimumScaleFactor(0.4)
+                    .lineLimit(1)
+                    .padding(.horizontal, 16)
+                    .scaleEffect(scale)
+                    .opacity(opacity)
+                if !tick.isFinal {
+                    Text("STARTING")
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(1.4)
+                        .foregroundColor(theme.textMuted)
+                        .opacity(opacity)
+                }
+            }
+        }
+        .onAppear { playTick() }
+    }
+
+    private func playTick() {
+        guard idx < Self.ticks.count else {
+            onComplete()
+            return
+        }
+        let tick = Self.ticks[idx]
+        // Light haptic on counts, success on the final go-word — the
+        // watch's taptic engine separates these clearly.
+        WKInterfaceDevice.current().play(tick.isFinal ? .success : .click)
+        scale = 1.35
+        opacity = 0
+        withAnimation(.easeOut(duration: 0.18)) {
+            scale = 1.0
+            opacity = 1
+        }
+        let ms = tick.ms
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms - 220)) {
+            withAnimation(.easeIn(duration: 0.2)) {
+                opacity = 0
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) {
+            idx += 1
+            playTick()
+        }
     }
 }
 

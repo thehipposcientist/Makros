@@ -32,6 +32,7 @@ import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
+import StartCountdownOverlay from '../components/StartCountdownOverlay';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
@@ -459,6 +460,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const workoutPalette = theme.sections.workout;
   const styles = createStyles(themeColors);
   const startTime = useRef(Date.now());
+  // Show the 3-2-1 countdown only on a true fresh start. If we find a
+  // persisted start time on mount, the user is resuming after a
+  // background / app restart and the countdown would be jarring.
+  const [showStartCountdown, setShowStartCountdown] = useState(false);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
@@ -467,6 +472,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (!isNaN(ts) && ts > 0) startTime.current = ts;
       } else {
         AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
+        // Fresh start — play the countdown.
+        setShowStartCountdown(true);
       }
     });
   }, []);
@@ -3994,6 +4001,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           prs={prModalData}
           themeName={themeName}
           onDismiss={() => setPrModalData(null)}
+        />
+      )}
+
+      {showStartCountdown && (
+        <StartCountdownOverlay
+          themeName={themeName}
+          onComplete={() => setShowStartCountdown(false)}
         />
       )}
     </View>
