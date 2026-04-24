@@ -30,6 +30,10 @@ User Profile -> GoalProfile -> WeeklyRecipe -> DayArchetype -> Slots -> Exercise
 - `fitness_score.py` — 4-pillar fitness score (strength 30, cardio 30, consistency 25, recovery 15)
 - `cardio.py` — classifies exercises as intervals/steady/easy
 - `plan_review.py` / `plan_ai_regenerate.py` — AI plan review is **PERMANENTLY DISABLED** (both workout + nutrition). `PLAN_REVIEW_ENABLED` / `NUTRITION_REVIEW_ENABLED` env flags are no-ops. Deterministic planner ships direct to client.
+- `plan_review_v2.py` — **deterministic** weekly plan review (replaces the disabled AI version). Consumes weekly volume + completions + nutrition (DailyNutritionMetrics) + optional Apple Health signals (sleep, RHR, steps, readiness, weight slope) and emits `Recommendation[]` with structured `action` dicts (`reduce_muscle_volume`, `add_cardio_session`, `add_zone2_session`, `swap_to_recovery`, `hold_calorie_adjustment`, `raise_calories`, `lower_calories`, `raise_protein_target`, `raise_fiber_target`, etc.). Builds a deterministic `headline` so the check-in coach can polish without composing from scratch. Exposed via `GET /workouts/weekly-review`.
+- `weekly_volume.py` — per-muscle hard-set tracker. Joins `WorkoutSession → WorkoutExercise → ExerciseSet → Exercise.primary_muscle`. Secondary muscles weighted 0.5×; warmups filtered. 5 status tiers per muscle: `undertrained / in_range / high / excessive / spike` (1.5×+ jump from 28-day baseline). 7d / 14d / 28d windows. Exposed via `GET /workouts/weekly-volume`.
+- `core_programmer.py` — intentional core placement across the week. Goal × days frequency, category rotation (anti-extension / anti-rotation / lateral / flexion / carry), never-core archetypes (legs / lower / full_body_strength), density gate. Replaces blind `Slot("Core", ...)` inserts.
+- `core_planning.py` — older lightweight helpers; superseded by `core_programmer.py` for new plans.
 - `ai_first_time_weight.py` — AI starting-weight rec when the layered transfer pipeline finds nothing. Has-history + no-history profile fallbacks. Returns weight only (rounded to 2.5 lb), stamped `weightRecommendationSource = 'ai_first_time'`. Errors fall through to deterministic tier-6/7 defaults.
 
 ### Hybrid Cardio Promotion (goal × days × duration)
@@ -94,8 +98,10 @@ Goal weights (adherence/quality/micro):
 
 **The longevity_signals_score has been deleted.** Gut & Plants is now a descriptive insight card with facts only (probiotic/fermented/plants/omega-3 — no score).
 
-### Food Classifier (`food_classifier.py`)
-Deterministic + heuristic classifier. Emits per-food flags: `likely_plant_foods`, `plant_count_value`, `fermented_flag`, `probiotic_flag` (strict: live-culture subset), `omega3_flag`, `processing_bucket` (minimally_processed / processed / ultra_processed / unknown), `protein_source` (plant / animal / mixed / none / unknown), plus v3 tags: `seafood_flag`, `fruit_flag`, `vegetable_flag`, `alcohol_flag`, `processed_meat_flag`, `refined_grain_flag`. Fish (salmon/tuna/shrimp/etc.) now resolves as `minimally_processed`. `classifier_version` stamped on `FoodMetadata`; bump triggers re-classification on next meal log.
+### Food Classifier (`food_classifier.py` + `ai_classify.py`)
+Deterministic + heuristic classifier. Emits per-food flags: `likely_plant_foods`, `plant_count_value`, `fermented_flag`, `probiotic_flag` (strict: live-culture subset), `omega3_flag`, `processing_bucket` (minimally_processed / processed / ultra_processed / unknown), `protein_source` (plant / animal / mixed / none / unknown), plus v3 tags: `seafood_flag`, `fruit_flag`, `vegetable_flag`, `alcohol_flag`, `processed_meat_flag`, `refined_grain_flag`. Fish (salmon/tuna/shrimp/etc.) now resolves as `minimally_processed`.
+
+**v4 — AI amount estimator (`ai_classify.estimate_amounts`)**: runs on **every** food regardless of keyword match (a custom food like "Grandma's chicken soup" no longer falls through). Per-serving estimates for nutrients USDA doesn't carry: `collagen_g_per_serving` (clamped 0–30 g) and `probiotic_cfu_billions_per_serving` (clamped 0–200 B), with `amount_confidence` (high/med/low/none). Cached on `FoodMetadata` keyed by `(normalized_name, classifier_version)` so cost = ~one prompt per unique food forever. **`compute_daily_metrics` always passes `allow_ai=True`** — earlier versions defaulted False which silently zeroed every collagen/CFU estimate. `CLASSIFIER_VERSION` stamped on `FoodMetadata`; bump invalidates cache + triggers re-classification on next meal log.
 
 ### Daily Metrics (`gut_health.py`)
 Per-day aggregation of per-item tags into `DailyNutritionMetrics` row. Stores: fiber totals, fiber/1000kcal, added sugar, sodium, saturated fat, distinct_plant_foods, fermented/probiotic/omega3/seafood/fruit/vegetable/alcohol/processed_meat/refined_grain servings, plant/animal protein split, processing_counts, max_meal_protein_pct, energy_availability (populated by recovery_flags), recovery_flags JSON.
@@ -120,13 +126,18 @@ Optional 5th flag: **thyroid_support** (opt-in only, gated by profile). Never ho
 
 ### API Surface (nutrition)
 - `GET /meals/score?days=7` — authoritative Nutrition Score for today + 7-day weekly. Client reads this for logged meals.
-- `GET /meals/gut-health?days=14` — descriptive Gut & Plants facts (today + window). No scores in the response.
+- `GET /meals/gut-health?days=14` — descriptive Gut & Plants facts (today + window). Today payload now includes `collagen_g` and `probiotic_cfu_billions` (AI-estimated amounts).
 - `GET /meals/recovery-flags?days=7&thyroid_opt_in=false` — Fueling & Recovery flags.
 - `GET /meals/hydration` / `POST /meals/hydration` — daily hydration log + target (half bodyweight in oz by default).
 - `GET /meals/averages?window=14` — adaptive rolling averages (divides by days_with_data).
 - `GET /meals/insights` — 14-day pattern detection (skipped meals, weekday/weekend diff, food quality distribution).
 - `GET /meals/common` — favorites (meals eaten 2+ times in lookback).
 - `POST /meals/log-checked` — check-off from plan → persists meal + triggers `_refresh_daily_metrics`.
+- `POST /meals/daily-macros` — training-day vs rest-day macro redistribution. Body: base macros + workout context (archetype/focus/cardio_style/stimulus). Returns adjusted macros — calories + protein unchanged, carbs shifted by day type (heavy +25g / leg +15g / hard +10g / standard 0 / easy −10g / rest −25g, capped per goal: fat_loss ±20, muscle_gain ±35, default ±30). Fat absorbs the kcal delta.
+
+### API Surface (workout coaching)
+- `GET /workouts/weekly-review?days=7&weight_slope_lbs_per_week=&avg_sleep_hours=&avg_resting_hr=&avg_steps=&readiness_score=` — full deterministic plan review with structured recommendations. Optional query params let the client pass Apple Health-derived signals it already has (no double-fetch).
+- `GET /workouts/weekly-volume?days=7` — per-muscle hard-set chart data only (lighter than the full review).
 
 ### Nutrition Context for AI Prompts
 `meal_history.py` `build_nutrition_context(db, user_id)` pulls rolling averages + common meals; `format_for_prompt` emits them as context lines for the meal skeleton prompt so AI meal plans lean on actual eating patterns.
@@ -166,6 +177,13 @@ Three coaches:
 - **Context passed** (richest of the three): profile + plan targets + 4-7 days of metrics + 7/14/28-day trends + weight summary + active UserFlag rows + last 1-3 AIDecision rows + user feedback dict + (weekly only) history_digest + prior commitments.
 - **Response gated** by `decision_rules.gate()` — caps delta size, enforces response-type rules. Response: `{response_type, message, delta, rationale_key, next_commitments}`.
 - **Persistence**: `AIDecision` row + `CoachMemory` rows (event_type=ai_checkin and commitment) + optional delta applied to `UserCoachingState.calorie_adjustment`.
+
+### 4. Quick-Action Intent Router (deterministic, no LLM)
+- **File**: `backend/app/routers/ai/quick_intents.py`.
+- **Wired in**: `routers/ai/chat.py::ask_trainer_question` runs `match_intent(q)` BEFORE the simple-knowledge fast path.
+- **12 intents**: `time_limited`, `slept_badly`, `too_sore`, `missed_workout`, `more_cardio`, `less_cardio`, `deload`, `more_core`, `hard_tomorrow`, `losing_too_fast`, `strength_dropping`, `hungrier`.
+- **Output shape** matches `TrainerQuestionResponse`. Each handler attaches a structured `action` dict the client can apply to the plan without another AI call (`shorten_workout`, `reduce_intensity`, `swap_to_recovery_or_reduce`, `rebalance_week`, `add_cardio_session`, `reduce_cardio`, `schedule_deload`, `set_core_frequency`, `carb_bump_today`, `raise_calories`, `strength_preservation`).
+- Falls through to LLM path on any pattern miss or handler exception.
 
 ### Known Context Gaps (recommended for next iteration)
 1. Home Trainer has NO readiness / fatigue — user asks "should I do legs today?" and coach is blind.
@@ -327,6 +345,45 @@ SQLModel `create_all` creates tables but doesn't ALTER. Idempotent `ADD COLUMN I
 - `_ensure_nutrition_v3_columns` — FoodNutrition.added_sugar_g + FoodMetadata seafood/fruit/vegetable/alcohol/processed_meat/refined_grain flags + DailyNutritionMetrics tag servings + recovery_flags JSONB + energy_availability + max_meal_protein_pct
 - `_backfill_custom_food_micronutrients` — one-shot backfill on startup
 
+## Apple Watch Integration
+
+### Bidirectional sync via WCSession
+- **Bridge**: `modules/thallo-watch-bridge/` (phone) ↔ `targets/thallo-watch/ConnectivityStore.swift` (watch).
+- **Outbound (phone → watch)**: `pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates), all routed through `applicationContext` with fallback to `transferUserInfo` on duplicate-payload errors.
+- **Inbound (watch → phone)**: `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `toggle_meal`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
+- **Pull-on-wake handshake**: watch fires `pull_state` on `WCSession.activate` + on `sessionReachabilityDidChange(reachable=true)` + on SwiftUI `scenePhase == .active`. Phone responds with a fresh full snapshot. Closes the gap where `applicationContext` queued stale data while the watch app was closed.
+- **`isPaired` silent gate REMOVED** from every push — it dropped payloads during transient unpaired states (reboot, session activation). Now only `isAvailable()` (platform support) gates pushes.
+- **User-switch wipe**: `clearWatchData()` on sign-out pushes empty workout / meals / supplements payloads so the next signed-in user doesn't see the previous user's stack.
+
+### Watch app pages
+- TabView with three pages: **Today** (workout) / **Meals** / **Supps**. Page dots always visible (`.indexViewStyle(.page(backgroundDisplayMode: .always))`). First-launch swipe hint pill auto-dismisses + persists.
+- **Active workout**: standalone full set logging via Digital Crown + −/+ steppers, rest timer, HR persistent chip, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip-exercise menu.
+- **Phone-side HK write**: completed lift / live-tracker / log-activity sessions write to Apple Health via `saveWorkoutToHealth` (`modules/thallo-healthkit/ios/...::saveWorkout` AsyncFunction wraps `HKWorkoutBuilder`). Watch-started sessions still write via `HKLiveWorkoutBuilder.finishWorkout` from the watch target.
+
+### Watch complication scaffold (#110 — manual Xcode wiring required)
+- `targets/thallo-watch-complication/` has a `@bacons/apple-targets` widget config + SwiftUI complication source.
+- Surfaces today's focus + readiness on the watch face (accessoryCircular / Rectangular / Inline).
+- Reads payload from a SharedDefaults JSON blob (`group.com.thallo.app`) that the main watch app writes on every WCSession update.
+- Won't ship until: (a) `expo prebuild` generates the target, (b) App Group entitlement matches across both watch targets, (c) main watch app calls `WidgetCenter.shared.reloadAllTimelines()` after writing the SharedDefaults blob.
+
+### Siri intent scaffold (#111 — manual Xcode wiring required)
+- `ios-extras/StartWorkoutAppIntent.swift` is a stub `AppIntent` that opens `thallo://start-workout` via deep link.
+- File body is `#if false` until the user adds an Intents extension target in Xcode + matching deep-link handler in `app/_layout.tsx`.
+
+## In-App Dev Logs (#128)
+- `src/utils/devLogs.ts` ring-buffers the last 400 `console.log/warn/error/info/debug` entries.
+- `src/components/DevLogsViewer.tsx` modal renders them with filter + level + share via iOS share sheet.
+- Trigger: Account modal → bottom → "Developer logs" link.
+- Critical for TestFlight builds where Metro / Xcode console aren't accessible.
+
+## HealthDataSummary aggregator (#136)
+- **File**: `src/services/healthDataSummary.ts`.
+- Single source of truth for all Apple Health reads — `getCachedHealthDataSummary()` for instant first paint, `refreshHealthDataSummary()` to force fresh, `getHealthDataSummary({age})` for cached-with-stale-refresh.
+- Flat shape: `steps`, `sleepMinutes`, `restingHeartRate`, `hrv`, `workoutMinutes`, `cardioMinutes`, `zone2Minutes`, `activeEnergyKcal`, `weightLbs`, `vo2Max`, plus a `weekly` rollup.
+- 30-min stale window, in-flight dedup, null = unknown / 0 = known-zero.
+- Z2 fallback: if no HR-zone data, treats steady cardio of 20+ min as Z2 so users without Watch HR still get meaningful counts.
+- ProgressScreen migrated to consume it; remaining direct `readHealthSummary` callers can migrate file-by-file (the aggregator wraps the same fn so callers keep working).
+
 ## Key Design Decisions
 - Workout planner is deterministic — no AI in exercise selection, split logic, or weekly recipe
 - AI is gated — meal skeletons, coach chat, food scanning, in-workout set review, food classification AI fallback, first-time weight rec
@@ -356,3 +413,31 @@ fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, h
 
 ## Supported Splits
 PPL, Upper/Lower, Full Body, PPL+UL hybrid, Bro split (auto-selected based on goal + days).
+
+## Recommended Next Improvements
+
+### Performance / observability
+- **Backend log structuring**: the `KeyError("Attempt to overwrite 'created'")` from `gut_backfill` startup is pre-existing but pollutes Sentry. Move to `extra={...}` keys that don't collide with `LogRecord` reserved names (`created`, `name`, `levelno`, etc).
+- **Per-route latency budgets**: `/workouts/weekly-review` and `/meals/score` are hot paths. Add a simple `time.perf_counter()` log line with route + duration so we can spot regressions.
+- **AI cost tracking**: `ai_classify.estimate_amounts` runs once per unique food forever. Add a counter (Prometheus or just a log line) so we can audit "how many AI calls per week per user" — feeds into per-user cost forecasting.
+- **DB query budget**: `compute_weekly_volume` runs 4 queries (sessions / exercises / exercise rows / sets). Acceptable for 7-14 day windows but at 28-day windows on a heavy user we should profile + consider an aggregated SQL rollup.
+
+### Tests to add (minimal-effort, high-leverage)
+- **Pure-function tests** (no DB): `weekly_volume._classify`, `plan_review_v2._build_headline`, `carb_distribution.classify_day` + `redistribute_macros`, `quick_intents.match_intent` for all 12 patterns. All deterministic.
+- **AI estimator regression test**: mock OpenAI client, verify clamping (collagen ≤30g, CFU ≤200B, confidence enum) holds even on out-of-bound responses.
+- **Plan review snapshot test**: seed a user with 5 completions over 7 days, no Apple Health, expect specific recommendation keys. Catches future rule-tweak regressions.
+- **Watch payload schema**: assert `WatchWorkoutPayload` JSON serialization round-trips through Swift `Codable` decoders. Currently we'd find decode failures only at runtime.
+
+### Future feature wins (queued in audit; not yet shipped)
+- **Actual RIR persistence** (`ExerciseSet.actual_rir` column + capture on log → unlocks rolling e1RM, smarter progression, real-effort signal for the trainer).
+- **Rolling e1RM** (weighted median over last 6–10 usable sets) → daily rec input; PR display keeps best-ever 1RM.
+- **Watch active-state persistence** so backgrounding mid-workout doesn't drop `exerciseIndex` / `setNumber` / `restRemaining`.
+- **Watch complication build pass** — finish the SharedDefaults wiring + entitlements so the scaffold actually ships.
+- **Siri intent build pass** — add Intents extension target + deep-link router in `app/_layout.tsx` for `thallo://start-workout`.
+- **Pre/post-workout time-aware fueling card** — fires when planned workout is in next 2-3h or just finished. Uses meal `consumed_at` + plan time.
+- **Functional-pattern archetypes** — explicit `HYBRID_KB_COMPLEX`, `HYBRID_CARRY_FOCUS` for users with kettlebells / sled. Today they fall back to circuit hybrids.
+
+### UI polish
+- Migrate remaining direct `readHealthSummary` consumers (HomeScreen, ActiveWorkoutScreen) to `getHealthDataSummary` so HK is queried once per session.
+- **Weekly review accept-action wiring**: today the WeeklyCoachingCard's "Apply" button shows a "Got it" alert. Wire each `action.type` to a real plan mutation (e.g. `reduce_muscle_volume` → patch the active WorkoutPlan's relevant slots).
+- **Quick-intent action wiring**: same pattern — when the chat returns `action: { type: 'shorten_workout', minutes: 30 }`, auto-apply on user confirm rather than relying on the user to navigate to the Switch Day picker.

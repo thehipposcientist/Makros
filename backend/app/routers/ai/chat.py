@@ -81,6 +81,25 @@ def ask_trainer_question(
 
     is_nutritionist = body.mode == "nutritionist"
 
+    # ── Structured quick-action intent router (deterministic, no AI) ──────────
+    # Catches 12 common asks (only 30 min, too sore, deload, etc) and
+    # returns canned responses + structured action dicts. Runs BEFORE
+    # the simple-knowledge fast path so "I slept badly" doesn't get
+    # treated as a general knowledge question.
+    if not body.conversation and not body.image_base64:
+        try:
+            from app.routers.ai.quick_intents import match_intent, handle_intent
+            _intent = match_intent(q)
+            if _intent:
+                _resp = handle_intent(_intent, q, profile=body.profile)
+                if _resp:
+                    logger.info(f"[trainer-question] QUICK INTENT: {_intent}")
+                    return _resp.to_dict()
+        except Exception as _e:
+            # Intent router is optional — any failure falls through
+            # to the LLM path so the user always gets SOMETHING.
+            logger.warning(f"[trainer-question] quick intent router error: {_e}")
+
     # ── Fast intent classification (deterministic, no AI call) ────────────────
     # Simple questions get a lightweight code path that skips full context loading.
     # This cuts response time from 15-30s to 2-5s for general knowledge questions.

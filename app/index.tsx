@@ -935,6 +935,15 @@ export default function Index() {
     if (authToken) {
       await pushUserStateToBackend(authToken);
     }
+    // Wipe the paired Apple Watch — without this, the watch keeps
+    // showing the previous user's workout + meals + supplement stack
+    // until a new push lands. iOS WCSession.applicationContext
+    // persists across app launches, so a different user signing in
+    // would see stale data on the wrist for a stretch.
+    try {
+      const { clearWatchData } = await import('../src/utils/watchSync');
+      await clearWatchData();
+    } catch { /* watch bridge optional */ }
     // Clear any in-flight plan-job marker — otherwise the next sign-in sees
     // a stale pending id, tries to resume it, and the user thinks we're
     // triggering a fresh plan generation on sign-in. The marker is

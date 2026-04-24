@@ -2113,6 +2113,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (hrData) healthMetrics.hrSummary = { avgBpm: hrData.avgBpm, maxBpm: hrData.maxBpm, zoneMinutes: [...hrData.zoneMinutes] };
       }
     } catch {}
+    // Write the completed session to Apple Health so it shows up in
+    // Fitness app + counts toward Activity rings. Best-effort —
+    // requires write authorisation; silently skipped if HK isn't
+    // available or the user hasn't granted permission.
+    try {
+      if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
+        const { saveWorkoutToHealth } = await import('../services/appleHealth');
+        await saveWorkoutToHealth({
+          startedAt: new Date(startTime.current),
+          endedAt: now,
+          activityTag: workout.focus,
+          caloriesBurned: healthMetrics?.caloriesBurned ?? null,
+        });
+      }
+    } catch { /* non-fatal */ }
     try {
       if (authToken) {
         const exercisesPayload = session.exercises.map((ex, idx) => ({

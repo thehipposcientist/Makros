@@ -143,6 +143,73 @@ public class ThalloHealthKitModule: Module {
             return try await self.statisticsPerDay(type: qt, unit: .kilocalorie(), start: startMs, end: endMs)
         }
 
+        AsyncFunction("saveWorkout") { (
+            startMs: Double,
+            endMs: Double,
+            activityType: String,
+            kcal: Double?,
+            distanceMiles: Double?,
+        ) -> Bool in
+            // Phone-side workouts (lift sessions, live-tracker runs)
+            // didn't land in Apple Health before — only watch-started
+            // workouts via HKLiveWorkoutBuilder did. This writes the
+            // session as an HKWorkout sample so it shows up in Fitness
+            // / Activity rings.
+            //
+            // Uses HKWorkoutBuilder (deprecation-aware fallback to
+            // HKWorkout init for older iOS deployment targets is not
+            // needed here — Thallo's deployment target is iOS 16+ and
+            // HKWorkoutBuilder is the preferred API). Call requires
+            // `workoutType()` write authorisation, which Thallo
+            // already requests.
+            let (s, e) = self.dates(startMs, endMs)
+            let type: HKWorkoutActivityType = self.activityTypeFromString(activityType)
+            let config = HKWorkoutConfiguration()
+            config.activityType = type
+            // Strength sessions are mostly indoor; runs/walks default
+            // to indoor as a safe choice (we don't have GPS).
+            config.locationType = .indoor
+
+            let builder = HKWorkoutBuilder(healthStore: self.store, configuration: config, device: .local())
+            return try await withCheckedThrowingContinuation { cont in
+                builder.beginCollection(withStart: s) { ok, err in
+                    if let err { cont.resume(throwing: err); return }
+                    guard ok else { cont.resume(returning: false); return }
+                    var samples: [HKSample] = []
+                    if let kcal {
+                        let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
+                        if let t = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned) {
+                            samples.append(HKQuantitySample(type: t, quantity: q, start: s, end: e))
+                        }
+                    }
+                    if let dist = distanceMiles {
+                        let q = HKQuantity(unit: .mile(), doubleValue: dist)
+                        if let t = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning) {
+                            samples.append(HKQuantitySample(type: t, quantity: q, start: s, end: e))
+                        }
+                    }
+                    let finishCollection: () -> Void = {
+                        builder.endCollection(withEnd: e) { ok, err in
+                            if let err { cont.resume(throwing: err); return }
+                            guard ok else { cont.resume(returning: false); return }
+                            builder.finishWorkout { workout, err in
+                                if let err { cont.resume(throwing: err); return }
+                                cont.resume(returning: workout != nil)
+                            }
+                        }
+                    }
+                    if samples.isEmpty {
+                        finishCollection()
+                    } else {
+                        builder.add(samples) { _, err in
+                            if let err { cont.resume(throwing: err); return }
+                            finishCollection()
+                        }
+                    }
+                }
+            }
+        }
+
         AsyncFunction("getWorkouts") { (startMs: Double, endMs: Double) -> [[String: Any]] in
             let (s, e) = self.dates(startMs, endMs)
             let pred = HKQuery.predicateForSamples(withStart: s, end: e, options: .strictStartDate)
@@ -191,6 +258,43 @@ public class ThalloHealthKitModule: Module {
             "MenstrualFlow": HKCategoryType.categoryType(forIdentifier: .menstrualFlow)!,
         ]
         return map[name]
+    }
+
+    /// Map our activity tag strings (matching `manualActivity.subtype`
+    /// / focus labels) to `HKWorkoutActivityType`. Falls back to
+    /// `.functionalStrengthTraining` for unknown lifts and `.other`
+    /// for unrecognised non-lift activities.
+    private func activityTypeFromString(_ raw: String) -> HKWorkoutActivityType {
+        let s = raw.lowercased()
+        if s.contains("run") { return .running }
+        if s.contains("walk") { return .walking }
+        if s.contains("hike") { return .hiking }
+        if s.contains("bike") || s.contains("cycl") || s == "ride" { return .cycling }
+        if s.contains("swim") { return .swimming }
+        if s.contains("row") { return .rowing }
+        if s.contains("ellipt") { return .elliptical }
+        if s.contains("stair") { return .stairClimbing }
+        if s.contains("yoga") { return .yoga }
+        if s.contains("pilates") { return .pilates }
+        if s.contains("hiit") || s.contains("interval") { return .highIntensityIntervalTraining }
+        if s.contains("circuit") || s.contains("cross") { return .crossTraining }
+        if s.contains("core") { return .coreTraining }
+        if s.contains("mobility") || s.contains("stretch") || s.contains("flex") { return .flexibility }
+        if s.contains("dance") || s.contains("spin") { return .dance }
+        if s.contains("boxing") { return .boxing }
+        if s.contains("basketball") { return .basketball }
+        if s.contains("soccer") { return .soccer }
+        if s.contains("tennis") { return .tennis }
+        if s.contains("pickleball") { return .pickleball }
+        if s.contains("golf") { return .golf }
+        // Strength-shaped fallbacks. "lift" / "weight" / generic lift
+        // archetype labels (push / pull / legs / upper / lower / full
+        // body) all route here.
+        if s.contains("lift") || s.contains("weight") || s.contains("strength") { return .traditionalStrengthTraining }
+        if ["push", "pull", "legs", "upper", "lower", "full body", "full_body"].contains(where: s.contains) {
+            return .traditionalStrengthTraining
+        }
+        return .functionalStrengthTraining
     }
 
     private func workoutName(_ type: HKWorkoutActivityType) -> String {

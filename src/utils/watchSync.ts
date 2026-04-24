@@ -16,6 +16,8 @@ import {
   WatchPalette,
   WatchProgress,
   WatchMealsPayload,
+  WatchSupplementsPayload,
+  WatchSupplementItem,
 } from '../../modules/thallo-watch-bridge';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
@@ -219,6 +221,82 @@ export async function pushMealsToWatch(
     syncedAtMs: Date.now(),
   };
   return WatchBridge.syncMeals(payload);
+}
+
+/** Wipe the watch's local store on sign-out / user-switch. Pushes
+ *  empty payloads for workout / meals / supplements so the watch
+ *  doesn't retain the previous user's plan + meals + macros after a
+ *  swap. Theme stays — it's user-preference, not user-data, and
+ *  defaults will arrive on the next sign-in.
+ *
+ *  iOS WCSession's applicationContext persists across app re-launches
+ *  on the watch side — without this wipe, the watch would happily
+ *  show your wife's meal plan when YOU sign in. (This is the bug
+ *  the user originally flagged.) */
+export async function clearWatchData(): Promise<void> {
+  if (!canPush()) return;
+  const now = Date.now();
+  // Empty workout = "rest" status with no exercises. Watch's
+  // ContentView treats `.rest` as "nothing to do today" and bails
+  // out of any active state.
+  await WatchBridge.syncWorkout({
+    focus: 'Rest',
+    durationMinutes: 0,
+    dateISO: new Date().toISOString().slice(0, 10),
+    status: 'rest',
+    readiness: null,
+    readinessLabel: null,
+    exercises: [],
+    syncedAtMs: now,
+  } as any).catch(() => {});
+  // Empty meals — null score, no items. Watch's MealsView shows
+  // the "Open Thallo on iPhone" empty state.
+  await WatchBridge.syncMeals({
+    dateISO: new Date().toISOString().slice(0, 10),
+    targets: { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
+    actual:  { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
+    score: null,
+    meals: [],
+    syncedAtMs: now,
+  }).catch(() => {});
+  // Empty supplement stack.
+  await WatchBridge.syncSupplements({
+    dateISO: new Date().toISOString().slice(0, 10),
+    items: [],
+    syncedAtMs: now,
+  }).catch(() => {});
+  wsLog('clearWatchData');
+}
+
+/** Push today's supplement stack to the watch so the Supps tab can
+ *  render it. Phone keeps authoritative state; watch taps round-trip
+ *  via `toggle_supplement` / `take_all_supplements` commands. */
+export async function pushSupplementsToWatch(
+  items: Array<{
+    id: number;
+    name: string;
+    dose?: string | null;
+    timing?: string | null;
+    taken?: boolean;
+    skipped?: boolean;
+  }>,
+  dateISO?: string,
+): Promise<boolean> {
+  if (!canPush()) return false;
+  const payload: WatchSupplementsPayload = {
+    dateISO: dateISO || new Date().toISOString().slice(0, 10),
+    items: items.map((s): WatchSupplementItem => ({
+      id: Number(s.id),
+      name: String(s.name ?? 'Supplement'),
+      dose: s.dose ?? null,
+      timing: s.timing ?? null,
+      taken: !!s.taken,
+      skipped: !!s.skipped,
+    })),
+    syncedAtMs: Date.now(),
+  };
+  wsLog('pushSupplementsToWatch', { count: items.length });
+  return WatchBridge.syncSupplements(payload);
 }
 
 /** Subscribe to commands the user taps on the watch. Returns an

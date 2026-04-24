@@ -7,7 +7,7 @@ from datetime import date
 from typing import Optional
 
 from app.database import get_session
-from app.models import User, Meal, MealItem, MealCreate, UserDayState
+from app.models import User, Meal, MealItem, MealCreate, UserDayState, UserGoal
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/meals", tags=["meals"])
@@ -88,6 +88,13 @@ def _build_meal_response(meal: Meal, db: Session) -> dict:
     return {**meal.model_dump(), "items": [i.model_dump() for i in items]}
 
 
+# Per-meal-log refresh runs the daily metrics with AI enabled so each
+# newly-logged food gets its collagen_g + probiotic_cfu amounts
+# estimated. The estimator is cached per food forever (one call per
+# unique food name + classifier version), so logging a salmon dinner
+# 30 times pays for AI exactly once. Without allow_ai=True we'd
+# silently zero out collagen + CFU for every food the deterministic
+# keyword classifier doesn't recognise — which was the bug.
 def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
     """Recompute DailyNutritionMetrics for the given user + date. Called
     after any write that changes what meals exist on that day so the
@@ -95,7 +102,7 @@ def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
     Non-blocking — failures here never break the caller."""
     try:
         from app.services.nutrition.gut_health import compute_daily_metrics
-        compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=False)
+        compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=True)
     except Exception:
         pass
 
@@ -322,7 +329,10 @@ def gut_health_signals(
 
     today = date.today()
     try:
-        today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=False)
+        # The gut-health endpoint also drives the daily NutritionCard,
+        # so it needs amounts populated. Cached per-food, so the first
+        # query of the day is the only AI cost.
+        today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=True)
     except Exception:
         today_row = None
 
@@ -370,6 +380,70 @@ def gut_health_signals(
             "item_count": today_row.item_count,
         },
         "window": rollup,
+    }
+
+
+class DailyMacrosBody(BaseModel):
+    """Body for /meals/daily-macros — the base weekly targets plus
+    today's planned workout context. Returns macros redistributed for
+    the day. Calories + protein unchanged; carbs shift by day type;
+    fat absorbs the kcal delta. See `carb_distribution.py` for rules."""
+    base_calories: int
+    base_protein_g: int
+    base_carbs_g: int
+    base_fat_g: int
+    archetype: str | None = None
+    focus: str | None = None
+    activity_category: str | None = None
+    cardio_style: str | None = None
+    stimulus: str | None = None
+
+
+@router.post("/daily-macros")
+def daily_macros_for_day(
+    body: DailyMacrosBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return today's macros redistributed for the scheduled workout.
+
+    Weekly calories + protein stay constant — this endpoint only
+    shifts carbs up on hard / leg days and down on rest / easy days,
+    with fat absorbing the kcal delta. Pure function; no side
+    effects. Client calls it once per day or whenever the day's
+    archetype changes."""
+    from app.services.nutrition.carb_distribution import (
+        MacroSet, redistribute_for_day,
+    )
+    # Look up goal for the per-goal shift cap (fat loss tightens, bulk
+    # widens). Falls back to a middle cap if no goal is set.
+    goal = db.exec(
+        select(UserGoal).where(UserGoal.user_id == current_user.id, UserGoal.is_active == True)
+    ).first()
+    goal_bucket = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else None) or "general_health"
+
+    base = MacroSet(
+        calories=body.base_calories,
+        protein_g=body.base_protein_g,
+        carbs_g=body.base_carbs_g,
+        fat_g=body.base_fat_g,
+    )
+    adjusted, day_type = redistribute_for_day(
+        base,
+        archetype=body.archetype,
+        focus=body.focus,
+        activity_category=body.activity_category,
+        cardio_style=body.cardio_style,
+        stimulus=body.stimulus,
+        goal_bucket=goal_bucket,
+    )
+    return {
+        "day_type": day_type,
+        "goal": goal_bucket,
+        "base": base.to_dict(),
+        "adjusted": adjusted.to_dict(),
+        "carb_delta_g": adjusted.carbs_g - base.carbs_g,
+        "fat_delta_g": adjusted.fat_g - base.fat_g,
     }
 
 

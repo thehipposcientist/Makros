@@ -1372,6 +1372,56 @@ def get_streak(
     return compute_streak_summary(current_user.id, db=db)
 
 
+@router.get("/weekly-review")
+def get_weekly_review(
+    days: int = 7,
+    weight_slope_lbs_per_week: float | None = None,
+    avg_sleep_hours: float | None = None,
+    avg_resting_hr: float | None = None,
+    avg_steps: float | None = None,
+    readiness_score: int | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Deterministic weekly plan review with full signal integration.
+
+    Caller (phone) passes Apple Health-derived signals it already
+    computed (weight slope, sleep, RHR, steps, readiness) so the
+    review can factor them in without double-fetching. All optional —
+    the review degrades gracefully when AH isn't connected.
+
+    No AI. Everything is rules on existing completion + nutrition +
+    plan + (optional) health data. The response is structured
+    recommendations the client renders as accept/dismiss cards."""
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    review = compute_weekly_review(
+        db, current_user.id,
+        days=max(3, min(28, days)),
+        weight_trend_lbs_per_week=weight_slope_lbs_per_week,
+        avg_sleep_hours=avg_sleep_hours,
+        avg_resting_hr=avg_resting_hr,
+        avg_steps=avg_steps,
+        readiness_score=readiness_score,
+    )
+    return review.to_dict()
+
+
+@router.get("/weekly-volume")
+def get_weekly_volume(
+    days: int = 7,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Per-muscle hard-set counts for the last `days` days.
+
+    Returned separately from the full review so clients that only need
+    the volume chart (analytics / progress tab) don't have to pay for
+    the recommendation pass."""
+    from app.services.workout.weekly_volume import compute_weekly_volume
+    snap = compute_weekly_volume(db, current_user.id, days=max(3, min(28, days)))
+    return snap.to_dict()
+
+
 @router.get("/completions")
 def list_completions(
     limit: int = Query(default=100, ge=1, le=500),

@@ -240,8 +240,10 @@ def build_indicators(
     cal_target, pro_target, goal_id, sex = _compute_targets(profile, goal)
 
     # Ensure today's metrics row is fresh — cheap if already computed.
+    # allow_ai=True so collagen_g + probiotic_cfu_billions populate on
+    # first compute of a newly-logged day. Cached per food forever.
     try:
-        metrics = compute_daily_metrics(db, user_id=user_id, metric_date=target_date, allow_ai=False)
+        metrics = compute_daily_metrics(db, user_id=user_id, metric_date=target_date, allow_ai=True)
     except Exception:
         metrics = None
 

@@ -32,6 +32,30 @@ export async function saveWorkoutSession(session: WorkoutSession): Promise<void>
     history.unshift(session);
   }
   await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
+
+  // Mirror to Apple Health for any session that wasn't already
+  // sourced FROM Apple Health (no infinite-loop on import) and that
+  // has real start/end timestamps. Best-effort + opt-in via the
+  // user's existing isAppleHealthEnabled flag.
+  try {
+    const fromHK = session.id?.startsWith('hk_');
+    if (fromHK) return;
+    if (!session.startedAt || !session.endedAt) return;
+    const enabled = await isAppleHealthEnabled().catch(() => false);
+    if (!enabled) return;
+    const { saveWorkoutToHealth, isHealthKitAvailable } = await import('../services/appleHealth');
+    if (!isHealthKitAvailable()) return;
+    const tag = session.manualActivity?.subtype
+      || session.focus
+      || 'Workout';
+    await saveWorkoutToHealth({
+      startedAt: new Date(session.startedAt),
+      endedAt: new Date(session.endedAt),
+      activityTag: tag,
+      caloriesBurned: session.manualActivity?.caloriesBurned ?? null,
+      distanceMiles: session.manualActivity?.distanceMiles ?? null,
+    });
+  } catch { /* non-fatal — session is already in local history */ }
 }
 
 /** Delete a single workout session by id and also drop any stored summary

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -1852,6 +1852,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           todayISO,
           nutritionScoreData?.score ?? null,
         );
+        // Today's supplement stack — mirrored so the Supps tab on the
+        // watch renders instantly. Commands from the watch round-trip
+        // to api.logDose via the command listener above.
+        try {
+          const { getTodaySupplements } = await import('../services/api');
+          const { pushSupplementsToWatch } = await import('../utils/watchSync');
+          if (authToken) {
+            const stack = await getTodaySupplements(authToken).catch(() => null);
+            if (stack) {
+              await pushSupplementsToWatch(
+                stack.map(s => ({
+                  id: s.id,
+                  name: s.custom_name || 'Supplement',
+                  dose: `${s.dose_amount}${s.dose_unit}`,
+                  timing: s.timing ?? null,
+                  taken: !!(s.logs_today || []).find(l => !l.skipped),
+                  skipped: !!(s.logs_today || []).find(l => l.skipped),
+                })),
+              );
+            }
+          }
+        } catch { /* non-fatal */ }
       } catch { /* watch bridge optional — silent failure is fine */ }
     })();
   // `schedule` is derived every render so we key on its first-item
@@ -2012,6 +2034,66 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const mealType = String(payload?.mealType || '');
             const todayISO = new Date().toISOString().slice(0, 10);
             if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
+          } else if (command === 'toggle_supplement') {
+            // Watch tapped a supplement row — log the dose on the
+            // phone, then re-push the stack so the watch picks up
+            // the authoritative state (overrides the optimistic flip).
+            (async () => {
+              try {
+                const id = Number(payload?.id ?? 0);
+                if (!id) return;
+                const taken = !!payload?.taken;
+                const { logDose, getTodaySupplements } = await import('../services/api');
+                if (!authToken) return;
+                await logDose(authToken, id, { skipped: !taken }).catch(() => null);
+                const fresh = await getTodaySupplements(authToken).catch(() => null);
+                if (fresh) {
+                  const { pushSupplementsToWatch } = await import('../utils/watchSync');
+                  await pushSupplementsToWatch(
+                    fresh.map(s => ({
+                      id: s.id,
+                      name: s.custom_name || 'Supplement',
+                      dose: `${s.dose_amount}${s.dose_unit}`,
+                      timing: s.timing ?? null,
+                      taken: !!(s.logs_today || []).find(l => !l.skipped),
+                      skipped: !!(s.logs_today || []).find(l => l.skipped),
+                    })),
+                  );
+                }
+              } catch { /* non-fatal */ }
+            })();
+          } else if (command === 'take_all_supplements') {
+            // Bulk-log every pending stack item. Mirrors the phone's
+            // "Take all (N)" button. Serial calls so backend timestamps
+            // don't collide + round-trip order is predictable.
+            (async () => {
+              try {
+                if (!authToken) return;
+                const { logDose, getTodaySupplements } = await import('../services/api');
+                const current = await getTodaySupplements(authToken).catch(() => null);
+                if (!current) return;
+                for (const s of current) {
+                  const logs = s.logs_today || [];
+                  if (logs.find(l => !l.skipped)) continue; // already taken
+                  if (logs.find(l => l.skipped))  continue; // explicitly skipped
+                  await logDose(authToken, s.id, { skipped: false }).catch(() => null);
+                }
+                const fresh = await getTodaySupplements(authToken).catch(() => null);
+                if (fresh) {
+                  const { pushSupplementsToWatch } = await import('../utils/watchSync');
+                  await pushSupplementsToWatch(
+                    fresh.map(s => ({
+                      id: s.id,
+                      name: s.custom_name || 'Supplement',
+                      dose: `${s.dose_amount}${s.dose_unit}`,
+                      timing: s.timing ?? null,
+                      taken: !!(s.logs_today || []).find(l => !l.skipped),
+                      skipped: !!(s.logs_today || []).find(l => l.skipped),
+                    })),
+                  );
+                }
+              } catch { /* non-fatal */ }
+            })();
           } else if (command === 'cancel_workout') {
             // Watch-originated cancel — drop any in-progress phone-side
             // workout state. We don't persist anything: past AsyncStorage
@@ -8801,14 +8883,26 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   </PressableScale>
                 </PulseView>
                 {isToday && (
-                  <TouchableOpacity
+                  // Pressable instead of TouchableOpacity so taps are
+                  // captured eagerly via onPressIn — fixes the case
+                  // where the parent DayCard's expand/collapse
+                  // TouchableOpacity stole the responder before this
+                  // child could fire. Haptic also fires immediately
+                  // so the user gets tactile confirmation even before
+                  // the modal opens.
+                  <Pressable
                     style={[styles.skipSecondaryBtn, { borderColor: tc.border, backgroundColor: tc.surface }]}
-                    onPress={() => onSkip(item.workout!.focus)}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    onPress={() => {
+                      import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
+                      console.log('[skip] tapped — focus=', item.workout!.focus);
+                      onSkip(item.workout!.focus);
+                    }}
                     accessibilityRole="button"
                     accessibilityLabel="Skip today's workout">
                     <Ionicons name="close-circle-outline" size={18} color={tc.textSecondary} />
                     <Text style={[styles.skipSecondaryBtnText, { color: tc.textSecondary }]}>Skip</Text>
-                  </TouchableOpacity>
+                  </Pressable>
                 )}
               </View>
               <WorkoutCard

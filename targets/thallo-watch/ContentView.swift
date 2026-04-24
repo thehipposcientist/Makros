@@ -22,6 +22,10 @@ struct ContentView: View {
 
     @State private var active: Bool = false
     @StateObject private var heartRate: HeartRateStore = HeartRateStore()
+    // Show a brief "← swipe →" hint on the first launch the user
+    // sees, then never again (persisted in UserDefaults). Covers the
+    // "I didn't know there were pages" discoverability gap.
+    @State private var showSwipeHint: Bool = !UserDefaults.standard.bool(forKey: "watchSwipeHintShown")
 
     var body: some View {
         ZStack {
@@ -58,8 +62,31 @@ struct ContentView: View {
                         conn.sendCommand("skip_workout")
                     })
                     MealsView(meals: conn.meals)
+                    SupplementsView()
                 }
                 .tabViewStyle(.page)
+                // `.always` keeps the page dots visible at the bottom
+                // so users discover they can swipe between Today /
+                // Meals / Supps without guessing. Default .automatic
+                // fades them out after a beat — fine on iOS, confusing
+                // on a small watch screen.
+                .indexViewStyle(.page(backgroundDisplayMode: .always))
+                .overlay(alignment: .top) {
+                    if showSwipeHint {
+                        SwipeHintPill()
+                            .transition(.opacity)
+                            .onAppear {
+                                // Auto-dismiss after 2.5 s so it doesn't
+                                // linger on subsequent launches.
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                    withAnimation(.easeOut(duration: 0.3)) {
+                                        showSwipeHint = false
+                                    }
+                                    UserDefaults.standard.set(true, forKey: "watchSwipeHintShown")
+                                }
+                            }
+                    }
+                }
             }
         }
         .onReceive(conn.$theme) { palette in theme.palette = palette }
@@ -526,5 +553,118 @@ private struct MealsView: View {
             .foregroundColor(theme.textMuted)
             .multilineTextAlignment(.center)
             .padding(.vertical, 24)
+    }
+}
+
+// ─── Swipe hint pill ────────────────────────────────────────────────
+
+/// Small primary-tinted hint that appears once per install at the top
+/// of the root TabView to teach the swipe gesture. Auto-dismisses
+/// after a few seconds and is persisted so it won't re-appear.
+private struct SwipeHintPill: View {
+    @EnvironmentObject var theme: ThemeStore
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.left.and.right")
+                .font(.system(size: 9, weight: .heavy))
+            Text("SWIPE FOR MORE")
+                .font(.system(size: 9, weight: .heavy))
+                .tracking(0.8)
+        }
+        .foregroundColor(theme.background)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(theme.primary)
+        .cornerRadius(8)
+        .padding(.top, 4)
+    }
+}
+
+// ─── Supplements tab ────────────────────────────────────────────────
+
+private struct SupplementsView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("SUPPLEMENTS")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.0)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                        Text("today")
+                            .font(.system(size: 9))
+                            .foregroundColor(theme.textMuted)
+                    }
+
+                    if let list = conn.supplements?.items, !list.isEmpty {
+                        let pending = list.filter { !$0.taken && !$0.skipped }
+                        if pending.count >= 2 {
+                            Button {
+                                conn.takeAllSupplementsLocal()
+                                conn.sendCommand("take_all_supplements")
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12))
+                                    Text("Take all (\(pending.count))")
+                                        .font(.system(size: 12, weight: .heavy))
+                                }
+                                .foregroundColor(theme.background)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(theme.primary)
+                                .cornerRadius(9)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        ForEach(list) { s in
+                            Button {
+                                conn.toggleSupplementLocal(id: s.id)
+                                conn.sendCommand(
+                                    "toggle_supplement",
+                                    payload: ["id": s.id, "taken": !s.taken],
+                                )
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: s.taken
+                                        ? "checkmark.circle.fill"
+                                        : (s.skipped ? "xmark.circle" : "circle"))
+                                        .font(.system(size: 18))
+                                        .foregroundColor(s.taken ? theme.success : theme.textMuted)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(s.name)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(theme.textPrimary)
+                                            .lineLimit(1)
+                                        if let dose = s.dose, !dose.isEmpty {
+                                            Text(dose)
+                                                .font(.system(size: 10))
+                                                .foregroundColor(theme.textMuted)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(10)
+                                .background(theme.surface)
+                                .cornerRadius(10)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } else {
+                        Text("Nothing scheduled today.")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.textMuted)
+                            .padding(.vertical, 24)
+                    }
+                }
+                .padding(10)
+            }
+        }
     }
 }

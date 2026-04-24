@@ -192,6 +192,46 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
 //
 /** Returns the most recent heart rate sample from the last 30 seconds.
  *  Designed for near-live HR display during an active workout. */
+/** Write a finished workout to Apple Health.
+ *
+ *  Phone-started sessions (lift workouts via ActiveWorkoutScreen,
+ *  open-ended runs via LiveActivityTracker) didn't land in Apple
+ *  Health before — only Watch-started sessions did via
+ *  HKLiveWorkoutBuilder. This closes the gap so completed Thallo
+ *  workouts appear in the iPhone Fitness app + count toward Activity
+ *  rings + are visible to other apps.
+ *
+ *  Best-effort: returns false if HK is unavailable, the user hasn't
+ *  granted write permission, or the call fails. The caller should
+ *  not retry — workouts are saved to Thallo's own history regardless.
+ */
+export async function saveWorkoutToHealth(opts: {
+  startedAt: Date;
+  endedAt: Date;
+  /** Free-form activity tag that matches an `HKWorkoutActivityType`.
+   *  Strings like "run" / "push" / "legs" / "yoga" all work — see
+   *  the native bridge's `activityTypeFromString` for the full list. */
+  activityTag: string;
+  caloriesBurned?: number | null;
+  distanceMiles?: number | null;
+}): Promise<boolean> {
+  if (!isHealthKitAvailable()) return false;
+  const mod = getModule();
+  if (!mod || typeof mod.saveWorkout !== 'function') return false;
+  try {
+    return await mod.saveWorkout(
+      opts.startedAt.getTime(),
+      opts.endedAt.getTime(),
+      opts.activityTag,
+      opts.caloriesBurned ?? null,
+      opts.distanceMiles ?? null,
+    );
+  } catch (e) {
+    console.warn('[appleHealth] saveWorkoutToHealth failed:', e);
+    return false;
+  }
+}
+
 export async function getLatestHeartRate(): Promise<number | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;

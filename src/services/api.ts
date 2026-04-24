@@ -2594,3 +2594,92 @@ export async function getAdaptiveMacros(
   });
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// Weekly Review — deterministic plan review + per-muscle volume
+// ═════════════════════════════════════════════════════════════════════
+
+export interface MuscleVolumeRow {
+  muscle: string;
+  primary_sets: number;
+  secondary_sets: number;
+  total_sets: number;
+  status: 'undertrained' | 'in_range' | 'high' | 'excessive' | 'spike' | 'unknown';
+  range_min: number | null;
+  range_max: number | null;
+  avg_sets_prior_weeks: number;
+  spike_ratio: number;
+}
+
+export interface WeeklyVolumeSnapshot {
+  user_id: number;
+  window_start: string;
+  window_end: string;
+  total_hard_sets: number;
+  sessions_counted: number;
+  by_muscle: Record<string, MuscleVolumeRow>;
+}
+
+export interface PlanRecommendation {
+  key: string;
+  area: 'workout' | 'nutrition' | 'recovery' | 'cardio';
+  priority: 'info' | 'suggest' | 'warn';
+  title: string;
+  detail: string;
+  action: Record<string, any>;
+}
+
+export interface WeeklyReviewResponse {
+  user_id: number;
+  week_start: string;
+  week_end: string;
+  goal: string;
+  sessions_completed: number;
+  sessions_planned: number;
+  adherence_pct: number;
+  cardio_minutes: number;
+  zone2_minutes: number;
+  volume: WeeklyVolumeSnapshot;
+  nutrition_adherence_pct: number;
+  days_logged: number;
+  avg_protein_g: number;
+  avg_fiber_g: number;
+  weight_trend_lbs_per_week: number | null;
+  weight_trend_direction: 'up' | 'down' | 'flat' | 'unknown';
+  avg_sleep_hours: number | null;
+  avg_resting_hr: number | null;
+  headline: string;
+  recommendations: PlanRecommendation[];
+}
+
+export async function getWeeklyReview(
+  token: string,
+  opts: {
+    days?: number;
+    weightSlopeLbsPerWeek?: number | null;
+    avgSleepHours?: number | null;
+    avgRestingHr?: number | null;
+    avgSteps?: number | null;
+    readinessScore?: number | null;
+  } = {},
+): Promise<WeeklyReviewResponse> {
+  const params = new URLSearchParams();
+  if (opts.days) params.set('days', String(opts.days));
+  if (opts.weightSlopeLbsPerWeek != null) params.set('weight_slope_lbs_per_week', String(opts.weightSlopeLbsPerWeek));
+  if (opts.avgSleepHours != null) params.set('avg_sleep_hours', String(opts.avgSleepHours));
+  if (opts.avgRestingHr != null) params.set('avg_resting_hr', String(opts.avgRestingHr));
+  if (opts.avgSteps != null) params.set('avg_steps', String(opts.avgSteps));
+  if (opts.readinessScore != null) params.set('readiness_score', String(opts.readinessScore));
+  const qs = params.toString();
+  return request<WeeklyReviewResponse>(`/workouts/weekly-review${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getWeeklyVolume(token: string, days = 7): Promise<WeeklyVolumeSnapshot> {
+  return request<WeeklyVolumeSnapshot>(`/workouts/weekly-volume?days=${days}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+

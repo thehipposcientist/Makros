@@ -59,6 +59,21 @@ export type WatchMealsPayload = {
   syncedAtMs: number;
 };
 
+export type WatchSupplementItem = {
+  id: number;
+  name: string;
+  dose?: string | null;
+  timing?: string | null;
+  taken: boolean;
+  skipped: boolean;
+};
+
+export type WatchSupplementsPayload = {
+  dateISO: string;
+  items: WatchSupplementItem[];
+  syncedAtMs: number;
+};
+
 export type WatchPalette = {
   background: string;
   surface: string;
@@ -104,6 +119,11 @@ export const WatchBridge = {
   async syncMeals(payload: WatchMealsPayload): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncMeals(payload); } catch { return false; }
+  },
+
+  async syncSupplements(payload: WatchSupplementsPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncSupplements(payload); } catch { return false; }
   },
 
   async updateProgress(progress: WatchProgress): Promise<boolean> {

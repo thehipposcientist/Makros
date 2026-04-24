@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,8 @@ import {
   submitCoachCheckin,
   CoachCheckinFeedback,
   CoachCheckinResponse,
+  getWeeklyReview,
+  WeeklyReviewResponse,
 } from '../services/api';
 
 /**
@@ -64,6 +66,26 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
   const [submitting, setSubmitting] = useState(false);
   const [response, setResponse] = useState<CoachCheckinResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Trainer / nutritionist summary fetched from the deterministic
+  // weekly review. Shown above the rating form so the check-in reads
+  // as "here's what the coach saw, does this match your experience?"
+  // rather than "tell us from scratch." Leads the user into
+  // confirming / refining instead of composing.
+  const [review, setReview] = useState<WeeklyReviewResponse | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    setReviewLoading(true);
+    (async () => {
+      try {
+        const r = await getWeeklyReview(authToken, { days: 7 });
+        if (!cancelled) setReview(r);
+      } catch { /* non-fatal — check-in still works without it */ }
+      finally { if (!cancelled) setReviewLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [visible, authToken]);
 
   const reset = () => {
     setEnergy(null);
@@ -170,8 +192,97 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
 
             {!response ? (
               <>
+                {/* Trainer + nutritionist read for the week — lets the
+                    check-in read as "confirm / refine" instead of the
+                    old "tell us from scratch" survey. Deterministic
+                    server data, no AI. */}
+                {reviewLoading ? (
+                  <View style={{ padding: 16, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  </View>
+                ) : review ? (
+                  <View style={{
+                    backgroundColor: colors.surface,
+                    borderRadius: radius.lg,
+                    padding: 14,
+                    marginBottom: 16,
+                    borderWidth: 1,
+                    borderColor: colors.primary + '44',
+                  }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: colors.primary, marginBottom: 6 }}>
+                      TRAINER'S READ · THIS WEEK
+                    </Text>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary, lineHeight: 19 }}>
+                      {review.headline}
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 14, marginTop: 10 }}>
+                      <View>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>SESSIONS</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                          {review.sessions_completed}/{review.sessions_planned}
+                        </Text>
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>CARDIO</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                          {Math.round(review.cardio_minutes)}m
+                        </Text>
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>HARD SETS</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                          {Math.round(review.volume.total_hard_sets)}
+                        </Text>
+                      </View>
+                      {review.days_logged > 0 && (
+                        <View>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>PROTEIN</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                            {Math.round(review.avg_protein_g)}g
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    {/* Top 2 recs — the rest of the list lives on the
+                        weekly coaching card. We surface the highest-
+                        priority ones here to tee up a conversation. */}
+                    {review.recommendations.length > 0 && (
+                      <View style={{ marginTop: 12, gap: 6 }}>
+                        {[...review.recommendations]
+                          .sort((a, b) => {
+                            const rank: Record<string, number> = { warn: 0, suggest: 1, info: 2 };
+                            return (rank[a.priority] ?? 9) - (rank[b.priority] ?? 9);
+                          })
+                          .slice(0, 2)
+                          .map(rec => (
+                            <View key={rec.key} style={{
+                              flexDirection: 'row', gap: 8, alignItems: 'flex-start',
+                              paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border + '55',
+                            }}>
+                              <View style={{
+                                width: 4, height: 16, borderRadius: 2, marginTop: 2,
+                                backgroundColor: rec.priority === 'warn' ? colors.error : rec.priority === 'suggest' ? colors.warning : colors.primary,
+                              }} />
+                              <View style={{ flex: 1 }}>
+                                <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textPrimary }}>
+                                  {rec.title}
+                                </Text>
+                                <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2, lineHeight: 15 }}>
+                                  {rec.detail}
+                                </Text>
+                              </View>
+                            </View>
+                          ))
+                        }
+                      </View>
+                    )}
+                  </View>
+                ) : null}
+
                 <Text style={styles.intro}>
-                  A quick read on how you're doing. Tap to rate — takes 15 seconds.
+                  {review
+                    ? 'Does this match how the week felt? Confirm with a few taps.'
+                    : "A quick read on how you're doing. Tap to rate — takes 15 seconds."}
                 </Text>
 
                 {renderScale('Energy',     'energy',     energy,     setEnergy)}

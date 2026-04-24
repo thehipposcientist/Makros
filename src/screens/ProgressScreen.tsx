@@ -22,6 +22,8 @@ import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, Pl
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
+import WeeklyCoachingCard from '../components/WeeklyCoachingCard';
+import Zone2TargetCard from '../components/Zone2TargetCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -301,7 +303,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         const enabled = await isAppleHealthEnabled();
         setHealthEnabled(enabled);
         if (!enabled) return;
-        const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
+        // Route through the aggregator so other cards (Zone 2,
+        // weekly coaching, readiness) get the same cached value
+        // without re-querying HealthKit. Falls back to direct
+        // readHealthSummary if the aggregator returns null.
+        const { getHealthDataSummary } = await import('../services/healthDataSummary');
+        const agg = await getHealthDataSummary({ age: userProfile.physicalStats?.age ?? null });
+        const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
         if (fresh) {
           setHealthSummary(fresh);
           saveHealthSummary(fresh).catch(() => null);
@@ -1378,6 +1386,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               at least one HK workout that doesn't already overlap an
               existing Thallo session. Classifying it here lets
               activity_impact.py factor the workout into fatigue. */}
+          {/* Zone 2 weekly target — goal-driven, one glance. Hidden
+              when goal target is <60 min/week (muscle gain / strength). */}
+          {authToken && (
+            <Zone2TargetCard
+              authToken={authToken}
+              themeName={userProfile.themePreference}
+            />
+          )}
+
+          {/* Weekly coaching — deterministic trainer-style analysis of
+              the user's actual week. Uses local weight/sleep/readiness
+              signals (all optional) to gate suggestions. */}
+          {authToken && (
+            <WeeklyCoachingCard
+              authToken={authToken}
+              themeName={userProfile.themePreference}
+              weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
+              avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
+              avgRestingHr={healthSummary?.restingHeartRate ?? null}
+              avgSteps={healthSummary?.avgSteps7d ?? null}
+              readinessScore={null /* wire from TrainingReadinessCard when extracted */}
+            />
+          )}
+
           {isHealthKitAvailable() && (
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}

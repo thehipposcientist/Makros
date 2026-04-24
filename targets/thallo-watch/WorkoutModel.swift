@@ -85,3 +85,23 @@ struct WatchMealsDay: Codable, Equatable {
     let meals: [WatchMealItem]
     let syncedAtMs: Double
 }
+
+// ─── Supplements ─────────────────────────────────────────────────────
+
+struct WatchSupplementItem: Codable, Identifiable, Equatable {
+    /// Stable per-stack-item id — matches the phone's StackItem.id so
+    /// watch-originated "take" commands can round-trip to api.logDose
+    /// without the watch needing to know the full product taxonomy.
+    let id: Int
+    let name: String
+    let dose: String?       // pre-formatted "200 IU" / "5 g" etc
+    let timing: String?     // "morning" / "with_food" / "post_workout"
+    let taken: Bool
+    let skipped: Bool
+}
+
+struct WatchSupplementsDay: Codable, Equatable {
+    let dateISO: String
+    let items: [WatchSupplementItem]
+    let syncedAtMs: Double
+}

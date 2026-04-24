@@ -19,6 +19,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var workout: WatchWorkout?
     @Published var meals: WatchMealsDay?
+    @Published var supplements: WatchSupplementsDay?
     @Published var theme: WatchPalette = .midnight
     @Published var isReachable: Bool = false
     @Published var lastError: String?
@@ -108,6 +109,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
            let decoded = try? JSONDecoder().decode(WatchPalette.self, from: data) {
             self.theme = decoded
         }
+        if let s = ctx["supplements"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: s),
+               let decoded = try? JSONDecoder().decode(WatchSupplementsDay.self, from: data) {
+                if supplements == nil || decoded.syncedAtMs >= (supplements?.syncedAtMs ?? 0) {
+                    self.supplements = decoded
+                }
+            }
+        }
     }
 
     private func absorbMessage(_ msg: [String: Any]) {
@@ -178,6 +187,41 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             score: day.score,
             meals: newMeals,
             syncedAtMs: day.syncedAtMs,
+        )
+    }
+
+    // Optimistic: flip a supplement's `taken` flag locally so the
+    // watch UI updates instantly on tap. Phone push overwrites with
+    // authoritative state after api.logDose completes.
+    func toggleSupplementLocal(id: Int) {
+        guard let day = supplements else { return }
+        var next: [WatchSupplementItem] = []
+        for s in day.items {
+            if s.id == id {
+                next.append(WatchSupplementItem(
+                    id: s.id, name: s.name, dose: s.dose, timing: s.timing,
+                    taken: !s.taken, skipped: s.skipped && s.taken,
+                ))
+            } else {
+                next.append(s)
+            }
+        }
+        self.supplements = WatchSupplementsDay(
+            dateISO: day.dateISO, items: next, syncedAtMs: day.syncedAtMs,
+        )
+    }
+
+    /// Mark every pending supplement as taken locally. Mirrors the
+    /// "Take All (N)" button on the phone.
+    func takeAllSupplementsLocal() {
+        guard let day = supplements else { return }
+        let next = day.items.map { s in
+            (s.taken || s.skipped)
+              ? s
+              : WatchSupplementItem(id: s.id, name: s.name, dose: s.dose, timing: s.timing, taken: true, skipped: false)
+        }
+        self.supplements = WatchSupplementsDay(
+            dateISO: day.dateISO, items: next, syncedAtMs: day.syncedAtMs,
         )
     }
 
