@@ -477,6 +477,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     });
   }, []);
+  // Phone↔watch active-state sync. On mount (user started from phone)
+  // we push `status: 'active'` so the watch flips into its active view.
+  // On unmount (finish, cancel, background kill) the HomeScreen's own
+  // sync effect takes over and pushes the next lifecycle state — no
+  // cleanup push is needed here because the active-state source of
+  // truth has already changed by then.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { pushWorkoutToWatch } = await import('../utils/watchSync');
+        await pushWorkoutToWatch(workout as any, {
+          dateISO: new Date().toISOString().slice(0, 10),
+          status: 'active',
+        });
+      } catch { /* watch bridge optional */ }
+    })();
+  }, [workout]);
+
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
   // Ref-based rest timer — avoids interval churn from re-running useEffect every second

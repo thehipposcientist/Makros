@@ -134,17 +134,24 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
         transform: [{ scale }],
         opacity,
         alignItems: 'center',
+        // Clamp to the inner diameter of the halo ring (280 − 2*16
+        // padding = 248) so long phrases like "MAKE IT COUNT." stay
+        // inside the circle instead of spilling across the screen.
+        maxWidth: 248,
+        paddingHorizontal: 4,
       }}>
         <Text
           numberOfLines={1}
           adjustsFontSizeToFit
+          minimumFontScale={0.5}
           style={{
-            fontSize: tick.isFinal ? 56 : 140,
+            // Final phrase starts smaller so it fits without scaling;
+            // adjustsFontSizeToFit handles the outliers.
+            fontSize: tick.isFinal ? 40 : 140,
             fontWeight: '900',
-            letterSpacing: tick.isFinal ? 1.5 : -4,
+            letterSpacing: tick.isFinal ? 1.2 : -4,
             color: tc.primary,
             textAlign: 'center',
-            paddingHorizontal: 32,
             // Hard shadow for readability over whatever content is
             // behind the translucent background.
             textShadowColor: tc.primary + '55',

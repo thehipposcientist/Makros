@@ -205,11 +205,16 @@ private struct StartCountdownOverlay: View {
                 .frame(width: 140, height: 140)
             VStack(spacing: 6) {
                 Text(tick.label)
-                    .font(.system(size: tick.isFinal ? 26 : 70, weight: .black, design: .rounded))
+                    // Final phrase starts at 20pt (smaller than the
+                    // 70pt digit) so even long strings like
+                    // "MAKE IT COUNT." fit inside the 140pt halo.
+                    // minimumScaleFactor lets it shrink further as
+                    // needed. frame(maxWidth:) clamps to halo diameter.
+                    .font(.system(size: tick.isFinal ? 20 : 70, weight: .black, design: .rounded))
                     .foregroundColor(theme.primary)
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
-                    .padding(.horizontal, 16)
+                    .frame(maxWidth: 124)
                     .scaleEffect(scale)
                     .opacity(opacity)
                 if !tick.isFinal {
