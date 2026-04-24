@@ -10,8 +10,8 @@ import { useMemo } from 'react';
 import { View, Text, Modal, TouchableOpacity, ScrollView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
-import { AppThemeName, ExerciseLibraryItem } from '../types';
-import { rankSwapCandidates } from '../utils/swapScoring';
+import { AppThemeName } from '../types';
+import { rankSwapCandidates, ExerciseLibraryItem } from '../utils/swapScoring';
 
 interface Props {
   visible: boolean;

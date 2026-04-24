@@ -3136,16 +3136,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion) => {
     console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0}`);
     let nextPlan: DailyNutritionPlan | null = null;
+    let savedMealType: string = mealType;
+    let savedIdx = -1;
     setNutritionPlansByDate(prev => {
       const current = prev[date];
       if (!current) { console.log(`[handleMealSave] no current plan for ${date}`); return prev; }
       const meals = [...(current.meals ?? [])];
       if (mealType === 'new_meal' || mealType === 'new_extra') {
         meals.push(updated);
+        savedIdx = meals.length - 1;
+        savedMealType = `meal_${savedIdx}`;
       } else if (mealType.startsWith('meal_')) {
         const idx = parseInt(mealType.slice(5), 10);
-        if (idx >= 0 && idx < meals.length) meals[idx] = updated;
-        else meals.push(updated);
+        if (idx >= 0 && idx < meals.length) {
+          meals[idx] = updated;
+          savedIdx = idx;
+        } else {
+          meals.push(updated);
+          savedIdx = meals.length - 1;
+          savedMealType = `meal_${savedIdx}`;
+        }
       }
       nextPlan = { ...current, meals };
       console.log(`[handleMealSave] built nextPlan with ${meals.length} meals, stamp=${(nextPlan as any)?._templatesVersion ?? 'NONE'}`);
@@ -3158,6 +3168,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       console.log(`[handleMealSave] nextPlan was null — NOT saved`);
     }
     if (nextPlan) await persistDayState(date, { nutrition_plan: nextPlan });
+
+    // Newly-added meals reflect real intent ("I'm adding this meal because
+    // I ate / am eating it"). Auto-check them and log to backend meal
+    // history so they show in /meals/history and trigger DailyNutrition-
+    // Metrics recompute (which feeds the Health Score daily average).
+    // Editing an already-checked meal re-logs so the updated totals
+    // replace the old history row on the next sync.
+    const isNewMeal = mealType === 'new_meal' || mealType === 'new_extra';
+    const wasAlreadyChecked = !!(checkedMealsByDate[date] ?? {})[savedMealType];
+    const shouldLog = isNewMeal || wasAlreadyChecked;
+    if (shouldLog && authToken && savedIdx >= 0) {
+      if (isNewMeal) {
+        // Auto-check: persist the check state + snapshot the preserved meal.
+        const currentChecks = checkedMealsByDate[date] ?? {};
+        const nextChecks = { ...currentChecks, [savedMealType]: true };
+        setCheckedMealsByDate(prev => ({ ...prev, [date]: nextChecks }));
+        await saveMealChecks(date, nextChecks);
+        await persistDayState(date, { meal_checks: nextChecks });
+        try { await savePreservedMeal(date, savedMealType, updated); } catch {}
+      }
+      // Fire-and-forget to backend; failures don't block save.
+      logMealChecked(authToken, {
+        meal_date: date,
+        meal_type: savedMealType,
+        meal: updated as Record<string, any>,
+        source: isNewMeal ? 'manual_add' : 'plan_check',
+      }).catch(err => console.log('[handleMealSave] meal-log background save failed:', err?.message));
+    }
 
     // Routine-backed meal edits must propagate to `mealRoutines` storage.
     // Identified by `_routineId` on the saved meal — the user just edited
@@ -3197,7 +3235,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         setNutritionPlansByDate(prev => applyRoutinesToAll(prev, nextRoutines));
       }
     }
-  }, [persistDayState]);
+  }, [persistDayState, authToken, checkedMealsByDate]);
 
   const handleAddSnack = useCallback((date: string) => {
     const emptyMeal: MealSuggestion = { meal: 'New Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };

@@ -847,17 +847,31 @@ def _lifting_plus_cardio_recipe(
 # eliminate the week's only cardio-adjacent rest opportunity.
 
 _HYBRID_PAIR: dict["DayArchetype", "DayArchetype"] = {
+    # PPL — all stimulus variants
     DayArchetype.LIFT_PUSH: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
     DayArchetype.LIFT_PUSH_HEAVY: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
     DayArchetype.LIFT_PUSH_VOLUME: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
     DayArchetype.LIFT_PULL: DayArchetype.LIFT_PULL_PLUS_CARDIO,
     DayArchetype.LIFT_PULL_HEAVY: DayArchetype.LIFT_PULL_PLUS_CARDIO,
     DayArchetype.LIFT_PULL_VOLUME: DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    # Upper / Lower — full + heavy + hypertrophy
     DayArchetype.LIFT_UPPER: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
     DayArchetype.LIFT_UPPER_HEAVY: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
     DayArchetype.LIFT_UPPER_HYPERTROPHY: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    # Full Body
     DayArchetype.LIFT_FULL_BODY: DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
     DayArchetype.LIFT_FULL_BODY_STRENGTH: DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+    # Bro split — chest/back/shoulders/arms all map to UPPER_PLUS_CARDIO
+    # since the cardio finisher is body-region-agnostic and the hybrid
+    # slot builder appends a generic cardio finisher. Legs bro stays
+    # excluded (same reason LIFT_LEGS is excluded — hard lower + cardio).
+    DayArchetype.LIFT_BRO_CHEST: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_BRO_BACK: DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_BRO_SHOULDERS: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_BRO_ARMS: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    # Strength-maintenance (non-lifting goals' anchor) — can take a
+    # gentle finisher too.
+    DayArchetype.LIFT_STRENGTH_MAINTENANCE: DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
 }
 
 _GOALS_PREFERRING_HYBRID_CARDIO = frozenset({

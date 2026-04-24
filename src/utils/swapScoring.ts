@@ -21,7 +21,7 @@ export interface ExerciseLibraryItem {
   is_custom?: boolean;
 }
 
-function equipmentClass(eq?: string): string {
+function equipmentClass(eq?: string | null): string {
   const s = (eq ?? '').toLowerCase();
   if (s.includes('barbell')) return 'barbell';
   if (s.includes('dumbbell') || s.includes('db')) return 'dumbbell';

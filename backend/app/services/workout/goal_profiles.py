@@ -150,6 +150,13 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_PUSH_HEAVY, DayArchetype.LIFT_PULL_HEAVY, DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME, DayArchetype.LIFT_LEGS_VOLUME,
             DayArchetype.MOBILITY_FLOW,
+            # Lift + cardio finishers — strength users can pull in a
+            # short zone-2 finisher on upper/push/pull days without
+            # sacrificing strength quality on the main lifts.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_UPPER_HEAVY,
@@ -313,6 +320,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.HYBRID_UPPER_INTERVALS,
             DayArchetype.HYBRID_STRENGTH_INTERVALS,
             DayArchetype.MOBILITY_FLOW,
+            # Lift + cardio finishers — athletic users benefit from
+            # interval finishers after upper work.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
             # Stimulus-differentiated
             DayArchetype.LIFT_UPPER_HEAVY, DayArchetype.LIFT_UPPER_HYPERTROPHY,
             DayArchetype.LIFT_LOWER_HEAVY, DayArchetype.LIFT_LOWER_HYPERTROPHY,
