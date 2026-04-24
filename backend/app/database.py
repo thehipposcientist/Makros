@@ -525,6 +525,42 @@ def _ensure_meal_consumed_at_column() -> None:
         print(f"[migration] meal consumed_at / meal_type add failed (non-fatal): {e}")
 
 
+def _ensure_food_metadata_amounts_columns() -> None:
+    """Add AI-estimated amount columns to food_metadata.
+
+    `collagen_g_per_serving` + `probiotic_servings_per_serving` carry
+    nutrient estimates USDA doesn't label. `amount_confidence` lets
+    downstream UIs fade out low-confidence numbers. Also extends
+    daily_nutrition_metrics with `collagen_g` so day-level totals can
+    aggregate from per-food amounts.
+
+    Idempotent — safe to run on every startup."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE food_metadata ADD COLUMN IF NOT EXISTS collagen_g_per_serving DOUBLE PRECISION",
+            ))
+            conn.execute(text(
+                "ALTER TABLE food_metadata ADD COLUMN IF NOT EXISTS probiotic_servings_per_serving DOUBLE PRECISION",
+            ))
+            conn.execute(text(
+                "ALTER TABLE food_metadata ADD COLUMN IF NOT EXISTS amount_confidence VARCHAR(16) DEFAULT 'none'",
+            ))
+            conn.execute(text(
+                "ALTER TABLE daily_nutrition_metrics ADD COLUMN IF NOT EXISTS collagen_g DOUBLE PRECISION DEFAULT 0",
+            ))
+            conn.execute(text(
+                "ALTER TABLE food_metadata ADD COLUMN IF NOT EXISTS probiotic_cfu_billions_per_serving DOUBLE PRECISION",
+            ))
+            conn.execute(text(
+                "ALTER TABLE daily_nutrition_metrics ADD COLUMN IF NOT EXISTS probiotic_cfu_billions DOUBLE PRECISION DEFAULT 0",
+            ))
+    except Exception as e:
+        print(f"[migration] food_metadata / daily_metrics amount columns add failed (non-fatal): {e}")
+
+
 def _ensure_user_profile_birthdate_column() -> None:
     """Add nullable `birthdate` to user_profiles. Existing rows get NULL;
     the profile router treats a NULL birthdate as "not filled in" and
@@ -558,6 +594,7 @@ def create_db_and_tables():
     _ensure_nutrition_v3_columns()
     _ensure_meal_consumed_at_column()
     _ensure_user_profile_birthdate_column()
+    _ensure_food_metadata_amounts_columns()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

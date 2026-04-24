@@ -348,6 +348,13 @@ def gut_health_signals(
             "fermented_servings": today_row.fermented_servings,
             "probiotic_servings": getattr(today_row, "probiotic_servings", 0) or 0,
             "omega3_servings": today_row.omega3_servings,
+            # AI-estimated amounts. `collagen_g` = grams today;
+            # `probiotic_cfu_billions` = billions of CFU today.
+            # 0 for either means the AI confidently found nothing OR
+            # the food predates the v4 classifier (logs after v4
+            # populate real numbers).
+            "collagen_g": getattr(today_row, "collagen_g", 0) or 0,
+            "probiotic_cfu_billions": getattr(today_row, "probiotic_cfu_billions", 0) or 0,
             "seafood_servings": getattr(today_row, "seafood_servings", 0) or 0,
             "fruit_servings": getattr(today_row, "fruit_servings", 0) or 0,
             "vegetable_servings": getattr(today_row, "vegetable_servings", 0) or 0,

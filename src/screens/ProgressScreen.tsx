@@ -1919,6 +1919,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     { icon: 'flask-outline', label: 'Fermented foods', value: `${gutHealthWindow.fermented_servings} servings`, detail: 'Kimchi, yogurt, sauerkraut support gut flora' },
                     { icon: 'medkit-outline', label: 'Probiotic servings', value: `${gutHealthWindow.probiotic_servings ?? 0}`, detail: 'Live cultures for microbiome balance' },
                     { icon: 'fish-outline', label: 'Omega-3 foods', value: `${gutHealthWindow.omega3_servings} servings`, detail: 'Anti-inflammatory, heart & brain health' },
+                    // Collagen — AI-estimated from every logged food, not
+                    // a keyword match. Shows daily average for readability.
+                    { icon: 'pulse-outline', label: 'Collagen', value: `${Math.round((gutHealthWindow as any).avg_collagen_g ?? 0)}g / day avg`, detail: 'AI-estimated from bone broth, skin-on cuts, gelatin, supplements' },
                   ].map(row => (
                     <View key={row.label} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
                       <Ionicons name={row.icon as any} size={16} color={tc.primary} style={{ marginTop: 1 }} />

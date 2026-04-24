@@ -2065,6 +2065,8 @@ export interface GutHealthToday {
   fermented_servings: number;
   probiotic_servings: number;
   omega3_servings: number;
+  /** AI-estimated grams of collagen from today's logged items. */
+  collagen_g: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;
@@ -2094,6 +2096,10 @@ export interface GutHealthWindow {
   fermented_servings: number;
   probiotic_servings: number;
   omega3_servings: number;
+  /** AI-estimated collagen grams across the full window. */
+  collagen_g: number;
+  /** AI-estimated average collagen grams per logged day. */
+  avg_collagen_g: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;

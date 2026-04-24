@@ -1555,6 +1555,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setNutritionScoreData(computeNutritionScore(plan, userProfile?.goal ?? 'body_recomp'));
   }, [nutritionPlansByDate, userProfile?.goal]);
 
+  // Authoritative daily amounts from the server — collagen + probiotic
+  // CFUs. Fetched alongside the score so NutritionCard can show real
+  // numbers instead of the client-side plan estimate. Refresh piggy-
+  // backs on checkedMealsByDate so toggling a meal immediately
+  // re-queries.
+  const [todayCollagenG, setTodayCollagenG] = useState<number | null>(null);
+  const [todayProbioticCfu, setTodayProbioticCfu] = useState<number | null>(null);
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getGutHealth } = await import('../services/api');
+        const res = await getGutHealth(authToken, 7);
+        if (cancelled) return;
+        const t: any = res?.today;
+        setTodayCollagenG(typeof t?.collagen_g === 'number' ? t.collagen_g : 0);
+        setTodayProbioticCfu(typeof t?.probiotic_cfu_billions === 'number' ? t.probiotic_cfu_billions : 0);
+      } catch { /* network / bridge optional */ }
+    })();
+    return () => { cancelled = true; };
+  }, [authToken, checkedMealsByDate, nutritionPlansByDate]);
+
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
     try {
@@ -1940,6 +1963,45 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
         unsubscribe = onWatchCommand((command, payload) => {
+          if (command === 'pull_state') {
+            // Watch explicitly asked for a fresh snapshot — push
+            // workout + meals + theme via the same path the
+            // reachability listener uses. Bypasses stale
+            // applicationContext so the watch UI is always current
+            // the moment the user opens Thallo on their wrist.
+            console.log('[watch] pull_state requested — pushing snapshot');
+            (async () => {
+              try {
+                const { pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch } =
+                  await import('../utils/watchSync');
+                const s = rePushStateRef.current;
+                const todayISO = new Date().toISOString().slice(0, 10);
+                const todayItem = (s.schedule as any[])?.[0] ?? null;
+                const todayWorkout = todayItem?.workout ?? null;
+                const status: 'scheduled' | 'completed' | 'skipped' | 'rest' =
+                  s.todayDone ? 'completed'
+                  : s.skippedDates.has(todayKey()) ? 'skipped'
+                  : todayItem?.isRest ? 'rest'
+                  : 'scheduled';
+                pushWorkoutToWatch(todayWorkout, {
+                  dateISO: todayISO,
+                  status,
+                  readiness: s.readinessScore?.score ?? null,
+                  readinessLabel: s.readinessScore?.label ?? null,
+                }).catch(() => {});
+                pushThemeToWatch(s.themePreference).catch(() => {});
+                const todayPlan = s.nutritionPlansByDate[todayISO]
+                  ?? (Object.values(s.nutritionPlansByDate)[0] as any);
+                pushMealsToWatch(
+                  todayPlan,
+                  s.checkedMealsByDate[todayISO],
+                  todayISO,
+                  s.nutritionScoreData?.score ?? null,
+                ).catch(() => {});
+              } catch { /* bridge optional */ }
+            })();
+            return;
+          }
           if (command === 'start_workout') {
             const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.start(today);
@@ -5788,6 +5850,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       goal={userProfile.goal}
                       savedMealNames={savedMealNames}
                       onAddFromSaved={() => setAddFromSavedFor(d.key)}
+                      dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
+                      dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
                     />
                   </AnimatedCollapsible>
                 </View>

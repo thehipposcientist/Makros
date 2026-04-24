@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 3   # bumped for seafood/fruit/veg/alcohol/processed_meat/refined_grain
+CLASSIFIER_VERSION = 4   # v4: AI-estimated collagen_g + probiotic_servings amounts
 
 Source = Literal["deterministic", "heuristic", "ai", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]

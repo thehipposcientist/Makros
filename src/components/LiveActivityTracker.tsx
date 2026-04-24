@@ -25,7 +25,7 @@ import {
   AppThemeName, WorkoutSession,
   ActivityCategory, ActivityIntensity, CardioStyle,
 } from '../types';
-import { isHealthKitAvailable, getLatestHeartRate } from '../services/appleHealth';
+import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 
@@ -182,7 +182,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     setPhase('running');
   };
 
-  const handleFinish = () => {
+  const handleFinish = async () => {
     if (!choice || !startedAtMs) { reset(); onClose(); return; }
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     // Snap a final elapsed before opening the log modal.
@@ -190,7 +190,27 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       ? pauseStartMs
       : Date.now();
     const finalSeconds = Math.max(1, Math.floor((endedMs - startedAtMs) / 1000) - pausedAccum);
-    const avgHr = hrN > 0 ? Math.round(hrSum / hrN) : null;
+    const fallbackAvgHr = hrN > 0 ? Math.round(hrSum / hrN) : null;
+
+    // Parity with AH imports: pull the authoritative HR + kcal
+    // summary from HealthKit for the tracked window. HK records at
+    // a higher sample rate than our 10s poll, and it also catches
+    // any Apple Workout the user may have started in parallel (e.g.
+    // Outdoor Run logged via the Watch's Workout app), whose calorie
+    // model is better calibrated than anything we'd compute client-
+    // side. Both calls are best-effort — null on failure, we still
+    // save the session.
+    let avgHr: number | null = fallbackAvgHr;
+    let kcal: number | null = null;
+    try {
+      const hr = await getWorkoutHrSummary(startedAtMs, endedMs).catch(() => null);
+      if (hr?.avgBpm) avgHr = Math.round(hr.avgBpm);
+    } catch { /* swallow — HK optional */ }
+    try {
+      const c = await getAppleWorkoutCaloriesForWindow(startedAtMs, endedMs).catch(() => null);
+      if (c && typeof c === 'number') kcal = Math.round(c);
+    } catch { /* swallow */ }
+
     setPrefill({
       // Namespacing the id with `live_` lets the save path tag the
       // session as `source: 'live_tracker'` for analytics, and keeps
@@ -204,6 +224,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       subtype: choice.subtype,
       cardioStyle: choice.cardioStyle,
       avgHeartRate: avgHr,
+      caloriesBurned: kcal,
     });
     setPhase('finishing');
     setLogModalVisible(true);

@@ -62,6 +62,11 @@ class DailyRawSignals:
     plant_slugs: list[str]
     item_count: int
     classified_item_count: int
+    # AI-estimated amount aggregates. Summed as per-serving × servings
+    # consumed rather than binary flag hits — so "bone broth, 2 cups"
+    # contributes ~20g collagen, not just "1 serving."
+    collagen_g: float = 0.0
+    probiotic_cfu_billions: float = 0.0
     per_meal_protein: dict[str, float] = field(default_factory=dict)
 
 
@@ -97,6 +102,8 @@ def compute_daily_metrics(
     row.fermented_servings = raw.fermented_servings
     row.probiotic_servings = raw.probiotic_servings
     row.omega3_servings = raw.omega3_servings
+    row.collagen_g = raw.collagen_g
+    row.probiotic_cfu_billions = raw.probiotic_cfu_billions
     row.seafood_servings = raw.seafood_servings
     row.fruit_servings = raw.fruit_servings
     row.vegetable_servings = raw.vegetable_servings
@@ -184,6 +191,10 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
         "fermented_servings": round(sum((r.fermented_servings or 0) for r in rows), 1),
         "probiotic_servings": round(sum((getattr(r, "probiotic_servings", 0) or 0) for r in rows), 1),
         "omega3_servings": round(sum((r.omega3_servings or 0) for r in rows), 1),
+        # AI-estimated nutrients USDA doesn't carry. Summed from
+        # per-food per-serving × servings consumed.
+        "collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in rows), 1),
+        "avg_collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in rows) / n, 1),
         "seafood_servings": round(sum((getattr(r, "seafood_servings", 0) or 0) for r in rows), 1),
         "fruit_servings": round(sum((getattr(r, "fruit_servings", 0) or 0) for r in rows), 1),
         "vegetable_servings": round(sum((getattr(r, "vegetable_servings", 0) or 0) for r in rows), 1),
@@ -211,6 +222,7 @@ def _empty_rollup(days: int) -> dict:
         "pct_days_fiber_target": 0.0,
         "distinct_plant_foods_week": 0,
         "fermented_servings": 0.0, "probiotic_servings": 0.0, "omega3_servings": 0.0,
+        "collagen_g": 0.0, "avg_collagen_g": 0.0,
         "seafood_servings": 0.0, "fruit_servings": 0.0, "vegetable_servings": 0.0,
         "alcohol_servings": 0.0, "processed_meat_servings": 0.0, "refined_grain_servings": 0.0,
         "plant_protein_g": 0.0, "animal_protein_g": 0.0, "plant_protein_pct": 0,
@@ -258,6 +270,8 @@ def _gather_raw_signals(
     fermented_servings = 0.0
     probiotic_servings = 0.0
     omega3_servings = 0.0
+    collagen_g = 0.0
+    probiotic_cfu_billions = 0.0
     seafood_servings = 0.0
     fruit_servings = 0.0
     vegetable_servings = 0.0
@@ -314,10 +328,36 @@ def _gather_raw_signals(
         if meta.source != "unknown" or meta.confidence > 0:
             classified_count += 1
 
+        # Servings consumed of this item — used to scale per-serving
+        # AI amount estimates. When serving_grams and nut.reference_grams
+        # are both known we use that ratio; otherwise assume 1 serving.
+        servings_consumed = 1.0
+        if nut and grams_consumed > 0 and (nut.reference_grams or 0) > 0:
+            servings_consumed = grams_consumed / float(nut.reference_grams)
+        servings_consumed = max(0.1, servings_consumed)
+
         if meta.fermented_flag:
             fermented_servings += 1.0
-        if getattr(meta, "probiotic_flag", False):
-            probiotic_servings += 1.0
+        # Probiotic aggregation — CFU count (billions) is the real
+        # bioactive unit. When the AI estimated CFUs we sum them and
+        # also bump the legacy servings count for back-compat with
+        # UIs that haven't switched yet. Older rows without CFU fall
+        # back to the servings estimate, then the boolean flag.
+        cfu_per_serving = getattr(meta, "probiotic_cfu_billions_per_serving", None)
+        if cfu_per_serving is not None and cfu_per_serving > 0:
+            probiotic_cfu_billions += float(cfu_per_serving) * servings_consumed
+            probiotic_servings += 1.0 * servings_consumed
+        else:
+            pb_per_serving = getattr(meta, "probiotic_servings_per_serving", None)
+            if pb_per_serving is not None and pb_per_serving > 0:
+                probiotic_servings += float(pb_per_serving) * servings_consumed
+            elif getattr(meta, "probiotic_flag", False):
+                probiotic_servings += 1.0
+        # Collagen — purely AI-estimated, no legacy fallback because
+        # the column didn't exist before v4.
+        col_per_serving = getattr(meta, "collagen_g_per_serving", None)
+        if col_per_serving is not None and col_per_serving > 0:
+            collagen_g += float(col_per_serving) * servings_consumed
         if meta.omega3_flag:
             omega3_servings += 1.0
         if getattr(meta, "seafood_flag", False):
@@ -368,8 +408,10 @@ def _gather_raw_signals(
         saturated_fat_g=round(saturated_fat_g, 1),
         distinct_plant_foods=len(plant_slugs),
         fermented_servings=fermented_servings,
-        probiotic_servings=probiotic_servings,
+        probiotic_servings=round(probiotic_servings, 2),
         omega3_servings=omega3_servings,
+        collagen_g=round(collagen_g, 1),
+        probiotic_cfu_billions=round(probiotic_cfu_billions, 1),
         seafood_servings=seafood_servings,
         fruit_servings=fruit_servings,
         vegetable_servings=vegetable_servings,

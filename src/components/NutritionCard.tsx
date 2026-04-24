@@ -46,6 +46,12 @@ interface NutritionCardProps {
    *  button. When wired, the UI splits the "Add Meal" affordance into
    *  a two-path menu (Empty meal / From saved meal). */
   onAddFromSaved?: () => void;
+  /** Authoritative daily amounts from /meals/gut-health → today. When
+   *  present they override the client-side plan-preview estimate so
+   *  the Gut signals strip shows real logged totals (grams of
+   *  collagen, billions of CFU, etc). */
+  dailyCollagenG?: number | null;
+  dailyProbioticCfuBillions?: number | null;
 }
 
 export default function NutritionCard({
@@ -67,6 +73,8 @@ export default function NutritionCard({
   goal,
   savedMealNames,
   onAddFromSaved,
+  dailyCollagenG,
+  dailyProbioticCfuBillions,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
@@ -349,12 +357,27 @@ export default function NutritionCard({
                       <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut signals</Text>
                       <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 'auto' }}>today</Text>
                     </View>
-                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                    <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
                       {[
-                        { label: 'Probiotic', value: Math.round(_gutHealth.probiotic_servings) },
-                        { label: 'Fermented', value: Math.round(_gutHealth.fermented_servings) },
-                        { label: 'Plants', value: _gutHealth.distinct_plant_foods },
-                        { label: 'Omega-3', value: _gutHealth.omega3_mg > 0 ? `${Math.round(_gutHealth.omega3_mg)}mg` : '0' },
+                        // Prefer authoritative server amount (from
+                        // /meals/gut-health → today). Falls back to
+                        // the client-side plan estimate when no props
+                        // are passed (e.g. plan-preview context).
+                        {
+                          label: 'Probiotic',
+                          value: dailyProbioticCfuBillions != null && dailyProbioticCfuBillions > 0
+                            ? `${dailyProbioticCfuBillions >= 10 ? Math.round(dailyProbioticCfuBillions) : dailyProbioticCfuBillions.toFixed(1)}B`
+                            : `${Math.round(_gutHealth.probiotic_servings)}`,
+                          detail: dailyProbioticCfuBillions != null ? 'CFU' : 'svg',
+                        },
+                        {
+                          label: 'Collagen',
+                          value: dailyCollagenG != null ? `${Math.round(dailyCollagenG)}g` : '—',
+                          detail: 'today',
+                        },
+                        { label: 'Fermented', value: Math.round(_gutHealth.fermented_servings), detail: 'svg' },
+                        { label: 'Plants', value: _gutHealth.distinct_plant_foods, detail: 'types' },
+                        { label: 'Omega-3', value: _gutHealth.omega3_mg > 0 ? `${Math.round(_gutHealth.omega3_mg)}mg` : '0', detail: 'today' },
                       ].map(tile => (
                         <View key={tile.label} style={{
                           flex: 1, alignItems: 'center', backgroundColor: colors.background,

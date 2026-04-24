@@ -442,50 +442,91 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                   </>
                 )}
 
-                {/* Duration */}
-                <Text style={[s.label, { color: tc.textPrimary, marginTop: 16 }]}>Duration</Text>
-                <View style={s.durationRow}>
-                  <TouchableOpacity
-                    style={[s.durationBtn, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
-                    onPress={() => adjustDuration(-5)}>
-                    <Ionicons name="remove" size={20} color={tc.textPrimary} />
-                  </TouchableOpacity>
-                  <View style={[s.durationDisplay, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
-                    <TextInput
-                      style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', minWidth: 50 }}
-                      value={String(durationMin)}
-                      onChangeText={t => {
-                        const n = parseInt(t, 10);
-                        if (!isNaN(n) && n >= 0 && n <= 300) setDurationMin(n);
-                        else if (t === '') setDurationMin(0);
-                      }}
-                      keyboardType="number-pad"
-                      selectTextOnFocus
-                    />
-                    <Text style={{ fontSize: 12, color: tc.textMuted, fontWeight: '600' }}>min</Text>
+                {/* When prefilled (Apple Health import or live-tracker
+                    finish), render date + duration + optional metrics
+                    as a compact read-only summary row instead of full
+                    interactive pickers. Everything here came FROM the
+                    source; asking the user to re-enter it is noise.
+                    Edit button flips the summary back to editable
+                    pickers for users who do need to tweak. */}
+                {prefill && !showAdvanced ? (
+                  <View style={{
+                    marginTop: 16,
+                    padding: 12,
+                    borderRadius: 10,
+                    backgroundColor: tc.surfaceRaised,
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                  }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Ionicons name="information-circle-outline" size={14} color={tc.primary} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.4 }}>
+                        FROM {prefill.externalId?.startsWith('hk_') ? 'APPLE HEALTH' : 'YOUR TRACKER'}
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 14, marginTop: 8 }}>
+                      <SummaryPill label="When" value={formatDate(dateOffset)} tc={tc} />
+                      <SummaryPill label="Duration" value={`${durationMin} min`} tc={tc} />
+                      {distance ? <SummaryPill label="Distance" value={`${distance} mi`} tc={tc} /> : null}
+                      {calories ? <SummaryPill label="Calories" value={`${calories} kcal`} tc={tc} /> : null}
+                      {heartRate ? <SummaryPill label="Avg HR" value={`${heartRate} bpm`} tc={tc} /> : null}
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => { configureExpandAnimation(200); setShowAdvanced(true); }}
+                      style={{ marginTop: 10 }}>
+                      <Text style={{ fontSize: 11, color: tc.primary, fontWeight: '700' }}>
+                        Edit values
+                      </Text>
+                    </TouchableOpacity>
                   </View>
-                  <TouchableOpacity
-                    style={[s.durationBtn, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
-                    onPress={() => adjustDuration(5)}>
-                    <Ionicons name="add" size={20} color={tc.textPrimary} />
-                  </TouchableOpacity>
-                </View>
-
-                {/* Date */}
-                <Text style={[s.label, { color: tc.textPrimary, marginTop: 16 }]}>When</Text>
-                <View style={s.chipRow}>
-                  {[0, -1, -2, -3].map(offset => {
-                    const active = dateOffset === offset;
-                    return (
+                ) : (
+                  <>
+                    {/* Duration */}
+                    <Text style={[s.label, { color: tc.textPrimary, marginTop: 16 }]}>Duration</Text>
+                    <View style={s.durationRow}>
                       <TouchableOpacity
-                        key={offset}
-                        style={[s.chip, { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surfaceRaised }]}
-                        onPress={() => setDateOffset(offset)}>
-                        <Text style={{ fontSize: 12, fontWeight: '600', color: active ? tc.primary : tc.textSecondary }}>{formatDate(offset)}</Text>
+                        style={[s.durationBtn, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
+                        onPress={() => adjustDuration(-5)}>
+                        <Ionicons name="remove" size={20} color={tc.textPrimary} />
                       </TouchableOpacity>
-                    );
-                  })}
-                </View>
+                      <View style={[s.durationDisplay, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                        <TextInput
+                          style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', minWidth: 50 }}
+                          value={String(durationMin)}
+                          onChangeText={t => {
+                            const n = parseInt(t, 10);
+                            if (!isNaN(n) && n >= 0 && n <= 300) setDurationMin(n);
+                            else if (t === '') setDurationMin(0);
+                          }}
+                          keyboardType="number-pad"
+                          selectTextOnFocus
+                        />
+                        <Text style={{ fontSize: 12, color: tc.textMuted, fontWeight: '600' }}>min</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[s.durationBtn, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
+                        onPress={() => adjustDuration(5)}>
+                        <Ionicons name="add" size={20} color={tc.textPrimary} />
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Date */}
+                    <Text style={[s.label, { color: tc.textPrimary, marginTop: 16 }]}>When</Text>
+                    <View style={s.chipRow}>
+                      {[0, -1, -2, -3].map(offset => {
+                        const active = dateOffset === offset;
+                        return (
+                          <TouchableOpacity
+                            key={offset}
+                            style={[s.chip, { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surfaceRaised }]}
+                            onPress={() => setDateOffset(offset)}>
+                            <Text style={{ fontSize: 12, fontWeight: '600', color: active ? tc.primary : tc.textSecondary }}>{formatDate(offset)}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </>
+                )}
 
                 {/* Notes */}
                 <Text style={[s.label, { color: tc.textPrimary, marginTop: 16 }]}>Notes</Text>
@@ -559,6 +600,21 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
         </View>
       </View>
     </Modal>
+  );
+}
+
+// ─── Summary pill for the prefilled-data compact row ────────────────────────
+
+function SummaryPill({ label, value, tc }: { label: string; value: string; tc: any }) {
+  return (
+    <View>
+      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>
+        {label.toUpperCase()}
+      </Text>
+      <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 2 }}>
+        {value}
+      </Text>
+    </View>
   );
 }
 

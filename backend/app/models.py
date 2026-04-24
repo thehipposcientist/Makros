@@ -825,6 +825,25 @@ class FoodMetadata(SQLModel, table=True):
     alcohol_flag: bool = Field(default=False)
     processed_meat_flag: bool = Field(default=False)
     refined_grain_flag: bool = Field(default=False)
+    # v4 — AI-estimated amounts for nutrients USDA doesn't label.
+    # Set by an AI enrichment pass (see `ai_classify.estimate_amounts`)
+    # for every food regardless of the deterministic keyword pass, so
+    # a custom food like "Grandma's chicken soup" with collagen content
+    # is no longer lost when its name doesn't match a regex. Per-serving
+    # values; the daily aggregator multiplies by servings consumed.
+    collagen_g_per_serving: float | None = Field(default=None)
+    # Probiotic count in BILLIONS of CFU per serving. CFUs are the
+    # bioactive unit for probiotics (1 cup yogurt ≈ 1–10B, kefir ≈
+    # 25–50B, label-driven supplement ≈ 1–100B). Stored in billions
+    # so typical values are small floats (1, 10, 50) rather than 1e9.
+    probiotic_cfu_billions_per_serving: float | None = Field(default=None)
+    # Legacy — replaced by CFU count above. Kept so existing rows
+    # read without a migration. New rows leave this nil and rely on
+    # cfu_billions for aggregation.
+    probiotic_servings_per_serving: float | None = Field(default=None)
+    # Confidence tier of the AI estimate: "high" / "med" / "low" / "none".
+    # UI uses this to grey-out low-confidence numbers.
+    amount_confidence: str = Field(default="none")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -874,6 +893,15 @@ class DailyNutritionMetrics(SQLModel, table=True):
     alcohol_servings: float = Field(default=0)
     processed_meat_servings: float = Field(default=0)
     refined_grain_servings: float = Field(default=0)
+    # v4 — AI-estimated amounts. Sum of `collagen_g_per_serving *
+    # servings_consumed` across the day's logged items. Covers foods
+    # USDA doesn't label (bone broth, custom recipes, gelatin, etc).
+    collagen_g: float = Field(default=0)
+    # Daily probiotic dose in BILLIONS of CFU. Summed from each item's
+    # per-serving CFU estimate × servings consumed. Makes "did I hit
+    # my probiotic target today?" a real number instead of a coarse
+    # servings count.
+    probiotic_cfu_billions: float = Field(default=0)
     # Max % of daily protein concentrated in a single meal — flags the
     # "all protein at dinner" pattern for muscle-gain users.
     max_meal_protein_pct: float = Field(default=0)

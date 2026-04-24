@@ -13,6 +13,7 @@ import SwiftUI
 struct ThalloWatchApp: App {
     @StateObject private var conn = ConnectivityStore.shared
     @StateObject private var theme = ThemeStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -20,6 +21,16 @@ struct ThalloWatchApp: App {
                 .environmentObject(conn)
                 .environmentObject(theme)
                 .preferredColorScheme(.dark)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Whenever the watch app becomes active (user raised wrist
+            // or tapped from the complication / Smart Stack), ask the
+            // phone for a fresh state snapshot. Closes the gap where
+            // applicationContext was queued hours ago and meals have
+            // moved on since.
+            if phase == .active {
+                conn.requestPull()
+            }
         }
     }
 }

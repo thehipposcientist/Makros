@@ -40,11 +40,34 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // Hydrate whatever's already queued in applicationContext
             // (survives cold start on both sides).
             self.absorbContext(session.receivedApplicationContext)
+            // Pull-on-wake handshake: actively ask the phone for the
+            // latest state. Without this, we're at the mercy of
+            // whatever was last queued in applicationContext — which
+            // may be stale by minutes or hours if the phone's state
+            // has moved on since the last push. Phone responds by
+            // re-pushing workout + meals + theme.
+            self.sendCommand("pull_state")
         }
     }
 
     func sessionReachabilityDidChange(_ session: WCSession) {
-        DispatchQueue.main.async { self.isReachable = session.isReachable }
+        DispatchQueue.main.async {
+            self.isReachable = session.isReachable
+            // Every time reachability becomes true (phone app opened
+            // or came back into range), ask for a refresh. Cheap,
+            // idempotent, closes the "wife's watch not pulling meals"
+            // gap directly.
+            if session.isReachable {
+                self.sendCommand("pull_state")
+            }
+        }
+    }
+
+    /// Explicitly ask the phone to re-push all state. Called on
+    /// WC activation, on reachability → true, and whenever the watch
+    /// app becomes visible again (see `ThalloWatchApp` scene phase).
+    func requestPull() {
+        sendCommand("pull_state")
     }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {

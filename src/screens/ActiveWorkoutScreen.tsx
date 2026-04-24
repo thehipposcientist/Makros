@@ -565,6 +565,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
         unsubscribe = onWatchCommand((command, payload) => {
+          if (command === 'pull_state') {
+            // Watch asked for a refresh while we're mid-workout —
+            // push `status: 'active'` + current warmup steps so the
+            // wrist flips to the active view with fresh content.
+            (async () => {
+              try {
+                const { pushWorkoutToWatch } = await import('../utils/watchSync');
+                await pushWorkoutToWatch(workout as any, {
+                  dateISO: new Date().toISOString().slice(0, 10),
+                  status: 'active',
+                  warmupSteps: warmupStepsRef.current,
+                });
+              } catch { /* bridge optional */ }
+            })();
+            return;
+          }
           if (command === 'log_set') {
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const weight = payload?.weightLbs;
