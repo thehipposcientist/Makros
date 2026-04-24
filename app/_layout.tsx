@@ -4,6 +4,11 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { colors } from '../src/constants/theme';
 import { configureWorkoutNotifications } from '../src/utils/restNotifications';
+import { installDevLogs } from '../src/utils/devLogs';
+
+// Install the ring-buffer console shim as early as possible so every
+// subsequent log lands in the in-app viewer. Runs once per JS runtime.
+installDevLogs();
 
 let GestureWrapper: React.ComponentType<{ style?: any; children: React.ReactNode }> = ({ style, children }) => (
   <View style={style}>{children}</View>

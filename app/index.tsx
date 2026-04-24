@@ -281,6 +281,7 @@ import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
+import DevLogsViewer from '../src/components/DevLogsViewer';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
@@ -1680,6 +1681,7 @@ function AccountInfoModal({
   onSignOut: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
+  const c = tc; // alias for the new Developer-logs block below
   const am = createAmStyles(tc);
   const [accountData, setAccountData] = useState<{ email: string; username: string } | null>(null);
   const [loading, setLoading]         = useState(true);
@@ -1687,6 +1689,7 @@ function AccountInfoModal({
   const [hasRecoveryQuestion, setHasRecoveryQuestion] = useState(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
   const [showTierInfo, setShowTierInfo] = useState(false);
+  const [showDevLogs, setShowDevLogs] = useState(false);
   const showHealthToggle = Platform.OS === 'ios';
 
   useEffect(() => {
@@ -1966,11 +1969,28 @@ function AccountInfoModal({
             <Text style={am.signOutText}>Sign Out</Text>
           </TouchableOpacity>
 
+          {/* Developer logs — visible always so you can hand a
+              TestFlight tester a single instruction: open Account →
+              tap "Developer logs" → copy. No hidden gesture so it
+              stays reachable mid-bug-report. */}
+          <TouchableOpacity
+            onPress={() => setShowDevLogs(true)}
+            style={{ marginTop: 8, alignItems: 'center', paddingVertical: 8 }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
+              Developer logs
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity onPress={onClose} style={am.closeBtn}>
             <Text style={am.closeText}>Close</Text>
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
+      <DevLogsViewer
+        visible={showDevLogs}
+        onClose={() => setShowDevLogs(false)}
+        themeName={profile.themePreference}
+      />
     </Modal>
   );
 }

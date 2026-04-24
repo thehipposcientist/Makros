@@ -91,12 +91,19 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             return true
         } catch {
             // Fall back to message delivery if updateContext rejects
-            // (duplicate payload, etc.).
+            // (duplicate payload, backoff, etc.).
             if s.isReachable {
                 s.sendMessage(dict, replyHandler: nil, errorHandler: nil)
                 return true
             }
-            return false
+            // Last resort: queue via transferUserInfo for guaranteed
+            // eventual delivery when the watch app next activates.
+            // Without this fallback, the push was silently lost any
+            // time updateApplicationContext threw AND the watch app
+            // wasn't reachable — exactly the "start workout while watch
+            // is closed" case the user was hitting.
+            s.transferUserInfo(dict)
+            return true
         }
     }
 

@@ -424,14 +424,68 @@ private struct ExerciseTab: View {
 
     private func logSetCard(_ ex: WatchExercise) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
+            // Weight row — pill + stepper buttons. Stepper gives the
+            // user an obvious way to change the number without having
+            // to know the Digital Crown is the input device. Crown
+            // still works when the pill is focused.
+            HStack(spacing: 4) {
+                Button {
+                    state.pendingWeight = max(0, state.pendingWeight - 5)
+                    WKInterfaceDevice.current().play(.click)
+                } label: {
+                    Text("−").font(.system(size: 22, weight: .black))
+                        .frame(width: 34, height: 34)
+                        .background(theme.surfaceRaised)
+                        .cornerRadius(8)
+                        .foregroundColor(theme.textPrimary)
+                }
+                .buttonStyle(.plain)
                 crownPill("Weight", value: "\(Int(state.pendingWeight)) lb", active: crownTarget == .weight) {
                     crownTarget = .weight
                 }
+                Button {
+                    state.pendingWeight = state.pendingWeight + 5
+                    WKInterfaceDevice.current().play(.click)
+                } label: {
+                    Text("+").font(.system(size: 22, weight: .black))
+                        .frame(width: 34, height: 34)
+                        .background(theme.surfaceRaised)
+                        .cornerRadius(8)
+                        .foregroundColor(theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+            }
+            HStack(spacing: 4) {
+                Button {
+                    state.pendingReps = max(0, state.pendingReps - 1)
+                    WKInterfaceDevice.current().play(.click)
+                } label: {
+                    Text("−").font(.system(size: 22, weight: .black))
+                        .frame(width: 34, height: 34)
+                        .background(theme.surfaceRaised)
+                        .cornerRadius(8)
+                        .foregroundColor(theme.textPrimary)
+                }
+                .buttonStyle(.plain)
                 crownPill("Reps", value: "\(state.pendingReps)", active: crownTarget == .reps) {
                     crownTarget = .reps
                 }
+                Button {
+                    state.pendingReps = state.pendingReps + 1
+                    WKInterfaceDevice.current().play(.click)
+                } label: {
+                    Text("+").font(.system(size: 22, weight: .black))
+                        .frame(width: 34, height: 34)
+                        .background(theme.surfaceRaised)
+                        .cornerRadius(8)
+                        .foregroundColor(theme.textPrimary)
+                }
+                .buttonStyle(.plain)
             }
+            Text("Tap a field then turn the Digital Crown, or use −/+")
+                .font(.system(size: 9))
+                .foregroundColor(theme.textMuted)
+                .lineLimit(2)
             Button(action: logSet) {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")

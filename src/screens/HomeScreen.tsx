@@ -4713,12 +4713,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
-            {/* Plan actions row — Why + Log + Edit */}
+            {/* Plan actions row — Start / Log / Edit, with optional
+                "Why this plan" pinned above when a trainer note exists.
+                Four chips in a single 360-ish pt row ran out of space;
+                flexWrap lets them reflow without clipping text. */}
             {workoutSubTab === 'plan' && (
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+              <View style={{ gap: 6, marginBottom: 8 }}>
                 {trainerNote ? (
                   <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55', flex: 1 }]}
+                    style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
                     onPress={() => setShowTrainerNote(true)}
                     activeOpacity={0.7}>
                     <Ionicons name="information-circle-outline" size={14} color={workoutPalette.strong} />
@@ -4727,33 +4730,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </Text>
                   </TouchableOpacity>
                 ) : null}
-                <TouchableOpacity
-                  style={[styles.planNoteLink, { borderColor: themeColors.primary + '44' }]}
-                  onPress={() => setShowLogActivity(true)}
-                  activeOpacity={0.7}>
-                  <Ionicons name="add-circle-outline" size={14} color={themeColors.primary} />
-                  <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]}>
-                    Log Activity
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.planNoteLink, { borderColor: themeColors.primary + '44' }]}
-                  onPress={() => setShowLiveTracker(true)}
-                  activeOpacity={0.7}>
-                  <Ionicons name="play-circle-outline" size={14} color={themeColors.primary} />
-                  <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]}>
-                    Start Workout
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44' }]}
-                  onPress={() => setWorkoutSubTab('equipment')}
-                  activeOpacity={0.7}>
-                  <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
-                  <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]}>
-                    Edit Plan
-                  </Text>
-                </TouchableOpacity>
+                <View style={{ flexDirection: 'row', gap: 6 }}>
+                  <TouchableOpacity
+                    style={[styles.planNoteLink, { borderColor: themeColors.primary + '66', flex: 1 }]}
+                    onPress={() => setShowLiveTracker(true)}
+                    activeOpacity={0.7}>
+                    <Ionicons name="play-circle-outline" size={14} color={themeColors.primary} />
+                    <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]} numberOfLines={1}>
+                      Start Workout
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.planNoteLink, { borderColor: themeColors.primary + '44', flex: 1 }]}
+                    onPress={() => setShowLogActivity(true)}
+                    activeOpacity={0.7}>
+                    <Ionicons name="add-circle-outline" size={14} color={themeColors.primary} />
+                    <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]} numberOfLines={1}>
+                      Log Activity
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: 1 }]}
+                    onPress={() => setWorkoutSubTab('equipment')}
+                    activeOpacity={0.7}>
+                    <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
+                    <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]} numberOfLines={1}>
+                      Edit Plan
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
