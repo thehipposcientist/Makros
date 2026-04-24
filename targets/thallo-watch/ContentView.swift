@@ -9,7 +9,10 @@ struct ContentView: View {
     @EnvironmentObject var conn: ConnectivityStore
     @EnvironmentObject var theme: ThemeStore
     @State private var active: Bool = false
-    @State private var heartRate: HeartRateStore = HeartRateStore()
+    // @StateObject (not @State) because HeartRateStore is an
+    // ObservableObject — @State won't republish @Published changes
+    // and the BPM number would freeze after the first sample.
+    @StateObject private var heartRate: HeartRateStore = HeartRateStore()
 
     var body: some View {
         ZStack {
@@ -89,34 +92,36 @@ private struct TodayView: View {
                     .foregroundColor(theme.textSecondary)
                 }
 
-                // Exercise preview list — first 3 visible, rest
-                // collapsed behind a summary count.
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(workout.exercises.prefix(3)) { ex in
-                        HStack(alignment: .top, spacing: 6) {
-                            Circle()
-                                .fill(theme.primary)
-                                .frame(width: 5, height: 5)
-                                .padding(.top, 5)
-                            VStack(alignment: .leading, spacing: 1) {
+                // Full exercise list — ScrollView already wraps this,
+                // so showing every row is fine. Each row reads
+                // "Bench Press · Barbell" on top and "4 × 5-8 · 135 lb"
+                // underneath so the user can glance at the full plan
+                // without opening the phone.
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(workout.exercises.enumerated()), id: \.element.id) { idx, ex in
+                        HStack(alignment: .top, spacing: 8) {
+                            // Index pill — keeps the eye anchored.
+                            Text("\(idx + 1)")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .foregroundColor(theme.primary)
+                                .frame(width: 18, height: 18)
+                                .background(theme.primary.opacity(0.18))
+                                .clipShape(Circle())
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(ex.name)
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(theme.textPrimary)
-                                    .lineLimit(1)
-                                Text("\(ex.sets) × \(ex.reps)")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(theme.textMuted)
+                                    .lineLimit(2)
+                                detailLine(for: ex)
                             }
                         }
-                    }
-                    if workout.exercises.count > 3 {
-                        Text("+ \(workout.exercises.count - 3) more")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(theme.textMuted)
-                            .padding(.leading, 11)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                        .background(theme.surface.opacity(0.6))
+                        .cornerRadius(8)
                     }
                 }
-                .padding(.top, 2)
+                .padding(.top, 4)
 
                 VStack(spacing: 6) {
                     Button(action: onStart) {
@@ -149,5 +154,34 @@ private struct TodayView: View {
             }
             .padding(10)
         }
+    }
+
+    /// Secondary line on each exercise row. Format:
+    ///   "4 × 5-8 · Barbell · 135 lb"
+    /// Fields trimmed gracefully when missing so the line always
+    /// reads cleanly (never a lone " · " orphan).
+    @ViewBuilder
+    private func detailLine(for ex: WatchExercise) -> some View {
+        let parts: [String] = {
+            var p: [String] = ["\(ex.sets) × \(ex.reps)"]
+            if let eq = ex.equipment, !eq.isEmpty {
+                // Humanize "barbell, flat_bench" → "Barbell · Flat Bench"
+                let pretty = eq
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces)
+                            .replacingOccurrences(of: "_", with: " ")
+                            .capitalized }
+                    .joined(separator: ", ")
+                p.append(pretty)
+            }
+            if let w = ex.plannedTargetWeightLbs, w > 0 {
+                p.append("\(Int(w)) lb")
+            }
+            return p
+        }()
+        Text(parts.joined(separator: " · "))
+            .font(.system(size: 10))
+            .foregroundColor(theme.textMuted)
+            .lineLimit(2)
     }
 }
