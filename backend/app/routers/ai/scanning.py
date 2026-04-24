@@ -225,6 +225,137 @@ class BarcodeLookupRequest(_PydanticBaseModel):
     barcode: str
 
 
+class SpeechToMealRequest(_PydanticBaseModel):
+    """Audio blob (base64) describing a meal in natural language —
+    "I had a handful of almonds and a cup of rice with some chicken".
+    Backend transcribes with Whisper → parses with the chat model into
+    structured items ready to paste into a meal."""
+    audio_base64: str
+    mime_type: str = "audio/m4a"
+
+
+@router.post("/speech-to-meal")
+def speech_to_meal(
+    body: SpeechToMealRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Two-stage: Whisper transcribes the audio, then gpt-4o-mini
+    extracts structured food items with best-guess macros.
+
+    Returns `{transcript, items: [{name, quantity, unit, calories,
+    protein, carbs, fat}]}`. Empty items list when nothing parseable.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    if not body.audio_base64:
+        raise HTTPException(status_code=400, detail="audio_base64 is required")
+
+    import base64
+    import io
+    try:
+        audio_bytes = base64.b64decode(body.audio_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="audio_base64 is not valid base64")
+
+    client = OpenAI(api_key=api_key)
+
+    # Stage 1: Whisper transcription.
+    transcript = ""
+    try:
+        # The OpenAI SDK wants a file-like object with a .name attribute
+        # so it can detect the MIME from the extension. Derive extension
+        # from mime_type when available; fall back to .m4a (iOS default).
+        ext = "m4a"
+        mt = (body.mime_type or "").lower()
+        if "wav" in mt: ext = "wav"
+        elif "mp3" in mt: ext = "mp3"
+        elif "webm" in mt: ext = "webm"
+        elif "ogg" in mt: ext = "ogg"
+        elif "mp4" in mt or "m4a" in mt: ext = "m4a"
+
+        class _NamedBytesIO(io.BytesIO):
+            name = f"meal.{ext}"
+        buf = _NamedBytesIO(audio_bytes)
+        transcript_resp = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=buf,
+            response_format="text",
+        )
+        transcript = str(transcript_resp).strip() if transcript_resp else ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription failed: {str(e)}")
+
+    if not transcript:
+        return {"transcript": "", "items": []}
+
+    # Stage 2: extract structured food items from the transcript.
+    micros_example = ", ".join(f'"{k}": 0' for k in MICRONUTRIENT_AI_FIELDS)
+    parser_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition expert. The user dictated a meal in natural "
+                "language. Parse each distinct food item with its quantity and unit "
+                "(translate vague measures like 'a handful' → grams, 'a cup' → cup, "
+                "'a few' → 2, 'some' → 1 serving). Estimate macros per the quantity "
+                "you parsed (not per 100g). Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Transcript: {transcript!r}\n\n"
+                "Return JSON in EXACTLY this shape — one entry per food, with "
+                "calories/protein/carbs/fat for the specified quantity (not per 100g):\n"
+                '{"items": [{"name": "rice, cooked", "quantity": 1, "unit": "cup", '
+                '"calories": 0, "protein": 0, "carbs": 0, "fat": 0, '
+                f'"micronutrients": {{{micros_example}}}}}]}}\n'
+                "If nothing parseable, return {\"items\": []}. Valid units: "
+                "g, oz, lb, cup, tbsp, tsp, ml, fl_oz, piece, serving."
+            ),
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), parser_messages,
+            max_tokens=900, timeout_secs=30,
+        )
+        response = _chat_create(client, **kwargs)
+        parsed = _extract_json(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Parse failed: {str(e)}")
+
+    raw_items = parsed.get("items") if isinstance(parsed, dict) else None
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    items_clean: list[dict] = []
+    for it in raw_items:
+        if not isinstance(it, dict) or not it.get("name"):
+            continue
+        items_clean.append({
+            "name": str(it.get("name")).strip(),
+            "quantity": float(it.get("quantity") or 1),
+            "unit": str(it.get("unit") or "serving"),
+            "calories": float(it.get("calories") or 0),
+            "protein": float(it.get("protein") or 0),
+            "carbs": float(it.get("carbs") or 0),
+            "fat": float(it.get("fat") or 0),
+            "micronutrients": it.get("micronutrients") or {},
+        })
+        # Reuse the existing food-classification helper so plants /
+        # fermented / omega-3 flags land in metadata for this item too.
+        try:
+            _attach_food_classification(items_clean[-1])
+        except Exception:
+            pass
+
+    return {"transcript": transcript, "items": items_clean}
+
+
 # ─── Exercise form video lookup ──────────────────────────────────────────────
 
 import json as _json

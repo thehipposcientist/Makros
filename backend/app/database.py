@@ -316,6 +316,69 @@ def _autoscrape_missing_video_ids() -> None:
     threading.Thread(target=_worker, daemon=True, name="video_autoscrape").start()
 
 
+def _backfill_mealitem_food_ids() -> None:
+    """One-shot backfill: resolve `food_id` on MealItems where it's
+    NULL but the `food_name` matches a Food row. Without this,
+    previously-logged meal items miss the FoodNutrition join and
+    fiber / sodium / added_sugar / saturated_fat all come out zero
+    for those days. Idempotent — rows that already have a food_id
+    are skipped, and rows whose name can't be matched stay NULL.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            # Resolve + update in a single pass. Uses normalized_name
+            # for matching to handle case / whitespace variants.
+            # Tolerant match: both sides lowercase + strip parens +
+            # collapse whitespace. Handles `"Spinach (Raw)"` vs Food row
+            # `"Spinach Raw"` (normalized_name = `"spinach raw"`), and
+            # other variants where punctuation diverges.
+            result = conn.execute(text("""
+                UPDATE meal_items mi
+                SET food_id = f.id
+                FROM foods f
+                WHERE mi.food_id IS NULL
+                  AND TRIM(regexp_replace(LOWER(mi.food_name), '[^a-z0-9]+', ' ', 'g'))
+                      = TRIM(regexp_replace(f.normalized_name, '[^a-z0-9]+', ' ', 'g'))
+            """))
+            n = result.rowcount or 0
+            if n > 0:
+                print(f"[migration] mealitem food_id backfill matched {n} rows")
+    except Exception as e:
+        print(f"[migration] mealitem food_id backfill failed (non-fatal): {e}")
+
+
+def _recompute_recent_daily_metrics() -> None:
+    """After the food_id backfill, the classifier + fiber sums change,
+    so recompute DailyNutritionMetrics for anyone with a row in the
+    last 14 days. Cheap — each recompute is a per-day query. Users
+    who haven't logged anything stay untouched."""
+    from datetime import date, timedelta
+    from sqlmodel import select
+    from app.models import DailyNutritionMetrics
+    try:
+        with Session(engine) as session:
+            cutoff = date.today() - timedelta(days=14)
+            rows = session.exec(
+                select(DailyNutritionMetrics)
+                .where(DailyNutritionMetrics.metric_date >= cutoff)
+            ).all()
+            if not rows:
+                return
+            from app.services.nutrition.gut_health import compute_daily_metrics
+            done = 0
+            for row in rows:
+                try:
+                    compute_daily_metrics(session, user_id=row.user_id, metric_date=row.metric_date, allow_ai=False)
+                    done += 1
+                except Exception:
+                    continue
+            print(f"[migration] recomputed daily metrics for {done} user-day rows")
+    except Exception as e:
+        print(f"[migration] recompute daily metrics failed (non-fatal): {e}")
+
+
 def _backfill_custom_food_micronutrients() -> None:
     """One-shot backfill: walk every FoodNutrition row whose `extra_nutrients`
     is NULL/empty, look the food name up in the seed micronutrient table,
@@ -481,6 +544,8 @@ def create_db_and_tables():
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()
+    _backfill_mealitem_food_ids()
+    _recompute_recent_daily_metrics()
     _seed_supplement_ingredients()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:

@@ -279,6 +279,19 @@ def _gather_raw_signals(
         )
         nut = nut_by_food.get(item.food_id) if item.food_id else None
         grams_consumed = float(item.serving_grams or 0)
+        # Fallback: derive grams from logged calories when serving_grams
+        # is missing. Saved meals / hand-logged items often lack the
+        # serving_grams field, which historically zeroed out fiber /
+        # sodium / added_sugar for those rows. Keeps the metric
+        # honest without forcing every saver to include grams.
+        if (
+            grams_consumed == 0
+            and nut is not None
+            and (nut.calories or 0) > 0
+            and (nut.reference_grams or 0) > 0
+            and (item.calories or 0) > 0
+        ):
+            grams_consumed = (float(item.calories) / float(nut.calories)) * float(nut.reference_grams)
         if nut and grams_consumed > 0 and nut.reference_grams > 0:
             scale = grams_consumed / float(nut.reference_grams)
             if nut.fiber is not None:

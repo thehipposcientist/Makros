@@ -216,11 +216,46 @@ def log_saved_meal(
     )
     db.add(meal)
     db.flush()
+
+    # Backfill food_id at log time for any saved item that doesn't
+    # carry one (older saves, items the user created by hand). Missing
+    # food_id breaks the gut-health pipeline — fiber / sodium /
+    # saturated fat / extras all come from FoodNutrition, joined by
+    # food_id. Match by exact lowercase name against the Food table.
+    from app.models import Food
+    needed_names = {
+        (it.get("food_name") or "").lower().strip()
+        for it in (saved.items or [])
+        if not it.get("food_id") and (it.get("food_name") or "").strip()
+    }
+    food_by_name: dict[str, int] = {}
+    if needed_names:
+        # Tolerant matcher: normalize both sides by lowercasing +
+        # replacing non-alphanumerics with spaces + collapsing
+        # whitespace. Matches "Spinach (Raw)" → "spinach raw" etc.
+        import re as _re
+        def _norm(s: str) -> str:
+            return _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+        # Load all foods matching ANY of the normalized variants.
+        normalized_targets = {_norm(n) for n in needed_names}
+        if normalized_targets:
+            rows = db.exec(select(Food)).all()
+            for f in rows:
+                key = _norm(f.name or "")
+                if key and key in normalized_targets and key not in food_by_name:
+                    food_by_name[key] = f.id
+
     for it in saved.items or []:
+        fid = it.get("food_id")
+        if not fid:
+            # Use the same tolerant normalizer as the loader above.
+            import re as _re2
+            key = _re2.sub(r"[^a-z0-9]+", " ", (it.get("food_name") or "").lower()).strip()
+            fid = food_by_name.get(key)
         db.add(MealItem(
             meal_id=meal.id,
             food_name=it.get("food_name") or "Item",
-            food_id=it.get("food_id"),
+            food_id=fid,
             serving_id=it.get("serving_id"),
             quantity=float(it.get("quantity") or 1),
             unit=str(it.get("unit") or "serving"),

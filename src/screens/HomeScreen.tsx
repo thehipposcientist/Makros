@@ -6016,15 +6016,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           onSaveAsMeal={async () => {
             if (!authToken || !editingMeal) return;
             const m = editingMeal.meal;
-            const items = (m.items ?? []).map((it: any) => ({
-              food_name: it.name || it.food_name || 'Item',
-              quantity: Number(it.quantity || it.qty || 1),
-              unit: String(it.unit || 'serving'),
-              calories: Number(it.calories || 0),
-              protein_g: Number(it.protein_g ?? it.protein ?? 0),
-              carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
-              fat_g: Number(it.fat_g ?? it.fat ?? 0),
-            }));
+            // Resolve food_id by matching item names to the library so
+            // the saved meal's items carry food_id / serving_id when
+            // we can. Without this, logged items land with NULL
+            // food_id → fiber / sodium / sat-fat (which require the
+            // FoodNutrition row) all land as zero. This was the bug
+            // where "today shows 0 fiber" even though a veggie shake
+            // with beans + oats was logged.
+            const byName = new Map<string, any>();
+            for (const f of allFoodsWithCustom ?? []) {
+              const k = (f.name || '').toLowerCase().trim();
+              if (k) byName.set(k, f);
+            }
+            const items = (m.items ?? []).map((it: any) => {
+              const name = String(it.name || it.food_name || 'Item');
+              const libMatch = byName.get(name.toLowerCase().trim());
+              return {
+                food_name: name,
+                food_id: libMatch?.id ?? libMatch?.food_id ?? null,
+                quantity: Number(it.quantity || it.qty || 1),
+                unit: String(it.unit || 'serving'),
+                calories: Number(it.calories || 0),
+                protein_g: Number(it.protein_g ?? it.protein ?? 0),
+                carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
+                fat_g: Number(it.fat_g ?? it.fat ?? 0),
+              };
+            });
             if (items.length === 0) {
               Alert.alert('Nothing to save', 'Add some foods first, then save as a meal.');
               return;

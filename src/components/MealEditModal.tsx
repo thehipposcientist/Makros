@@ -295,6 +295,17 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     });
   };
   const [items, setItems] = useState<MealItem[]>(() => seedItemBaselines(ensureItems(meal).items ?? []));
+
+  // Speech-to-meal — user taps mic, describes their meal, Whisper
+  // transcribes + GPT parses into structured items. Two-tap UX:
+  // first tap starts recording, second tap stops + sends.
+  const recordingRef = useRef<any>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [speechLoading, setSpeechLoading] = useState(false);
+  const [speechReview, setSpeechReview] = useState<null | {
+    transcript: string;
+    items: Array<{ name: string; quantity: number; unit: string; calories: number; protein: number; carbs: number; fat: number }>;
+  }>(null);
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
   const [barcodeScanning, setBarcodeScanning] = useState(false);
@@ -615,6 +626,65 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       }
       return next;
     });
+  };
+
+  /** Speech-to-meal recording flow. First tap on mic → start recording
+   *  (expo-av). Second tap → stop, upload audio, open review sheet. */
+  const handleMicToggle = async () => {
+    if (!authToken) return;
+    try {
+      if (!isRecording) {
+        const AV = await import('expo-av');
+        const { granted } = await AV.Audio.requestPermissionsAsync();
+        if (!granted) {
+          Alert.alert('Microphone permission needed', 'Enable mic access in Settings to describe a meal.');
+          return;
+        }
+        await AV.Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+        });
+        const rec = new AV.Audio.Recording();
+        await rec.prepareToRecordAsync(AV.Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        await rec.startAsync();
+        recordingRef.current = rec;
+        setIsRecording(true);
+        return;
+      }
+      // Second tap: stop + send.
+      const rec = recordingRef.current;
+      if (!rec) { setIsRecording(false); return; }
+      setSpeechLoading(true);
+      setIsRecording(false);
+      await rec.stopAndUnloadAsync();
+      const uri: string = rec.getURI() || '';
+      recordingRef.current = null;
+      if (!uri) { setSpeechLoading(false); return; }
+      // Read the file as base64 and post to /ai/speech-to-meal.
+      const FileSystem = await import('expo-file-system');
+      const audio_base64 = await (FileSystem as any).readAsStringAsync(uri, { encoding: 'base64' });
+      const mime = uri.toLowerCase().endsWith('.wav') ? 'audio/wav'
+        : uri.toLowerCase().endsWith('.mp3') ? 'audio/mp3'
+        : uri.toLowerCase().endsWith('.webm') ? 'audio/webm'
+        : 'audio/m4a';
+      const api = await import('../services/api');
+      const res = await api.speechToMeal(authToken, { audio_base64, mime_type: mime });
+      if (!res.items?.length) {
+        Alert.alert(
+          'Nothing parsed',
+          res.transcript
+            ? `We heard "${res.transcript}" but couldn't identify food items. Try again with specific foods and amounts.`
+            : "We didn't catch that — try again with clearer audio.",
+        );
+        return;
+      }
+      setSpeechReview({ transcript: res.transcript, items: res.items });
+    } catch (e: any) {
+      Alert.alert('Mic error', String(e?.message ?? e));
+      setIsRecording(false);
+    } finally {
+      setSpeechLoading(false);
+    }
   };
 
   const barcodeLock = useRef(false);
@@ -1166,30 +1236,70 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
 
             {authToken && (
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+              <>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                  <TouchableOpacity
+                    style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                    disabled={scanLoading}
+                    onPress={() => setBarcodeScanning(true)}>
+                    <Ionicons name="barcode-outline" size={18} color={colors.primary} />
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Barcode</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                    disabled={scanLoading}
+                    onPress={() => pickAndScan('camera')}>
+                    {scanLoading
+                      ? <ActivityIndicator size="small" color={colors.primary} />
+                      : <><Ionicons name="camera-outline" size={18} color={colors.primary} /><Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Photo</Text></>}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+                    disabled={scanLoading}
+                    onPress={() => pickAndScan('library')}>
+                    <Ionicons name="images-outline" size={18} color={colors.primary} />
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Library</Text>
+                  </TouchableOpacity>
+                </View>
+                {/* Speech-to-meal — describe a meal out loud and AI parses
+                    quantities + macros. Tap once to start, again to stop.
+                    Full-width so the active "Recording…" state reads clearly. */}
                 <TouchableOpacity
-                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
-                  disabled={scanLoading}
-                  onPress={() => setBarcodeScanning(true)}>
-                  <Ionicons name="barcode-outline" size={18} color={colors.primary} />
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Barcode</Text>
+                  onPress={handleMicToggle}
+                  disabled={speechLoading}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                    paddingVertical: 11, borderRadius: 10, marginBottom: 8,
+                    backgroundColor: isRecording ? colors.error + '1A'
+                      : speechLoading ? colors.surfaceRaised : colors.primary + '14',
+                    borderWidth: 1,
+                    borderColor: isRecording ? colors.error + '88' : colors.primary + '55',
+                  }}
+                >
+                  {speechLoading ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Ionicons
+                      name={isRecording ? 'stop-circle' : 'mic'}
+                      size={18}
+                      color={isRecording ? colors.error : colors.primary}
+                    />
+                  )}
+                  <Text style={{
+                    fontSize: 13, fontWeight: '700',
+                    color: isRecording ? colors.error : colors.primary,
+                  }}>
+                    {speechLoading
+                      ? 'Transcribing…'
+                      : isRecording
+                        ? 'Tap to stop — recording'
+                        : 'Describe meal out loud'}
+                  </Text>
+                  {!isRecording && !speechLoading && (
+                    <Text style={{ fontSize: 10, fontWeight: '700', color: colors.primary + 'AA', letterSpacing: 0.3 }}>BETA</Text>
+                  )}
                 </TouchableOpacity>
-                <TouchableOpacity
-                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
-                  disabled={scanLoading}
-                  onPress={() => pickAndScan('camera')}>
-                  {scanLoading
-                    ? <ActivityIndicator size="small" color={colors.primary} />
-                    : <><Ionicons name="camera-outline" size={18} color={colors.primary} /><Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Photo</Text></>}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
-                  disabled={scanLoading}
-                  onPress={() => pickAndScan('library')}>
-                  <Ionicons name="images-outline" size={18} color={colors.primary} />
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>Library</Text>
-                </TouchableOpacity>
-              </View>
+              </>
             )}
 
             <View style={s.searchRow}>
@@ -1289,6 +1399,117 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           onClose={() => setBarcodeScanning(false)}
           onScan={handleBarcodeScan}
         />
+    </Modal>
+    {/* Speech-to-meal review — user heard the transcript + what was
+        parsed, can edit / remove, then bulk-paste into the meal. */}
+    <Modal
+      visible={!!speechReview}
+      animationType="slide"
+      transparent
+      onRequestClose={() => setSpeechReview(null)}
+    >
+      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' }}>
+        <View style={{
+          backgroundColor: colors.background, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+          padding: 16, paddingBottom: 30, maxHeight: '85%',
+        }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <Text style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary }}>
+              Parsed meal
+            </Text>
+            <TouchableOpacity onPress={() => setSpeechReview(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name="close" size={22} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+          {speechReview?.transcript ? (
+            <View style={{ backgroundColor: colors.surface, borderRadius: 10, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: colors.border }}>
+              <Text style={{ fontSize: 10, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.4, marginBottom: 4 }}>HEARD</Text>
+              <Text style={{ fontSize: 12, color: colors.textPrimary, fontStyle: 'italic' }}>"{speechReview.transcript}"</Text>
+            </View>
+          ) : null}
+          <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10, lineHeight: 15 }}>
+            AI estimated quantities and macros — review and tweak before adding to your meal.
+          </Text>
+          <ScrollView style={{ flexGrow: 0 }}>
+            {(speechReview?.items || []).map((it, i) => (
+              <View key={`${i}-${it.name}`} style={{
+                backgroundColor: colors.surface, borderRadius: 12, padding: 12, marginBottom: 8,
+                borderWidth: 1, borderColor: colors.border,
+              }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <TextInput
+                    value={it.name}
+                    onChangeText={(t) => setSpeechReview(s => s ? { ...s, items: s.items.map((x, idx) => idx === i ? { ...x, name: t } : x) } : s)}
+                    style={{ flex: 1, backgroundColor: colors.surfaceRaised, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, color: colors.textPrimary, fontSize: 13, fontWeight: '700' }}
+                    placeholderTextColor={colors.textMuted}
+                  />
+                  <TouchableOpacity
+                    onPress={() => setSpeechReview(s => s ? { ...s, items: s.items.filter((_, idx) => idx !== i) } : s)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.surfaceRaised, alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Ionicons name="close" size={13} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                  <TextInput
+                    value={String(it.quantity)}
+                    onChangeText={(t) => setSpeechReview(s => s ? { ...s, items: s.items.map((x, idx) => idx === i ? { ...x, quantity: parseFloat(t) || 0 } : x) } : s)}
+                    keyboardType="decimal-pad"
+                    style={{ flex: 2, backgroundColor: colors.surfaceRaised, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, color: colors.textPrimary, fontSize: 12 }}
+                  />
+                  <TextInput
+                    value={it.unit}
+                    onChangeText={(t) => setSpeechReview(s => s ? { ...s, items: s.items.map((x, idx) => idx === i ? { ...x, unit: t } : x) } : s)}
+                    style={{ flex: 1, backgroundColor: colors.surfaceRaised, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, color: colors.textPrimary, fontSize: 12 }}
+                  />
+                </View>
+                <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
+                  {Math.round(it.calories)} cal · {Math.round(it.protein)}g P · {Math.round(it.carbs)}g C · {Math.round(it.fat)}g F
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+            <TouchableOpacity
+              onPress={() => setSpeechReview(null)}
+              style={{ flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}
+            >
+              <Text style={{ color: colors.textSecondary, fontWeight: '700', fontSize: 13 }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                if (!speechReview) return;
+                const mapped = speechReview.items
+                  .filter(it => (it.name || '').trim() && it.quantity > 0)
+                  .map(it => ({
+                    name: it.name,
+                    quantity: it.quantity,
+                    unit: it.unit || 'serving',
+                    calories: it.calories,
+                    protein: it.protein,
+                    carbs: it.carbs,
+                    fat: it.fat,
+                    baseQuantity: it.quantity > 0 ? it.quantity : 1,
+                    baseCalories: it.calories,
+                    baseProtein: it.protein,
+                    baseCarbs: it.carbs,
+                    baseFat: it.fat,
+                  } as any));
+                userEdited.current = true;
+                setItems(prev => [...prev, ...mapped]);
+                setSpeechReview(null);
+              }}
+              disabled={(speechReview?.items.length ?? 0) === 0}
+              style={{ flex: 2, paddingVertical: 12, borderRadius: 10, alignItems: 'center', backgroundColor: (speechReview?.items.length ?? 0) === 0 ? colors.border : colors.primary }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>
+                Add {(speechReview?.items.length ?? 0)} to meal
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
     </Modal>
     </>
   );

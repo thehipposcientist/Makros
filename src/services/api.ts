@@ -1788,6 +1788,34 @@ export async function scanSupplementsMulti(
   }, 60000);
 }
 
+
+// ─── Speech-to-meal ─────────────────────────────────────────────────────────
+
+export type SpokenFoodItem = {
+  name: string;
+  quantity: number;
+  unit: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  micronutrients?: Record<string, number>;
+};
+
+/** Two-stage speech-to-meal: audio → Whisper transcript → structured
+ *  food items with estimated macros. User reviews before it lands in
+ *  the meal editor. */
+export async function speechToMeal(
+  token: string,
+  payload: { audio_base64: string; mime_type?: string },
+): Promise<{ transcript: string; items: SpokenFoodItem[] }> {
+  return request('/ai/speech-to-meal', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 60000);
+}
+
 export async function lookupSupplement(
   token: string,
   name: string,
