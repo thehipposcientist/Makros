@@ -33,6 +33,8 @@ import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
+import { isWatchReachable } from '../utils/watchSync';
+import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
@@ -405,6 +407,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // the deterministic template while the AI call is in flight or if
     // it fails. See backend: POST /ai/warmup.
     const [warmupSteps, setWarmupSteps] = useState<string[]>(() => buildWarmupPlan(workout));
+    // Mirror warmupSteps into a ref so the once-mounted watch-sync
+    // effect can always send the freshest steps (AI warmup resolves
+    // async after the initial push).
+    const warmupStepsRef = useRef<string[]>(warmupSteps);
+    useEffect(() => { warmupStepsRef.current = warmupSteps; }, [warmupSteps]);
     useEffect(() => {
       let cancelled = false;
       const loadWarmup = async () => {
@@ -464,6 +471,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // persisted start time on mount, the user is resuming after a
   // background / app restart and the countdown would be jarring.
   const [showStartCountdown, setShowStartCountdown] = useState(false);
+  // When the phone starts a workout and the user has a paired but
+  // currently-closed Thallo watch app, we can't auto-launch it — iOS
+  // blocks that. So we nudge: show a dismissable prompt telling the
+  // user to open Thallo on the watch. Auto-hides the moment the watch
+  // reports reachable (i.e., the user opened it).
+  const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
@@ -491,19 +504,32 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     (async () => {
       try {
         const { pushWorkoutToWatch, onWatchReachabilityChange } = await import('../utils/watchSync');
+        // Capture the current warmup steps (ref'd so the closure
+        // always reads the freshest set — warmupSteps may get
+        // replaced when the AI warmup resolves a beat after mount).
         const pushActive = () => pushWorkoutToWatch(workout as any, {
           dateISO: new Date().toISOString().slice(0, 10),
           status: 'active',
+          warmupSteps: warmupStepsRef.current,
         }).catch(() => {});
         // Initial push on mount.
         pushActive();
-        // Re-push whenever the watch becomes reachable. Idempotent:
-        // pushWorkoutToWatch merges into applicationContext + races
-        // sendMessage if reachable, so extra fires are harmless.
+        // If the watch is paired but not reachable right now, the
+        // Thallo watch app isn't open — show the nudge. Suppress if
+        // there's no watch at all (isPaired=false) so users without
+        // an Apple Watch never see this modal.
+        try {
+          if (WatchBridge.isPaired() && !WatchBridge.isReachable()) {
+            setShowOpenWatchPrompt(true);
+          }
+        } catch { /* bridge optional */ }
+        // Re-push whenever the watch becomes reachable. Idempotent.
         unsubscribe = onWatchReachabilityChange((info) => {
           if (info.reachable) {
             console.log('[watch] reachable — re-pushing active workout');
             pushActive();
+            // Watch is open now — hide the prompt if it was up.
+            setShowOpenWatchPrompt(false);
           }
         });
       } catch { /* watch bridge optional */ }
@@ -4142,6 +4168,56 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           onComplete={() => setShowStartCountdown(false)}
         />
       )}
+
+      {/* Open-on-watch nudge. iOS can't auto-launch the watch app from
+          the phone, so when a user starts a workout on the phone and
+          the watch app is closed, tell them to open Thallo on their
+          wrist to mirror the session. Auto-dismisses the moment the
+          watch reports reachable (reachability listener flips it). */}
+      <Modal
+        visible={showOpenWatchPrompt}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowOpenWatchPrompt(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <View style={{
+            backgroundColor: themeColors.surface,
+            borderRadius: 18,
+            padding: 20,
+            width: '100%',
+            maxWidth: 340,
+            borderWidth: 1, borderColor: themeColors.border,
+            alignItems: 'center',
+          }}>
+            <View style={{
+              width: 54, height: 54, borderRadius: 27,
+              backgroundColor: themeColors.primary + '22',
+              alignItems: 'center', justifyContent: 'center',
+              marginBottom: 12,
+            }}>
+              <Ionicons name="watch-outline" size={28} color={themeColors.primary} />
+            </View>
+            <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary, textAlign: 'center' }}>
+              Open Thallo on your watch
+            </Text>
+            <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 17 }}>
+              Launch the Thallo app on your Apple Watch and tap Start — your phone workout and watch will stay in sync from there.
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowOpenWatchPrompt(false)}
+              style={{
+                marginTop: 16,
+                paddingVertical: 12, paddingHorizontal: 28,
+                borderRadius: 12,
+                backgroundColor: themeColors.primary,
+              }}>
+              <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.background }}>
+                Got it
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

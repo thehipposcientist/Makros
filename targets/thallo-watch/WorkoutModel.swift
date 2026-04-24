@@ -46,6 +46,11 @@ struct WatchWorkout: Codable, Equatable {
     /// iOS TrainingReadinessCard uses. Shown on Today view as a chip.
     let readinessLabel: String?
     let exercises: [WatchExercise]
+    /// Plain-text warm-up bullets from the phone's buildWarmupPlan
+    /// (or AI warmup when it resolves). Shown as a dismissable card
+    /// on the exercise tab before the first set. Nil / empty = no
+    /// warmup (recovery / cardio / cold-start days).
+    let warmupSteps: [String]?
     let syncedAtMs: Double
 }
 

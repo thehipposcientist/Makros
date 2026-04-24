@@ -33,6 +33,10 @@ export type WatchWorkoutPayload = {
   readiness: number | null;
   readinessLabel: string | null;
   exercises: WatchExercise[];
+  /** Plain-text warm-up bullets. Shown on the watch before the first
+   *  exercise as a dismissable card so users can cue off them without
+   *  pulling the phone out. Empty / undefined = no card. */
+  warmupSteps?: string[];
   syncedAtMs: number;
 };
 

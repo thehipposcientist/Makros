@@ -311,11 +311,21 @@ private struct ExerciseTab: View {
         }
     }
 
+    @State private var warmupDismissed: Bool = false
+
     var body: some View {
         ZStack {
             theme.background.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
+                    // Warm-up card — only shown before the first set of
+                    // the first exercise. Once the user taps "Start" it
+                    // collapses and won't reappear during this session.
+                    if !warmupDismissed,
+                       let steps = workout.warmupSteps, !steps.isEmpty,
+                       state.exerciseIndex == 0, state.setNumber == 1 {
+                        warmupCard(steps: steps)
+                    }
                     if let ex = currentExercise {
                         header(ex)
                         // Either the rest timer OR the set input
@@ -339,6 +349,49 @@ private struct ExerciseTab: View {
             Button("Skip exercise", role: .destructive) { advanceExercise() }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    @ViewBuilder
+    private func warmupCard(steps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.primary)
+                Text("WARM-UP")
+                    .font(.system(size: 9, weight: .heavy))
+                    .tracking(1.2)
+                    .foregroundColor(theme.primary)
+                Spacer()
+            }
+            ForEach(Array(steps.prefix(5).enumerated()), id: \.offset) { _, step in
+                Text("• \(step)")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.textSecondary)
+                    .lineLimit(3)
+            }
+            Button {
+                WKInterfaceDevice.current().play(.click)
+                withAnimation(.easeOut(duration: 0.22)) { warmupDismissed = true }
+            } label: {
+                Text("Start lifts")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(theme.primary)
+                    .foregroundColor(theme.background)
+                    .cornerRadius(9)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .padding(10)
+        .background(theme.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(theme.primary.opacity(0.5), lineWidth: 1),
+        )
+        .cornerRadius(12)
     }
 
     private func header(_ ex: WatchExercise) -> some View {
@@ -550,8 +603,8 @@ private struct ExerciseTab: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("RESTING")
-                        .font(.system(size: 9, weight: .bold))
-                        .tracking(1)
+                        .font(.system(size: 10, weight: .black))
+                        .tracking(1.2)
                         .foregroundColor(theme.warning)
                     if state.paused {
                         Text("PAUSED")
@@ -560,8 +613,9 @@ private struct ExerciseTab: View {
                     }
                 }
                 Text(formatTime(rest))
-                    .font(.system(size: 36, weight: .heavy, design: .rounded))
-                    .foregroundColor(theme.textPrimary)
+                    .font(.system(size: 38, weight: .black, design: .rounded))
+                    .foregroundColor(theme.warning)
+                    .shadow(color: theme.warning.opacity(0.35), radius: 5)
             }
 
             // Up-next preview. Shows "Next set: reps target" OR (if
@@ -738,17 +792,31 @@ private struct HeartRateTab: View {
 
     var body: some View {
         ZStack {
+            // Themed background with a subtle accent glow behind the
+            // bpm readout so dark themes get a pop of color without
+            // washing out the numeral itself.
             theme.background.ignoresSafeArea()
+            if !dim {
+                // Skip the glow under always-on to preserve burn-in budget.
+                RadialGradient(
+                    colors: [zoneColor.opacity(0.28), Color.clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: 110,
+                )
+                .ignoresSafeArea()
+            }
             VStack(spacing: 8) {
                 Text("HEART RATE")
                     .font(.system(size: 9, weight: .bold))
                     .tracking(1)
-                    .foregroundColor(theme.textMuted)
+                    .foregroundColor(theme.primary)
 
                 HStack(alignment: .lastTextBaseline, spacing: 4) {
                     Text(hr.heartRate.map { "\($0)" } ?? "—")
-                        .font(.system(size: 52, weight: .heavy, design: .rounded))
+                        .font(.system(size: 56, weight: .black, design: .rounded))
                         .foregroundColor(zoneColor)
+                        .shadow(color: zoneColor.opacity(0.45), radius: 6)
                         // Always-on dim: drop opacity to keep the
                         // numeral legible but not burn-in risky.
                         .opacity(dim ? 0.55 : 1)
@@ -760,21 +828,25 @@ private struct HeartRateTab: View {
                 if let z = hr.zone {
                     VStack(spacing: 2) {
                         Text("ZONE \(z)")
-                            .font(.system(size: 10, weight: .heavy))
-                            .tracking(0.6)
+                            .font(.system(size: 11, weight: .black))
+                            .tracking(0.8)
                             .foregroundColor(zoneColor)
                         Text(zoneLabel(z))
-                            .font(.system(size: 11))
-                            .foregroundColor(theme.textSecondary)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(theme.textPrimary)
                     }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 10)
-                    .background(zoneColor.opacity(0.15))
-                    .cornerRadius(8)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 12)
+                    .background(zoneColor.opacity(0.22))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(zoneColor.opacity(0.6), lineWidth: 1),
+                    )
+                    .cornerRadius(10)
                 } else if hr.running {
                     Text("Reading…")
                         .font(.system(size: 11))
-                        .foregroundColor(theme.textMuted)
+                        .foregroundColor(theme.primary)
                 } else if let err = hr.errorMessage {
                     Text(err)
                         .font(.system(size: 10))

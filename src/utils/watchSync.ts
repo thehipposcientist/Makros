@@ -43,6 +43,9 @@ export function buildWatchWorkoutPayload(
     status: WatchWorkoutStatus;
     readiness?: number | null;
     readinessLabel?: string | null;
+    /** Plain-text warm-up steps to mirror on the watch. Usually the
+     *  output of `buildWarmupPlan(day)` on the phone. */
+    warmupSteps?: string[];
   },
 ): WatchWorkoutPayload | null {
   if (!day) {
@@ -81,6 +84,11 @@ export function buildWatchWorkoutPayload(
     readiness: opts.readiness ?? null,
     readinessLabel: opts.readinessLabel ?? null,
     exercises,
+    // Only include warmupSteps on live / scheduled statuses — watch
+    // shouldn't show a warmup card on a completed or skipped day.
+    ...(opts.warmupSteps && opts.warmupSteps.length > 0 && (opts.status === 'active' || opts.status === 'scheduled')
+      ? { warmupSteps: opts.warmupSteps }
+      : {}),
     syncedAtMs: Date.now(),
   };
 }
@@ -132,6 +140,7 @@ export async function pushWorkoutToWatch(
     status: WatchWorkoutStatus;
     readiness?: number | null;
     readinessLabel?: string | null;
+    warmupSteps?: string[];
   },
 ): Promise<boolean> {
   const payload = buildWatchWorkoutPayload(day, opts);

@@ -1,12 +1,13 @@
 export type AppThemeName =
   | 'midnight' | 'neon'    | 'ocean'   | 'forest'
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
-  | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
+  | 'citrus'              | 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
   | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
   | 'aurora'   | 'copper'  | 'storm'
-  | 'linen'    | 'mint';
+  | 'linen'    | 'mint'
+  | 'butter'   | 'seaglass' | 'lilac' | 'cloud';
 
 export interface ThemeColors {
   background: string;
@@ -271,37 +272,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  flamingo: {
-    // REDESIGNED. Was: hot fuchsia on dark pink-black — too close to Neon.
-    // Now: tropical CORAL-ORANGE on warm dark-brown (Miami sunset, not rave).
-    // Sections: coral workout / tropical-aqua meals / orchid AI.
-    name: 'flamingo',
-    label: 'Flamingo Coast',
-    description: 'Warm dark background with tropical coral and aqua — sunset beach, not cyberpunk.',
-    colors: {
-      background:    '#180E08',  // warm dark brown-black
-      surface:       '#221608',
-      surfaceRaised: '#301E10',
-      border:        '#502C18',
-      primary:       '#FF7858',  // CORAL-ORANGE (not fuchsia)
-      primaryDark:   '#CC5030',
-      primaryLight:  '#FFB098',
-      accent:        '#20D8B8',  // tropical AQUA
-      textPrimary:   '#FFF4EE',
-      textSecondary: '#D0A888',
-      textMuted:     '#906860',
-      error:         '#FF3840',
-      warning:       '#F0A820',
-      success:       '#28C870',
-    },
-    sections: {
-      workout: { soft: '#301008', strong: '#FF7858', text: '#FFB898' },  // CORAL (brand color)
-      meals:   { soft: '#063028', strong: '#20D8B8', text: '#80F8E8' },  // TROPICAL AQUA
-      ai:      { soft: '#1C0830', strong: '#C048D0', text: '#E898FF' },  // orchid purple
-      planner: { soft: '#281808', strong: '#F0A828', text: '#F8D888' },
-      account: { soft: '#280E08', strong: '#FF6840', text: '#FFA888' },
-    },
-  },
 
   citrus: {
     // REDESIGNED. Was: red-orange on warm-dark — too close to Scarlet.
@@ -949,6 +919,136 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#E4E4F8', strong: '#5848CC', text: '#1C0C6A' },   // INDIGO
       planner: { soft: '#FFF0C8', strong: '#B87800', text: '#5A3C00' },
       account: { soft: '#F8E0EC', strong: '#C0347C', text: '#5A0838' },
+    },
+  },
+
+  butter: {
+    // Pale buttery yellow background with deep espresso text + rich
+    // amber primary. Warmer than Parchment / Sand (which lean brown)
+    // and distinct from the other lights because yellow-on-cream
+    // carries a morning-kitchen feel.
+    name: 'butter',
+    label: 'Butter & Honey',
+    description: 'Soft buttery background with deep amber — warm, inviting, morning light.',
+    colors: {
+      background:    '#FFF9E6',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#FBEFC7',
+      border:        '#E8D18A',
+      primary:       '#C07608',  // deep amber
+      primaryDark:   '#8A5404',
+      primaryLight:  '#E8A840',
+      accent:        '#2A5E8C',  // navy foil
+      textPrimary:   '#2A1F04',
+      textSecondary: '#5A4218',
+      textMuted:     '#8A7446',
+      error:         '#C42030',
+      warning:       '#AE7400',
+      success:       '#2A8048',
+    },
+    sections: {
+      workout: { soft: '#FBE8A8', strong: '#C07608', text: '#4A2C04' },
+      meals:   { soft: '#DCEEF8', strong: '#2A5E8C', text: '#0A2438' },
+      ai:      { soft: '#F0E0F8', strong: '#8A3AC0', text: '#2E0A4A' },
+      planner: { soft: '#FFE8D0', strong: '#C25818', text: '#4A1C04' },
+      account: { soft: '#FAE4CC', strong: '#A04818', text: '#3C1806' },
+    },
+  },
+
+  seaglass: {
+    // Pale turquoise-aqua background with deep sea-teal primary and
+    // terra-cotta accent. Distinct from Arctic (cool blue) and Mint
+    // (green) — more green-cyan, evokes beach glass and tidepools.
+    name: 'seaglass',
+    label: 'Seaglass',
+    description: 'Pale turquoise background with deep sea-teal and terracotta — coastal, breezy, bright.',
+    colors: {
+      background:    '#E8F6F2',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#CFEAE2',
+      border:        '#9AC8BE',
+      primary:       '#137A78',  // deep sea teal
+      primaryDark:   '#0A4F50',
+      primaryLight:  '#48B0A8',
+      accent:        '#D05830',  // terracotta
+      textPrimary:   '#08242A',
+      textSecondary: '#2C4E4E',
+      textMuted:     '#5C7878',
+      error:         '#CC2838',
+      warning:       '#B86808',
+      success:       '#1A8058',
+    },
+    sections: {
+      workout: { soft: '#B8E0D8', strong: '#137A78', text: '#062E2E' },
+      meals:   { soft: '#FBDACC', strong: '#D05830', text: '#5A1E0A' },
+      ai:      { soft: '#DFE0FA', strong: '#4A4ACC', text: '#0E0E58' },
+      planner: { soft: '#FFEFC4', strong: '#B07010', text: '#4A2E04' },
+      account: { soft: '#F2DCE4', strong: '#B8347C', text: '#4A0A38' },
+    },
+  },
+
+  lilac: {
+    // Pale periwinkle-lilac background with royal purple and peach
+    // accent. Fills a genuine gap — no purple light theme existed
+    // before. Softer than Blossom's fuchsia; more floral than Steel.
+    name: 'lilac',
+    label: 'Lilac Morning',
+    description: 'Pale lilac background with royal purple and peach — soft, floral, distinct.',
+    colors: {
+      background:    '#F5F0FB',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#EADFF6',
+      border:        '#C4B0E4',
+      primary:       '#6B3AA8',  // royal purple
+      primaryDark:   '#471C80',
+      primaryLight:  '#9A74D0',
+      accent:        '#E89470',  // peach
+      textPrimary:   '#1F1030',
+      textSecondary: '#4A3664',
+      textMuted:     '#806A98',
+      error:         '#C42848',
+      warning:       '#B87000',
+      success:       '#2A8048',
+    },
+    sections: {
+      workout: { soft: '#DCCCF0', strong: '#6B3AA8', text: '#2A0E58' },
+      meals:   { soft: '#F8DFCC', strong: '#D0702A', text: '#4A2008' },
+      ai:      { soft: '#FFD8E8', strong: '#C83080', text: '#4A0A30' },
+      planner: { soft: '#E0F0F8', strong: '#3468A8', text: '#0A2848' },
+      account: { soft: '#D8F0E0', strong: '#1C7850', text: '#042A20' },
+    },
+  },
+
+  cloud: {
+    // Cool pale gray-blue background with stormy blue primary and
+    // sunset orange accent. Cooler than Steel (which is more neutral
+    // gray); the background carries a bit more blue so the primary
+    // pops harder.
+    name: 'cloud',
+    label: 'Cloud & Storm',
+    description: 'Cool pale sky background with stormy blue and sunset orange — crisp, clean, modern.',
+    colors: {
+      background:    '#EFF3F8',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#DCE4F0',
+      border:        '#AFC0D8',
+      primary:       '#3068A8',  // stormy blue
+      primaryDark:   '#1A4278',
+      primaryLight:  '#6A98D0',
+      accent:        '#E07028',  // sunset orange
+      textPrimary:   '#101824',
+      textSecondary: '#384860',
+      textMuted:     '#6A7E98',
+      error:         '#C42028',
+      warning:       '#B86408',
+      success:       '#1C7850',
+    },
+    sections: {
+      workout: { soft: '#C8D8EC', strong: '#3068A8', text: '#0A244A' },
+      meals:   { soft: '#FAE0CC', strong: '#E07028', text: '#4A2008' },
+      ai:      { soft: '#E8E0F0', strong: '#7040B0', text: '#2A0858' },
+      planner: { soft: '#FFEEC0', strong: '#B06800', text: '#4A2C00' },
+      account: { soft: '#FCE0E8', strong: '#C83068', text: '#4A0828' },
     },
   },
 

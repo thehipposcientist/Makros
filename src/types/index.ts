@@ -8,12 +8,13 @@ export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
 export type AppThemeName =
   | 'midnight' | 'neon'    | 'ocean'   | 'forest'
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
-  | 'citrus'   | 'flamingo'| 'cocoa'   | 'slate'
+  | 'citrus'              | 'cocoa'   | 'slate'
   | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
   | 'parchment'| 'meadow'
   | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
   | 'aurora'   | 'copper'  | 'storm'
-  | 'linen'    | 'mint';
+  | 'linen'    | 'mint'
+  | 'butter'   | 'seaglass' | 'lilac' | 'cloud';
 
 export interface GoalOption {
   value: string;

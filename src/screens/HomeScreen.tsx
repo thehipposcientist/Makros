@@ -4020,7 +4020,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : schedule;
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow', 'steel', 'sand', 'linen', 'mint'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow', 'steel', 'sand', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'cloud'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -5854,7 +5854,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           { key: 'wine',     label: 'Wine',     swatch: '#C82848', mode: 'dark' },
           { key: 'obsidian', label: 'Obsidian', swatch: '#888888', mode: 'dark' },
           { key: 'neon',     label: 'Neon',     swatch: '#00FF88', mode: 'dark' },
-          { key: 'flamingo', label: 'Flamingo', swatch: '#FF69B4', mode: 'dark' },
           { key: 'citrus',   label: 'Citrus',   swatch: '#FFD700', mode: 'dark' },
           { key: 'scarlet',  label: 'Scarlet',  swatch: '#DC143C', mode: 'dark' },
           { key: 'cocoa',    label: 'Cocoa',    swatch: '#8B4513', mode: 'dark' },
@@ -5876,6 +5875,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           { key: 'sand',      label: 'Sand',      swatch: '#C06030', mode: 'light' },
           { key: 'linen',     label: 'Linen',     swatch: '#6A8030', mode: 'light' },
           { key: 'mint',      label: 'Mint',      swatch: '#0E8078', mode: 'light' },
+          { key: 'butter',    label: 'Butter',    swatch: '#C07608', mode: 'light' },
+          { key: 'seaglass',  label: 'Seaglass',  swatch: '#137A78', mode: 'light' },
+          { key: 'lilac',     label: 'Lilac',     swatch: '#6B3AA8', mode: 'light' },
+          { key: 'cloud',     label: 'Cloud',     swatch: '#3068A8', mode: 'light' },
         ];
         const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
         const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
