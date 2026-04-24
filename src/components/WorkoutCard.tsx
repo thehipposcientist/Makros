@@ -205,13 +205,21 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   return (
     <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
       {/* Thumbnail — YouTube video frame when available, numbered tile
-          otherwise. wger static images removed for visual consistency. */}
+          otherwise. Tapping the thumbnail launches the form-video modal
+          (separate hit target from the whole row so an accidental tap
+          while scrolling the plan doesn't open video). */}
       {(() => {
         const thumbUri = exerciseThumbSmall(exercise as any);
-        return thumbUri ? (
+        if (!thumbUri) {
+          return (
+            <View style={[styles.exNum, { backgroundColor: section.strong }]}>
+              <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
+            </View>
+          );
+        }
+        const inner = (
           <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 1, borderColor: c.border, position: 'relative' }}>
             <Image source={{ uri: thumbUri }} style={{ width: 44, height: 44 }} resizeMode="cover" />
-            {/* Tiny play glyph — tells the user this IS a video preview. */}
             <View style={{
               position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
               alignItems: 'center', justifyContent: 'center',
@@ -225,10 +233,18 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
               </View>
             </View>
           </View>
-        ) : (
-          <View style={[styles.exNum, { backgroundColor: section.strong }]}>
-            <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
-          </View>
+        );
+        if (!onOpenVideo) return inner;
+        return (
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={`Play form video for ${exercise.name}`}
+            activeOpacity={0.7}
+            onPress={() => onOpenVideo(exercise.name)}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+          >
+            {inner}
+          </TouchableOpacity>
         );
       })()}
 

@@ -115,7 +115,7 @@ export default function PreparednessCard({
     ['Muscle recovery',  result.pillars.fatigue,          20],
     ['Nutrition',        result.pillars.nutrition,        15],
     ['Resting HR',       result.pillars.restingHr,        10],
-    ['Yesterday',        result.pillars.yesterdayStrain,  5],
+    ["Yesterday's load", result.pillars.yesterdayStrain,  5],
   ];
 
   return (

@@ -235,7 +235,7 @@ export default function TrainingReadinessCard({
   if (hasAppleHealth) {
     pillarRows.push(['Resting HR', prep.pillars.restingHr, 10]);
   }
-  pillarRows.push(['Yesterday', prep.pillars.yesterdayStrain, 5]);
+  pillarRows.push(['Yesterday\'s load', prep.pillars.yesterdayStrain, 5]);
 
   const focusLabel = todaysFocus
     ? todaysFocus.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
@@ -263,21 +263,48 @@ export default function TrainingReadinessCard({
         backgroundColor: labelColor,
         opacity: 0.6,
       }} />
-      {/* Header — same shape as RecoveryCard */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <Ionicons name="flash-outline" size={16} color={labelColor} />
+      {/* Header — score-circle treatment so it reads as a gauge, not a
+          second copy of the workout-card focus header. The colored ring
+          carries the readiness state; "Push" appears as a small caption
+          beneath the state word, not as the dominant headline. */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        {/* Score dial — colored by state (green/amber/red). Size and
+            ring-weight mirror the Switch Day tile dial so the visual
+            language is consistent across the home screen. */}
+        <View style={{
+          width: 56, height: 56, borderRadius: 28,
+          borderWidth: 4, borderColor: labelColor,
+          backgroundColor: tc.surface,
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <AnimCounter
+            value={prep.score}
+            style={{ fontSize: 18, fontWeight: '900', color: labelColor, lineHeight: 20 }}
+          />
+          <Text style={{ fontSize: 7, fontWeight: '700', color: labelColor + 'BB', letterSpacing: 0.4, marginTop: -1 }}>
+            READY
+          </Text>
+        </View>
         <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
-            <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
-              {focusLabel ? `${focusLabel}: ` : 'Today: '}
-              <Text style={{ color: labelColor }}>{prep.label}</Text>
-              <Text style={{ color: tc.textSecondary }}> (</Text>
+          {/* State word — primary line ("Primed" / "Ready" / "Moderate" /
+              "Fatigued"). Large and color-coded but NOT the focus name,
+              so the user can't confuse it with the "Push" header below. */}
+          <Text style={{ fontSize: 18, fontWeight: '800', color: labelColor, lineHeight: 22 }}>
+            {prep.label}
+          </Text>
+          {/* Small caption beneath — ties readiness to today's focus
+              without competing with the workout card. */}
+          {focusLabel ? (
+            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }} numberOfLines={1}>
+              for {focusLabel}
             </Text>
-            <AnimCounter value={prep.score} style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }} />
-            <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }}>)</Text>
-          </View>
+          ) : (
+            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }}>
+              Today's training readiness
+            </Text>
+          )}
           {!expanded && (
-            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 3 }} numberOfLines={1}>
               {prep.insights[0] ?? (relevantMuscles.length > 0
                 ? `${relevantMuscles.map(([m]) => m.replace('_', ' ')).join(', ')} recovery shown`
                 : 'All tracked signals look clean')}
@@ -318,19 +345,41 @@ export default function TrainingReadinessCard({
           <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
             DRIVERS
           </Text>
-          {pillarRows.map(([label, pts, max]) => {
-            const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
-            const barColor = barColorFor(pct);
-            return (
-              <View key={label as string} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label as string}</Text>
-                <AnimBar pct={pct} color={barColor} trackColor={tc.border} />
-                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
-                  {pts}/{max}
-                </Text>
-              </View>
-            );
-          })}
+          {/* Per-pillar descriptions so users understand what each row
+              means — particularly "Yesterday", which was confusing
+              users ("what is yesterday?"). The description renders as
+              a small muted caption beneath each bar. */}
+          {(() => {
+            const descriptions: Record<string, string> = {
+              'Sleep': 'Last night\'s sleep duration + quality from Apple Health.',
+              'HRV': 'Heart-rate variability trend — higher = better recovered.',
+              'Muscle recovery': 'How fresh the muscles you\'re training today are (fatigue decay from recent workouts).',
+              'Nutrition': 'Whether you\'ve hit your calorie + protein targets the last few days.',
+              'Resting HR': 'Resting heart rate vs your 30-day baseline. Elevated RHR often means under-recovered.',
+              "Yesterday's load": 'How hard yesterday\'s training was. A short or rest day = more points today; 2+ hours of training yesterday pulls the score down because you\'re less recovered.',
+            };
+            return pillarRows.map(([label, pts, max]) => {
+              const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
+              const barColor = barColorFor(pct);
+              const desc = descriptions[label as string];
+              return (
+                <View key={label as string} style={{ marginBottom: 6 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label as string}</Text>
+                    <AnimBar pct={pct} color={barColor} trackColor={tc.border} />
+                    <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
+                      {pts}/{max}
+                    </Text>
+                  </View>
+                  {desc && (
+                    <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2, marginLeft: 0, lineHeight: 13 }}>
+                      {desc}
+                    </Text>
+                  )}
+                </View>
+              );
+            });
+          })()}
 
           {!hasAppleHealth && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>

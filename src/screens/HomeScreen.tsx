@@ -3690,10 +3690,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     await persistDayState(date, { skipped_focus: null });
   }, [persistDayState]);
 
-  const [videoModalName, setVideoModalName] = useState<string | null>(null);
-  const openExerciseVideo = useCallback((exerciseName: string) => {
-    setVideoModalName(exerciseName);
-  }, []);
+  // Video modal target — carries the exercise name PLUS optional
+  // metadata so the backend can rank results to the exact variant
+  // (e.g. "Band Chest Press" excludes "Machine Chest Press" hits).
+  const [videoModalTarget, setVideoModalTarget] = useState<{
+    name: string;
+    equipment?: string | null;
+    primary_muscle?: string | null;
+    movement_pattern?: string | null;
+  } | null>(null);
+  const openExerciseVideo = useCallback(
+    (exerciseName: string, ctx?: { equipment?: string | null; primary_muscle?: string | null; movement_pattern?: string | null }) => {
+      setVideoModalTarget({ name: exerciseName, ...ctx });
+    },
+    [],
+  );
 
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
@@ -4655,6 +4666,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     // go straight to Plan → Swap get an empty library.
                     ensureExerciseLibrary().catch(() => {});
                     setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName });
+                  }}
+                  onOpenExerciseVideo={(exName) => {
+                    // Launched from the small thumbnail on an exercise
+                    // row. Pull context from the workout exercise so
+                    // the video-search filter is tight.
+                    const ex = (item.workout?.exercises || []).find(
+                      (e: any) => (e.name || '').toLowerCase() === exName.toLowerCase(),
+                    );
+                    openExerciseVideo(exName, {
+                      equipment: (ex as any)?.equipment ?? null,
+                      primary_muscle: (ex as any)?.primary_muscle ?? null,
+                      movement_pattern: (ex as any)?.movement_pattern ?? null,
+                    });
                   }}
                   onViewExercise={async (exName) => {
                     // Navigate to Library sub-tab with the exercise
@@ -5737,11 +5761,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* Embedded form-video modal */}
       <FormVideoModal
-        visible={!!videoModalName}
-        exerciseName={videoModalName ?? ''}
+        visible={!!videoModalTarget}
+        exerciseName={videoModalTarget?.name ?? ''}
+        equipment={videoModalTarget?.equipment ?? null}
+        primaryMuscle={videoModalTarget?.primary_muscle ?? null}
+        movementPattern={videoModalTarget?.movement_pattern ?? null}
         authToken={authToken}
         themeName={userProfile.themePreference}
-        onClose={() => setVideoModalName(null)}
+        onClose={() => setVideoModalTarget(null)}
       />
 
       {/* Recipe modal — on-demand prep instructions + variations */}
@@ -5820,50 +5847,116 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         exerciseName={selectedExercise.name}
                         videoId={_vid}
                         themeName={userProfile.themePreference}
-                        onPress={() => openExerciseVideo(selectedExercise.name)}
+                        onPress={() => openExerciseVideo(selectedExercise.name, {
+                          // Pass the concrete gear (first entry) when
+                          // available so "Band Chest Press" queries
+                          // include "resistance band" and filter out
+                          // machine/cable/dumbbell variants.
+                          equipment: (() => {
+                            const gear = (selectedExercise as any).gear as Array<{ name: string }> | undefined;
+                            return gear?.[0]?.name ?? selectedExercise.equipment ?? null;
+                          })(),
+                          primary_muscle: selectedExercise.primary_muscle ?? null,
+                          movement_pattern: (selectedExercise as any).movement_pattern ?? null,
+                        })}
                       />
                       <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
                         <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
                         {selectedExercise.secondary_muscles?.length ? (
                           <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
-                        <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment) || 'Bodyweight'}</Text>
-                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                        {/* Prefer the concrete gear list (from
+                            ExerciseEquipment) over the broad
+                            home/gym/minimal bucket — "Equipment: Home"
+                            was confusing users into thinking "Home" was
+                            a piece of gear. Bucket becomes a separate
+                            "Setting" hint when useful. */}
+                        {(() => {
+                          const gear = (selectedExercise as any).gear as Array<{ name: string; slug: string }> | undefined;
+                          const bucket = String(selectedExercise.equipment ?? '').toLowerCase();
+                          const gearLabel = gear && gear.length
+                            ? gear.map(g => g.name).join(', ')
+                            : (bucket === 'bodyweight' || bucket === 'none' ? 'Bodyweight' : null);
+                          const settingLabel =
+                            bucket === 'home' ? 'Home-friendly'
+                            : bucket === 'minimal' ? 'Minimal equipment'
+                            : bucket === 'gym' ? 'Gym'
+                            : bucket === 'full' ? 'Full gym'
+                            : null;
+                          return (
+                            <>
+                              {gearLabel && (
+                                <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {gearLabel}</Text>
+                              )}
+                              {settingLabel && gearLabel !== settingLabel && (
+                                <Text style={[styles.detailMeta, { color: workoutPalette.text + '99' }]}>Setting: {settingLabel}</Text>
+                              )}
+                            </>
+                          );
+                        })()}
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, alignItems: 'center' }}>
                           {/* "Watch Form Video" button removed — the
                               ExerciseVideoCard above handles the same
                               YouTube deep-link with a real thumbnail
                               preview, so the button was a duplicate CTA. */}
-                          {/* Dislike / re-like toggle — excludes this exercise
-                              from future AI-generated plans. Mirrors the
-                              ActiveWorkoutScreen "thumbs-down" pattern so
-                              users don't have to be mid-workout to opt out
-                              of an exercise they hate. */}
+                          {/* Avoid-this-exercise toggle (labelled — this
+                              is an EXERCISE preference, NOT feedback on
+                              the form video). Excludes the exercise
+                              from future AI-generated plans unless the
+                              user manually adds it back. */}
                           {(() => {
                             const disliked = (userProfile.dislikedExercises ?? []).some(
                               d => d.toLowerCase() === selectedExercise.name.toLowerCase(),
                             );
+                            const applyToggle = () => {
+                              const existing = userProfile.dislikedExercises ?? [];
+                              const next = disliked
+                                ? existing.filter(d => d.toLowerCase() !== selectedExercise.name.toLowerCase())
+                                : [...existing, selectedExercise.name];
+                              onProfileUpdate?.({ dislikedExercises: next } as any, true);
+                            };
+                            const onPress = () => {
+                              if (disliked) {
+                                // Un-avoiding doesn't need confirmation —
+                                // it's a "let it back in" action, not a
+                                // destructive one.
+                                applyToggle();
+                                return;
+                              }
+                              Alert.alert(
+                                'Avoid this exercise?',
+                                `We'll try not to include ${selectedExercise.name} in future plans unless you manually add it. Great for movements that aggravate an injury or you just don't enjoy.`,
+                                [
+                                  { text: 'Cancel', style: 'cancel' },
+                                  { text: 'Avoid Exercise', style: 'destructive', onPress: applyToggle },
+                                ],
+                              );
+                            };
                             return (
                               <TouchableOpacity
-                                onPress={() => {
-                                  const existing = userProfile.dislikedExercises ?? [];
-                                  const next = disliked
-                                    ? existing.filter(d => d.toLowerCase() !== selectedExercise.name.toLowerCase())
-                                    : [...existing, selectedExercise.name];
-                                  onProfileUpdate?.({ dislikedExercises: next } as any, true);
-                                }}
+                                onPress={onPress}
+                                activeOpacity={0.8}
                                 style={{
-                                  paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10,
-                                  backgroundColor: disliked ? themeColors.error + '22' : themeColors.surfaceRaised,
+                                  flexDirection: 'row', alignItems: 'center', gap: 8,
+                                  paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10,
+                                  backgroundColor: disliked ? themeColors.error + '1A' : themeColors.surfaceRaised,
                                   borderWidth: 1,
-                                  borderColor: disliked ? themeColors.error : themeColors.border,
-                                  alignItems: 'center', justifyContent: 'center',
+                                  borderColor: disliked ? themeColors.error + '88' : themeColors.border,
                                 }}
+                                accessibilityRole="button"
+                                accessibilityLabel={disliked ? 'Currently avoiding — tap to allow this exercise again' : 'Avoid this exercise in future plans'}
                               >
                                 <Ionicons
                                   name={disliked ? 'thumbs-down' : 'thumbs-down-outline'}
                                   size={16}
                                   color={disliked ? themeColors.error : themeColors.textSecondary}
                                 />
+                                <Text style={{
+                                  fontSize: 12, fontWeight: '700',
+                                  color: disliked ? themeColors.error : themeColors.textSecondary,
+                                }}>
+                                  {disliked ? 'Avoiding this exercise' : "Don't recommend"}
+                                </Text>
                               </TouchableOpacity>
                             );
                           })()}
@@ -6134,14 +6227,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return (
                     <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
                       {_thumb ? (
-                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
-                          <Image source={{ uri: _thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
-                          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                            <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
-                              <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+                        /* Thumbnail is a separate tap target — tapping
+                           it launches the form-video modal directly so
+                           users can preview without first opening the
+                           detail page. */
+                        <TouchableOpacity
+                          activeOpacity={0.7}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            openExerciseVideo(ex.name, {
+                              equipment: (ex as any).gear?.[0]?.name ?? (ex as any).equipment ?? null,
+                              primary_muscle: (ex as any).primary_muscle ?? null,
+                              movement_pattern: (ex as any).movement_pattern ?? null,
+                            });
+                          }}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Play form video for ${ex.name}`}
+                        >
+                          <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                            <Image source={{ uri: _thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+                            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                              <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+                              </View>
                             </View>
                           </View>
-                        </View>
+                        </TouchableOpacity>
                       ) : (
                         <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
                           <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
@@ -6150,9 +6261,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <View style={{ flex: 1 }}>
                         <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
                         <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
-                          {String(ex.primary_muscle ?? '').replace(/_/g, ' ')}
-                          {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length ? ` · ${ex.secondary_muscles.join(', ')}` : ''}
+                          {humanizeToken(ex.primary_muscle)}
+                          {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length
+                            ? ` · also hits ${ex.secondary_muscles.map(humanizeToken).join(', ')}`
+                            : ''}
                         </Text>
+                        {/* Equipment (concrete gear only, no "home"
+                            bucket). Kept small and only shown when the
+                            row has space — library feels like a library,
+                            not a YouTube results page. */}
+                        {(() => {
+                          const gear = (ex as any).gear as Array<{ name: string }> | undefined;
+                          if (!gear || gear.length === 0) return null;
+                          return (
+                            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }} numberOfLines={1}>
+                              {gear.map(g => g.name).slice(0, 2).join(', ')}
+                            </Text>
+                          );
+                        })()}
                       </View>
                       <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
                     </TouchableOpacity>
@@ -7483,7 +7609,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -7512,6 +7638,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   /** Navigates to the exercise info page (library sub-tab with
    *  exercise pre-selected). */
   onViewExercise?: (exerciseName: string) => void;
+  /** Opens the form-video modal for the given exercise. Wired from
+   *  the WorkoutCard thumbnail tap — users can play the YouTube
+   *  demo without leaving the plan. */
+  onOpenExerciseVideo?: (exerciseName: string) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -7816,12 +7946,15 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                           <Ionicons name="close-circle" size={20} color={tc.textMuted} />
                         </TouchableOpacity>
                       </View>
-                      {/* Grid: each option is a tile with a big colored
-                          READINESS circle on top and the focus label in
-                          small text below. Keeps the score as the
-                          primary visual anchor so the options can't be
-                          confused with the card's current focus. */}
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                      {/* Readiness dial grid — the circle + score is the
+                          hero; the focus label is a small muted caption
+                          underneath. Uses a dashed inner ring and
+                          transparent background so the tiles don't
+                          visually repeat the day card below. */}
+                      <Text style={{ fontSize: 10, color: tc.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
+                        Numbers show today's readiness for that focus. Higher = fresher.
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
                         {splitOptions.filter(f => f !== item.workout?.focus).map(focus => {
                           const w = optionWarnings?.[focus];
                           const hasConflict = !!w?.conflict;
@@ -7831,6 +7964,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                             : w.readiness >= 70 ? '#22C55E'
                             : w.readiness >= 40 ? '#F59E0B'
                             : '#EF4444';
+                          const tierLabel = w?.readiness == null ? 'Unknown'
+                            : w.readiness >= 70 ? 'Fresh'
+                            : w.readiness >= 40 ? 'Moderate'
+                            : 'Tired';
                           const warnMsg = hasConflict && lowReady
                             ? 'Back-to-back same family + low readiness'
                             : hasConflict
@@ -7839,10 +7976,6 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                                 ? `Low readiness (${w.readiness}%) — muscles still recovering`
                                 : null;
                           const handlePick = () => {
-                            // onChangeFocus itself closes the picker
-                            // (setSwitchDayIdx(-1) at the top), so don't
-                            // toggle here — double-toggling caused the
-                            // panel to re-open or state to race.
                             const apply = () => { onChangeFocus(focus); };
                             if (warned && warnMsg) {
                               Alert.alert(
@@ -7861,42 +7994,66 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                           return (
                             <TouchableOpacity
                               key={focus}
+                              activeOpacity={0.75}
                               style={{
                                 width: '31%',
-                                paddingVertical: 10, paddingHorizontal: 6,
-                                borderRadius: 10,
-                                borderWidth: 1.5,
-                                borderColor: warned ? '#F59E0B' + '88' : tc.border,
-                                backgroundColor: tc.surface,
-                                alignItems: 'center',
+                                paddingVertical: 12, paddingHorizontal: 4,
+                                alignItems: 'center', justifyContent: 'center',
+                                // Intentionally NO solid background or
+                                // heavy border — the tile reads as a
+                                // dial, not a card. This is the key
+                                // visual separation from the workout
+                                // card that sits directly below.
+                                borderRadius: 8,
+                                backgroundColor: warned ? '#F59E0B' + '10' : 'transparent',
                               }}
                               onPress={handlePick}>
-                              {/* Readiness circle — color = state, number = score. */}
+                              {/* Outer score dial — large, color-coded,
+                                  the dominant visual. */}
                               <View style={{
-                                width: 44, height: 44, borderRadius: 22,
-                                borderWidth: 3, borderColor: tier,
+                                width: 56, height: 56, borderRadius: 28,
+                                borderWidth: 4, borderColor: tier,
                                 alignItems: 'center', justifyContent: 'center',
-                                backgroundColor: tier + '14',
-                                marginBottom: 6,
+                                backgroundColor: tc.surface,
+                                marginBottom: 8,
                               }}>
                                 {hasScore ? (
-                                  <Text style={{ fontSize: 13, fontWeight: '800', color: tier }}>{w!.readiness}</Text>
+                                  <>
+                                    <Text style={{ fontSize: 18, fontWeight: '900', color: tier, lineHeight: 20 }}>
+                                      {w!.readiness}
+                                    </Text>
+                                    <Text style={{ fontSize: 7, fontWeight: '700', color: tier + 'BB', letterSpacing: 0.4, marginTop: -1 }}>
+                                      READY
+                                    </Text>
+                                  </>
                                 ) : (
-                                  <Ionicons name="ellipsis-horizontal" size={14} color={tier} />
+                                  <Ionicons name="ellipsis-horizontal" size={16} color={tier} />
                                 )}
                               </View>
+                              {/* Focus label — this is the CHOICE the
+                                  user is picking, so it needs to be
+                                  legible. Bumped up (14 / 700 / primary)
+                                  and placed directly under the dial so
+                                  the tile reads "Push — 85 Ready" at a
+                                  glance. */}
                               <Text style={{
-                                fontSize: 11, fontWeight: '700',
+                                fontSize: 14, fontWeight: '800',
                                 color: tc.textPrimary, textAlign: 'center',
-                              }} numberOfLines={2}>{focus}</Text>
+                                marginBottom: 2,
+                              }} numberOfLines={2}>
+                                {focus}
+                              </Text>
+                              {/* State caption under the focus, in the
+                                  tier color — visually subordinate to
+                                  the focus name but still color-coded. */}
                               <Text style={{
-                                fontSize: 9, fontWeight: '600',
-                                color: tier, marginTop: 1, letterSpacing: 0.3,
+                                fontSize: 9, fontWeight: '700',
+                                color: tier, letterSpacing: 0.5, textTransform: 'uppercase',
                               }}>
-                                {hasScore ? 'READY' : '—'}
+                                {tierLabel}
                               </Text>
                               {warned && (
-                                <View style={{ position: 'absolute', top: 4, right: 4 }}>
+                                <View style={{ position: 'absolute', top: 2, right: 2 }}>
                                   <Ionicons name="warning" size={12} color="#F59E0B" />
                                 </View>
                               )}
@@ -7940,6 +8097,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                     : undefined
                 }
                 onViewExercise={onViewExercise}
+                onOpenExerciseVideo={onOpenExerciseVideo}
               />
             </>
           )}

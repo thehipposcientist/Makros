@@ -945,11 +945,11 @@ export async function getGoals() {
 // it in AsyncStorage and return instantly on subsequent opens. TTL is
 // long (24h) because the seed rarely changes. Pass { forceRefresh: true }
 // to bypass the cache.
-// v2: bumped when `video_id` was added to the library schema — old v1
-// caches were populated before the backend started returning video_id,
-// so sticking with v1 meant 24h of stale rows where thumbnails couldn't
-// resolve. Bump the suffix any time the shape or required fields change.
-const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v2';
+// v3: bumped when `gear` (concrete equipment list) was added to the
+// library schema — old v2 caches didn't include it, so the detail page
+// was still falling back to the "Home" bucket label. Bump the suffix
+// any time the shape or required fields change.
+const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v3';
 const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function getExercises(params?: { muscle?: string; equipment?: string; forceRefresh?: boolean }) {

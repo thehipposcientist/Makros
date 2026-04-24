@@ -239,6 +239,17 @@ _VIDEO_CACHE: dict[str, list[dict]] = {}
 
 class ExerciseVideoRequest(_PydanticBaseModel):
     exercise_name: str
+    # Optional context so we can filter results to the RIGHT variant.
+    # Example: "Band Chest Press" should not return "Machine Chest Press"
+    # tutorials. The server re-ranks and filters candidate titles against
+    # the tokens in `equipment` / `primary_muscle` / `movement_pattern`.
+    equipment: str | None = None
+    primary_muscle: str | None = None
+    movement_pattern: str | None = None
+    # Tokens to penalize / strip results (e.g. ["machine", "cable"] when
+    # looking for band variant). Heavier penalty than the default
+    # mismatch rules.
+    exclude_tokens: list[str] = []
 
 
 def _oembed_probe(vid: str) -> dict | None:
@@ -287,8 +298,76 @@ def exercise_video_lookup(
     if not name:
         raise HTTPException(status_code=400, detail="Exercise name required")
 
-    query = f"{name} proper form tutorial"
+    # Build a targeted query. Adding equipment + muscle tokens helps
+    # YouTube rank the "Band Chest Press" variant above the unrelated
+    # "Machine Chest Press" result, which was previously showing up
+    # because "chest press" alone is ambiguous.
+    query_parts = [name, "proper form"]
+    if body.equipment:
+        query_parts.insert(1, body.equipment)
+    query = " ".join(query_parts) + " tutorial"
     search_url = f"https://www.youtube.com/results?search_query={_urlparse.quote(query)}"
+
+    # Title-ranking inputs — used below to drop results that are clearly
+    # the wrong variant (machine vs band vs dumbbell vs cable).
+    name_tokens = [t for t in _re.split(r"[^a-z0-9]+", name.lower()) if t]
+    exclude_tokens = [t.lower() for t in (body.exclude_tokens or []) if t]
+    # Default equipment-mismatch penalties: if the exercise name mentions
+    # "band" we actively downrank results titled "machine"/"cable", etc.
+    _EQUIPMENT_FAMILIES = [
+        {"band", "bands", "resistance"},
+        {"dumbbell", "dumbbells", "db"},
+        {"barbell", "bb"},
+        {"cable", "cables", "pulley"},
+        {"machine", "selectorized", "hammer", "plate-loaded"},
+        {"kettlebell", "kettlebells", "kb"},
+        {"bodyweight", "no-equipment"},
+    ]
+    name_family: set[str] = set()
+    for fam in _EQUIPMENT_FAMILIES:
+        if any(tok in fam for tok in name_tokens):
+            name_family = fam
+            break
+    # All foreign equipment family tokens ("machine" when the user
+    # requested "band"). We treat these as soft-excludes.
+    foreign_equipment_tokens: set[str] = set()
+    for fam in _EQUIPMENT_FAMILIES:
+        if fam is not name_family:
+            foreign_equipment_tokens.update(fam)
+
+    def _title_score(probe: dict) -> float:
+        """Higher = more likely to be the right variant. Negative scores
+        are dropped entirely so we don't ship an obviously-wrong tutorial
+        (e.g. "Machine Chest Press" when the user picked "Band Chest Press")."""
+        if not probe:
+            return -999.0
+        title = (probe.get("title") or "").lower()
+        if not title:
+            return -1.0
+        title_tokens = set(_re.split(r"[^a-z0-9]+", title))
+        score = 0.0
+        # Reward every matching exercise-name token.
+        for t in name_tokens:
+            if t in title_tokens:
+                score += 1.0
+        # Reward the right equipment family.
+        if name_family and any(t in title_tokens for t in name_family):
+            score += 1.5
+        # Penalize foreign equipment families (the "machine" problem).
+        for t in foreign_equipment_tokens:
+            if t in title_tokens:
+                score -= 2.5
+        # Hard-exclude tokens drop by a lot more.
+        for t in exclude_tokens:
+            if t in title_tokens:
+                score -= 5.0
+        # Small bonus for "form" / "technique" / "how to" — the user
+        # asked for a form demo, not a bodybuilder vlog.
+        for kw in ("form", "technique", "how", "proper", "tutorial"):
+            if kw in title_tokens:
+                score += 0.25
+                break
+        return score
 
     # 1. Curated mapping wins — manually-vetted video IDs bypass the probe.
     try:
@@ -301,6 +380,7 @@ def exercise_video_lookup(
             "video_id": curated, "title": name, "thumbnail_url": "", "author_name": "",
         }
         opt["is_short"] = False
+        opt["recommended"] = True
         return {
             "video_id": curated,
             "options": [opt],
@@ -309,7 +389,7 @@ def exercise_video_lookup(
             "curated": True,
         }
 
-    cache_key = name.lower()
+    cache_key = f"{name.lower()}|{(body.equipment or '').lower()}"
     if cache_key in _VIDEO_CACHE:
         opts = _VIDEO_CACHE[cache_key]
         return {
@@ -376,28 +456,40 @@ def exercise_video_lookup(
     with _TPE(max_workers=8) as pool:
         probes = list(pool.map(lambda c: _oembed_probe(c[0]), candidates))
 
-    options: list[dict] = []
+    scored: list[tuple[float, dict]] = []
     for (vid, is_short), probe in zip(candidates, probes):
         if not probe:
             continue
         probe["is_short"] = bool(is_short)
-        options.append(probe)
+        s = _title_score(probe)
+        # Drop anything with a negative score — those are the wrong
+        # equipment variant (the whole point of this rewrite). If this
+        # leaves the list empty the UI falls through to the "Search
+        # YouTube" empty-state instead of shipping a bad match.
+        if s < 0:
+            continue
+        scored.append((s, probe))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    options = [p for _, p in scored][:10]
 
-    # Cap the returned list so the client's grid doesn't get enormous.
-    options = options[:10]
+    # Flag the #1 result as recommended so the client can render a
+    # "Recommended" chip on it.
+    if options:
+        options[0]["recommended"] = True
 
     if not options:
-        # Nothing embeddable — surface the first raw candidate so the UI can
-        # at least render an "Open on YouTube" button for it.
-        fallback_vid = candidates[0][0]
-        options = [{
-            "video_id": fallback_vid,
-            "title": name,
-            "thumbnail_url": f"https://i.ytimg.com/vi/{fallback_vid}/hqdefault.jpg",
-            "author_name": "",
-            "is_short": candidates[0][1],
-        }]
-        print(f"[exercise-video] no embeddable video for '{name}' — using raw fallback")
+        # No well-ranked result survived the filter. Do NOT ship the raw
+        # unranked candidate — let the client render the empty state
+        # with the "Search YouTube" fallback so the user knows this is
+        # an uncurated exercise.
+        _VIDEO_CACHE[cache_key] = []
+        return {
+            "video_id": None,
+            "options": [],
+            "search_url": search_url,
+            "cached": False,
+            "empty_reason": "no_matching_form_video",
+        }
 
     _VIDEO_CACHE[cache_key] = options
     if len(_VIDEO_CACHE) > 500:

@@ -34,6 +34,12 @@ def list_exercises(
     """
     Returns the exercise library. Filterable by muscle group and equipment.
     Used to populate exercise picker / autocomplete in the app.
+
+    Response includes both the legacy `equipment` bucket (home/gym/minimal/
+    full) and a `gear` list of concrete items from ExerciseEquipment
+    (resistance_bands / dumbbell / barbell ...). The client renders `gear`
+    as "Equipment: Resistance Band" and treats the bucket as a separate
+    "Setting: Home-friendly" label so users don't see "Equipment: Home".
     """
     query = select(Exercise)
     if muscle:
@@ -41,7 +47,31 @@ def list_exercises(
     if equipment:
         query = query.where(Exercise.equipment == equipment)
     exercises = db.exec(query.order_by(Exercise.primary_muscle, Exercise.name)).all()
-    return exercises
+
+    # Batch the gear lookup so we don't issue one query per exercise.
+    ex_ids = [e.id for e in exercises if e.id is not None]
+    gear_by_exercise: dict[int, list[dict]] = {}
+    if ex_ids:
+        rows = db.exec(
+            select(ExerciseEquipment, Equipment)
+            .join(Equipment, Equipment.id == ExerciseEquipment.equipment_id)
+            .where(ExerciseEquipment.exercise_id.in_(ex_ids))
+        ).all()
+        for link, eq in rows:
+            gear_by_exercise.setdefault(link.exercise_id, []).append({
+                "slug": eq.slug,
+                "name": eq.name,
+                "category": eq.category,
+            })
+
+    out: list[dict] = []
+    for e in exercises:
+        d = e.model_dump() if hasattr(e, "model_dump") else e.dict()
+        d["gear"] = gear_by_exercise.get(e.id or -1, [])
+        # Keep `equipment` (the bucket) as-is for backwards compat. The
+        # client reads `gear` first and only falls back to bucket.
+        out.append(d)
+    return out
 
 
 @router.get("/exercises/{exercise_id}")

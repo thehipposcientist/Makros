@@ -11,6 +11,14 @@
 //     static images are intentionally NOT used (inconsistent with the
 //     YouTube-thumbnail treatment everywhere else).
 //
+// Legal framing:
+//   - Copy explicitly says "YouTube form demo" / "Watch on YouTube" so
+//     the user never thinks the app owns the video.
+//   - Thumbnails are served by `img.youtube.com` (hotlinking allowed,
+//     same as Twitter/Discord/Reddit previews).
+//   - Play still routes through the YouTube embed iframe — no download,
+//     no rehost.
+//
 // onPress always invokes openExerciseVideo (FormVideoModal).
 
 import { View, Text, TouchableOpacity, Image } from 'react-native';
@@ -75,43 +83,58 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
               {exerciseName}
             </Text>
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4, letterSpacing: 0.5, fontWeight: '600' }}>
-              TAP TO LOAD FORM VIDEO
+              TAP FOR YOUTUBE FORM DEMO
             </Text>
           </View>
         )}
-        {/* Play overlay — centered, semi-transparent circle with a play
-            glyph, so the tile reads as a video preview even before load. */}
+        {/* Light bottom-only gradient — ensures the "YouTube" badge stays
+            readable without darkening the whole thumbnail. Top 60% of
+            the image is fully unaltered so the form preview stays clear. */}
+        {thumbUri && (
+          <View pointerEvents="none" style={{
+            position: 'absolute', left: 0, right: 0, bottom: 0, height: '45%',
+            backgroundColor: 'rgba(0,0,0,0.25)',
+          }} />
+        )}
+        {/* Play overlay — softer (was 0.55 opacity, now 0.38), smaller
+            circle so the thumbnail is the hero. */}
         <View style={{
           position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
           alignItems: 'center', justifyContent: 'center',
         }}>
           <View style={{
-            width: 60, height: 60, borderRadius: 30,
-            backgroundColor: 'rgba(0,0,0,0.55)',
+            width: 54, height: 54, borderRadius: 27,
+            backgroundColor: 'rgba(0,0,0,0.38)',
+            borderWidth: 2, borderColor: 'rgba(255,255,255,0.85)',
             alignItems: 'center', justifyContent: 'center',
           }}>
-            <Ionicons name="play" size={26} color="#fff" style={{ marginLeft: 3 }} />
+            <Ionicons name="play" size={22} color="#fff" style={{ marginLeft: 3 }} />
           </View>
         </View>
-        {videoId && (
+        {thumbUri && (
           <View style={{
             position: 'absolute', bottom: 8, right: 10,
-            backgroundColor: 'rgba(0,0,0,0.65)',
-            paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4,
-            flexDirection: 'row', alignItems: 'center', gap: 4,
+            backgroundColor: 'rgba(0,0,0,0.72)',
+            paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4,
+            flexDirection: 'row', alignItems: 'center', gap: 5,
           }}>
-            <Ionicons name="logo-youtube" size={10} color="#FF0000" />
+            <Ionicons name="logo-youtube" size={11} color="#FF0000" />
             <Text style={{ fontSize: 10, fontWeight: '700', color: '#fff', letterSpacing: 0.3 }}>
-              FORM VIDEO
+              YOUTUBE
             </Text>
           </View>
         )}
       </View>
       <View style={{ padding: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <Ionicons name="play-circle" size={16} color={tc.primary} />
-        <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>
-          Watch form video
-        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
+            Watch form video
+          </Text>
+          <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }} numberOfLines={1}>
+            YouTube form demo — not created by Thallo
+          </Text>
+        </View>
         <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
       </View>
     </TouchableOpacity>

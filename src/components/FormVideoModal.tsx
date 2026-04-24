@@ -14,6 +14,13 @@ interface Props {
   exerciseName: string;
   authToken?: string | null;
   themeName?: AppThemeName;
+  /** Optional context passed to the backend so results stay tight to
+   *  the exact exercise variant. Example: "Band Chest Press" with
+   *  equipment="resistance_bands" so the backend can filter out
+   *  "Machine Chest Press" tutorials. */
+  equipment?: string | null;
+  primaryMuscle?: string | null;
+  movementPattern?: string | null;
   onClose: () => void;
 }
 
@@ -23,6 +30,7 @@ interface VideoOption {
   thumbnail_url: string;
   author_name: string;
   is_short: boolean;
+  recommended?: boolean;
 }
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -32,18 +40,20 @@ const THUMB_W = (PLAYER_W - 8) / 2;
 const THUMB_H = (THUMB_W * 9) / 16;
 
 export default function FormVideoModal({
-  visible, exerciseName, themeName, authToken, onClose,
+  visible, exerciseName, themeName, authToken, equipment, primaryMuscle, movementPattern, onClose,
 }: Props) {
   const colors = getTheme(themeName).colors;
   const [options, setOptions] = useState<VideoOption[]>([]);
   const [activeVideo, setActiveVideo] = useState<VideoOption | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [emptyReason, setEmptyReason] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!authToken || !exerciseName) return;
     setLoading(true);
     setError(null);
+    setEmptyReason(null);
     setOptions([]);
     setActiveVideo(null);
     try {
@@ -55,18 +65,24 @@ export default function FormVideoModal({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
         },
-        body: JSON.stringify({ exercise_name: exerciseName }),
+        body: JSON.stringify({
+          exercise_name: exerciseName,
+          equipment: equipment ?? undefined,
+          primary_muscle: primaryMuscle ?? undefined,
+          movement_pattern: movementPattern ?? undefined,
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const opts: VideoOption[] = Array.isArray(data?.options) ? data.options : [];
       setOptions(opts);
+      if (opts.length === 0) setEmptyReason(data?.empty_reason || 'no_results');
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
       setLoading(false);
     }
-  }, [authToken, exerciseName]);
+  }, [authToken, exerciseName, equipment, primaryMuscle, movementPattern]);
 
   useEffect(() => {
     if (visible) load();
@@ -122,10 +138,12 @@ export default function FormVideoModal({
             ) : null}
             <View style={{ flex: 1 }}>
               <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-                {activeVideo ? activeVideo.title : 'Form Videos'}
+                {activeVideo ? activeVideo.title : 'YouTube form demos'}
               </Text>
               <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {activeVideo ? activeVideo.author_name : exerciseName}
+                {activeVideo
+                  ? (activeVideo.author_name ? `by ${activeVideo.author_name}` : 'YouTube')
+                  : exerciseName}
               </Text>
             </View>
             <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -152,6 +170,16 @@ export default function FormVideoModal({
                   originWhitelist={['*']}
                 />
               </View>
+              {/* Channel attribution row — always visible so users
+                  understand the video is third-party. */}
+              {activeVideo.author_name ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
+                  <Ionicons name="logo-youtube" size={12} color="#FF0000" />
+                  <Text style={{ fontSize: 11, color: colors.textMuted }} numberOfLines={1}>
+                    Form demo by {activeVideo.author_name} on YouTube
+                  </Text>
+                </View>
+              ) : null}
               <View style={styles.actions}>
                 <TouchableOpacity
                   onPress={handleBack}
@@ -196,49 +224,86 @@ export default function FormVideoModal({
                   </Text>
                 </View>
               )}
-              <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
-                <View style={styles.grid}>
-                  {options.map((opt) => (
-                    <Animated.View
-                      key={opt.video_id}
-                      style={{ opacity: 1, transform: [{ translateY: 0 }] }}
-                    >
-                      <TouchableOpacity
-                        activeOpacity={0.8}
-                        onPress={() => setActiveVideo(opt)}
-                        style={[
-                          styles.thumbCard,
-                          { backgroundColor: colors.surfaceRaised, borderColor: colors.border },
-                        ]}
+              {/* Empty state — NO curated/well-ranked results came back.
+                  We don't dump raw YouTube results into the UI; instead
+                  we tell the user so they can open a search themselves. */}
+              {!loading && !error && options.length === 0 && (
+                <View style={{ alignItems: 'center', paddingVertical: 28, paddingHorizontal: 20 }}>
+                  <View style={{
+                    width: 52, height: 52, borderRadius: 26,
+                    backgroundColor: colors.surfaceRaised,
+                    alignItems: 'center', justifyContent: 'center', marginBottom: 10,
+                  }}>
+                    <Ionicons name="videocam-off-outline" size={22} color={colors.textMuted} />
+                  </View>
+                  <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, textAlign: 'center' }}>
+                    No curated videos yet
+                  </Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: 4, lineHeight: 16 }}>
+                    We couldn't find a tutorial that matches this exercise
+                    closely enough. You can open YouTube to search manually.
+                  </Text>
+                </View>
+              )}
+              {options.length > 0 && (
+                <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+                  <View style={styles.grid}>
+                    {options.map((opt) => (
+                      <Animated.View
+                        key={opt.video_id}
+                        style={{ opacity: 1, transform: [{ translateY: 0 }] }}
                       >
-                        <View style={{ width: THUMB_W - 2, height: THUMB_H, backgroundColor: '#000', borderTopLeftRadius: radius.md, borderTopRightRadius: radius.md, overflow: 'hidden' }}>
-                          {opt.thumbnail_url ? (
-                            <Image source={{ uri: opt.thumbnail_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                          ) : null}
-                          {opt.is_short ? (
-                            <View style={[styles.shortBadge, { backgroundColor: colors.primary }]}>
-                              <Text style={{ fontSize: 9, fontWeight: '800', color: colors.background, letterSpacing: 0.6 }}>SHORT</Text>
-                            </View>
-                          ) : null}
-                          <View style={styles.playOverlay}>
-                            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' }}>
-                              <Ionicons name="play" size={18} color="#fff" style={{ marginLeft: 2 }} />
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => setActiveVideo(opt)}
+                          style={[
+                            styles.thumbCard,
+                            {
+                              backgroundColor: colors.surfaceRaised,
+                              borderColor: opt.recommended ? colors.primary : colors.border,
+                              borderWidth: opt.recommended ? 1.5 : 1,
+                            },
+                          ]}
+                        >
+                          <View style={{ width: THUMB_W - 2, height: THUMB_H, backgroundColor: '#000', borderTopLeftRadius: radius.md, borderTopRightRadius: radius.md, overflow: 'hidden' }}>
+                            {opt.thumbnail_url ? (
+                              <Image source={{ uri: opt.thumbnail_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                            ) : null}
+                            {opt.recommended ? (
+                              <View style={[styles.recommendedBadge, { backgroundColor: colors.primary }]}>
+                                <Ionicons name="checkmark-circle" size={9} color={colors.background} />
+                                <Text style={{ fontSize: 9, fontWeight: '800', color: colors.background, letterSpacing: 0.4 }}>RECOMMENDED</Text>
+                              </View>
+                            ) : opt.is_short ? (
+                              <View style={[styles.shortBadge, { backgroundColor: colors.primary }]}>
+                                <Text style={{ fontSize: 9, fontWeight: '800', color: colors.background, letterSpacing: 0.6 }}>SHORT</Text>
+                              </View>
+                            ) : null}
+                            <View style={styles.playOverlay}>
+                              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="play" size={18} color="#fff" style={{ marginLeft: 2 }} />
+                              </View>
                             </View>
                           </View>
-                        </View>
-                        <View style={{ padding: 8 }}>
-                          <Text numberOfLines={2} style={{ fontSize: 11, fontWeight: '600', color: colors.textPrimary, lineHeight: 15 }}>
-                            {opt.title || 'Untitled'}
-                          </Text>
-                          {opt.author_name ? (
-                            <Text numberOfLines={1} style={{ fontSize: 10, color: colors.textMuted, marginTop: 2 }}>{opt.author_name}</Text>
-                          ) : null}
-                        </View>
-                      </TouchableOpacity>
-                    </Animated.View>
-                  ))}
-                </View>
-              </ScrollView>
+                          <View style={{ padding: 8 }}>
+                            <Text numberOfLines={2} style={{ fontSize: 11, fontWeight: '600', color: colors.textPrimary, lineHeight: 15 }}>
+                              {opt.title || 'Untitled'}
+                            </Text>
+                            {opt.author_name ? (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 }}>
+                                <Ionicons name="logo-youtube" size={9} color="#FF0000" />
+                                <Text numberOfLines={1} style={{ fontSize: 10, color: colors.textMuted }}>
+                                  {opt.author_name}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        </TouchableOpacity>
+                      </Animated.View>
+                    ))}
+                  </View>
+                </ScrollView>
+              )}
               <View style={styles.actions}>
                 <TouchableOpacity
                   onPress={() => Linking.openURL(searchUrl)}
@@ -246,7 +311,9 @@ export default function FormVideoModal({
                   activeOpacity={0.8}
                 >
                   <Ionicons name="open-outline" size={14} color={colors.textSecondary} />
-                  <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>More on YouTube</Text>
+                  <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>
+                    {options.length === 0 ? 'Search YouTube' : 'More on YouTube'}
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={handleClose}
@@ -285,11 +352,15 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     overflow: 'hidden',
     marginBottom: 8,
-    borderWidth: 1,
   },
   shortBadge: {
     position: 'absolute', top: 6, right: 6,
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+  },
+  recommendedBadge: {
+    position: 'absolute', top: 6, left: 6,
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4,
   },
   playOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
