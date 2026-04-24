@@ -41,6 +41,10 @@ from .slots import (
     _hybrid_lower_power_slots,
     _hybrid_strength_intervals_slots,
     _hybrid_upper_intervals_slots,
+    _push_plus_cardio_slots,
+    _pull_plus_cardio_slots,
+    _upper_plus_cardio_slots,
+    _full_body_plus_cardio_slots,
     _legs_slots,
     _lower_slots,
     _mobility_flow_slots,
@@ -514,6 +518,17 @@ def archetype_to_slots(
         return _hybrid_lower_power_slots()
     if archetype == _DA.HYBRID_FULL_BODY_CIRCUIT:
         return _hybrid_full_body_circuit_slots()
+
+    # Lift + same-day cardio
+    if archetype == _DA.LIFT_PUSH_PLUS_CARDIO:
+        return _push_plus_cardio_slots()
+    if archetype == _DA.LIFT_PULL_PLUS_CARDIO:
+        return _pull_plus_cardio_slots()
+    if archetype == _DA.LIFT_UPPER_PLUS_CARDIO:
+        ci = day_index // 2
+        return _upper_plus_cardio_slots(ci)
+    if archetype == _DA.LIFT_FULL_BODY_PLUS_CARDIO:
+        return _full_body_plus_cardio_slots(day_index)
 
     # Unknown archetype — safe fallback to full body.
     return _full_body_slots(day_index)

@@ -104,6 +104,13 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
             # Active recovery option for 6+ day weeks
             DayArchetype.MOBILITY_FLOW,
+            DayArchetype.RECOVERY_EASY,
+            # Lift + same-day cardio: used when muscle_gain user has 5+
+            # training days and session time supports 10-15 min finisher.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_PUSH,
@@ -179,6 +186,13 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
+            # Lift + same-day cardio — preferred over dedicated cardio
+            # days for body_recomp to keep lift-day discipline high.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+            DayArchetype.RECOVERY_EASY,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_UPPER,
@@ -228,6 +242,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
+            # Lift + same-day cardio — common for fat_loss so cardio
+            # volume can scale without cannibalizing the rest day.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_UPPER,
@@ -370,6 +390,12 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.STRETCH_BLOCK,
             DayArchetype.RECOVERY_EASY,
             DayArchetype.STRESS_RELIEF_EASY,
+            # Hybrid lift+cardio — preferred for general health so cardio
+            # lands on lift days instead of creating extra dedicated days.
+            DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+            DayArchetype.LIFT_PULL_PLUS_CARDIO,
+            DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+            DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
         }),
         anchor_archetypes=(
             DayArchetype.LIFT_FULL_BODY,

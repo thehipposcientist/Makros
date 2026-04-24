@@ -83,6 +83,15 @@ class DayArchetype(str, Enum):
     HYBRID_UPPER_INTERVALS = "hybrid_upper_intervals"
     HYBRID_LOWER_POWER = "hybrid_lower_power"    # lower strength + plyo + sprint
     HYBRID_FULL_BODY_CIRCUIT = "hybrid_full_body_circuit"
+    # Lift + short zone-2 cardio finisher. Same-day cardio attachments
+    # used by muscle_gain / recomp / fat_loss / general_health plans so
+    # a user with more days per week doesn't have to cannibalize their
+    # rest day for cardio. Cardio amount is duration-aware (5-25 min)
+    # and trimmed by density_adjust_slots on short sessions.
+    LIFT_PUSH_PLUS_CARDIO = "lift_push_plus_cardio"
+    LIFT_PULL_PLUS_CARDIO = "lift_pull_plus_cardio"
+    LIFT_UPPER_PLUS_CARDIO = "lift_upper_plus_cardio"
+    LIFT_FULL_BODY_PLUS_CARDIO = "lift_full_body_plus_cardio"
 
 
 ArchetypeCategory = Literal["lift", "cond", "mobility", "recovery", "hybrid"]
@@ -319,6 +328,32 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
         default_name="Full Body Circuit", intensity_cost=4,
         accepts_types=frozenset({"strength", "cardio"}),
     ),
+    # ── Lift + same-day cardio finisher (duration-aware) ──────────
+    # Category is "lift" (not "hybrid") because these are structurally
+    # lift days — the cardio is an optional finisher that density trim
+    # drops first on short sessions. training_type stays "mixed" so the
+    # prescription dispatcher routes cardio rows to cardio prescription
+    # and lift rows to lift prescription.
+    DayArchetype.LIFT_PUSH_PLUS_CARDIO: ArchetypeMeta(
+        category="lift", training_type="mixed",
+        default_name="Push + Cardio", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.LIFT_PULL_PLUS_CARDIO: ArchetypeMeta(
+        category="lift", training_type="mixed",
+        default_name="Pull + Cardio", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.LIFT_UPPER_PLUS_CARDIO: ArchetypeMeta(
+        category="lift", training_type="mixed",
+        default_name="Upper + Cardio", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
+    DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO: ArchetypeMeta(
+        category="lift", training_type="mixed",
+        default_name="Full Body + Cardio", intensity_cost=4,
+        accepts_types=frozenset({"strength", "cardio"}),
+    ),
 }
 
 
@@ -394,6 +429,10 @@ ARCHETYPE_TO_FOCUS_BUCKET: dict[DayArchetype, str] = {
     DayArchetype.HYBRID_UPPER_INTERVALS: "upper_body",
     DayArchetype.HYBRID_LOWER_POWER: "lower_body",
     DayArchetype.HYBRID_FULL_BODY_CIRCUIT: "full_body",
+    DayArchetype.LIFT_PUSH_PLUS_CARDIO: "upper_body",
+    DayArchetype.LIFT_PULL_PLUS_CARDIO: "upper_body",
+    DayArchetype.LIFT_UPPER_PLUS_CARDIO: "upper_body",
+    DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO: "full_body",
 }
 
 
@@ -452,6 +491,10 @@ ARCHETYPE_TO_FOCUS_FAMILY: dict[DayArchetype, str] = {
     DayArchetype.HYBRID_UPPER_INTERVALS: "upper",
     DayArchetype.HYBRID_LOWER_POWER: "lower",
     DayArchetype.HYBRID_FULL_BODY_CIRCUIT: "full_body",
+    DayArchetype.LIFT_PUSH_PLUS_CARDIO: "push",
+    DayArchetype.LIFT_PULL_PLUS_CARDIO: "pull",
+    DayArchetype.LIFT_UPPER_PLUS_CARDIO: "upper",
+    DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO: "full_body",
 }
 
 

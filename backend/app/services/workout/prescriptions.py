@@ -315,12 +315,21 @@ def _prescribe_mobility(slot, exercise: dict) -> Prescription:
 
 
 def _prescribe_warmup(slot, exercise: dict) -> Prescription:
-    """Warmup prescription: 1 set of a brief mobility drill. Either a
-    45-60s hold or a 5-8 rep flow depending on the exercise type."""
-    mp = (exercise.get("movement_pattern") or "").lower()
-    if "stretch" in mp or "static" in mp:
-        return Prescription(sets=1, reps="45-60s hold", rest_seconds=0, rir_target=1.0)
-    return Prescription(sets=1, reps="5-8 reps flow", rest_seconds=0, rir_target=1.0)
+    """Warmup prescription: always a short, DYNAMIC movement-prep block.
+
+    Static stretching and long mobility holds reduce peak force output
+    before heavy lifts. So regardless of the underlying exercise's
+    movement pattern, we prescribe a dynamic flow (2 sets × 6-8 reps,
+    no rest, low RIR). If the exercise library happened to pick a
+    static stretch for this slot, the user still performs it as a
+    dynamic flow rather than a long held position.
+
+    Density trimming (slots.py `density_adjust_slots`) drops the whole
+    warmup slot first when `session_minutes` is tight, so SHORT
+    sessions (<=30 min) skip this block entirely and go straight to
+    ramp-up sets on the primary lift.
+    """
+    return Prescription(sets=2, reps="6-8 reps flow", rest_seconds=0, rir_target=1.0)
 
 
 # ── Recovery ───────────────────────────────────────────────────────

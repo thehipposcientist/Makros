@@ -655,6 +655,41 @@ def _hybrid_strength_intervals_slots() -> list[Slot]:
     ]
 
 
+# ── Lift + same-day cardio finisher (duration-aware) ──────────────
+# These reuse existing lift slot patterns and append a single cardio
+# finisher slot at role="isolation" so density_adjust_slots drops it
+# first on short sessions. Result: SHORT (<=30min) sessions silently
+# turn back into a pure lift day; MEDIUM/LONG keep the 10-25 min cardio
+# finisher per the planner's goal×days×duration table.
+
+def _push_plus_cardio_slots() -> list[Slot]:
+    return [
+        *_push_slots(),
+        Slot("Cardio Finisher", "cardio", None, "isolation"),
+    ]
+
+
+def _pull_plus_cardio_slots() -> list[Slot]:
+    return [
+        *_pull_slots(),
+        Slot("Cardio Finisher", "cardio", None, "isolation"),
+    ]
+
+
+def _upper_plus_cardio_slots(cycle_index: int = 0) -> list[Slot]:
+    return [
+        *_upper_slots(cycle_index),
+        Slot("Cardio Finisher", "cardio", None, "isolation"),
+    ]
+
+
+def _full_body_plus_cardio_slots(day_index: int = 0) -> list[Slot]:
+    return [
+        *_full_body_slots(day_index),
+        Slot("Cardio Finisher", "cardio", None, "isolation"),
+    ]
+
+
 def _hybrid_full_body_circuit_slots() -> list[Slot]:
     """Full-body circuit — compounds + cardio burst."""
     return [

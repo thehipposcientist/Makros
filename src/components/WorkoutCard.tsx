@@ -25,9 +25,13 @@ interface WorkoutCardProps {
   workout: WorkoutDay;
   themeName?: AppThemeName;
   onOpenExerciseVideo?: (exerciseName: string) => void;
+  /** Open the swap picker for the exercise at this index. Enables a
+   *  swap button on each exercise row so plan-view swaps use the same
+   *  overlap-ranked alternatives as the live Switch Exercise feature. */
+  onSwapExercise?: (exerciseIndex: number, exerciseName: string) => void;
 }
 
-export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }: WorkoutCardProps) {
+export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, onSwapExercise }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -156,6 +160,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo }:
             c={c}
             styles={styles}
             onOpenVideo={onOpenExerciseVideo}
+            onSwap={onSwapExercise}
           />
         ))}
       </View>
@@ -181,7 +186,7 @@ function StatItem({ icon, value, color }: {
 
 // ── ExerciseRow ───────────────────────────────────────────────────────────────
 
-function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo }: {
+function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap }: {
   index: number;
   exercise: WorkoutDay['exercises'][number];
   isLast: boolean;
@@ -189,6 +194,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
   c: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   onOpenVideo?: (name: string) => void;
+  onSwap?: (exerciseIndex: number, exerciseName: string) => void;
 }) {
   return (
     <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
@@ -264,6 +270,19 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo 
               onPress={() => onOpenVideo(exercise.name)}>
               <Ionicons name="open-outline" size={11} color={section.strong} />
               <Text style={[styles.videoChipText, { color: section.strong }]}>Form</Text>
+            </Pressable>
+          )}
+          {onSwap && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.videoChip,
+                { borderColor: c.textMuted, backgroundColor: pressed ? c.textMuted + '22' : c.surface },
+              ]}
+              onPress={() => onSwap(index, exercise.name)}
+              accessibilityLabel={`swap-${exercise.name}`}
+            >
+              <Ionicons name="swap-horizontal" size={11} color={c.textSecondary} />
+              <Text style={[styles.videoChipText, { color: c.textSecondary }]}>Swap</Text>
             </Pressable>
           )}
         </View>

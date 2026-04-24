@@ -2377,19 +2377,61 @@ def generate_mobility_day(session_minutes: int = 45) -> dict:
     return {"day": "Mobility Day", "focus": "Mobility", "stimulus": "mobility", "exercises": exercises}
 
 
-def generate_cardio_day(session_minutes: int = 45, goal: str = "body_recomp") -> dict:
-    """Generate a cardio day appropriate for the user's goal."""
-    if goal in ("fat_loss", "endurance", "hyrox", "athletic_performance"):
-        exercises = [
-            {"name": "Jump Rope", "sets": 1, "reps": "5 min warm-up", "rest_seconds": 60, "equipment": "bodyweight", "slot_role": "warmup", "muscles_targeted": ["cardio", "calves"]},
-            {"name": "Rowing Machine", "sets": 1, "reps": f"{min(25, session_minutes - 15)} min steady", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "back", "core"]},
-            {"name": "Assault Bike Intervals", "sets": 6, "reps": "30s on / 60s off", "rest_seconds": 60, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "quads"]},
+def generate_cardio_day(
+    session_minutes: int = 45,
+    goal: str = "body_recomp",
+    equipment_owned: list[str] | None = None,
+) -> dict:
+    """Generate a cardio day appropriate for the user's goal.
+
+    Filters exercise candidates against the user's owned equipment so we
+    never emit a Stair Climber to someone who doesn't have one — the old
+    hardcoded list tagged all machine cardio as generic "machine" which
+    slipped past the equipment filter downstream.
+    """
+    owned = {e.lower().strip() for e in (equipment_owned or [])}
+    # Bodyweight is always available. "None" equivalent.
+    owned.add("bodyweight")
+    owned.add("none")
+
+    def _matches(required: list[str]) -> bool:
+        """True iff user has at least one of the required equipment slugs."""
+        return any(r.lower() in owned for r in required)
+
+    # Candidate pool — each carries its real equipment requirement so the
+    # equipment filter actually works. "bodyweight" entries always survive.
+    pool_intense = [
+        {"name": "Jump Rope",              "sets": 1, "reps": "5 min warm-up",                     "rest_seconds": 60, "equipment": "bodyweight",        "slot_role": "warmup",  "muscles_targeted": ["cardio", "calves"],       "_req": ["bodyweight", "jump_rope"]},
+        {"name": "Rowing Machine",         "sets": 1, "reps": f"{min(25, session_minutes - 15)} min steady", "rest_seconds": 0, "equipment": "rower",      "slot_role": "primary", "muscles_targeted": ["cardio", "back", "core"], "_req": ["rowing_machine", "rower"]},
+        {"name": "Assault Bike Intervals", "sets": 6, "reps": "30s on / 60s off",                  "rest_seconds": 60, "equipment": "assault_bike",      "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["assault_bike"]},
+        {"name": "Treadmill Intervals",    "sets": 6, "reps": "60s on / 60s off",                  "rest_seconds": 60, "equipment": "treadmill",         "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["treadmill"]},
+        {"name": "Bike Sprints",           "sets": 8, "reps": "20s on / 40s off",                  "rest_seconds": 40, "equipment": "stationary_bike",   "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["stationary_bike", "bike"]},
+        {"name": "Outdoor Run Intervals",  "sets": 5, "reps": "2 min hard / 2 min easy",           "rest_seconds": 0,  "equipment": "bodyweight",        "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["bodyweight"]},
+    ]
+    pool_easy = [
+        {"name": "Incline Treadmill Walk", "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "treadmill",     "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"], "_req": ["treadmill"]},
+        {"name": "Stair Climber",          "sets": 1, "reps": "10 min",                                "rest_seconds": 0, "equipment": "stair_climber", "slot_role": "primary", "muscles_targeted": ["cardio", "quads", "glutes"],  "_req": ["stair_climber"]},
+        {"name": "Stationary Bike (Zone 2)","sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "stationary_bike","slot_role": "primary","muscles_targeted": ["cardio", "quads"],          "_req": ["stationary_bike", "bike"]},
+        {"name": "Outdoor Walk",           "sets": 1, "reps": f"{min(30, session_minutes - 5)} min",   "rest_seconds": 0, "equipment": "bodyweight",   "slot_role": "primary", "muscles_targeted": ["cardio", "glutes"],           "_req": ["bodyweight"]},
+        {"name": "Elliptical (Zone 2)",    "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "elliptical",    "slot_role": "primary", "muscles_targeted": ["cardio", "full_body"],        "_req": ["elliptical"]},
+        {"name": "Rowing Zone 2",          "sets": 1, "reps": f"{min(25, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "rower",         "slot_role": "primary", "muscles_targeted": ["cardio", "back"],             "_req": ["rowing_machine", "rower"]},
+    ]
+
+    pool = pool_intense if goal in ("fat_loss", "endurance", "hyrox", "athletic_performance") else pool_easy
+
+    # Keep only candidates the user can actually do. Always include at
+    # least the bodyweight fallback so an equipment-poor user still gets
+    # a cardio day they can perform.
+    filtered = [ex for ex in pool if _matches(ex["_req"])]
+    if not filtered:
+        filtered = [
+            {"name": "Outdoor Walk", "sets": 1, "reps": f"{min(30, session_minutes - 5)} min",
+             "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "primary",
+             "muscles_targeted": ["cardio", "glutes"]},
         ]
-    else:
-        exercises = [
-            {"name": "Incline Treadmill Walk", "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"]},
-            {"name": "Stair Climber", "sets": 1, "reps": "10 min", "rest_seconds": 0, "equipment": "machine", "slot_role": "primary", "muscles_targeted": ["cardio", "quads", "glutes"]},
-        ]
+
+    # Strip the internal `_req` hint before returning.
+    exercises = [{k: v for k, v in ex.items() if k != "_req"} for ex in filtered[:3]]
     return {
         "day": "Cardio Day",
         "focus": "Cardio",

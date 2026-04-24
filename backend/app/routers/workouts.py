@@ -483,7 +483,11 @@ def generate_single_day(
             print(f"[generate-day] Mobility: session_minutes={body.session_minutes} exercises={len(day.get('exercises',[]))} est_time={est:.0f}min")
         elif override_lower == "cardio":
             from app.services.workout.planner import generate_cardio_day
-            day = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
+            day = generate_cardio_day(
+                body.session_minutes or 45,
+                body.goal or "body_recomp",
+                equipment_owned=body.equipment,
+            )
             logger.debug("[generate-day] focus override → generated Cardio day")
         else:
             for alt_idx, alt_day in enumerate(days):
@@ -754,7 +758,11 @@ def generate_full_week(
             days[target_idx] = generate_mobility_day(body.session_minutes or 45)
         elif override_lower == "cardio":
             from app.services.workout.planner import generate_cardio_day
-            days[target_idx] = generate_cardio_day(body.session_minutes or 45, body.goal or "body_recomp")
+            days[target_idx] = generate_cardio_day(
+                body.session_minutes or 45,
+                body.goal or "body_recomp",
+                equipment_owned=body.equipment,
+            )
         else:
             # Separate lifting days from non-lifting days
             lift_positions: list[int] = []

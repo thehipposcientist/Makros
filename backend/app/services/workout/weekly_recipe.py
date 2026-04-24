@@ -57,7 +57,7 @@ PLANNER_VERSION = "2026.04.22.05"
 
 logger = logging.getLogger(__name__)
 
-from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family
+from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family, is_conditioning
 from .goal_profiles import GoalProfile
 
 
@@ -811,12 +811,175 @@ def _lifting_plus_cardio_recipe(
     out.extend(recovery)
 
     assert len(out) == days, f"Recipe length {len(out)} != requested {days} days (lift={lift_days} cond={cond_days} recovery={recovery_days})"
+
+    # Hybrid promotion: for goals that prefer same-day cardio, promote
+    # PUSH/PULL/UPPER/FULL_BODY lift days adjacent to dedicated cardio
+    # into PLUS_CARDIO hybrids AND replace the cardio slot with another
+    # lift-day rotation. Net effect: same day count, same lift volume,
+    # cardio moves from dedicated day → same-day finisher on a
+    # cardio-compatible lift. Legs never auto-merged (hard lower +
+    # cardio = bad).
+    out = _promote_same_day_cardio(
+        out,
+        profile=profile,
+        lifting_split=lifting_split,
+    )
+
     return _repair_adjacent_duplicates(
         out,
         allowed_archetypes=profile.allowed_archetypes,
         lifting_split=lifting_split,
         user_chose_split=user_chose_split,
     )
+
+
+# ── Lift + cardio merger ──────────────────────────────────────────────
+#
+# Goal policy: for muscle_gain / body_recomp / fat_loss / general_health,
+# prefer same-day cardio finishers on PUSH/PULL/UPPER/FULL_BODY lift days
+# over dedicated cardio days. We leave LEGS alone (heavy lower + cardio
+# crushes recovery) and never steal the only rest day.
+#
+# How: after the recipe is built, walk the sequence and merge at most
+# `_target_same_day_cardio_count(goal, days)` (lift, cardio) pairs into
+# PLUS_CARDIO hybrids. We only merge when the lift is in the preferred
+# set, the archetype is allowed by the profile, and the merge wouldn't
+# eliminate the week's only cardio-adjacent rest opportunity.
+
+_HYBRID_PAIR: dict["DayArchetype", "DayArchetype"] = {
+    DayArchetype.LIFT_PUSH: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_PUSH_HEAVY: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_PUSH_VOLUME: DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_PULL: DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_PULL_HEAVY: DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_PULL_VOLUME: DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_UPPER: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    DayArchetype.LIFT_UPPER_HEAVY: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    DayArchetype.LIFT_UPPER_HYPERTROPHY: DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    DayArchetype.LIFT_FULL_BODY: DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+    DayArchetype.LIFT_FULL_BODY_STRENGTH: DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+}
+
+_GOALS_PREFERRING_HYBRID_CARDIO = frozenset({
+    "muscle_gain", "body_recomp", "fat_loss", "general_health",
+})
+
+
+def _promote_same_day_cardio(
+    recipe: list[DayArchetype],
+    *,
+    profile: "GoalProfile",
+    lifting_split: str,
+) -> list[DayArchetype]:
+    """Convert dedicated cardio days into same-day PLUS_CARDIO hybrids
+    on adjacent PUSH/PULL/UPPER/FULL_BODY lift days.
+
+    Strategy — preserve day count + lift volume:
+      1. Find the nearest cardio-compatible lift neighbor.
+      2. Promote that lift to its PLUS_CARDIO hybrid.
+      3. Replace the freed cardio slot with the next lift in rotation
+         so the week stays at its requested density.
+
+    Skips legs (hard lower + cardio = bad recovery).
+    Honors per-goal max promotions so fat_loss can still keep 1
+    dedicated cardio day when cond_days >= 2.
+    """
+    bucket = getattr(profile, "bucket", None)
+    if bucket not in _GOALS_PREFERRING_HYBRID_CARDIO:
+        return recipe
+
+    # Per-goal promotion cap. Rest come from dedicated cardio days.
+    if bucket == "fat_loss":
+        max_promotions = 2
+    elif bucket == "muscle_gain":
+        max_promotions = 2
+    else:  # body_recomp, general_health
+        max_promotions = 2
+
+    out = list(recipe)
+
+    # Collect cardio-day indexes.
+    cardio_idxs = [i for i, a in enumerate(out) if is_conditioning(a)]
+    if not cardio_idxs:
+        return out
+
+    # Build a pool of replacement lifts from the split rotation, offset
+    # so we don't re-insert the same archetype that's already adjacent.
+    from .day_templates import (
+        SPLIT_PPL as _SPLIT_PPL,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL,
+        SPLIT_UPPER_LOWER as _SPLIT_UL,
+    )
+    if lifting_split in (_SPLIT_PPL, _SPLIT_PPL_UL):
+        rotation_pool = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
+    elif lifting_split == _SPLIT_UL:
+        rotation_pool = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
+    else:
+        rotation_pool = [DayArchetype.LIFT_FULL_BODY]
+    rotation_pool = [a for a in rotation_pool if a in profile.allowed_archetypes]
+    if not rotation_pool:
+        return out
+
+    promotions = 0
+    for ci in cardio_idxs:
+        if promotions >= max_promotions:
+            break
+        # Find the nearest cardio-compatible lift (prev or next).
+        candidates: list[tuple[int, DayArchetype]] = []
+        for offset in (-1, 1, -2, 2):
+            ni = ci + offset
+            if 0 <= ni < len(out):
+                if out[ni] in _HYBRID_PAIR and _HYBRID_PAIR[out[ni]] in profile.allowed_archetypes:
+                    candidates.append((ni, out[ni]))
+        if not candidates:
+            continue
+        lift_idx, lift_a = candidates[0]
+        hybrid = _HYBRID_PAIR[lift_a]
+
+        # Promote the lift.
+        out[lift_idx] = hybrid
+        # Replace the cardio slot with the rotation lift that is
+        # currently LEAST represented in the week, and that isn't the
+        # same as either neighbor. Normalize against focus_family so
+        # LIFT_PUSH and LIFT_PUSH_PLUS_CARDIO count as the same family.
+        from .archetypes import archetype_to_focus_family as _fam
+        family_counts: dict[str, int] = {}
+        for a in out:
+            family_counts[_fam(a)] = family_counts.get(_fam(a), 0) + 1
+        adjacent_fams = {
+            _fam(out[i]) for i in (ci - 1, ci + 1) if 0 <= i < len(out)
+        }
+        # Rank candidates by (family_count_so_far, priority_in_rotation).
+        ranked = sorted(
+            rotation_pool,
+            key=lambda a: (family_counts.get(_fam(a), 0), rotation_pool.index(a)),
+        )
+        replacement = next(
+            (a for a in ranked if _fam(a) not in adjacent_fams),
+            ranked[0],
+        )
+        out[ci] = replacement
+        promotions += 1
+
+    return out
+
+
+def _find_hybrid_pair(
+    lift: DayArchetype,
+    cardio: DayArchetype,
+    allowed: frozenset[DayArchetype],
+) -> DayArchetype | None:
+    """If `lift` is a mergeable push/pull/upper/full-body day and `cardio`
+    is a dedicated cardio archetype, return the matching PLUS_CARDIO
+    hybrid. Otherwise None. Legs are never merged."""
+    if not is_conditioning(cardio):
+        return None
+    target = _HYBRID_PAIR.get(lift)
+    if target is None:
+        return None
+    if target not in allowed:
+        return None
+    return target
 
 
 # ── Family-sibling substitution map ─────────────────────────────────
@@ -1286,7 +1449,22 @@ def _fatigue_cost(a: DayArchetype) -> float:
 
 
 def _is_heavy(a: DayArchetype) -> bool:
-    """True for archetypes classified as heavy / strength stimulus."""
+    """True for archetypes classified as heavy / strength stimulus.
+
+    Explicitly excludes the PLUS_CARDIO family — those are hypertrophy
+    lift days with an easy cardio finisher, not heavy strength days,
+    and they shouldn't trigger the heavy-streak guard.
+    """
+    # Explicit exclusion list for hybrid lift-with-cardio archetypes
+    # (training_type "mixed" but not meaningfully heavy).
+    _PLUS_CARDIO = {
+        DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+        DayArchetype.LIFT_PULL_PLUS_CARDIO,
+        DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+        DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+    }
+    if a in _PLUS_CARDIO:
+        return False
     meta = ARCHETYPE_META[a]
     return meta.training_type in ("strength", "power", "mixed") and meta.intensity_cost >= 4
 

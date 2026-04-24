@@ -38,6 +38,7 @@ import WorkoutCard from '../components/WorkoutCard';
 import NutritionCard from '../components/NutritionCard';
 import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
 import IncompleteDayBanner from '../components/IncompleteDayBanner';
+import PlanSwapExerciseModal from '../components/PlanSwapExerciseModal';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -1291,6 +1292,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // doesn't trigger just because of a single day swap.
   const [showAllThemes, setShowAllThemes] = useState(false);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
+  // Plan-view exercise swap — when a user taps "Swap" on a WorkoutCard row
+  // in the plan, this captures the target so the picker modal can open
+  // and mutate the plan_json on selection.
+  const [swapExerciseState, setSwapExerciseState] = useState<{
+    workout: WorkoutDay;
+    exerciseIndex: number;
+    exerciseName: string;
+  } | null>(null);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
   const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
   const [selectedSupplement, setSelectedSupplement] = useState<SupplementEntry | null>(null);
@@ -2429,14 +2438,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   };
 
-  const openExerciseLibrary = useCallback(async () => {
-    setShowExerciseLibrary(true);
+  // Pure library-fetch, no side effects on modal visibility. Shared
+  // between openExerciseLibrary (Library sub-tab) and the plan-view
+  // swap flow (warmed lazily when the user taps Swap).
+  const ensureExerciseLibrary = useCallback(async () => {
     if (exerciseLibrary.length > 0) return;
     setExerciseLibraryLoading(true);
     try {
       const rows = await getExercises();
-      // Merge the user's AI-saved custom exercises on top of the server
-      // library so both show up in the same filters and searches.
       const customs = (userProfile?.customExercises ?? []).map(ce => ({
         id: ce.id as any,
         name: ce.name,
@@ -2448,7 +2457,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       })) as unknown as ExerciseLibraryItem[];
       setExerciseLibrary([...customs, ...rows]);
     } catch {
-      // On network error, still show the user's custom exercises.
       const customs = (userProfile?.customExercises ?? []).map(ce => ({
         id: ce.id as any,
         name: ce.name,
@@ -2463,6 +2471,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setExerciseLibraryLoading(false);
     }
   }, [exerciseLibrary.length, userProfile?.customExercises]);
+
+  const openExerciseLibrary = useCallback(async () => {
+    setShowExerciseLibrary(true);
+    await ensureExerciseLibrary();
+  }, [ensureExerciseLibrary]);
 
   /** Save an AI-search result into the user's custom exercise library so
    *  future local searches find it without another AI call. Persists via
@@ -4530,6 +4543,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
                     return idx >= 0 && regeneratingDayIdxs.has(idx);
                   })()}
+                  onSwapExercise={(workout, exIdx, exName) => {
+                    // Warm the exercise library if it hasn't been loaded
+                    // yet — the library fuels the overlap-ranked picker
+                    // in PlanSwapExerciseModal. Without this, users who
+                    // go straight to Plan → Swap get an empty library.
+                    ensureExerciseLibrary().catch(() => {});
+                    setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName });
+                  }}
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
@@ -5426,6 +5447,57 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </ScrollView>
         );
       })()}</ErrorBoundary>)}
+
+      {/* Plan-view exercise swap picker. Reuses the same overlap scoring
+          as the live Switch Exercise feature so rankings are consistent. */}
+      <PlanSwapExerciseModal
+        visible={!!swapExerciseState}
+        baseExerciseName={swapExerciseState?.exerciseName ?? null}
+        library={exerciseLibrary}
+        ownedEquipment={(userProfile as any)?.equipmentOwned ?? (userProfile as any)?.equipment ?? []}
+        themeName={userProfile.themePreference}
+        onClose={() => setSwapExerciseState(null)}
+        onSelect={async (next) => {
+          const target = swapExerciseState;
+          if (!target) return;
+          // Mutate the in-memory plan: match by focus, swap the exercise
+          // at the given index for the picked candidate. Persist the
+          // updated plan back to AsyncStorage so edits survive reload.
+          try {
+            const raw = await AsyncStorage.getItem('aiWorkoutPlan');
+            if (raw) {
+              const plan = JSON.parse(raw);
+              if (plan && Array.isArray(plan.days)) {
+                const dayIdx = plan.days.findIndex(
+                  (d: any) => d?.focus === target.workout.focus,
+                );
+                if (dayIdx >= 0 && Array.isArray(plan.days[dayIdx]?.exercises)) {
+                  const exs = plan.days[dayIdx].exercises;
+                  if (target.exerciseIndex >= 0 && target.exerciseIndex < exs.length) {
+                    const prev = exs[target.exerciseIndex];
+                    exs[target.exerciseIndex] = {
+                      ...prev,
+                      name: next.name,
+                      equipment: next.equipment ?? prev.equipment,
+                      muscles_targeted: [
+                        next.primary_muscle,
+                        ...(next.secondary_muscles ?? []),
+                      ].filter(Boolean),
+                      primary_muscle: next.primary_muscle,
+                      image_url: next.image_url ?? prev.image_url,
+                    };
+                    await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(plan));
+                    setWorkoutPlan(plan);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[plan-swap] persist failed:', e);
+          }
+          setSwapExerciseState(null);
+        }}
+      />
 
       {/* Log Activity modal */}
       <LogActivityModal
@@ -7236,7 +7308,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -7258,6 +7330,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   /** Local "this card is regenerating" flag set by the parent when a
    *  Switch-Day tap fires generateWorkoutDay. Drives a shimmer overlay. */
   isRegenerating?: boolean;
+  /** Opens the plan-view swap modal. Parent manages the modal state +
+   *  plan persistence. Passes the target workout so the parent can
+   *  match-and-mutate by focus + date without a dayIndex lookup. */
+  onSwapExercise?: (workout: WorkoutDay, exerciseIndex: number, exerciseName: string) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -7656,7 +7732,15 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   </TouchableOpacity>
                 )}
               </View>
-              <WorkoutCard workout={item.workout!} themeName={themeName} />
+              <WorkoutCard
+                workout={item.workout!}
+                themeName={themeName}
+                onSwapExercise={
+                  onSwapExercise
+                    ? (exIdx, exName) => onSwapExercise(item.workout!, exIdx, exName)
+                    : undefined
+                }
+              />
             </>
           )}
         </View>
