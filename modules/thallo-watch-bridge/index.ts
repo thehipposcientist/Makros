@@ -23,11 +23,32 @@ export type WatchExercise = {
   recommendation?: string | null;
 };
 
+export type WatchWorkoutStatus = 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest';
+
 export type WatchWorkoutPayload = {
   focus: string;
   durationMinutes: number;
   dateISO: string;
+  status: WatchWorkoutStatus;
   exercises: WatchExercise[];
+  syncedAtMs: number;
+};
+
+export type WatchMealItem = {
+  mealType: string;
+  name: string;
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  checked: boolean;
+};
+
+export type WatchMealsPayload = {
+  dateISO: string;
+  targets: { calories: number; proteinG: number; carbsG: number; fatG: number };
+  actual:  { calories: number; proteinG: number; carbsG: number; fatG: number };
+  meals: WatchMealItem[];
   syncedAtMs: number;
 };
 
@@ -71,6 +92,11 @@ export const WatchBridge = {
   async syncTheme(palette: WatchPalette): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncTheme(palette); } catch { return false; }
+  },
+
+  async syncMeals(payload: WatchMealsPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncMeals(payload); } catch { return false; }
   },
 
   async updateProgress(progress: WatchProgress): Promise<boolean> {

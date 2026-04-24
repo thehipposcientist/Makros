@@ -1,16 +1,23 @@
 // Phone-side orchestrator for the Apple Watch companion.
 //
-// Two responsibilities:
-//   1. Push today's workout + theme to the watch whenever they change.
+// Responsibilities:
+//   1. Push today's workout (with correct lifecycle status) + theme +
+//      meals to the watch whenever they change.
 //   2. Subscribe to commands from the watch (Start / Skip / End / rest
-//      controls) and route them into existing app actions.
+//      controls / toggle meal) and route them into phone actions.
 //
-// Everything no-ops when the bridge is unavailable (Android / missing
-// module), so callers can always invoke these without a platform
-// guard.
+// Everything no-ops when the bridge is unavailable (Android, devices
+// without a paired watch), so callers can always invoke these.
 
-import { WatchBridge, WatchWorkoutPayload, WatchPalette, WatchProgress } from '../../modules/thallo-watch-bridge';
-import { WorkoutDay, AppThemeName } from '../types';
+import {
+  WatchBridge,
+  WatchWorkoutPayload,
+  WatchWorkoutStatus,
+  WatchPalette,
+  WatchProgress,
+  WatchMealsPayload,
+} from '../../modules/thallo-watch-bridge';
+import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
 
 export type WatchExerciseClient = {
@@ -23,11 +30,31 @@ export type WatchExerciseClient = {
   recommendation?: string | null;
 };
 
-/** Build the compact watch payload from the full WorkoutDay. Drops
- *  all the fields (image_url, micronutrients, archetype) the watch
- *  doesn't need, so every Apple Watch transfer stays tiny. */
-export function buildWatchWorkoutPayload(day: WorkoutDay | null | undefined, dateISO?: string): WatchWorkoutPayload | null {
-  if (!day) return null;
+/** Build the compact watch payload from the day AND its current
+ *  status. Status drives which UI the watch shows (scheduled = Start
+ *  button visible; active = "rejoin"; completed/skipped/rest = status
+ *  card, no Start). Feed the actual `schedule[0]` output here — NOT
+ *  the raw `workoutPlan.days[0]`, which ignores skips/switches and
+ *  was the source of the "watch shows push even though I skipped" bug. */
+export function buildWatchWorkoutPayload(
+  day: WorkoutDay | null | undefined,
+  opts: { dateISO?: string; status: WatchWorkoutStatus },
+): WatchWorkoutPayload | null {
+  if (!day) {
+    // Rest day — still send so watch knows today's status, even
+    // though there's no exercise list.
+    if (opts.status === 'rest') {
+      return {
+        focus: 'Rest',
+        durationMinutes: 0,
+        dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
+        status: 'rest',
+        exercises: [],
+        syncedAtMs: Date.now(),
+      };
+    }
+    return null;
+  }
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => ({
     name: String(e.name || 'Exercise'),
     sets: Number(e.sets || 3),
@@ -40,20 +67,15 @@ export function buildWatchWorkoutPayload(day: WorkoutDay | null | undefined, dat
   return {
     focus: String(day.focus || 'Workout'),
     durationMinutes: Number((day as any).durationMinutes ?? (day as any).duration ?? 60),
-    dateISO: dateISO || new Date().toISOString().slice(0, 10),
+    dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
+    status: opts.status,
     exercises,
     syncedAtMs: Date.now(),
   };
 }
 
-/** Extract the minimal watch-ready palette from the app's theme. Only
- *  the colors the SwiftUI views actually reference, so we don't blow
- *  WatchConnectivity's payload budget. */
 export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPalette {
   const t = getTheme(themeName).colors;
-  // `success`/`warning`/`error` aren't in every color bundle at
-  // compile time — fall back to midnight equivalents when absent so
-  // the watch never shows a broken color.
   const fallback = { success: '#59D98E', warning: '#FFB454', error: '#FF5D73' };
   return {
     background:    String(t.background),
@@ -69,34 +91,89 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
   };
 }
 
-/** Push today's workout to the watch. No-op when the bridge or a
- *  paired watch isn't available. */
-export async function pushWorkoutToWatch(day: WorkoutDay | null, dateISO?: string) {
-  const payload = buildWatchWorkoutPayload(day, dateISO);
+/** Push today's workout with its current lifecycle status. */
+export async function pushWorkoutToWatch(
+  day: WorkoutDay | null,
+  opts: { dateISO?: string; status: WatchWorkoutStatus },
+): Promise<boolean> {
+  const payload = buildWatchWorkoutPayload(day, opts);
   if (!payload) return false;
   if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
   return WatchBridge.syncWorkout(payload);
 }
 
-/** Push the user's current theme palette to the watch. */
 export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
   const palette = buildWatchPalette(themeName);
   if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
   return WatchBridge.syncTheme(palette);
 }
 
-/** Mid-workout progress tick. Call on set completion / rest changes /
- *  exercise transitions so the watch mirrors phone state. */
 export async function pushProgressToWatch(progress: WatchProgress) {
   if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
   return WatchBridge.updateProgress(progress);
 }
 
-/** Subscribe to commands the user taps on the watch. The caller wires
- *  each command into the app's existing actions (start the workout
- *  on the phone, skip today, log a set, etc.). Returns an
+/** Push today's meals (targets + actual + per-meal check state). */
+export async function pushMealsToWatch(
+  plan: DailyNutritionPlan | null | undefined,
+  checkedMeals: Record<string, boolean> | null | undefined,
+  dateISO?: string,
+): Promise<boolean> {
+  if (!plan) return false;
+  if (!WatchBridge.isAvailable() || !WatchBridge.isPaired()) return false;
+
+  const targets = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const mealArr = plan.meals ?? [];
+  const checks = checkedMeals ?? {};
+
+  // Actual = sum of checked meals' macros. Matches the phone's
+  // NutritionCard calculation so numbers stay aligned.
+  let actCal = 0, actPro = 0, actCarb = 0, actFat = 0;
+  const items = mealArr.map((m: any, i: number) => {
+    const mealType = `meal_${i}`;
+    const checked = !!checks[mealType];
+    if (checked) {
+      actCal  += Number(m.calories ?? 0);
+      actPro  += Number(m.protein  ?? 0);
+      actCarb += Number(m.carbs    ?? 0);
+      actFat  += Number(m.fat      ?? 0);
+    }
+    return {
+      mealType,
+      name: String(m.meal || m.name || `Meal ${i + 1}`),
+      calories: Math.round(Number(m.calories ?? 0)),
+      proteinG: Math.round(Number(m.protein  ?? 0)),
+      carbsG:   Math.round(Number(m.carbs    ?? 0)),
+      fatG:     Math.round(Number(m.fat      ?? 0)),
+      checked,
+    };
+  });
+
+  const payload: WatchMealsPayload = {
+    dateISO: dateISO || new Date().toISOString().slice(0, 10),
+    targets: {
+      calories: Math.round(Number(targets.calories ?? 0)),
+      proteinG: Math.round(Number(targets.protein  ?? 0)),
+      carbsG:   Math.round(Number(targets.carbs    ?? 0)),
+      fatG:     Math.round(Number(targets.fat      ?? 0)),
+    },
+    actual: {
+      calories: Math.round(actCal),
+      proteinG: Math.round(actPro),
+      carbsG:   Math.round(actCarb),
+      fatG:     Math.round(actFat),
+    },
+    meals: items,
+    syncedAtMs: Date.now(),
+  };
+  return WatchBridge.syncMeals(payload);
+}
+
+/** Subscribe to commands the user taps on the watch. Returns an
  *  unsubscribe function. */
-export function onWatchCommand(cb: (command: string, payload: Record<string, any>) => void): () => void {
+export function onWatchCommand(
+  cb: (command: string, payload: Record<string, any>) => void,
+): () => void {
   if (!WatchBridge.isAvailable()) return () => {};
   return WatchBridge.addCommandListener(cb);
 }

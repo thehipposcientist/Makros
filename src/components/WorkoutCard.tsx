@@ -218,7 +218,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
           );
         }
         const inner = (
-          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 1, borderColor: c.border, position: 'relative' }}>
+          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 2, borderColor: c.border, position: 'relative' }}>
             <Image source={{ uri: thumbUri }} style={{ width: 44, height: 44 }} resizeMode="cover" />
             <View style={{
               position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,

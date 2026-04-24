@@ -1786,19 +1786,46 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { mounted = false; };
   }, [todayDone, workoutPlan]);
 
-  // Apple Watch sync — pushes today's workout + active theme to the
-  // paired watch whenever either changes. No-ops on devices without
-  // the watch bridge module (Android, devices without a paired watch).
+  // Apple Watch sync — pushes today's workout + theme + meals to the
+  // paired watch whenever anything changes. Uses `schedule[0]` rather
+  // than `workoutPlan.days[0]` so skipped/completed/rest states reflect
+  // the actual phone UI (the earlier version showed the original
+  // scheduled workout even after the user skipped). No-ops when the
+  // bridge isn't available (Android / no paired watch).
   useEffect(() => {
     (async () => {
       try {
-        const { pushWorkoutToWatch, pushThemeToWatch } = await import('../utils/watchSync');
-        const today = workoutPlan?.days?.[0] ?? null;
-        await pushWorkoutToWatch(today as any, new Date().toISOString().slice(0, 10));
+        const {
+          pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
+        } = await import('../utils/watchSync');
+        const todayISO = new Date().toISOString().slice(0, 10);
+        // `schedule` is the post-skip/post-switch today row — the same
+        // source the on-screen day card reads. Using this (instead of
+        // `workoutPlan.days[0]`) was the fix for "watch shows push
+        // even though I skipped today".
+        const todayItem = (schedule as any[])?.[0] ?? null;
+        const todayWorkout = todayItem?.workout ?? null;
+        // Derive lifecycle status from the app's actual flags.
+        const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
+          todayDone ? 'completed'
+          : skippedDates.has(todayKey()) ? 'skipped'
+          : todayItem?.isRest ? 'rest'
+          : 'scheduled';
+        await pushWorkoutToWatch(todayWorkout, { dateISO: todayISO, status });
         await pushThemeToWatch(userProfile?.themePreference);
+        const todayPlan = nutritionPlansByDate[todayISO]
+          ?? (Object.values(nutritionPlansByDate)[0] as any);
+        await pushMealsToWatch(todayPlan, checkedMealsByDate[todayISO], todayISO);
       } catch { /* watch bridge optional — silent failure is fine */ }
     })();
-  }, [workoutPlan, userProfile?.themePreference]);
+  // `schedule` is derived every render so we key on its first-item
+  // workout reference to avoid sync spam. todayDone / skippedDates
+  // flip the status between lifecycle buckets.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
+    nutritionPlansByDate, checkedMealsByDate,
+  ]);
 
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
@@ -1808,15 +1835,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     (async () => {
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
-        unsubscribe = onWatchCommand((command) => {
-          const today = workoutPlan?.days?.[0];
-          if (!today) return;
+        unsubscribe = onWatchCommand((command, payload) => {
           if (command === 'start_workout') {
-            // Phone has a dedicated "start workout" action on HomeScreen —
-            // route through the same onStartWorkout passed from the parent.
-            onStartWorkout?.(today as any);
+            const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
+            if (today) onStartWorkout?.(today as any);
           } else if (command === 'skip_workout') {
-            handleSkipToday(today.focus);
+            const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
+            if (today) handleSkipToday(today.focus);
+          } else if (command === 'toggle_meal') {
+            const mealType = String(payload?.mealType || '');
+            const todayISO = new Date().toISOString().slice(0, 10);
+            if (mealType) handleToggleMeal(todayISO, mealType);
           }
           // Rest / set / end commands only fire inside an active
           // workout; ActiveWorkoutScreen owns those handlers.
@@ -1824,9 +1853,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } catch { /* optional */ }
     })();
     return () => { if (unsubscribe) unsubscribe(); };
-  // handleSkipToday is declared later in this component (useCallback),
-  // so its reference is stable across re-renders — safe to omit from
-  // deps without stale-closure risk.
+  // handleSkipToday / handleToggleMeal are declared later in this
+  // component via useCallback — stable refs across re-renders so
+  // it's safe to omit them from deps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workoutPlan, onStartWorkout]);
 
@@ -6696,7 +6725,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           accessibilityRole="button"
                           accessibilityLabel={`Play form video for ${ex.name}`}
                         >
-                          <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                          <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
                             <Image source={{ uri: _thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
                             <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
                               <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>

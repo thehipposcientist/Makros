@@ -18,6 +18,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     static let shared = ConnectivityStore()
 
     @Published var workout: WatchWorkout?
+    @Published var meals: WatchMealsDay?
     @Published var theme: WatchPalette = .midnight
     @Published var isReachable: Bool = false
     @Published var lastError: String?
@@ -71,6 +72,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
         }
+        if let m = ctx["meals"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: m),
+               let decoded = try? JSONDecoder().decode(WatchMealsDay.self, from: data) {
+                if meals == nil || decoded.syncedAtMs >= (meals?.syncedAtMs ?? 0) {
+                    self.meals = decoded
+                }
+            }
+        }
         if let t = ctx["theme"] as? [String: Any],
            let data = try? JSONSerialization.data(withJSONObject: t),
            let decoded = try? JSONDecoder().decode(WatchPalette.self, from: data) {
@@ -84,6 +93,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         case "workout":
             if let payload = msg["payload"] as? [String: Any] {
                 absorbContext(["workout": payload])
+            }
+        case "meals":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(["meals": payload])
             }
         case "theme":
             if let payload = msg["payload"] as? [String: Any] {

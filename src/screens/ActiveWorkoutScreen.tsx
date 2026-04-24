@@ -2497,7 +2497,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const thumbUri = exerciseThumbSmall(ex as any);
                   return thumbUri ? (
-                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
                       <Image source={{ uri: thumbUri }} style={{ width: 40, height: 40 }} resizeMode="cover" />
                       <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
                         <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
@@ -3183,7 +3183,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {(() => {
                   const thumbUri = mEx ? exerciseThumbSmall(mEx as any) : null;
                   return thumbUri ? (
-                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
                       <Image source={{ uri: thumbUri }} style={{ width: 64, height: 64 }} resizeMode="cover" />
                       <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
                         <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>

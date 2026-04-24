@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Combine
+import WatchKit
 
 final class ActiveWorkoutState: ObservableObject {
     @Published var exerciseIndex: Int = 0
@@ -31,15 +32,26 @@ final class ActiveWorkoutState: ObservableObject {
     }
 
     // Local 1hz tick — decrements restRemaining so the watch doesn't
-    // depend on the phone pushing every second (saves battery).
+    // depend on the phone pushing every second (saves battery). When
+    // the timer hits zero we fire a haptic so the user knows rest is
+    // up without needing to look at the watch. `notification` gives
+    // the strongest cue available on watchOS.
     private var timer: AnyCancellable?
+    private var lastRestTickFired: Int? = nil
     func startTick() {
         timer?.cancel()
         timer = Timer.publish(every: 1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self, let r = self.restRemaining, r > 0 else { return }
-                self.restRemaining = r - 1
+                guard let self else { return }
+                guard let r = self.restRemaining, r > 0 else { return }
+                let next = r - 1
+                self.restRemaining = next
+                if next == 0 {
+                    // Rest is up — double-tap haptic that Apple's own
+                    // Workout app uses for interval transitions.
+                    WKInterfaceDevice.current().play(.notification)
+                }
             }
     }
     func stopTick() { timer?.cancel(); timer = nil }
@@ -48,7 +60,12 @@ final class ActiveWorkoutState: ObservableObject {
 struct ActiveWorkoutView: View {
     let workout: WatchWorkout
     @ObservedObject var hr: HeartRateStore
-    let onEnd: () -> Void
+    /// End the workout everywhere (watch + phone).
+    let onEndWorkout: () -> Void
+    /// Close just the watch UI; phone keeps tracking. Lets the user
+    /// fall back to Apple's native Workout app without losing their
+    /// phone-side logged sets.
+    let onCloseWatchOnly: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
     @StateObject private var state = ActiveWorkoutState()
@@ -63,7 +80,8 @@ struct ActiveWorkoutView: View {
             ExerciseTab(
                 workout: workout,
                 state: state,
-                onEnd: onEnd
+                onEndWorkout: onEndWorkout,
+                onCloseWatchOnly: onCloseWatchOnly
             )
             HeartRateTab(hr: hr)
         }
@@ -78,7 +96,8 @@ struct ActiveWorkoutView: View {
 private struct ExerciseTab: View {
     let workout: WatchWorkout
     @ObservedObject var state: ActiveWorkoutState
-    let onEnd: () -> Void
+    let onEndWorkout: () -> Void
+    let onCloseWatchOnly: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
     @EnvironmentObject var conn: ConnectivityStore
@@ -135,18 +154,42 @@ private struct ExerciseTab: View {
                             onDoneSet:   { conn.sendCommand("log_set") }
                         )
 
-                        Button(action: onEnd) {
-                            HStack {
-                                Image(systemName: "stop.fill")
-                                Text("End workout")
+                        // Two exit paths:
+                        //   • End workout — stops HR session on the
+                        //     watch AND tells the phone to end.
+                        //   • Close watch — dismisses the watch UI,
+                        //     stops the watch HR session, but the
+                        //     phone's workout keeps running. Lets the
+                        //     user switch to Apple's Workout app
+                        //     without losing logged sets.
+                        HStack(spacing: 6) {
+                            Button(action: onCloseWatchOnly) {
+                                HStack {
+                                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                    Text("Close watch")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .frame(maxWidth: .infinity)
                             }
-                            .frame(maxWidth: .infinity)
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 8)
+                            .background(theme.surfaceRaised)
+                            .foregroundColor(theme.textSecondary)
+                            .cornerRadius(10)
+                            Button(action: onEndWorkout) {
+                                HStack {
+                                    Image(systemName: "stop.fill")
+                                    Text("End")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 8)
+                            .background(theme.surfaceRaised)
+                            .foregroundColor(theme.error)
+                            .cornerRadius(10)
                         }
-                        .buttonStyle(.plain)
-                        .padding(.vertical, 8)
-                        .background(theme.surfaceRaised)
-                        .foregroundColor(theme.error)
-                        .cornerRadius(10)
                     }
                 }
                 .padding(10)
