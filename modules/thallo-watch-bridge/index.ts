@@ -11,7 +11,7 @@
 //   "start_workout", "skip_workout", "end_workout", "start_rest",
 //   "skip_rest", "log_set".
 
-import { NativeModule, requireOptionalNativeModule } from 'expo';
+import { requireOptionalNativeModule } from 'expo';
 
 export type WatchExercise = {
   name: string;
@@ -52,26 +52,16 @@ export type WatchProgress = {
   recommendation?: string | null;
 };
 
-type WatchBridgeNative = {
-  isAvailable(): boolean;
-  isPaired(): boolean;
-  isReachable(): boolean;
-  syncWorkout(payload: WatchWorkoutPayload): Promise<boolean>;
-  syncTheme(palette: WatchPalette): Promise<boolean>;
-  updateProgress(progress: WatchProgress): Promise<boolean>;
-  addListener(eventName: string): void;
-  removeListeners(count: number): void;
-};
-
-// Optional so the module missing (e.g. on Android) doesn't crash the app.
-const native = requireOptionalNativeModule<NativeModule<{
-  command: (evt: { command: string; payload: Record<string, any> }) => void;
-}> & WatchBridgeNative>('ThalloWatchBridgeModule');
+// Loose typing on the native module — Expo's NativeModule generic
+// types + `as any` were fighting Metro's babel parser. Keeping this
+// minimal means no parser gymnastics, and the public `WatchBridge`
+// object below provides the type-safe surface callers actually use.
+const native: any = requireOptionalNativeModule('ThalloWatchBridgeModule');
 
 export const WatchBridge = {
-  isAvailable: () => native?.isAvailable?.() ?? false,
-  isPaired:    () => native?.isPaired?.() ?? false,
-  isReachable: () => native?.isReachable?.() ?? false,
+  isAvailable: (): boolean => !!native?.isAvailable?.(),
+  isPaired:    (): boolean => !!native?.isPaired?.(),
+  isReachable: (): boolean => !!native?.isReachable?.(),
 
   async syncWorkout(payload: WatchWorkoutPayload): Promise<boolean> {
     if (!native) return false;
@@ -90,13 +80,18 @@ export const WatchBridge = {
 
   /** Listen for commands the user taps on the watch (Start / Skip /
    *  End / rest controls). Returns an unsubscribe function. */
-  addCommandListener(cb: (command: string, payload: Record<string, any>) => void): () => void {
+  addCommandListener(
+    cb: (command: string, payload: Record<string, any>) => void,
+  ): () => void {
     if (!native) return () => {};
-    const sub = native.addListener('command', (evt: any) => {
+    const handler = (evt: { command?: string; payload?: Record<string, any> }) => {
       if (evt && typeof evt.command === 'string') {
         cb(evt.command, evt.payload ?? {});
       }
-    } as any);
-    return () => { try { sub?.remove?.(); } catch {} };
+    };
+    const sub = native.addListener('command', handler);
+    return () => {
+      try { sub?.remove?.(); } catch { /* no-op */ }
+    };
   },
 };
