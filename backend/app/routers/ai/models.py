@@ -47,6 +47,11 @@ class PlanRequest(BaseModel):
     workoutDurationMinutes: int = 60
     equipment: list[str]
     foodsAvailable: list[str]
+    # User-created custom foods (AI-scanned, manually-added, etc.).
+    # Passed to the meal skeleton so the picker can prioritize them —
+    # users who took the time to add their own foods usually want them
+    # to actually show up in their plan.
+    customFoodNames: list[str] = []
 
     # Training context (optional)
     experienceLevel: str | None = None

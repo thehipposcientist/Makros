@@ -24,12 +24,11 @@ from .utils import (
 
 
 @router.get("/smoke-test")
-async def smoke_test(model: str = "gpt-5", current_user: User = Depends(get_current_user)):
+async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(get_current_user)):
     """
     Diagnostic endpoint — tests bare chat completions with no structured output.
-    GET /ai/smoke-test?model=gpt-5
+    GET /ai/smoke-test?model=gpt-4o-mini
     Returns {"ok": true, "reply": "..."} or {"ok": false, "error": "..."}
-    No auth required so it can be hit with curl quickly.
     """
     api_key = get_openai_api_key()
     if not api_key:
@@ -64,6 +63,7 @@ async def smoke_test(model: str = "gpt-5", current_user: User = Depends(get_curr
 def ask_trainer_question(
     body: TrainerQuestionRequest,
     current_user: User = Depends(get_current_user),
+    db=Depends(__import__('app.database', fromlist=['get_session']).get_session),
 ):
     """General trainer Q&A with broad plan/profile/progress context."""
     api_key = get_openai_api_key()
@@ -189,6 +189,18 @@ def ask_trainer_question(
             context_blob["scheduleMapping"] = mapping
     if body.userContext:
         context_blob["recentActivityLog"] = body.userContext[:800]
+
+    # ── Server-side context enrichment ───────────────────────────────────────
+    # Injects readiness / weight_trend / active_flags / coach_memory /
+    # nutrition_signals / logged_today / timeline_progress. Defensive —
+    # failures per-block silently drop that block.
+    try:
+        from app.services.coach.trainer_context import enrich as _enrich_trainer
+        extra = _enrich_trainer(current_user.id, db)
+        if extra:
+            context_blob["coachContext"] = extra
+    except Exception as e:
+        logger.debug(f"[trainer-question] server-context enrichment failed (non-fatal): {e}")
 
     # ── Auto-detect topic from question keywords for context trimming ────────
     topic = body.topic
@@ -337,6 +349,24 @@ def ask_trainer_question(
         "what 'tomorrow', 'Wednesday', etc. mean in terms of which plan day to modify. "
         "Example: if scheduleMapping says {dayLabel: 'tomorrow', planDay: 'Day 3', focus: 'Legs'}, "
         "and the user says 'make tomorrow push', change Day 3's focus from Legs to Push.\n\n"
+        "COACH CONTEXT — SERVER-COMPUTED SIGNALS (when present):\n"
+        "The `coachContext` block contains computed signals you couldn't otherwise see. "
+        "Use them actively when they're relevant to the user's question:\n"
+        "  - readiness: {score, top_fatigued, blocked_focuses}. Low readiness (<50) or specific "
+        "blocked_focuses means the user should avoid that type of day. Cite the number.\n"
+        "  - weight_trend: {slope_lbs_per_wk, ema, last_5}. If they ask about progress, reference the slope. "
+        "Positive slope on fat_loss = falling behind; negative slope on muscle_gain = falling behind.\n"
+        "  - active_flags: server-detected issues (low_adherence_7d, excessive_soreness, sleep_deficit, etc). "
+        "Address flags that relate to the question.\n"
+        "  - coach_memory: {last_decisions, open_commitments}. Reference prior coaching (e.g. 'last time I "
+        "suggested X — how did that go?') instead of starting from scratch.\n"
+        "  - nutrition_signals: {score, top_gaps, recovery_flags}. If the user asks about nutrition or "
+        "recovery, cite the actual score and named gaps. Don't generalize.\n"
+        "  - logged_today: actual logged cal/protein for today. If asking about what to eat, subtract this "
+        "from targets to get what's LEFT today. Don't recommend 2000 cal if they've already eaten 1800.\n"
+        "  - timeline_progress: {weeks_elapsed, pct_weight_delta_achieved}. If pct_timeline_elapsed is "
+        "much bigger than pct_weight_delta_achieved, they're behind pace — say so plainly.\n"
+        "Never invent values for coachContext fields. If a field is absent, it's unknown — don't guess.\n\n"
         "WORKOUT HISTORY — RESPECT COMPLETED SESSIONS:\n"
         "The `progress.workoutHistory` and `progress.recentDays` fields show what the user ACTUALLY did recently.\n"
         "- Entries with `completed: true` are real workouts the user finished — even if `exercises` is empty (manually logged).\n"

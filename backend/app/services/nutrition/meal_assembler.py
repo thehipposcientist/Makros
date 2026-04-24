@@ -1381,6 +1381,7 @@ def assemble_nutrition_response(
             req.mealsPerDay = generate_count
             templates, note, supps = generate_deterministic_skeleton(
                 req, variety_n, allowed_foods, db=db, user_id=user_id,
+                preferred_foods=getattr(req, "customFoodNames", None) or [],
             )
         finally:
             req.mealsPerDay = original_mpd

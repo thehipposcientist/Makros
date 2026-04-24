@@ -4,7 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { WorkoutDay, AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
-import { getExerciseImage } from '../utils/exerciseImages';
+import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
 
 /** Turn a planner-emitted equipment string into a display label.
@@ -29,9 +29,13 @@ interface WorkoutCardProps {
    *  swap button on each exercise row so plan-view swaps use the same
    *  overlap-ranked alternatives as the live Switch Exercise feature. */
   onSwapExercise?: (exerciseIndex: number, exerciseName: string) => void;
+  /** Open the exercise info page (description, cues, video) for the
+   *  given exercise name. Typically routes to the Library sub-tab with
+   *  the exercise pre-selected. */
+  onViewExercise?: (exerciseName: string) => void;
 }
 
-export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, onSwapExercise }: WorkoutCardProps) {
+export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, onSwapExercise, onViewExercise }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -161,6 +165,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
             styles={styles}
             onOpenVideo={onOpenExerciseVideo}
             onSwap={onSwapExercise}
+            onView={onViewExercise}
           />
         ))}
       </View>
@@ -186,7 +191,7 @@ function StatItem({ icon, value, color }: {
 
 // ── ExerciseRow ───────────────────────────────────────────────────────────────
 
-function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap }: {
+function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView }: {
   index: number;
   exercise: WorkoutDay['exercises'][number];
   isLast: boolean;
@@ -195,15 +200,30 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   styles: ReturnType<typeof createStyles>;
   onOpenVideo?: (name: string) => void;
   onSwap?: (exerciseIndex: number, exerciseName: string) => void;
+  onView?: (name: string) => void;
 }) {
   return (
     <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
-      {/* Thumbnail / Number */}
+      {/* Thumbnail — YouTube video frame when available, numbered tile
+          otherwise. wger static images removed for visual consistency. */}
       {(() => {
-        const imgUrl = exercise.image_url || getExerciseImage(exercise.name);
-        return imgUrl ? (
-          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 1, borderColor: c.border }}>
-            <Image source={{ uri: imgUrl }} style={{ width: 44, height: 44 }} resizeMode="cover" />
+        const thumbUri = exerciseThumbSmall(exercise as any);
+        return thumbUri ? (
+          <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: c.surface, overflow: 'hidden', borderWidth: 1, borderColor: c.border, position: 'relative' }}>
+            <Image source={{ uri: thumbUri }} style={{ width: 44, height: 44 }} resizeMode="cover" />
+            {/* Tiny play glyph — tells the user this IS a video preview. */}
+            <View style={{
+              position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <View style={{
+                width: 18, height: 18, borderRadius: 9,
+                backgroundColor: 'rgba(0,0,0,0.55)',
+                alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+              </View>
+            </View>
           </View>
         ) : (
           <View style={[styles.exNum, { backgroundColor: section.strong }]}>
@@ -270,6 +290,19 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
               onPress={() => onOpenVideo(exercise.name)}>
               <Ionicons name="open-outline" size={11} color={section.strong} />
               <Text style={[styles.videoChipText, { color: section.strong }]}>Form</Text>
+            </Pressable>
+          )}
+          {onView && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.videoChip,
+                { borderColor: c.textMuted, backgroundColor: pressed ? c.textMuted + '22' : c.surface },
+              ]}
+              onPress={() => onView(exercise.name)}
+              accessibilityLabel={`view-${exercise.name}`}
+            >
+              <Ionicons name="information-circle-outline" size={11} color={c.textSecondary} />
+              <Text style={[styles.videoChipText, { color: c.textSecondary }]}>Info</Text>
             </Pressable>
           )}
           {onSwap && (

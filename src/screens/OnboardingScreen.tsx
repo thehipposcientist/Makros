@@ -755,39 +755,47 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             description so users can compare without tapping. Selected
             card expands to full width for the full text. */}
         <Text style={styles.sectionHeading}>Most popular</Text>
-        <Animated.View style={styles.goalGrid} layout={LinearTransition.springify().damping(18).stiffness(160)}>
+        {/* 2-column grid. Cards stay at 48% width regardless of selection
+            (removed the active → 100% width trick that made selection
+            re-flow the entire grid and look broken). Selected card just
+            gets a highlighted border + checkmark + longer description. */}
+        <View style={styles.goalGrid}>
           {LAUNCH_GOALS.map(g => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = selectedGoal === g.id;
             return (
-              <Animated.View key={g.id} layout={LinearTransition.springify().damping(18).stiffness(160)}>
-                <TouchableOpacity
-                  testID={`goal-card-${g.id}`}
-                  accessibilityLabel={`goal-card-${g.id}`}
-                  style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
-                  onPress={() => selectGoal(g.id)}
-                  activeOpacity={0.75}
+              <TouchableOpacity
+                key={g.id}
+                testID={`goal-card-${g.id}`}
+                accessibilityLabel={`goal-card-${g.id}`}
+                style={[styles.goalCard, active && styles.goalCardActive]}
+                onPress={() => selectGoal(g.id)}
+                activeOpacity={0.75}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', width: '100%', justifyContent: 'center' }}>
+                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={22} color={active ? colors.primary : colors.textMuted} />
+                  {active && (
+                    <Ionicons name="checkmark-circle" size={16} color={colors.primary} style={{ position: 'absolute', right: -2, top: -2 }} />
+                  )}
+                </View>
+                <Text style={[styles.goalLabel, active && styles.goalLabelActive, { marginTop: 6, textAlign: 'center' }]}>{g.label}</Text>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    color: active ? colors.textSecondary : colors.textMuted,
+                    marginTop: 4,
+                    lineHeight: 15,
+                    textAlign: 'center',
+                    width: '100%',
+                  }}
+                  numberOfLines={active ? 6 : 2}
                 >
-                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? colors.primary : colors.textMuted} style={{ marginBottom: 6 }} />
-                  <Text style={[styles.goalLabel, active && styles.goalLabelActive]}>{g.label}</Text>
-                  <Text
-                    style={{
-                      fontSize: 11,
-                      color: active ? colors.textSecondary : colors.textMuted,
-                      marginTop: 6,
-                      lineHeight: 15,
-                      textAlign: active ? 'left' : 'center',
-                      width: '100%',
-                    }}
-                    numberOfLines={active ? undefined : 3}
-                  >
-                    {g.description}
-                  </Text>
-                </TouchableOpacity>
-              </Animated.View>
+                  {g.description}
+                </Text>
+              </TouchableOpacity>
             );
           })}
-        </Animated.View>
+        </View>
 
         {/* Pace — shown inline on the goal step itself whenever the user
             picks a pace-aware goal (fat loss / bulk / body-recomp / tone).
@@ -1305,7 +1313,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </Text>
 
       {/* Quick-start templates */}
-      <Text style={styles.sectionHeading}>Quick select by gym type</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Ionicons name="flash" size={14} color={colors.primary} />
+        <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0, color: colors.primary }]}>
+          Quick start · tap to apply
+        </Text>
+      </View>
+      <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+        Pick a preset — you can still customize the list below.
+      </Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
         {EQUIPMENT_TEMPLATES.map(t => {
           const active = selectedEquipTemplate === t.id;
@@ -1466,7 +1482,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </View>
 
       {/* Quick diet presets */}
-      <Text style={styles.sectionHeading}>Quick start by diet type</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Ionicons name="flash" size={14} color={colors.primary} />
+        <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0, color: colors.primary }]}>
+          Quick start · tap to apply
+        </Text>
+      </View>
+      <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+        Pick the eating style closest to yours — you can adjust the food list below.
+      </Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
         {FOOD_PRESETS.map(p => {
           const active = selectedFoodPreset === p.id;
@@ -1480,7 +1504,31 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                   setFoodsAvailable([]);
                 } else {
                   setSelectedFoodPreset(p.id);
-                  setFoodsAvailable([...p.items]);
+                  // Match template strings against the canonical food
+                  // library so items like "Ground Beef (80/20)" or
+                  // "Berries (small amount)" resolve to the real
+                  // library entry instead of creating a custom-food chip.
+                  const lib = (meta?.allFoods ?? []) as Array<{ name: string }>;
+                  const normalize = (s: string) => s.toLowerCase()
+                    .replace(/\([^)]*\)/g, '')
+                    .replace(/[^a-z0-9\s]+/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  const libIndex = new Map<string, string>();
+                  for (const f of lib) {
+                    const k = normalize(f.name);
+                    if (k && !libIndex.has(k)) libIndex.set(k, f.name);
+                    // Also index first-word prefix so "berries" hits "Berries"
+                    const first = k.split(' ', 1)[0];
+                    if (first && !libIndex.has(first)) libIndex.set(first, f.name);
+                  }
+                  const resolved: string[] = [];
+                  for (const raw of p.items) {
+                    const k = normalize(raw);
+                    const hit = libIndex.get(k) ?? libIndex.get(k.split(' ', 1)[0]);
+                    resolved.push(hit ?? raw);
+                  }
+                  setFoodsAvailable(Array.from(new Set(resolved)));
                 }
               }}
               activeOpacity={0.75}>
@@ -1999,14 +2047,21 @@ const styles = StyleSheet.create({
   templateScroll: { marginBottom: 16 },
   templateScrollContent: { gap: 8, paddingBottom: 2 },
   templateChip: {
-    backgroundColor: colors.surface, borderRadius: radius.md,
-    borderWidth: 1.5, borderColor: colors.border,
-    paddingVertical: 10, paddingHorizontal: 14, minWidth: 110,
+    backgroundColor: colors.surfaceRaised, borderRadius: radius.md,
+    borderWidth: 2, borderColor: colors.primary + '44',
+    paddingVertical: 14, paddingHorizontal: 16, minWidth: 150, maxWidth: 200,
+    // Subtle shadow so the chip reads as tappable, not static label.
+    shadowColor: colors.primary, shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08, shadowRadius: 4, elevation: 2,
   },
-  templateChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '18' },
-  templateChipLabel: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  templateChipActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '22',
+    borderWidth: 2.5,
+  },
+  templateChipLabel: { fontSize: 14, fontWeight: '800', color: colors.textPrimary, marginBottom: 3 },
   templateChipLabelActive: { color: colors.primary },
-  templateChipDesc: { fontSize: 11, color: colors.textMuted },
+  templateChipDesc: { fontSize: 11, color: colors.textSecondary, lineHeight: 15 },
   templateChipDescActive: { color: colors.primaryLight },
 
   // Photo scan

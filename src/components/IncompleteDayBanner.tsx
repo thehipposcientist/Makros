@@ -49,17 +49,23 @@ export default function IncompleteDayBanner({
       const dismissed = await AsyncStorage.getItem(DISMISSED_KEY_PREFIX + dateKey);
       if (dismissed === '1') return;
 
-      const res = await getMealHistory(authToken, 2);
+      // Fetch a 7-day window so we can tell the difference between
+      // "user logged yesterday but missed most of it" and "user is
+      // brand new and has never logged anything." Only the first
+      // case deserves a nudge — never nag a new user.
+      const res = await getMealHistory(authToken, 7);
       const meals = res.meals || [];
-      // Sum yesterday's totals. meal_date is "YYYY-MM-DD" from backend.
-      const cals = meals
-        .filter(m => m.meal_date === dateKey)
-        .reduce((sum, m) => sum + (m.totals?.calories ?? 0), 0);
+      if (meals.length === 0) return;   // New user — no history at all.
+      const yesterdayMeals = meals.filter(m => m.meal_date === dateKey);
+      // If they logged nothing yesterday and nothing in the 2 days
+      // before, treat as non-user; skip the prompt. Only nudge when
+      // yesterday has SOME signal (started logging but didn't finish).
+      if (yesterdayMeals.length === 0) return;
 
+      const cals = yesterdayMeals.reduce(
+        (sum, m) => sum + (m.totals?.calories ?? 0), 0,
+      );
       const ratio = cals / targetCalories;
-      // Only nudge if there's SOME signal of app activity but logs look thin.
-      // A 0-calorie day could just mean they skipped — we still nudge because
-      // the alternative is a silent data gap that hurts averages.
       if (ratio < INCOMPLETE_RATIO) {
         setYesterdayCals(Math.round(cals));
         setVisible(true);

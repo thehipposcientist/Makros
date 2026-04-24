@@ -53,7 +53,7 @@ from typing import Optional
 #   - Adjacency / rotation rules change
 #   - Injury-pattern block list or dislike filter changes
 # Cosmetic copy / logging tweaks don't need a bump.
-PLANNER_VERSION = "2026.04.22.05"
+PLANNER_VERSION = "2026.04.24.02"
 
 logger = logging.getLogger(__name__)
 
@@ -988,8 +988,16 @@ def _promote_same_day_cardio(
         SPLIT_PPL_UL as _SPLIT_PPL_UL,
         SPLIT_UPPER_LOWER as _SPLIT_UL,
     )
-    if lifting_split in (_SPLIT_PPL, _SPLIT_PPL_UL):
+    if lifting_split == _SPLIT_PPL:
         rotation_pool = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
+    elif lifting_split == _SPLIT_PPL_UL:
+        # PPL+UL hybrid: full 5-day rotation so the filler lift picked
+        # to replace a promoted cardio day can be Upper/Lower — not just
+        # PPL (which was creating duplicate Push days on 5-day PPL+UL).
+        rotation_pool = [
+            DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
+            DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER,
+        ]
     elif lifting_split == _SPLIT_UL:
         rotation_pool = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
     else:

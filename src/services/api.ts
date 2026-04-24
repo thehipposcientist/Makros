@@ -562,6 +562,7 @@ export async function getAIPlans(
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
     foodsAvailable:         profile.foodsAvailable,
+    customFoodNames:        (profile.customFoods ?? []).map(f => f.name).filter(Boolean),
     supplementsAvailable:   profile.supplementsAvailable ?? [],
     experienceLevel:        profile.experienceLevel,
     preferredSplit:         profile.preferredSplit || undefined,
@@ -944,7 +945,11 @@ export async function getGoals() {
 // it in AsyncStorage and return instantly on subsequent opens. TTL is
 // long (24h) because the seed rarely changes. Pass { forceRefresh: true }
 // to bypass the cache.
-const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v1';
+// v2: bumped when `video_id` was added to the library schema — old v1
+// caches were populated before the backend started returning video_id,
+// so sticking with v1 meant 24h of stale rows where thumbnails couldn't
+// resolve. Bump the suffix any time the shape or required fields change.
+const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v2';
 const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function getExercises(params?: { muscle?: string; equipment?: string; forceRefresh?: boolean }) {

@@ -263,20 +263,20 @@ def _pick_role(
     pantry: list[str],
     used_in_template: set[str],
     rotation_offset: int,
+    preferred_foods: set[str] | None = None,
 ) -> str | None:
     """Return a food from `pantry` matching `role`, biased away from
-    `used_in_template`. `rotation_offset` shifts the starting scan index so
-    consecutive calls with the same pantry don't land on the same pick.
+    `used_in_template`. `rotation_offset` shifts the starting scan index
+    so consecutive calls with the same pantry don't land on the same pick.
 
-    For the `protein` role we rank matches by the hard-coded density
-    table first (chicken > whey > salmon > eggs > greek yogurt > ...) so
-    the biggest-protein food available still anchors the meal even when
-    the template is rotating across days. Without that bias, a cheap
-    rotation can stick eggs (6 g/serving) in a muscle-gain lunch and
-    push the day's protein ~15% under target.
+    `preferred_foods` — lower-cased names the caller wants biased up.
+    Currently used to give user-added custom foods priority over seed
+    foods for the same role ("I took the time to add this — use it").
+    Custom foods float to the top of the rotation list while still
+    respecting density rank among themselves for the protein role.
 
-    Deterministic: identical (role, pantry, used, offset) always returns
-    the same food. No random.
+    Deterministic: identical (role, pantry, used, offset, preferred)
+    always returns the same food.
     """
     keywords = _ROLE_KEYWORDS.get(role)
     if not keywords or not pantry:
@@ -286,11 +286,6 @@ def _pick_role(
     if not matches:
         return None
 
-    # For protein specifically, stable-sort matches by density rank so
-    # high-protein foods come first in the rotation list. This doesn't
-    # break determinism (the rank table is a constant) and keeps the
-    # "rotate across days for variety" behavior intact — rotation still
-    # walks through the ranked list, it just starts from a better place.
     if role == "protein":
         matches = sorted(
             matches,
@@ -298,6 +293,16 @@ def _pick_role(
                 _canonical_protein_key(name), 99,
             ),
         )
+
+    # Custom-food bias: stable-partition so preferred foods come first
+    # while preserving the role-specific order (protein-density, etc)
+    # within each partition. Users who add "Kirkland pea protein" get
+    # it picked over generic seed "Whey Protein" for the same slot.
+    if preferred_foods:
+        prefs = {p.lower() for p in preferred_foods}
+        preferred_match = [m for m in matches if m.lower() in prefs]
+        other_match = [m for m in matches if m.lower() not in prefs]
+        matches = preferred_match + other_match
 
     # Rotate the match list so day_index / slot_index pick different items.
     start = rotation_offset % len(matches)
@@ -307,8 +312,6 @@ def _pick_role(
     for f in rotated:
         if f.lower() not in used_in_template:
             return f
-    # Everything's used already — repeat the first rotated pick rather
-    # than returning None (which would leave the slot empty).
     return rotated[0]
 
 
@@ -370,6 +373,7 @@ def _build_meal(
     rotation_offset: int,
     meal_index: int,
     slot_type: str,
+    preferred_foods: set[str] | None = None,
 ) -> MealSkeleton:
     """Turn one archetype row into one `MealSkeleton`.
 
@@ -387,6 +391,7 @@ def _build_meal(
             # duplicates so a single meal doesn't list chicken twice.
             used_in_template | meal_used,
             rotation_offset + slot_i,
+            preferred_foods=preferred_foods,
         )
         if food and food.lower() not in meal_used:
             picks.append(food)
@@ -445,6 +450,7 @@ def generate_deterministic_skeleton(
     *,
     db: Any = None,
     user_id: int | None = None,
+    preferred_foods: list[str] | None = None,
 ) -> tuple[list[TemplateSkeleton], str, list[dict]]:
     """Deterministic drop-in for `call_skeleton_ai`.
 
@@ -478,6 +484,16 @@ def generate_deterministic_skeleton(
     variety_n = max(1, min(7, int(variety_n or 1)))
     if meals_per_day <= 0 or not allowed_foods:
         return [TemplateSkeleton(meals=[]) for _ in range(variety_n)], "", []
+
+    # Build the preferred-food bias set once per call so _build_meal /
+    # _pick_role can short-circuit on a set membership check. Users who
+    # added custom foods (AI-scanned or typed) get those favored over
+    # generic seed foods for the same role.
+    _preferred_set: set[str] = {
+        (n or "").strip().lower()
+        for n in (preferred_foods or [])
+        if (n or "").strip()
+    }
 
     # Pantry filtering: drop anything incompatible with diet/allergens up
     # front so the role resolver never even considers those foods.
@@ -522,6 +538,7 @@ def generate_deterministic_skeleton(
                 rotation_offset,
                 slot_idx,
                 slot_type,
+                preferred_foods=_preferred_set,
             )
             meals.append(meal)
             used_in_template.update(f.lower() for f in meal.food_refs)

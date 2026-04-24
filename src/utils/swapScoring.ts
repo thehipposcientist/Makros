@@ -11,6 +11,7 @@
 export interface ExerciseLibraryItem {
   id?: number | string;
   name: string;
+  slug?: string | null;
   primary_muscle?: string | null;
   secondary_muscles?: string[] | null;
   equipment?: string | null;
@@ -18,6 +19,7 @@ export interface ExerciseLibraryItem {
   is_compound?: boolean | null;
   description?: string | null;
   image_url?: string | null;
+  video_id?: string | null;
   is_custom?: boolean;
 }
 

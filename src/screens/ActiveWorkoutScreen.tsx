@@ -27,6 +27,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
+import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
@@ -2494,10 +2495,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setActiveExIdx(isActive ? -1 : i); }}
                 activeOpacity={0.7}>
                 {(() => {
-                  const imgUrl = ex.image_url || getExerciseImage(ex.name);
-                  return imgUrl ? (
-                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
-                      <Image source={{ uri: imgUrl }} style={{ width: 40, height: 40 }} resizeMode="cover" />
+                  const thumbUri = exerciseThumbSmall(ex as any);
+                  return thumbUri ? (
+                    <View style={{ width: 40, height: 40, borderRadius: 8, marginRight: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                      <Image source={{ uri: thumbUri }} style={{ width: 40, height: 40 }} resizeMode="cover" />
+                      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                        <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+                          <Ionicons name="play" size={9} color="#fff" style={{ marginLeft: 1 }} />
+                        </View>
+                      </View>
                     </View>
                   ) : null;
                 })()}
@@ -3175,10 +3181,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <View style={[styles.timerModalRoot, { backgroundColor: themeColors.background }]}>
               <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
                 {(() => {
-                  const imgUrl = mEx?.image_url || (mEx ? getExerciseImage(mEx.name) : undefined);
-                  return imgUrl ? (
-                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
-                      <Image source={{ uri: imgUrl }} style={{ width: 64, height: 64 }} resizeMode="cover" />
+                  const thumbUri = mEx ? exerciseThumbSmall(mEx as any) : null;
+                  return thumbUri ? (
+                    <View style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 12, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                      <Image source={{ uri: thumbUri }} style={{ width: 64, height: 64 }} resizeMode="cover" />
+                      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                        <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+                          <Ionicons name="play" size={12} color="#fff" style={{ marginLeft: 1 }} />
+                        </View>
+                      </View>
                     </View>
                   ) : null;
                 })()}
@@ -3839,11 +3850,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {aiExerciseResults.map((ex, i) => (
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
                         <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                          {ex.image_url ? (
-                            <View style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
-                              <Image source={{ uri: ex.image_url }} style={{ width: 48, height: 48 }} resizeMode="cover" />
-                            </View>
-                          ) : null}
+                          {/* AI-suggested exercises come from a live
+                              search — we don't render wger static images
+                              for them to stay consistent with the rest
+                              of the app (YouTube-thumb or placeholder). */}
                           <View style={{ flex: 1 }}>
                             <Text style={styles.addExerciseName}>{ex.name}</Text>
                             <Text style={styles.addExerciseMeta}>

@@ -4,7 +4,7 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image, Dimensions, Alert,
 } from 'react-native';
-import { login, register, resetPassword, getRecoveryQuestion } from '../services/api';
+import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -23,8 +23,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [recoveryQuestion, setRecoveryQuestion] = useState('');
+  const [recoveryQuestion, setRecoveryQuestionText] = useState('');
   const [recoveryAnswer, setRecoveryAnswer] = useState('');
+  // Signup-only: user picks from a preset list for ease of recall.
+  const [signupRecoveryQuestion, setSignupRecoveryQuestion] = useState<string>(
+    "What was the name of your first pet?"
+  );
+  const [signupRecoveryAnswer, setSignupRecoveryAnswer] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -46,7 +51,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setPassword('');
     setConfirmPassword('');
     setRecoveryAnswer('');
-    if (next !== 'reset_answer') setRecoveryQuestion('');
+    if (next !== 'reset_answer') setRecoveryQuestionText('');
     setShowPassword(false);
     setShowConfirmPassword(false);
   };
@@ -97,12 +102,27 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       if (!username.trim()) { setError('Username is required'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
+      if (!signupRecoveryAnswer.trim() || signupRecoveryAnswer.trim().length < 2) {
+        setError("Please answer your security question — you'll need it to reset your password");
+        return;
+      }
     }
     setLoading(true);
     try {
       const isNewUser = mode === 'signup';
       if (isNewUser) await register(email.trim(), username.trim(), password);
       const { access_token } = await login(email.trim(), password);
+      // Set the recovery question/answer right after signup so password
+      // reset works without a separate profile trip. Non-blocking — a
+      // failure here still lets the user into onboarding, and they can
+      // set it later from Profile.
+      if (isNewUser) {
+        try {
+          await setRecoveryQuestion(access_token, signupRecoveryQuestion, signupRecoveryAnswer.trim());
+        } catch (e) {
+          console.log('[auth] set recovery question failed:', e);
+        }
+      }
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
@@ -254,13 +274,66 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
-                returnKeyType="go"
-                onSubmitEditing={handleSubmit}
+                returnKeyType="next"
+                onSubmitEditing={() => mode === 'signup' ? answerRef.current?.focus() : handleSubmit()}
               />
               <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowConfirmPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showConfirmPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
+          )}
+
+          {/* Recovery question — SIGNUP ONLY. Picked from a small preset
+              list so users don't compose something they'll forget. The
+              answer is required; password-reset uses this. */}
+          {mode === 'signup' && (
+            <>
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 2, marginTop: 4 }}>
+                Security question · used to reset your password
+              </Text>
+              <Text style={{ fontSize: 10, color: colors.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
+                You can change this later from your profile settings.
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                {[
+                  "What was the name of your first pet?",
+                  "What city were you born in?",
+                  "What is your mother's maiden name?",
+                  "What was your first car?",
+                ].map(q => (
+                  <TouchableOpacity
+                    key={q}
+                    onPress={() => setSignupRecoveryQuestion(q)}
+                    style={{
+                      paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: signupRecoveryQuestion === q ? colors.primary : colors.border,
+                      backgroundColor: signupRecoveryQuestion === q ? colors.primary + '22' : colors.surface,
+                    }}
+                  >
+                    <Text style={{
+                      fontSize: 11,
+                      fontWeight: signupRecoveryQuestion === q ? '700' : '500',
+                      color: signupRecoveryQuestion === q ? colors.primary : colors.textSecondary,
+                    }}>
+                      {q}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <TextInput
+                ref={answerRef}
+                style={styles.input}
+                placeholder="Your answer"
+                placeholderTextColor={colors.textMuted}
+                value={signupRecoveryAnswer}
+                onChangeText={setSignupRecoveryAnswer}
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="go"
+                onSubmitEditing={handleSubmit}
+              />
+            </>
           )}
 
           {error ? <Text style={styles.error}>{error}</Text> : null}

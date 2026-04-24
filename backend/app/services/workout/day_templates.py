@@ -384,6 +384,29 @@ def build_day_templates(split: str, days_per_week: int) -> list[tuple[str, list[
 # ─── Archetype dispatch (primary planner path) ──────────────────────
 
 
+def _strip_warmup_slots(slots: list[Slot], archetype) -> list[Slot]:
+    """Remove the legacy warmup slot from lift/hybrid archetypes.
+
+    Every `_*_slots()` builder emits a `Slot("Warmup Mobility", ...)` as
+    the first entry. That slot accepted any mobility-pattern exercise,
+    which users experienced as "I have a mobility drill on my heavy
+    legs day" even though it was technically the warmup block.
+
+    The set programming layer already generates warm-up sets on the
+    primary compound (ramp-ups), so a dedicated warmup exercise is
+    redundant for lift/hybrid days. We keep the warmup slot on
+    MOBILITY_FLOW / STRETCH_BLOCK / RECOVERY_EASY — those days are
+    supposed to be mobility-focused.
+    """
+    from .archetypes import ARCHETYPE_META as _META
+    meta = _META.get(archetype)
+    if not meta:
+        return slots
+    if meta.category in ("mobility", "recovery"):
+        return slots
+    return [s for s in slots if getattr(s, "role", None) != "warmup"]
+
+
 def archetype_to_slots(
     archetype,
     day_index: int,
@@ -532,6 +555,21 @@ def archetype_to_slots(
 
     # Unknown archetype — safe fallback to full body.
     return _full_body_slots(day_index)
+
+
+# Wrap the dispatcher so every call goes through warmup-stripping.
+_inner_archetype_to_slots = archetype_to_slots
+
+
+def archetype_to_slots(  # noqa: F811 — intentional wrap
+    archetype,
+    day_index: int,
+    days_per_week: int,
+    *,
+    focused_muscle: Optional[str] = None,
+) -> list[Slot]:
+    raw = _inner_archetype_to_slots(archetype, day_index, days_per_week, focused_muscle=focused_muscle)
+    return _strip_warmup_slots(raw, archetype)
 
 
 def archetype_display_name(archetype, day_index: int, recipe: list) -> str:

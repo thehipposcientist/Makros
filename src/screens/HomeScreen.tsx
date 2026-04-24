@@ -39,6 +39,9 @@ import NutritionCard from '../components/NutritionCard';
 import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
 import IncompleteDayBanner from '../components/IncompleteDayBanner';
 import PlanSwapExerciseModal from '../components/PlanSwapExerciseModal';
+import ExerciseVideoCard from '../components/ExerciseVideoCard';
+import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -132,11 +135,15 @@ interface AvailabilityItem {
 interface ExerciseLibraryItem {
   id?: number;
   name: string;
+  slug?: string;
   description?: string | null;
   primary_muscle?: string;
   secondary_muscles?: string[];
   equipment?: string;
   is_compound?: boolean;
+  image_url?: string | null;
+  video_id?: string | null;
+  movement_pattern?: string | null;
 }
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -1565,6 +1572,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     );
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
+    // Warm the exercise library in the background so plan-view + active-
+    // workout thumbnails have the name→video_id index populated even
+    // for users who never visit the Library sub-tab.
+    ensureExerciseLibrary().catch(() => {});
     // Weekly check-in — auto-popup every 7 days
     AsyncStorage.getItem('weekStartDate').then(async raw => {
       if (!raw) {
@@ -1622,6 +1633,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       .then(([h, s]) => { setWorkoutHistoryList(h); setWorkoutHistorySummaries(s); })
       .catch(() => {});
   }, [planRefreshKey]);
+
+  // Library sub-tab state sync. When the user leaves the Workout tab
+  // (bottom tab change) while parked on Library and later returns,
+  // `workoutSubTab` is still 'library' but `showExerciseLibrary` may be
+  // stale. Re-trigger the library load so content renders without a
+  // manual Plan → Library bounce.
+  useEffect(() => {
+    if (activeTab !== 'workout') return;
+    if (workoutSubTab !== 'library') return;
+    if (!showExerciseLibrary) setShowExerciseLibrary(true);
+    ensureExerciseLibrary().catch(() => {});
+  }, [activeTab, workoutSubTab, showExerciseLibrary, ensureExerciseLibrary]);
 
   // Next-day unlogged-meals prompt. Fires once per calendar day when
   // yesterday had a plan with unchecked meals and the user hasn't dismissed
@@ -2440,9 +2463,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   // Pure library-fetch, no side effects on modal visibility. Shared
   // between openExerciseLibrary (Library sub-tab) and the plan-view
-  // swap flow (warmed lazily when the user taps Swap).
-  const ensureExerciseLibrary = useCallback(async () => {
-    if (exerciseLibrary.length > 0) return;
+  // swap flow (warmed lazily when the user taps Swap). Returns the
+  // loaded list so callers that need it synchronously (e.g. Info
+  // button looking up the tapped exercise) don't have to wait for
+  // state to propagate through React.
+  const ensureExerciseLibrary = useCallback(async (): Promise<ExerciseLibraryItem[]> => {
+    if (exerciseLibrary.length > 0) return exerciseLibrary;
     setExerciseLibraryLoading(true);
     try {
       const rows = await getExercises();
@@ -2455,7 +2481,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         description: ce.description ?? '',
         is_custom: true,
       })) as unknown as ExerciseLibraryItem[];
-      setExerciseLibrary([...customs, ...rows]);
+      const combined = [...customs, ...rows];
+      setExerciseLibrary(combined);
+      // Prime the shared name/slug → video_id index so stale
+      // WorkoutPlan snapshots (generated before video_id existed on
+      // build_planner_exercise) can still render thumbnails via
+      // name/slug lookup. Means users don't need a forced plan regen
+      // to see previews.
+      primeThumbnailIndex(combined as any);
+      return combined;
     } catch {
       const customs = (userProfile?.customExercises ?? []).map(ce => ({
         id: ce.id as any,
@@ -2467,10 +2501,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         is_custom: true,
       })) as unknown as ExerciseLibraryItem[];
       setExerciseLibrary(customs);
+      return customs;
     } finally {
       setExerciseLibraryLoading(false);
     }
-  }, [exerciseLibrary.length, userProfile?.customExercises]);
+  }, [exerciseLibrary, userProfile?.customExercises]);
 
   const openExerciseLibrary = useCallback(async () => {
     setShowExerciseLibrary(true);
@@ -4474,12 +4509,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 ppl_upper_lower: ['Push', 'Pull', 'Legs', 'Upper', 'Lower'],
                 bro: ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs'],
               };
+              // Lift + same-day cardio finisher variants. Only offered for
+              // splits where the backend can produce the matching
+              // PLUS_CARDIO archetype (PPL, Upper/Lower, Full Body). Bro
+              // split maps chest/back/shoulders/arms → upper+cardio already
+              // on the backend, so we surface Upper+Cardio only.
+              const splitPlusCardioOptions: Record<string, string[]> = {
+                ppl: ['Push + Cardio', 'Pull + Cardio'],
+                upper_lower: ['Upper + Cardio'],
+                full_body: ['Full Body + Cardio'],
+                ppl_upper_lower: ['Push + Cardio', 'Pull + Cardio', 'Upper + Cardio'],
+                bro: ['Upper + Cardio'],
+              };
               const focusOptions = splitFocusOptions[split] ?? splitFocusOptions.ppl;
+              const plusCardioOptions = splitPlusCardioOptions[split] ?? splitPlusCardioOptions.ppl;
               const extraOptions = ['Cardio', 'Mobility', 'Recovery'];
               // "Empty" lets the user start from a blank day and add their
               // own exercises — no generator is run. Always last so it reads
               // as an escape hatch, not a primary choice.
-              const allOptions = [...focusOptions, ...extraOptions, 'Empty'];
+              const allOptions = [...focusOptions, ...plusCardioOptions, ...extraOptions, 'Empty'];
 
               // Map dateKey → completed focus so when schedule index 0 is
               // today, we can still see yesterday's focus (outside schedule).
@@ -4537,6 +4585,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   if (vals.length === 0) return 0;
                   return vals.reduce((a, b) => a + b, 0) / vals.length;
                 };
+                // PLUS_CARDIO variants: blend the lift-group fatigue with
+                // cardio fatigue so a user who's already stacked a lot of
+                // cardio recently sees a lower readiness on "Push + Cardio"
+                // than on plain "Push".
+                const isPlusCardio = /\+\s*cardio/.test(lower);
                 let fatigue = 0;
                 if (/push|chest|pressing/.test(lower)) fatigue = avg(['chest', 'shoulders', 'triceps']);
                 else if (/pull|back|bicep|lat/.test(lower)) fatigue = avg(['back', 'biceps']);
@@ -4547,6 +4600,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 else if (/arms?/.test(lower)) fatigue = avg(['biceps', 'triceps']);
                 else if (/cardio|zone|interval/.test(lower)) fatigue = mf['cardio'] ?? 0;
                 else return null; // no fatigue concept (mobility/recovery)
+                if (isPlusCardio) {
+                  // 70% lift + 30% cardio — the lift is the primary stress,
+                  // the cardio finisher is lighter but still meaningful.
+                  fatigue = fatigue * 0.7 + (mf['cardio'] ?? 0) * 0.3;
+                }
                 return Math.max(0, Math.min(100, Math.round((1 - fatigue) * 100)));
               };
 
@@ -4568,7 +4626,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   skipReason={skipReasonsByDate[key]}
                   completedSummary={isCompleted ? todaySummary : null}
                   expanded={expandedDay === i}
-                  onPress={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setExpandedDay(expandedDay === i ? -1 : i); }}
+                  onPress={() => {
+                    import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                    const collapsing = expandedDay === i;
+                    setExpandedDay(collapsing ? -1 : i);
+                    // Collapse the Switch Day picker when the parent
+                    // card collapses — otherwise re-expanding the card
+                    // shows the picker already open, which reads as a
+                    // bug even though state was technically preserved.
+                    if (collapsing && switchDayIdx === i) setSwitchDayIdx(-1);
+                  }}
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
@@ -4588,6 +4655,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     // go straight to Plan → Swap get an empty library.
                     ensureExerciseLibrary().catch(() => {});
                     setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName });
+                  }}
+                  onViewExercise={async (exName) => {
+                    // Navigate to Library sub-tab with the exercise
+                    // pre-selected. ensureExerciseLibrary returns the
+                    // loaded list directly so we don't race React state
+                    // (previous closure captured stale exerciseLibrary).
+                    const lib = await ensureExerciseLibrary().catch(() => [] as ExerciseLibraryItem[]);
+                    const norm = exName.toLowerCase().trim();
+                    const hit = lib.find(e => (e.name || '').toLowerCase() === norm)
+                      ?? lib.find(e => (e.name || '').toLowerCase().includes(norm));
+                    if (hit) {
+                      setSelectedExercise(hit);
+                      setShowExerciseLibrary(true);
+                      setWorkoutSubTab('library');
+                      setLibraryActiveTab('exercises');
+                    } else {
+                      // No match — still route the user to Library so
+                      // they can search manually rather than silently
+                      // doing nothing.
+                      setWorkoutSubTab('library');
+                      setShowExerciseLibrary(true);
+                      setLibraryActiveTab('exercises');
+                      setExerciseSearch(exName);
+                    }
                   }}
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
@@ -4834,13 +4925,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const isSelected = expandedHistoryDate === c.date;
                         const color = scoreColor(c.score);
                         const hasScore = c.score != null;
+                        // "Fully logged" — day counts as complete when
+                        // EITHER (a) every non-removed plan meal is
+                        // checked, OR (b) at least 3 meals are checked
+                        // (catches users who manually log without the
+                        // plan matching exactly). Removed meals are
+                        // always excluded from the all-checked criterion.
+                        const planDay = nutritionPlansByDate[c.date];
+                        const checks = checkedMealsByDate[c.date] ?? {};
+                        const removedSetHist = new Set((planDay?.removedMealIds ?? []) as string[]);
+                        const activeKeys = (planDay?.meals ?? [])
+                          .map((_, i) => `meal_${i}`)
+                          .filter(k => !removedSetHist.has(k));
+                        const checkedCount = Object.values(checks).filter(Boolean).length;
+                        const allPlanChecked = activeKeys.length > 0 && activeKeys.every(k => !!checks[k]);
+                        const fullyLogged = allPlanChecked || checkedCount >= 3;
                         return (
                           <TouchableOpacity
                             key={c.date}
                             activeOpacity={0.7}
                             onPress={() => {
                               if (isToday) return;
-                              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                              configureExpandAnimation(300);
                               setExpandedHistoryDate(isSelected ? null : c.date);
                             }}
                             style={{
@@ -4851,13 +4957,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               alignItems: 'center',
                               justifyContent: 'center',
                               gap: 4,
-                              backgroundColor: themeColors.surfaceRaised,
-                              borderWidth: isSelected ? 2 : 1,
-                              borderColor: isSelected ? themeColors.primary : themeColors.border,
+                              backgroundColor: fullyLogged && !isToday ? '#22C55E' + '22' : themeColors.surfaceRaised,
+                              borderWidth: isSelected ? 2 : fullyLogged && !isToday ? 2 : 1,
+                              borderColor: isSelected
+                                ? themeColors.primary
+                                : fullyLogged && !isToday ? '#22C55E' : themeColors.border,
                             }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: isToday ? themeColors.primary : themeColors.textSecondary }}>
-                              {dateLabel}
-                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: isToday ? themeColors.primary : themeColors.textSecondary }}>
+                                {dateLabel}
+                              </Text>
+                              {/* Inline checkmark next to date — guaranteed
+                                  to render (previous absolute-positioned
+                                  badge got clipped by parent overflow on
+                                  some devices). */}
+                              {fullyLogged && !isToday && (
+                                <Ionicons name="checkmark-circle" size={12} color="#22C55E" />
+                              )}
+                            </View>
                             <View style={{
                               width: 28, height: 28, borderRadius: 14,
                               alignItems: 'center', justifyContent: 'center',
@@ -5075,33 +5192,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 manual-logging prompt. Logged meals still surface via the
                 existing meal-history + checked-meal paths; they just don't
                 come from an AI-built plan. */}
+            {/* Free tier banner — one-line reminder that AI plans are Pro.
+                Day cards below render empty meal frames the user fills
+                manually (routines auto-fill; everything else stays blank
+                until they add). */}
             {mealsSubTab === 'plan' && isFreeTier && (
               <FadeInView delay={0}>
                 <View style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 10,
                   backgroundColor: themeColors.surface,
-                  borderRadius: 14, padding: 20, marginTop: 8,
+                  borderRadius: 12, padding: 12, marginBottom: 10,
                   borderWidth: 1, borderColor: themeColors.border,
-                  alignItems: 'center',
                 }}>
-                  <Ionicons name="restaurant-outline" size={32} color={themeColors.textMuted} />
-                  <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary, marginTop: 10 }}>
-                    Manual meal logging
-                  </Text>
-                  <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center', marginTop: 6, lineHeight: 17 }}>
-                    You're on the Free tier. Add meals yourself in the Foods tab; totals + averages still update in the background.
-                  </Text>
-                  <TouchableOpacity
-                    onPress={() => setMealsSubTab('foods' as any)}
-                    style={{
-                      marginTop: 14, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10,
-                      backgroundColor: themeColors.primary,
-                    }}
-                  >
-                    <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.background }}>Add a meal</Text>
-                  </TouchableOpacity>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 10, fontStyle: 'italic' }}>
-                    Upgrade to Pro for AI-generated meal plans.
-                  </Text>
+                  <Ionicons name="restaurant-outline" size={18} color={themeColors.primary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                      Manual meal logging
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                      Add meals yourself — or pin routines to auto-fill. Upgrade to Pro for AI plans.
+                    </Text>
+                  </View>
                 </View>
               </FadeInView>
             )}
@@ -5128,8 +5239,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {mealsSubTab === 'plan' && !isFreeTier && authToken && (
               <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
-            {mealsSubTab === 'plan' && !isFreeTier && mealDays.map((d, idx) => {
-              const plan = nutritionPlansByDate[d.key];
+            {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
+              let plan = nutritionPlansByDate[d.key];
+              // Free tier: synthesize an empty plan frame so the user
+              // sees a day card they can add meals to manually. Pro
+              // users get a proper plan here; free users get an empty
+              // scaffold that the "+ Add meal" flow fills.
+              if (!plan && isFreeTier) {
+                plan = {
+                  meals: [],
+                  removedMealIds: [],
+                  targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+                } as any;
+              }
               if (!plan) return (
                 <FadeInView key={d.key} delay={idx * 60}>
                   <View style={{ height: 60, justifyContent: 'center', alignItems: 'center' }}>
@@ -5479,7 +5601,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
           <TouchableOpacity
             style={[styles.profileSignOutBtn, { backgroundColor: themeColors.surface, borderColor: themeColors.error + '55' }]}
-            onPress={onSignOut}>
+            onPress={() => {
+              Alert.alert(
+                'Sign out?',
+                'You\'ll need to sign back in to see your plan and progress.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Sign out', style: 'destructive', onPress: onSignOut },
+                ],
+              );
+            }}>
             <Text style={[styles.profileSignOutText, { color: themeColors.error }]}>Sign Out</Text>
           </TouchableOpacity>
         </ScrollView>
@@ -5682,19 +5813,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <ScrollView contentContainerStyle={styles.detailContent}>
                 {(() => {
                   const guide = buildExerciseGuide(selectedExercise);
-                  const { getExerciseImage: _getImg } = require('../utils/exerciseImages');
-                  const _imgUrl = (selectedExercise as any).image_url || _getImg(selectedExercise.name);
+                  const _vid = (selectedExercise as any).video_id as string | null | undefined;
                   return (
                     <>
-                      {_imgUrl ? (
-                        <View style={{ width: '100%', height: 200, borderRadius: 14, marginBottom: 14, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
-                          <Image
-                            source={{ uri: _imgUrl }}
-                            style={{ width: '100%', height: '100%' }}
-                            resizeMode="contain"
-                          />
-                        </View>
-                      ) : null}
+                      <ExerciseVideoCard
+                        exerciseName={selectedExercise.name}
+                        videoId={_vid}
+                        themeName={userProfile.themePreference}
+                        onPress={() => openExerciseVideo(selectedExercise.name)}
+                      />
                       <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
                         <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
                         {selectedExercise.secondary_muscles?.length ? (
@@ -5702,9 +5829,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         ) : null}
                         <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Equipment: {humanizeToken(selectedExercise.equipment) || 'Bodyweight'}</Text>
                         <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                          <TouchableOpacity style={[styles.detailVideoBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => openExerciseVideo(selectedExercise.name)}>
-                            <Text style={styles.detailVideoBtnText}>▶  Watch Form Video</Text>
-                          </TouchableOpacity>
+                          {/* "Watch Form Video" button removed — the
+                              ExerciseVideoCard above handles the same
+                              YouTube deep-link with a real thumbnail
+                              preview, so the button was a duplicate CTA. */}
                           {/* Dislike / re-like toggle — excludes this exercise
                               from future AI-generated plans. Mirrors the
                               ActiveWorkoutScreen "thumbs-down" pattern so
@@ -5998,12 +6126,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   {filteredExerciseLibrary.length === 0 ? (
                     <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
                   ) : filteredExerciseLibrary.map((ex) => {
-                    const _exImg = ex.image_url || (require('../utils/exerciseImages').getExerciseImage(ex.name));
+                    // YouTube thumbnail when the exercise has a curated
+                    // video_id; otherwise placeholder icon. wger static
+                    // images are no longer used — consistent video-tile
+                    // look across every surface that shows an exercise.
+                    const _thumb = exerciseThumbSmall(ex as any);
                     return (
                     <TouchableOpacity key={String(ex.id ?? ex.name)} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]} activeOpacity={0.8} onPress={() => setSelectedExercise(ex)}>
-                      {_exImg ? (
-                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border }}>
-                          <Image source={{ uri: _exImg }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+                      {_thumb ? (
+                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 1, borderColor: themeColors.border, position: 'relative' }}>
+                          <Image source={{ uri: _thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+                          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                            <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+                              <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+                            </View>
+                          </View>
                         </View>
                       ) : (
                         <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
@@ -7346,7 +7483,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -7372,6 +7509,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
    *  plan persistence. Passes the target workout so the parent can
    *  match-and-mutate by focus + date without a dayIndex lookup. */
   onSwapExercise?: (workout: WorkoutDay, exerciseIndex: number, exerciseName: string) => void;
+  /** Navigates to the exercise info page (library sub-tab with
+   *  exercise pre-selected). */
+  onViewExercise?: (exerciseName: string) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -7676,13 +7816,18 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                           <Ionicons name="close-circle" size={20} color={tc.textMuted} />
                         </TouchableOpacity>
                       </View>
-                      <View style={{ flexDirection: 'column', gap: 8 }}>
+                      {/* Grid: each option is a tile with a big colored
+                          READINESS circle on top and the focus label in
+                          small text below. Keeps the score as the
+                          primary visual anchor so the options can't be
+                          confused with the card's current focus. */}
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                         {splitOptions.filter(f => f !== item.workout?.focus).map(focus => {
                           const w = optionWarnings?.[focus];
                           const hasConflict = !!w?.conflict;
                           const lowReady = w?.readiness != null && w.readiness < 40;
                           const warned = hasConflict || lowReady;
-                          const tier = w?.readiness == null ? null
+                          const tier = w?.readiness == null ? '#9CA3AF'
                             : w.readiness >= 70 ? '#22C55E'
                             : w.readiness >= 40 ? '#F59E0B'
                             : '#EF4444';
@@ -7712,32 +7857,48 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                               apply();
                             }
                           };
+                          const hasScore = w?.readiness != null;
                           return (
                             <TouchableOpacity
                               key={focus}
                               style={{
-                                paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10,
+                                width: '31%',
+                                paddingVertical: 10, paddingHorizontal: 6,
+                                borderRadius: 10,
                                 borderWidth: 1.5,
-                                borderColor: warned ? '#F59E0B' + '88' : workoutPalette.strong + '55',
+                                borderColor: warned ? '#F59E0B' + '88' : tc.border,
                                 backgroundColor: tc.surface,
+                                alignItems: 'center',
                               }}
                               onPress={handlePick}>
-                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
-                                  <Text style={{ fontSize: 14, fontWeight: '700', color: workoutPalette.strong }}>{focus}</Text>
-                                  {tier && (
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: tier }} />
-                                      <Text style={{ fontSize: 10, fontWeight: '700', color: tier }}>{w!.readiness}%</Text>
-                                    </View>
-                                  )}
-                                </View>
-                                {warned && (
-                                  <Ionicons name="warning-outline" size={14} color="#F59E0B" />
+                              {/* Readiness circle — color = state, number = score. */}
+                              <View style={{
+                                width: 44, height: 44, borderRadius: 22,
+                                borderWidth: 3, borderColor: tier,
+                                alignItems: 'center', justifyContent: 'center',
+                                backgroundColor: tier + '14',
+                                marginBottom: 6,
+                              }}>
+                                {hasScore ? (
+                                  <Text style={{ fontSize: 13, fontWeight: '800', color: tier }}>{w!.readiness}</Text>
+                                ) : (
+                                  <Ionicons name="ellipsis-horizontal" size={14} color={tier} />
                                 )}
                               </View>
-                              {warnMsg && (
-                                <Text style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>{warnMsg}</Text>
+                              <Text style={{
+                                fontSize: 11, fontWeight: '700',
+                                color: tc.textPrimary, textAlign: 'center',
+                              }} numberOfLines={2}>{focus}</Text>
+                              <Text style={{
+                                fontSize: 9, fontWeight: '600',
+                                color: tier, marginTop: 1, letterSpacing: 0.3,
+                              }}>
+                                {hasScore ? 'READY' : '—'}
+                              </Text>
+                              {warned && (
+                                <View style={{ position: 'absolute', top: 4, right: 4 }}>
+                                  <Ionicons name="warning" size={12} color="#F59E0B" />
+                                </View>
                               )}
                             </TouchableOpacity>
                           );
@@ -7778,6 +7939,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                     ? (exIdx, exName) => onSwapExercise(item.workout!, exIdx, exName)
                     : undefined
                 }
+                onViewExercise={onViewExercise}
               />
             </>
           )}

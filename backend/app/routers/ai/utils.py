@@ -37,8 +37,16 @@ def get_openai_api_key() -> str | None:
     return os.getenv("OPENAI_API_KEY")
 
 # ── Model selectors (all configurable via .env) ───────────────────────────────
-# Chat/questions use gpt-5-mini for quality; everything else uses gpt-4o-mini
-# for cost efficiency.  Override any via .env.
+# Model-selection policy (2026-Q2):
+#   - gpt-5-mini is ONLY used for image tasks (food photo, meal photo,
+#     body scan, form photo, supplement label). Vision-specialized.
+#   - Everything else runs on gpt-4o-mini for cost + latency.
+# Override any via .env.
+def model_image() -> str:
+    """Vision / image-analysis model. Used only when the prompt includes
+    an image_url content part."""
+    return os.getenv("MODEL_IMAGE", "gpt-5-mini")
+
 def model_plan_generation() -> str:
     return os.getenv("MODEL_PLAN_GENERATION", "gpt-4o-mini")
 
@@ -46,7 +54,9 @@ def model_plan_update() -> str:
     return os.getenv("MODEL_PLAN_UPDATE", "gpt-4o-mini")
 
 def model_meal_parsing() -> str:
-    return os.getenv("MODEL_MEAL_PARSING", "gpt-5-mini")
+    """Text-only meal parsing (food search, meal instructions). For
+    photo-based parsing use `model_image()` instead."""
+    return os.getenv("MODEL_MEAL_PARSING", "gpt-4o-mini")
 
 def model_chat() -> str:
     return os.getenv("MODEL_CHAT", "gpt-4o-mini")

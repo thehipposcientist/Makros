@@ -654,22 +654,34 @@ def score_candidate(
             score -= 2.5
 
     # 7d. Yoga, mobility drills, and stretches should ONLY appear on
-    # mobility, recovery, or general_health/flexibility days — never on
-    # lifting, conditioning, or hybrid days in ANY role.
+    # mobility, recovery, or flexibility days — never on lifting,
+    # conditioning, or hybrid days in ANY role. This is a HARD BLOCK
+    # (not a score penalty) because users kept seeing "Ankle Mobility
+    # Drill" appear on Legs day — a -20 penalty is just relative and
+    # could still win when all real candidates score badly.
     slug = (exercise.get("slug") or "").lower()
     ex_name_lower = (exercise.get("name") or "").lower()
     ex_type = (exercise.get("exercise_type") or "").lower()
+    mp = (exercise.get("movement_pattern") or "").lower()
     is_mobility_stretch = (
         slug.startswith("yoga_")
         or slug.startswith("stretch_")
         or slug.startswith("mobility_")
         or ex_type == "mobility"
+        or mp == "mobility"
         or "stretch" in ex_name_lower
         or "mobility drill" in ex_name_lower
+        or "mobility" in ex_name_lower
     )
-    if is_mobility_stretch:
-        if bucket not in ("general_health", "flexibility", "stress_relief"):
-            score -= 20.0
+    # The slot's own movement_pattern tells us whether this IS a
+    # mobility slot. Only mobility-role slots accept mobility content.
+    slot_is_mobility = (
+        getattr(slot, "movement_pattern", None) == "mobility"
+        or getattr(slot, "role", None) == "warmup"
+    )
+    if is_mobility_stretch and not slot_is_mobility:
+        # Return a sentinel score so the caller filters it out entirely.
+        return -1e9
 
     # 8. Tiny deterministic jitter so ties between two equivalent
     # candidates don't always pick the alphabetically-first one. Seeded
@@ -963,7 +975,7 @@ def _equipment_label(exercise: dict) -> str:
 # downstream consumers (plan_review, AI regenerate, progression,
 # frontend) can rely on a stable shape.
 _CANONICAL_PLANNED_EXERCISE_KEYS: tuple[str, ...] = (
-    "name", "sets", "reps", "restSeconds", "equipment", "image_url",
+    "name", "sets", "reps", "restSeconds", "equipment", "image_url", "video_id",
     "targetWeightLbs",
     "weightRecommendationSource", "weightRecommendationConfidence", "weightRecommendationReason",
     "setScheme",
@@ -1009,6 +1021,7 @@ def build_planner_exercise(
         "restSeconds": int(prescription.rest_seconds),
         "equipment": _equipment_label(exercise),
         "image_url": exercise.get("image_url") or None,
+        "video_id": exercise.get("video_id") or None,
         # Internal metadata the canonicalizer + progression engine read.
         "_slug": exercise.get("slug"),
         "_slot": slot_label,

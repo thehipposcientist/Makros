@@ -88,13 +88,113 @@ def log_meal_from_plan(
     db.add(meal)
     db.flush()  # get meal.id
 
+    # Build a name→food_id index so items can be linked to the food
+    # library. Without this link, downstream code (gut_health metrics,
+    # micronutrient aggregation) can't pull fiber/sodium/added_sugar
+    # from FoodNutrition and everything reports zero.
+    from app.models import Food
+    import re as _re
+
+    def _norm(s: str) -> str:
+        # Lowercase, strip parens + punctuation, collapse whitespace.
+        s = (s or "").lower()
+        s = _re.sub(r"\([^)]*\)", " ", s)
+        s = _re.sub(r"[^a-z0-9\s]+", " ", s)
+        return _re.sub(r"\s+", " ", s).strip()
+
+    food_rows = db.exec(select(Food).where(col(Food.is_active) == True)).all()  # noqa: E712
+    # Build: exact-normalized index + first-word → list of candidates.
+    food_id_by_norm: dict[str, tuple[int, float | None]] = {}
+    first_word_index: dict[str, list[tuple[int, float | None, str]]] = {}
+    for f in food_rows:
+        norm_full = _norm(f.name or "")
+        if norm_full and norm_full not in food_id_by_norm:
+            food_id_by_norm[norm_full] = (f.id, f.serving_grams)
+        first = norm_full.split(" ", 1)[0] if norm_full else ""
+        if first:
+            first_word_index.setdefault(first, []).append((f.id, f.serving_grams, norm_full))
+
+    def _match_food(name: str) -> tuple[int | None, float | None]:
+        key = _norm(name)
+        if not key:
+            return (None, None)
+        # Tier 1: exact normalized match.
+        if key in food_id_by_norm:
+            fid, sg = food_id_by_norm[key]
+            return (fid, sg)
+        # Tier 2: query is a prefix of a known food (e.g. "bread" →
+        # "bread white"). Pick shortest match so "chicken" beats
+        # "chicken caesar salad" when user logged generic "chicken".
+        first = key.split(" ", 1)[0]
+        candidates = first_word_index.get(first, [])
+        if candidates:
+            # Prefer exact first-token match; fall back to shortest name.
+            shortest = sorted(candidates, key=lambda t: len(t[2]))[0]
+            return (shortest[0], shortest[1])
+        # Tier 3: singular → plural (egg → eggs) via a suffix check.
+        if not key.endswith("s"):
+            plural = key + "s"
+            if plural in food_id_by_norm:
+                fid, sg = food_id_by_norm[plural]
+                return (fid, sg)
+        return (None, None)
+
+    # Pre-load FoodNutrition for matched food_ids so we can reverse-
+    # compute grams from calories (more robust than unit parsing, which
+    # has to handle oz / fl_oz / cup / slice / piece / etc).
+    from app.models import FoodNutrition
+    match_cache: dict[str, tuple[int | None, float | None]] = {}
+    for it in (meal_data.get("items") or []):
+        nm = it.get("name") or ""
+        if nm and nm not in match_cache:
+            match_cache[nm] = _match_food(nm)
+    all_food_ids = [fid for fid, _ in match_cache.values() if fid is not None]
+    nut_by_food: dict[int, FoodNutrition] = {}
+    if all_food_ids:
+        for n in db.exec(select(FoodNutrition).where(col(FoodNutrition.food_id).in_(all_food_ids))).all():
+            nut_by_food[n.food_id] = n
+
     items = meal_data.get("items") or []
     for item in items:
+        name = item.get("name", "Unknown")
+        food_id, default_grams = match_cache.get(name, (None, None))
+        qty = float(item.get("quantity", 1) or 1)
+        unit = str(item.get("unit") or "").strip().lower()
+        item_cal = float(item.get("calories", 0) or 0)
+        # Resolve consumed grams. Priority:
+        #   1. Explicit `serving_grams` on the item.
+        #   2. Unit is grams → quantity IS grams.
+        #   3. Calories-based reverse computation using FoodNutrition
+        #      per-100g calories (most robust, independent of unit zoo).
+        #   4. Fallback: quantity × default_serving_grams.
+        serving_grams = item.get("serving_grams")
+        try:
+            serving_grams = float(serving_grams) if serving_grams is not None else None
+        except Exception:
+            serving_grams = None
+        if serving_grams is None:
+            if unit in ("g", "gram", "grams"):
+                serving_grams = qty
+            elif unit in ("kg", "kilogram"):
+                serving_grams = qty * 1000.0
+            elif unit in ("mg", "milligram"):
+                serving_grams = qty / 1000.0
+            elif food_id is not None and item_cal > 0:
+                nut = nut_by_food.get(food_id)
+                if nut and nut.calories and nut.reference_grams:
+                    # grams = (item_cal / per-ref calories) × reference_grams
+                    per_ref_cal = float(nut.calories)
+                    if per_ref_cal > 0:
+                        serving_grams = (item_cal / per_ref_cal) * float(nut.reference_grams)
+            if serving_grams is None and default_grams:
+                serving_grams = float(default_grams) * qty
         db.add(MealItem(
             meal_id=meal.id,
-            food_name=item.get("name", "Unknown"),
-            quantity=float(item.get("quantity", 1)),
+            food_name=name,
+            food_id=food_id,
+            quantity=qty,
             unit=item.get("unit", "serving"),
+            serving_grams=serving_grams,
             calories=float(item.get("calories", 0)),
             protein_g=float(item.get("protein", 0)),
             carbs_g=float(item.get("carbs", 0)),

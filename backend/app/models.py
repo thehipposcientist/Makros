@@ -292,6 +292,27 @@ class NutritionPlan(SQLModel, table=True):
     deactivation_reason: str | None = Field(default=None)  # "regen" | "goal_change" | "manual"
 
 
+class BodyScan(SQLModel, table=True):
+    """Persisted body-scan result. Previously stored client-side only
+    (AsyncStorage `bodyScanHistory`), which meant users lost scan
+    history on reinstall / device change. The AI response is stored
+    verbatim plus the user's weight at time of scan."""
+    __tablename__ = "body_scans"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    scan_date: date = Field(index=True)
+    body_fat_pct: float | None = Field(default=None)
+    body_fat_range: str | None = Field(default=None)
+    muscle_mass: str | None = Field(default=None)         # low/below_average/average/above_average/high
+    category: str | None = Field(default=None)            # Athletic / Lean / Average / ...
+    strengths: list = Field(default_factory=list, sa_column=Column(JSON))
+    improvements: list = Field(default_factory=list, sa_column=Column(JSON))
+    assessment: str | None = Field(default=None)
+    disclaimer: str | None = Field(default=None)
+    weight_lbs: float | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 class AIDecision(SQLModel, table=True):
     """Structured record of every AI coaching decision. Replaces prose chat history in payloads."""
     __tablename__ = "ai_decisions"
@@ -329,6 +350,12 @@ class Exercise(SQLModel, table=True):
     is_machine: bool = Field(default=False)
     is_unilateral: bool = Field(default=False)
     image_url: str | None = Field(default=None)
+    # Curated YouTube video ID for the demo / form walkthrough. When
+    # present the client shows a YouTube thumbnail card that deep-links
+    # to the YouTube app. Fallback for untagged exercises is a
+    # "Watch demo on YouTube" search card in the client. Only the ~50
+    # most-used exercises need curation — everything else uses search.
+    video_id: str | None = Field(default=None)
     # "reps" (default) | "time" | "distance" | "calories". Lets the planner
     # and the client pick the right rep-target string ("30-45s", "20-30 yds")
     # instead of defaulting to goal-based rep counts for holds / carries.

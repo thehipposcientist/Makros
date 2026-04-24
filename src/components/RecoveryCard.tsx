@@ -154,6 +154,13 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
       {expanded && (
         <View style={{ marginTop: 10 }}>
+          {/* Explainer: the bars aggregate fatigue over a decay window
+              (day 0 = 100%, day 1 = 50%, day 2 = 25%, day 3 = 10%) so
+              users understand the bars aren't a single-day snapshot. */}
+          <Text style={{ fontSize: 10, color: tc.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
+            Per-muscle recovery based on training from the last ~4 days (weighted so
+            today counts most, older sessions fade out).
+          </Text>
           {/* Main visualization — body heat map */}
           {(() => {
             // Map backend muscle fatigue (chest/back/... as 0-1) onto the heat
@@ -221,6 +228,19 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
               if (typeof a.days_ago === 'number' && a.days_ago > 1) return `${a.days_ago}d ago`;
               return a.date;
             };
+            // Fatigue decay — matches the backend model (day 0 = 100%,
+            // day 1 = 50%, day 2 = 25%, day 3 = 10%, older = ~0%). We
+            // surface this percentage per row so "Yesterday" reads as
+            // "still carrying ~50% of that workout's fatigue" instead
+            // of a bare date label.
+            const contributionPct = (daysAgo?: number): number | null => {
+              if (typeof daysAgo !== 'number') return null;
+              if (daysAgo <= 0) return 100;
+              if (daysAgo === 1) return 50;
+              if (daysAgo === 2) return 25;
+              if (daysAgo === 3) return 10;
+              return 0;
+            };
             const activityName = (a: { focus: string; category?: string; subtype?: string }) => {
               // Prefer the specific subtype (Sauna / Yoga / Walk) when present;
               // fall back to category then raw focus.
@@ -261,8 +281,16 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                 )}
                 {training.length > 0 && (
                   <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
-                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 2 }}>
                       RECENT TRAINING
+                    </Text>
+                    {/* Explainer: these rows drive the per-muscle bars
+                        above. The "still X%" label tells the user how
+                        much of that session's fatigue is still weighing
+                        on their recovery score today. */}
+                    <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginBottom: 6 }}>
+                      Each session adds fatigue that fades over ~3 days
+                      (today = 100% → yesterday = 50% → 2d = 25% → 3d = 10%).
                     </Text>
                     {training.map((a, i) => (
                       <View key={`t-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
@@ -271,7 +299,13 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                           {activityName(a)}
                           {a.duration_minutes ? ` · ${a.duration_minutes}m` : ''}
                         </Text>
-                        <Text style={{ fontSize: 10, color: tc.textMuted }}>{dayLabel(a)}</Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                          {dayLabel(a)}
+                          {(() => {
+                            const pct = contributionPct(a.days_ago);
+                            return pct != null && pct > 0 ? ` · still ${pct}%` : '';
+                          })()}
+                        </Text>
                       </View>
                     ))}
                   </View>

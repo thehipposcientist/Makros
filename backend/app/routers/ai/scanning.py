@@ -83,7 +83,7 @@ from .models import (
     MealInstructionsRequest,
 )
 from .utils import (
-    get_openai_api_key, model_meal_parsing, model_chat,
+    get_openai_api_key, model_meal_parsing, model_chat, model_image,
     _is_gpt5, _build_chat_kwargs, _chat_create, _extract_json,
     _log_openai_error,
     SCHEMA_FOOD_PHOTO, SCHEMA_SCAN_FOODS, SCHEMA_SUPPLEMENT_INFO,
@@ -141,7 +141,7 @@ def analyze_food_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45)
+        kwargs = _build_chat_kwargs(model_image(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45)
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
         for item_name in (result.get("items") or []):
@@ -208,7 +208,7 @@ def scan_foods_photo(
         # Bumped from 500 → 1500 to fit the full micronutrient panel for
         # multiple foods. With ~31 fields per food and 3-5 foods per scan,
         # 500 tokens truncated mid-object and produced invalid JSON.
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45)
+        kwargs = _build_chat_kwargs(model_image(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45)
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
         for food in (result.get("foods") or []):
@@ -821,7 +821,7 @@ def get_supplement_from_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _sp_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(model_image(), _sp_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -887,7 +887,7 @@ def scan_equipment_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=150, timeout_secs=20)
+        kwargs = _build_chat_kwargs(model_image(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=150, timeout_secs=20)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -939,7 +939,7 @@ def analyze_form_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_chat(), _form_messages, json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(model_image(), _form_messages, json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -953,7 +953,13 @@ def body_scan(
     body: BodyScanRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Estimate body composition from a photo using AI vision."""
+    """Estimate body composition from a photo using AI vision. Persists
+    the result to `body_scans` so history survives reinstall / device
+    change (previously AsyncStorage-only)."""
+    from app.database import get_session as _gs
+    from app.models import BodyScan as _BodyScanRow
+    from sqlmodel import Session as _Session
+    from datetime import date as _date
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
@@ -1013,14 +1019,90 @@ def body_scan(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_chat(), _scan_messages, json_schema=None, max_tokens=500, timeout_secs=40)
+        # gpt-5-mini: image tasks only. This is one of the few places we
+        # intentionally call the vision-specialized model; other paths
+        # stay on the default MODEL_CHAT (gpt-4o-mini).
+        from app.routers.ai.utils import model_image
+        kwargs = _build_chat_kwargs(model_image(), _scan_messages, json_schema=None, max_tokens=500, timeout_secs=40)
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
-        return result
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Body scan failed: {str(e)}")
+
+    # Persist the scan so history survives across devices / reinstalls.
+    try:
+        gen = _gs()
+        db = next(gen)
+        try:
+            row = _BodyScanRow(
+                user_id=current_user.id,
+                scan_date=_date.today(),
+                body_fat_pct=(float(result.get("bodyFatPct")) if result.get("bodyFatPct") is not None else None),
+                body_fat_range=result.get("bodyFatRange"),
+                muscle_mass=result.get("muscleMass"),
+                category=result.get("category"),
+                strengths=result.get("strengths") or [],
+                improvements=result.get("improvements") or [],
+                assessment=result.get("assessment"),
+                disclaimer=result.get("disclaimer"),
+                weight_lbs=body.weight_lbs,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            result["id"] = row.id
+            result["scan_date"] = str(row.scan_date)
+        finally:
+            try: next(gen)
+            except StopIteration: pass
+    except Exception:
+        # Persistence failure must not break the scan UX — the AI result
+        # still returns to the client even if the DB write fails.
+        pass
+    return result
+
+
+@router.get("/body-scans")
+def list_body_scans(
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+):
+    """List the current user's body-scan history (newest first). Client
+    uses this to hydrate `bodyScanHistory` on app open so scans taken
+    on one device appear on others."""
+    from app.database import get_session as _gs
+    from app.models import BodyScan as _BodyScanRow
+    from sqlmodel import Session as _Session, select as _select
+    gen = _gs()
+    db = next(gen)
+    try:
+        rows = db.exec(
+            _select(_BodyScanRow)
+            .where(_BodyScanRow.user_id == current_user.id)
+            .order_by(_BodyScanRow.created_at.desc())
+            .limit(max(1, min(100, int(limit))))
+        ).all()
+        return {
+            "scans": [{
+                "id": str(r.id),
+                "date": r.created_at.isoformat() if r.created_at else None,
+                "scan_date": str(r.scan_date) if r.scan_date else None,
+                "bodyFatPct": r.body_fat_pct,
+                "bodyFatRange": r.body_fat_range,
+                "muscleMass": r.muscle_mass,
+                "category": r.category,
+                "strengths": r.strengths or [],
+                "improvements": r.improvements or [],
+                "assessment": r.assessment,
+                "disclaimer": r.disclaimer,
+                "weightLbs": r.weight_lbs,
+            } for r in rows]
+        }
+    finally:
+        try: next(gen)
+        except StopIteration: pass
 
 
 # ─── Goal matcher ────────────────────────────────────────────────────────────

@@ -750,6 +750,17 @@ def generate_full_week(
         NON_LIFTING = {"mobility", "recovery", "active recovery", "stretching",
                        "cardio", "conditioning", "mobility_flow", "recovery_easy"}
 
+        # "Push + Cardio" / "Pull + Cardio" / "Upper + Cardio" /
+        # "Full Body + Cardio" — the user asked for a lift day with a
+        # same-day cardio finisher. We still treat it as a lifting
+        # override, but after rotation we promote the target day by
+        # appending a cardio finisher if one isn't already there.
+        wants_cardio_finisher = " + cardio" in override_lower
+        base_focus_lower = (
+            override_lower.replace(" + cardio", "").strip()
+            if wants_cardio_finisher else override_lower
+        )
+
         if override_lower in ("recovery", "active recovery"):
             from app.services.workout.planner import generate_recovery_day
             days[target_idx] = generate_recovery_day(body.session_minutes or 45)
@@ -773,12 +784,21 @@ def generate_full_week(
                     lift_positions.append(idx)
                     lift_days.append(d)
 
-            # Find which lifting slot has the desired focus
+            # Find which lifting slot has the desired focus. Prefer an
+            # exact match first; if the user asked for a PLUS_CARDIO
+            # variant that the recipe didn't produce, fall back to a
+            # matching base lift day (we promote it to PLUS_CARDIO below).
             src_lift_idx: int | None = None
             for li, ld in enumerate(lift_days):
                 if (ld.get("focus") or "").lower().strip() == override_lower:
                     src_lift_idx = li
                     break
+            if src_lift_idx is None and wants_cardio_finisher:
+                for li, ld in enumerate(lift_days):
+                    lf = (ld.get("focus") or "").lower().strip()
+                    if lf == base_focus_lower or lf.startswith(base_focus_lower + " "):
+                        src_lift_idx = li
+                        break
 
             if src_lift_idx is not None and target_idx in lift_positions:
                 dst_lift_idx = lift_positions.index(target_idx)
@@ -796,6 +816,44 @@ def generate_full_week(
                 # doesn't have) — label-only fallback
                 days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
                 logger.info(f"[generate-week] pin fallback: label-only for {body.pin_focus}")
+
+            # Promote the target day to PLUS_CARDIO if the user asked for
+            # the cardio-finisher variant and the day isn't already one.
+            if wants_cardio_finisher:
+                target_day = days[target_idx]
+                current_focus = (target_day.get("focus") or "").lower()
+                already_hybrid = " + cardio" in current_focus
+                if not already_hybrid:
+                    from app.services.workout.planner import generate_cardio_day
+                    # Pull one lightweight finisher from the cardio pool —
+                    # the first exercise (Zone 2 steady-state) is a good
+                    # finisher anchor.
+                    finisher_day = generate_cardio_day(
+                        min(25, max(15, (body.session_minutes or 45) // 3)),
+                        "body_recomp",  # easy-pool: zone 2 preferred as a finisher
+                        equipment_owned=body.equipment,
+                    )
+                    finisher_exs = finisher_day.get("exercises", [])
+                    finisher_exs = [ex for ex in finisher_exs if ex.get("slot_role") != "warmup"]
+                    if finisher_exs:
+                        pick = finisher_exs[0].copy()
+                        pick["slot_role"] = "isolation"
+                        pick["name"] = f"{pick.get('name', 'Cardio')} (Finisher)"
+                        # Generated cardio exercises emit `rest_seconds`;
+                        # the rest of the plan uses camelCase `restSeconds`.
+                        # Normalize inline so the day stays consistent.
+                        if "rest_seconds" in pick and "restSeconds" not in pick:
+                            pick["restSeconds"] = pick.pop("rest_seconds")
+                        else:
+                            pick.pop("rest_seconds", None)
+                        updated = {**target_day}
+                        updated["exercises"] = [*(target_day.get("exercises") or []), pick]
+                        updated["focus"] = body.pin_focus
+                        days[target_idx] = updated
+                        logger.info(
+                            f"[generate-week] pin promote: appended cardio finisher "
+                            f"'{pick.get('name')}' to target day"
+                        )
 
     result_plan = {
         "days": days,
