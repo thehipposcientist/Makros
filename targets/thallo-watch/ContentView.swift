@@ -270,7 +270,13 @@ private struct TodayView: View {
                 // nutrition is trending today. Both are optional —
                 // chips hide when data isn't available.
                 HStack(spacing: 6) {
-                    if let r = workout.readiness {
+                    // Readiness chip reads from `conn.readiness` first so
+                    // the Today chip and the Readiness tab share ONE
+                    // source. Falls back to the value embedded in the
+                    // workout payload only when the readiness payload
+                    // hasn't landed yet (cold start before the phone's
+                    // first readiness push).
+                    if let r = conn.readiness?.score ?? workout.readiness {
                         let color = r >= 70 ? theme.success
                             : r >= 40 ? theme.warning : theme.error
                         HStack(spacing: 4) {

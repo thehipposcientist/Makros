@@ -1967,69 +1967,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             summary,
           });
         } catch { /* non-fatal */ }
-        // Readiness drill-down — composite score + factor breakdown
-        // so the watch's Readiness tab shows what's driving the
-        // number. Built from data the phone already has (readinessScore
-        // state + cached health summary). When readinessScore is null
-        // we still push the factors so the user sees what's missing
-        // (e.g. "no sleep data — connect Apple Health").
-        try {
-          const { pushReadinessToWatch } = await import('../utils/watchSync');
-          const cached = await (await import('../services/healthDataSummary')).getCachedHealthDataSummary();
-          const factors: any[] = [];
-          // Sleep factor — derived from the same hours-based scale
-          // we used for the sleep tab. "good" >= 7h.
-          if (cached?.sleepMinutes != null) {
-            const h = cached.sleepMinutes / 60;
-            const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
-            factors.push({
-              label: 'Sleep', value: v,
-              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-              detail: `${h.toFixed(1)}h last night`,
-            });
-          }
-          // RHR factor — under 65 = "good", 65-75 = "ok", 75+ = "low".
-          if (cached?.restingHeartRate != null) {
-            const rhr = cached.restingHeartRate;
-            const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
-            factors.push({
-              label: 'RHR', value: v,
-              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-              detail: `${rhr} bpm`,
-            });
-          }
-          // HRV — higher is better, but absolute thresholds vary
-          // wildly by individual. Use 50ms as the median signal.
-          if (cached?.hrv != null) {
-            const hrv = cached.hrv;
-            const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
-            factors.push({
-              label: 'HRV', value: v,
-              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-              detail: `${hrv} ms`,
-            });
-          }
-          // Recent training load — proxy via fatigue from
-          // readinessScore.factors? For now, a simple "did the user
-          // train hard yesterday?" check from the cached weekly Z2.
-          // TODO: pipe in training-load score from the readiness
-          // engine when we lift it into healthDataSummary.
-          // Reuse the SAME score that was already pushed via
-          // pushWorkoutToWatch above (the workout-card lightning bolt).
-          // Two pushes, one number — the watch's Today icon and the
-          // Readiness tab now show the EXACT same value, regardless of
-          // any meal-fetch timing drift between separate compute calls.
-          await pushReadinessToWatch({
-            score: unifiedPrepScore,
-            label: unifiedPrepLabel,
-            summary: unifiedPrepScore != null
-              ? (unifiedPrepScore >= 75 ? "Solid recovery — train as planned."
-                 : unifiedPrepScore >= 50 ? "Moderate. Standard intensity is fine."
-                 : "Low. Consider lighter loads today.")
-              : null,
-            factors,
-          });
-        } catch { /* non-fatal */ }
+        // Readiness payload is owned by `TrainingReadinessCard`'s
+        // `pushReadinessToWatch` call. Routing all readiness writes
+        // through one site eliminates the score race we used to see
+        // (HomeScreen + the card pushing seconds apart, sometimes with
+        // empty factors clobbering full ones). The watch's Today chip
+        // now reads `conn.readiness?.score` first, so it shares the
+        // exact same value as the Readiness tab — both surfaces always
+        // show one number. The reachability re-push below still seeds
+        // readiness on cold-wake, when the card hasn't mounted yet.
         // Weight summary for the quick-log tab. Reads the weight
         // history utility so the EMA + slope match the phone's
         // weight chart.

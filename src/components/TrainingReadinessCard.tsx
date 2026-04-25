@@ -165,19 +165,49 @@ export default function TrainingReadinessCard({
       try { onScoreComputed?.(res.score, res.label); } catch {}
 
       // Push the EXACT score the user is looking at on this card to
-      // the watch as the authoritative reading. Eliminates the few-point
-      // drift between phone-render time and the watch-sync useEffect's
-      // independent compute. Now the watch always shows what the phone
-      // most-recently displayed.
+      // the watch as the authoritative reading. This card is the SOLE
+      // writer of `pushReadinessToWatch` — HomeScreen's regular sync
+      // used to also push and the two could race, occasionally landing
+      // a stale score on the watch a beat after this one. Factors are
+      // built here too so the Readiness tab on the watch never gets
+      // overwritten with an empty list.
       try {
         const { pushReadinessToWatch } = await import('../utils/watchSync');
+        const factors: Array<{ label: string; value: number; status: 'good' | 'ok' | 'low'; detail: string | null }> = [];
+        if (summary?.lastNightSleepHours != null) {
+          const h = summary.lastNightSleepHours;
+          const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
+          factors.push({
+            label: 'Sleep', value: v,
+            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+            detail: `${h.toFixed(1)}h last night`,
+          });
+        }
+        if (summary?.restingHeartRate != null) {
+          const rhr = summary.restingHeartRate;
+          const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
+          factors.push({
+            label: 'RHR', value: v,
+            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+            detail: `${rhr} bpm`,
+          });
+        }
+        if (summary?.hrvAvg != null) {
+          const hrv = summary.hrvAvg;
+          const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
+          factors.push({
+            label: 'HRV', value: v,
+            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+            detail: `${Math.round(hrv)} ms`,
+          });
+        }
         await pushReadinessToWatch({
           score: res.score,
           label: res.label,
           summary: res.score >= 75 ? 'Solid recovery — train as planned.'
             : res.score >= 50 ? 'Moderate. Standard intensity is fine.'
             : 'Low. Consider lighter loads today.',
-          factors: [],
+          factors,
         }).catch(() => {});
       } catch { /* watch bridge optional */ }
     } catch {
