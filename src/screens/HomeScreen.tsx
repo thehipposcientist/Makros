@@ -1862,17 +1862,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
           : 'scheduled';
-        // ── Single readiness compute for the WHOLE sync cycle ──
-        // Prefer the canonical value the phone's TrainingReadinessCard
-        // last computed (set via onScoreComputed callback). If fresh
-        // (<2 min old), reuse — phone and watch will show identical
-        // numbers. If stale or never computed (user hasn't viewed
-        // Progress tab), compute fresh here.
+        // ── Readiness: trust what the phone is currently displaying ──
+        // The canonical ref is set by TrainingReadinessCard whenever it
+        // renders. Always prefer that over recomputing — guarantees the
+        // watch ALWAYS shows the same number the phone last displayed.
+        // No freshness window: the card writes a fresh value every
+        // time it loads, and stale values are still better than drift.
         let unifiedPrepScore: number | null = readinessScore?.score ?? null;
         let unifiedPrepLabel: string | null = readinessScore?.label ?? null;
         const canonical = canonicalPrepRef.current;
-        const canonicalFresh = canonical && (Date.now() - canonical.computedAt) < 2 * 60_000;
-        if (canonicalFresh && canonical) {
+        if (canonical) {
           unifiedPrepScore = canonical.score;
           unifiedPrepLabel = canonical.label;
         } else {
@@ -5771,10 +5770,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
-                    let dayIdx = workoutPlan.days.indexOf(item.workout);
-                    if (dayIdx < 0) dayIdx = workoutPlan.days.findIndex(d => d?.focus === item.workout?.focus);
-                    if (dayIdx < 0 && i < workoutPlan.days.length) dayIdx = i;
-                    if (dayIdx < 0) return;
+                    // Use the VISUAL schedule index `i` directly. The
+                    // backend `pin_day_index` indexes into the freshly
+                    // generated 7-day output (same shape as the visual
+                    // schedule). Earlier we computed dayIdx from
+                    // `workoutPlan.days.indexOf(item.workout)` which can
+                    // map differently than the visual schedule when rest
+                    // days are reordered — the bug user reported as
+                    // "tap tomorrow's switch → it changes today's plan."
+                    const dayIdx = i;
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});

@@ -38,32 +38,30 @@ final class HeartRateStore: NSObject, ObservableObject {
             errorMessage = "HealthKit unavailable on this device."
             return
         }
-        // Begin the HKWorkoutSession IMMEDIATELY — don't wait for the
-        // requestAuthorization callback. If permissions are already
-        // granted (the common case after first install), the session
-        // starts in the same RunLoop tick and watchOS keeps the app
-        // foregrounded. If permissions are denied, beginSession's
-        // try/catch handles it gracefully.
-        //
-        // Earlier the auth callback gated session start, which meant a
-        // 1-3s delay during which watchOS could background the app
-        // (the "watch closes on Start" symptom). The auth call is still
-        // fired in parallel so first-time permissions get prompted.
-        beginSession()
+        // Auth FIRST — calling HKWorkoutSession.startActivity before
+        // authorization is resolved can hard-crash the app on watchOS
+        // (rather than throw a catchable error). The earlier
+        // "synchronous start before auth" optimization for snappier
+        // UI was the cause of the "tap Start → app instantly closes"
+        // crash. Keep the placeholder live-HR view in ActiveWorkoutView
+        // (added separately) to prevent watchOS backgrounding during
+        // the brief auth → session-start window.
         let read: Set<HKObjectType> = [
             HKObjectType.quantityType(forIdentifier: .heartRate)!,
             HKObjectType.workoutType(),
         ]
         let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
-        store.requestAuthorization(toShare: write, read: read) { [weak self] _, err in
+        store.requestAuthorization(toShare: write, read: read) { [weak self] ok, err in
             guard let self else { return }
             if let err {
                 DispatchQueue.main.async { self.errorMessage = err.localizedDescription }
+                return
             }
-            // No retry of beginSession needed — the synchronous call
-            // above already started it (or failed cleanly via catch).
-            // If the user denies in the prompt, the session that's
-            // already running just won't get HR samples.
+            // Even when the user denies, ok=true (auth completed).
+            // Session can still start; HR samples just won't flow.
+            // Failures inside beginSession's try/catch set
+            // errorMessage instead of crashing.
+            self.beginSession()
         }
     }
 
