@@ -26,6 +26,7 @@
     ],
     "ios": {
       "bundleIdentifier": "com.thallo.app",
+      "appleTeamId": "2K37DX38H2",
       "supportsTablet": false,
       "infoPlist": {
         "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes and take food photos for nutrition tracking.",
