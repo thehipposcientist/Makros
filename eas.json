@@ -21,6 +21,7 @@
   "submit": {
     "production": {
       "ios": {
+        "bundleIdentifier": "com.thallo.app",
         "ascAppId": "6762629195",
         "appleTeamId": "2K37DX38H2"
       }
