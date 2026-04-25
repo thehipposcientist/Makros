@@ -1836,36 +1836,65 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const todayISO = new Date().toISOString().slice(0, 10);
         const todayItem = (schedule as any[])?.[0] ?? null;
         const todayWorkout = todayItem?.workout ?? null;
+        // Detect in-progress workout — ActiveWorkoutScreen writes
+        // `activeWorkoutStartTime` on mount and clears it on
+        // end/cancel. While that key is present (and recent), the
+        // user is mid-workout. The watch must see status='active'
+        // not 'scheduled', otherwise the regular HomeScreen sync
+        // re-push will keep overriding the watch's active state and
+        // closing the watch app. Was the root cause of "tap Start →
+        // app closes on watch even after a fresh build."
+        let isWorkoutInProgress = false;
+        try {
+          const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
+          if (startTimeRaw) {
+            const t = parseInt(startTimeRaw, 10);
+            // Only trust the flag if it's within the last 4 hours —
+            // beyond that it's stale (app force-close, etc).
+            if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
+              isWorkoutInProgress = true;
+            }
+          }
+        } catch { /* AsyncStorage flake — assume not in workout */ }
         const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
-          todayDone ? 'completed'
+          isWorkoutInProgress ? 'active'
+          : todayDone ? 'completed'
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
           : 'scheduled';
         // ── Single readiness compute for the WHOLE sync cycle ──
-        // Compute the 6-pillar preparedness ONCE here at the top.
-        // Both pushWorkoutToWatch (workout-card lightning bolt icon) AND
-        // pushReadinessToWatch (Readiness tab) get the EXACT same number.
-        // Earlier they each had their own compute path with their own
-        // network calls, producing drift even with the shared loader
-        // (different snapshots ms apart). One source of truth fixes that.
+        // Prefer the canonical value the phone's TrainingReadinessCard
+        // last computed (set via onScoreComputed callback). If fresh
+        // (<2 min old), reuse — phone and watch will show identical
+        // numbers. If stale or never computed (user hasn't viewed
+        // Progress tab), compute fresh here.
         let unifiedPrepScore: number | null = readinessScore?.score ?? null;
         let unifiedPrepLabel: string | null = readinessScore?.label ?? null;
-        try {
-          if (authToken) {
-            const { scorePreparedness } = await import('../services/preparedness');
-            const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-            const inputs = await loadPreparednessInputs({
-              authToken,
-              age: userProfile?.age ?? null,
-              proteinTarget: userProfile?.proteinGoal ?? null,
-              calorieTarget: userProfile?.calorieGoal ?? null,
-              todaysFocus: todayItem?.workout?.focus ?? null,
-            });
-            const prep = scorePreparedness(inputs);
-            unifiedPrepScore = prep.score;
-            unifiedPrepLabel = prep.label;
-          }
-        } catch { /* fall back to backend score */ }
+        const canonical = canonicalPrepRef.current;
+        const canonicalFresh = canonical && (Date.now() - canonical.computedAt) < 2 * 60_000;
+        if (canonicalFresh && canonical) {
+          unifiedPrepScore = canonical.score;
+          unifiedPrepLabel = canonical.label;
+        } else {
+          try {
+            if (authToken) {
+              const { scorePreparedness } = await import('../services/preparedness');
+              const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+              const inputs = await loadPreparednessInputs({
+                authToken,
+                age: userProfile?.age ?? null,
+                proteinTarget: userProfile?.proteinGoal ?? null,
+                calorieTarget: userProfile?.calorieGoal ?? null,
+                todaysFocus: todayItem?.workout?.focus ?? null,
+              });
+              const prep = scorePreparedness(inputs);
+              unifiedPrepScore = prep.score;
+              unifiedPrepLabel = prep.label;
+              // Update the ref so subsequent syncs reuse this value.
+              canonicalPrepRef.current = { score: prep.score, label: prep.label, computedAt: Date.now() };
+            }
+          } catch { /* fall back to backend score */ }
+        }
         await pushWorkoutToWatch(todayWorkout, {
           dateISO: todayISO,
           status,
@@ -2098,8 +2127,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const todayISO = new Date().toISOString().slice(0, 10);
           const todayItem = (s.schedule as any[])?.[0] ?? null;
           const todayWorkout = todayItem?.workout ?? null;
-          const status: 'scheduled' | 'completed' | 'skipped' | 'rest' =
-            s.todayDone ? 'completed'
+          // Detect in-progress workout — same reasoning as the main
+          // sync useEffect (must override 'scheduled' to 'active' or
+          // the watch app will close mid-workout).
+          let isWorkoutInProgressRP = false;
+          try {
+            // Synchronous-ish AsyncStorage read inside the listener;
+            // if it's slow we just default to scheduled (worst case
+            // the watch sees a stale state for one extra cycle).
+            AsyncStorage.getItem('activeWorkoutStartTime').then(raw => {
+              if (raw) {
+                const t = parseInt(raw, 10);
+                if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
+                  isWorkoutInProgressRP = true;
+                  // Re-push with active status if we just discovered
+                  // we're mid-workout. Idempotent on the watch side.
+                  pushWorkoutToWatch(todayWorkout, {
+                    dateISO: todayISO, status: 'active',
+                    readiness: null, readinessLabel: null,
+                  }).catch(() => {});
+                }
+              }
+            }).catch(() => {});
+          } catch { /* non-fatal */ }
+          const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
+            isWorkoutInProgressRP ? 'active'
+            : s.todayDone ? 'completed'
             : s.skippedDates.has(todayKey()) ? 'skipped'
             : todayItem?.isRest ? 'rest'
             : 'scheduled';
@@ -4570,6 +4623,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     [userProfile?.weightEntries],
   );
 
+  // Canonical preparedness — set by TrainingReadinessCard when it renders
+  // its score on Progress tab. The watch sync useEffect prefers this
+  // value (when fresh) so phone display and watch display SHARE one
+  // computation. Without this, two independent computes drifted.
+  const canonicalPrepRef = useRef<{ score: number; label: string; computedAt: number } | null>(null);
+
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
@@ -5166,6 +5225,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   proteinTarget={todayPlan?.targets?.protein ?? null}
                   calorieTarget={todayPlan?.targets?.calories ?? null}
                   todaysFocus={todaysFocus}
+                  onScoreComputed={(score, label) => {
+                    // Cache the canonical phone-displayed value so the
+                    // watch sync useEffect can use it instead of
+                    // re-computing (eliminates phone-vs-watch drift).
+                    canonicalPrepRef.current = { score, label, computedAt: Date.now() };
+                  }}
                 />
               );
             })()}

@@ -115,10 +115,14 @@ interface Props {
   todaysFocus?: string | null;
   /** Prefer a parent-provided summary so we don't duplicate the fetch. */
   healthSummary?: HealthSummary | null;
+  /** Called with the computed score after every load so the parent
+   *  can use the SAME number for watch pushes. Eliminates phone vs.
+   *  watch drift caused by independent compute calls. */
+  onScoreComputed?: (score: number, label: string) => void;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -154,6 +158,11 @@ export default function TrainingReadinessCard({
       setFatigue(f);
       const res = scorePreparedness(inputs);
       setPrep(res);
+      // Hand the computed score back to the parent so the watch push
+      // can use the SAME value the user sees on this card. Without
+      // this, phone Progress tab and watch readiness could drift even
+      // with the shared loader (different fetch timestamps).
+      try { onScoreComputed?.(res.score, res.label); } catch {}
 
       // Push the EXACT score the user is looking at on this card to
       // the watch as the authoritative reading. Eliminates the few-point
