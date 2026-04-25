@@ -2709,6 +2709,16 @@ export async function applyRecommendationAction(
   });
 }
 
+/** Wipe every WorkoutCompletion + WorkoutSession row for `dateISO`.
+ *  Used by the day-card "Undo done" path when a phantom completion
+ *  appears (timezone bug at midnight, partial sync, manual error). */
+export async function deleteWorkoutCompletion(token: string, dateISO: string): Promise<void> {
+  await request(`/workouts/completion?workout_date=${dateISO}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function getWeeklyVolume(token: string, days = 7): Promise<WeeklyVolumeSnapshot> {
   return request<WeeklyVolumeSnapshot>(`/workouts/weekly-volume?days=${days}`, {
     method: 'GET',

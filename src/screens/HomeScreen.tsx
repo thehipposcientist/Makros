@@ -4236,6 +4236,51 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     await persistDayState(date, { skipped_focus: null });
   }, [persistDayState]);
 
+  // Wipe a phantom "done" state — backend WorkoutCompletion +
+  // WorkoutSession + every related local artifact for the date.
+  // Triggered from the day card's "Mark as not done" link.
+  const handleUndoComplete = useCallback(async (date: string) => {
+    try {
+      if (authToken) {
+        const { deleteWorkoutCompletion } = await import('../services/api');
+        await deleteWorkoutCompletion(authToken, date).catch(() => {});
+      }
+      // Strip local history entries for that date so isTodayWorkoutDone
+      // can't fall back to a stale local row.
+      const history = await loadWorkoutHistory();
+      const next = history.filter(s => !s.date.startsWith(date));
+      const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+      await AsyncStorage.setItem('workoutHistory', JSON.stringify(next.slice(0, 100)));
+      // Drop preserved-completed snapshot for that date.
+      const { loadPreservedCompletedWorkouts } = await import('../utils/workoutHistory');
+      const preserved = await loadPreservedCompletedWorkouts();
+      delete preserved[date];
+      await AsyncStorage.setItem('preservedCompletedWorkouts', JSON.stringify(preserved));
+      // Drop today's stored summary.
+      const summaries = await loadWorkoutSummaries();
+      const remaining = summaries.filter(s => !s.date.startsWith(date));
+      await AsyncStorage.setItem('workoutSummaries', JSON.stringify(remaining));
+      // Refresh local state so the UI flips immediately.
+      if (date === todayKey()) {
+        setTodayDone(false);
+        setTodaySummary(null);
+        setCompletedDates(prev => {
+          const nset = new Set(prev);
+          nset.delete(date);
+          return nset;
+        });
+      }
+      setPreservedWorkouts(prev => {
+        const np = { ...prev };
+        delete np[date];
+        return np;
+      });
+      console.log('[undo-complete] cleared completion for', date);
+    } catch (e) {
+      console.warn('[undo-complete] failed:', e);
+    }
+  }, [authToken]);
+
   // Video modal target — carries the exercise name PLUS optional
   // metadata so the backend can rank results to the exact variant
   // (e.g. "Band Chest Press" excludes "Machine Chest Press" hits).
@@ -5276,6 +5321,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onStartWorkout={onStartWorkout}
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
+                  onUndoComplete={isToday ? () => handleUndoComplete(key) : undefined}
                   splitOptions={allOptions}
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
@@ -5659,23 +5705,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               alignItems: 'center',
                               justifyContent: 'center',
                               gap: 4,
-                              backgroundColor: fullyLogged && !isToday ? themeColors.success + '22' : themeColors.surfaceRaised,
-                              borderWidth: isSelected ? 2 : fullyLogged && !isToday ? 2 : 1,
-                              borderColor: isSelected
-                                ? themeColors.primary
-                                : fullyLogged && !isToday ? themeColors.success : themeColors.border,
+                              // Strip the "fully logged" outline + tinted
+                              // background — the card below already shows
+                              // the day's state with much more detail. The
+                              // calendar's only job is "let me pick a day +
+                              // see the score color." Border + bg now only
+                              // change when SELECTED.
+                              backgroundColor: themeColors.surfaceRaised,
+                              borderWidth: isSelected ? 2 : 1,
+                              borderColor: isSelected ? themeColors.primary : themeColors.border,
                             }}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
                               <Text style={{ fontSize: 10, fontWeight: '700', color: isToday ? themeColors.primary : themeColors.textSecondary }}>
                                 {dateLabel}
                               </Text>
-                              {/* Inline checkmark next to date — guaranteed
-                                  to render (previous absolute-positioned
-                                  badge got clipped by parent overflow on
-                                  some devices). */}
-                              {fullyLogged && !isToday && (
-                                <Ionicons name="checkmark-circle" size={12} color={themeColors.success} />
-                              )}
+                              {/* Calendar checkmark removed — the
+                                  card below already shows the daily
+                                  state clearly. The little check next
+                                  to the date label was redundant +
+                                  visually noisy. */}
                             </View>
                             <View style={{
                               width: 28, height: 28, borderRadius: 14,
@@ -5959,7 +6007,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   authToken={authToken}
                   themeName={userProfile.themePreference}
                   targetCalories={target}
-                  onFillIn={() => setMealsSubTab('foods' as any)}
+                  // Land on the History sub-tab (which lets the user
+                  // add meals to past days) — NOT Foods (the search /
+                  // library) which is what the user complained looked
+                  // like "settings." Foods is the wrong destination
+                  // for "fill in yesterday's missed meals."
+                  onFillIn={() => setMealsSubTab('history')}
                 />
               );
             })()}
@@ -8635,7 +8688,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -8648,6 +8701,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   onStartWorkout: (workout: WorkoutDay) => void;
   onSkip: (focus: string) => void;
   onUnskip: () => void;
+  /** Wipes today's WorkoutCompletion + WorkoutSession + local
+   *  history entries so a phantom-done state can be reverted. */
+  onUndoComplete?: () => void;
   onChangeFocus?: (newFocus: string) => void;
   splitOptions?: string[];
   optionWarnings?: Record<string, { conflict: boolean; readiness: number | null }>;
@@ -8908,6 +8964,38 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
               <View style={[styles.completedBanner, { backgroundColor: tc.success + '1A', borderColor: tc.success }]}>
                 <Text style={[styles.completedBannerText, { color: tc.success }]}>Workout completed today!</Text>
               </View>
+              {/* Undo affordance for phantom completions — no real
+                  history entry, but the day still shows as done. Tap
+                  to wipe the WorkoutCompletion + Session rows + local
+                  history for today. */}
+              {isToday && onUndoComplete && (
+                <TouchableOpacity
+                  onPress={() => {
+                    Alert.alert(
+                      'Mark as not done?',
+                      'This wipes today\'s completion record. Use this if today shows as done but you didn\'t actually finish a workout.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Mark not done',
+                          style: 'destructive',
+                          onPress: () => onUndoComplete(),
+                        },
+                      ],
+                    );
+                  }}
+                  style={{
+                    alignSelf: 'flex-start',
+                    paddingHorizontal: 12, paddingVertical: 6,
+                    borderRadius: 8,
+                    backgroundColor: tc.surfaceRaised,
+                    borderWidth: 1, borderColor: tc.border,
+                  }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>
+                    Mark as not done
+                  </Text>
+                </TouchableOpacity>
+              )}
               {completedSummary ? (
                 <View style={[styles.completedBanner, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, gap: 8, alignItems: 'flex-start' }]}>
                   <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>

@@ -921,6 +921,22 @@ def mark_workout_complete(
          give downstream systems (plan_review, progression engine,
          analytics) real per-set history instead of just a duration.
     """
+    # Defensive guard: reject completions that have NO sets logged AND
+    # no duration AND aren't a manual activity (cardio / sport / etc).
+    # This blocks phantom completions from a stray watch end-workout
+    # signal that wasn't backed by a real session — exactly the bug the
+    # user hit waking up to a "done" day with nothing in history.
+    has_real_data = (
+        (body.duration_seconds and body.duration_seconds > 30) or
+        bool(body.activity_category) or
+        bool(body.exercises and len(body.exercises) > 0)
+    )
+    if not has_real_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty completion rejected — log sets, duration, or pick an activity first.",
+        )
+
     # Upsert by (user, date, focus). Multiple activities per day are allowed
     # (e.g. legs workout in the morning + sauna recovery in the evening).
     # Each gets its own completion row so fatigue accumulates correctly.
@@ -1209,6 +1225,53 @@ def mark_workout_complete(
         "structured_persisted": bool(session_rows_created),
         "prs": prs,
     }
+
+
+@router.delete("/completion", status_code=204)
+def delete_workout_completion(
+    workout_date: date = Query(..., description="YYYY-MM-DD"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Delete every `WorkoutCompletion` row for the given date — used
+    when a session was logged in error or a phantom row appeared
+    (timezone bug at midnight, partial sync, etc). Idempotent: safe
+    to call when nothing exists.
+
+    Also wipes any matching `WorkoutSession` rows so per-set detail
+    + downstream PR / volume rollups don't keep referencing the
+    deleted day. Per-set + per-exercise children are removed via
+    cascade through the FK, but we don't define cascade on these
+    tables — clean them up explicitly.
+    """
+    rows = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == workout_date)
+    ).all()
+    for r in rows:
+        db.delete(r)
+
+    sessions = db.exec(
+        select(WorkoutSession)
+        .where(WorkoutSession.user_id == current_user.id)
+        .where(WorkoutSession.workout_date == workout_date)
+    ).all()
+    for s in sessions:
+        # Cascade: drop child exercise rows + set rows.
+        exercises = db.exec(
+            select(WorkoutExercise).where(WorkoutExercise.session_id == s.id)
+        ).all()
+        for e in exercises:
+            sets_ = db.exec(
+                select(ExerciseSet).where(ExerciseSet.workout_exercise_id == e.id)
+            ).all()
+            for st in sets_:
+                db.delete(st)
+            db.delete(e)
+        db.delete(s)
+
+    db.commit()
 
 
 @router.get("/status", response_model=WorkoutStatusResponse)
