@@ -2178,6 +2178,29 @@ export async function getGutHealth(token: string, days = 7): Promise<{ today: Gu
   });
 }
 
+// Plant vs animal protein breakdown for today — per-food list so the
+// NutritionCard tile can drill into a modal showing each contributing
+// item. Mixed items split 50/50 between plant + animal.
+export interface ProteinBreakdownItem {
+  name: string;
+  protein_g: number;
+}
+export interface ProteinBreakdown {
+  date: string;
+  plant_total_g: number;
+  animal_total_g: number;
+  plant_pct: number;
+  animal_pct: number;
+  plant: ProteinBreakdownItem[];
+  animal: ProteinBreakdownItem[];
+  unclassified: ProteinBreakdownItem[];
+}
+export async function getProteinBreakdown(token: string): Promise<ProteinBreakdown> {
+  return request(`/meals/protein-breakdown`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // Unified Nutrition Score — server-side authority.
 export interface NutritionScoreBreakdownItem {
   label: string;

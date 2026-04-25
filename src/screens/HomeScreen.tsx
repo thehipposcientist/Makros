@@ -1569,17 +1569,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // re-queries.
   const [todayCollagenG, setTodayCollagenG] = useState<number | null>(null);
   const [todayProbioticCfu, setTodayProbioticCfu] = useState<number | null>(null);
+  const [proteinBreakdown, setProteinBreakdown] = useState<any | null>(null);
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
     (async () => {
       try {
-        const { getGutHealth } = await import('../services/api');
-        const res = await getGutHealth(authToken, 7);
+        const { getGutHealth, getProteinBreakdown } = await import('../services/api');
+        const [gut, breakdown] = await Promise.all([
+          getGutHealth(authToken, 7).catch(() => null),
+          getProteinBreakdown(authToken).catch(() => null),
+        ]);
         if (cancelled) return;
-        const t: any = res?.today;
+        const t: any = gut?.today;
         setTodayCollagenG(typeof t?.collagen_g === 'number' ? t.collagen_g : 0);
         setTodayProbioticCfu(typeof t?.probiotic_cfu_billions === 'number' ? t.probiotic_cfu_billions : 0);
+        setProteinBreakdown(breakdown);
       } catch { /* network / bridge optional */ }
     })();
     return () => { cancelled = true; };
@@ -6441,6 +6446,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onAddFromSaved={() => setAddFromSavedFor(d.key)}
                       dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
                       dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
+                      proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}
                     />
                   </AnimatedCollapsible>
                 </View>

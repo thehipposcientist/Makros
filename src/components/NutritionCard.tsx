@@ -52,6 +52,19 @@ interface NutritionCardProps {
    *  collagen, billions of CFU, etc). */
   dailyCollagenG?: number | null;
   dailyProbioticCfuBillions?: number | null;
+  /** Per-food plant vs animal protein breakdown for today. Drives the
+   *  "Plant vs Meat" tile + drill-down modal beneath the macro grid.
+   *  Null = not yet loaded; { plant_total_g: 0, animal_total_g: 0 }
+   *  = loaded but no protein logged yet (tile hides). */
+  proteinBreakdown?: {
+    plant_total_g: number;
+    animal_total_g: number;
+    plant_pct: number;
+    animal_pct: number;
+    plant: Array<{ name: string; protein_g: number }>;
+    animal: Array<{ name: string; protein_g: number }>;
+    unclassified: Array<{ name: string; protein_g: number }>;
+  } | null;
 }
 
 export default function NutritionCard({
@@ -75,8 +88,10 @@ export default function NutritionCard({
   onAddFromSaved,
   dailyCollagenG,
   dailyProbioticCfuBillions,
+  proteinBreakdown,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showProteinModal, setShowProteinModal] = useState(false);
   const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
@@ -178,6 +193,57 @@ export default function NutritionCard({
           <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
+
+        {/* Plant vs Meat protein tile — hidden until at least one
+            classified-protein meal is logged. Tap to open the drill-
+            down modal showing each contributing food. */}
+        {proteinBreakdown && (proteinBreakdown.plant_total_g + proteinBreakdown.animal_total_g) > 0 && (() => {
+          const plantG = proteinBreakdown.plant_total_g;
+          const animalG = proteinBreakdown.animal_total_g;
+          const total = plantG + animalG;
+          const plantPct = total > 0 ? (plantG / total) * 100 : 0;
+          // Plant green / animal warm-orange split bar — keeps the
+          // semantic ("plant"=green / "animal"=warm) consistent across
+          // themes without hardcoding theme-specific colors.
+          const plantColor = '#22C55E';
+          const animalColor = '#E07830';
+          return (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => setShowProteinModal(true)}
+              style={{
+                marginTop: 10, padding: 12,
+                backgroundColor: colors.surface,
+                borderRadius: 10,
+                borderWidth: 1, borderColor: colors.border,
+              }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textSecondary, letterSpacing: 0.4 }}>
+                  PROTEIN SOURCE
+                </Text>
+                <View style={{ flex: 1 }} />
+                <Text style={{ fontSize: 11, fontWeight: '700', color: plantColor }}>
+                  Plant {Math.round(plantG)}g
+                </Text>
+                <Text style={{ fontSize: 11, color: colors.textMuted }}>·</Text>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: animalColor }}>
+                  Meat {Math.round(animalG)}g
+                </Text>
+                <Ionicons name="chevron-forward" size={12} color={colors.textMuted} />
+              </View>
+              {/* Proportional split bar */}
+              <View style={{ flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden', backgroundColor: colors.border }}>
+                <View style={{ width: `${plantPct}%`, backgroundColor: plantColor }} />
+                <View style={{ flex: 1, backgroundColor: animalColor }} />
+              </View>
+              {proteinBreakdown.unclassified.length > 0 && (
+                <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
+                  +{proteinBreakdown.unclassified.length} unclassified item{proteinBreakdown.unclassified.length === 1 ? '' : 's'} — tap to see
+                </Text>
+              )}
+            </TouchableOpacity>
+          );
+        })()}
         {/* Day score — tap to open combined nutrition modal */}
         {dayScore.score > 0 && (() => {
           const sc = dayScore;
@@ -539,6 +605,118 @@ export default function NutritionCard({
                   ))}
                 </View>
               </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Plant vs Meat protein drill-down modal */}
+        <Modal
+          visible={showProteinModal}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowProteinModal(false)}>
+          <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' }}>
+            <View style={{
+              backgroundColor: colors.background,
+              borderTopLeftRadius: 24, borderTopRightRadius: 24,
+              padding: 18, maxHeight: '85%',
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+                <Text style={{ fontSize: 18, fontWeight: '800', color: colors.textPrimary, flex: 1 }}>
+                  Protein source today
+                </Text>
+                <TouchableOpacity onPress={() => setShowProteinModal(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="close" size={22} color={colors.textMuted} />
+                </TouchableOpacity>
+              </View>
+              {proteinBreakdown && (() => {
+                const plantG = proteinBreakdown.plant_total_g;
+                const animalG = proteinBreakdown.animal_total_g;
+                const total = plantG + animalG;
+                const plantPct = total > 0 ? (plantG / total) * 100 : 0;
+                return (
+                  <ScrollView showsVerticalScrollIndicator={false}>
+                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                      <View style={{ flex: 1, padding: 12, backgroundColor: '#22C55E22', borderRadius: 10 }}>
+                        <Text style={{ fontSize: 10, color: '#16803D', fontWeight: '800', letterSpacing: 0.5 }}>PLANT</Text>
+                        <Text style={{ fontSize: 22, fontWeight: '900', color: '#16803D', marginTop: 4 }}>
+                          {Math.round(plantG)}<Text style={{ fontSize: 12, fontWeight: '700' }}>g</Text>
+                        </Text>
+                        <Text style={{ fontSize: 10, color: '#16803D' }}>{Math.round(plantPct)}% of protein</Text>
+                      </View>
+                      <View style={{ flex: 1, padding: 12, backgroundColor: '#E0783022', borderRadius: 10 }}>
+                        <Text style={{ fontSize: 10, color: '#9A4810', fontWeight: '800', letterSpacing: 0.5 }}>ANIMAL</Text>
+                        <Text style={{ fontSize: 22, fontWeight: '900', color: '#9A4810', marginTop: 4 }}>
+                          {Math.round(animalG)}<Text style={{ fontSize: 12, fontWeight: '700' }}>g</Text>
+                        </Text>
+                        <Text style={{ fontSize: 10, color: '#9A4810' }}>{Math.round(100 - plantPct)}% of protein</Text>
+                      </View>
+                    </View>
+
+                    {proteinBreakdown.plant.length > 0 && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#16803D', letterSpacing: 0.5, marginTop: 4, marginBottom: 6 }}>
+                          PLANT SOURCES
+                        </Text>
+                        {proteinBreakdown.plant.map((it, i) => (
+                          <View key={`p-${i}`} style={{
+                            flexDirection: 'row', alignItems: 'center',
+                            paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
+                            backgroundColor: colors.surface, borderRadius: 8,
+                            borderLeftWidth: 3, borderLeftColor: '#22C55E',
+                          }}>
+                            <Text style={{ flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>{it.name}</Text>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: '#16803D' }}>{Math.round(it.protein_g)}g</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    {proteinBreakdown.animal.length > 0 && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#9A4810', letterSpacing: 0.5, marginTop: 10, marginBottom: 6 }}>
+                          ANIMAL SOURCES
+                        </Text>
+                        {proteinBreakdown.animal.map((it, i) => (
+                          <View key={`a-${i}`} style={{
+                            flexDirection: 'row', alignItems: 'center',
+                            paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
+                            backgroundColor: colors.surface, borderRadius: 8,
+                            borderLeftWidth: 3, borderLeftColor: '#E07830',
+                          }}>
+                            <Text style={{ flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>{it.name}</Text>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: '#9A4810' }}>{Math.round(it.protein_g)}g</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    {proteinBreakdown.unclassified.length > 0 && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textMuted, letterSpacing: 0.5, marginTop: 10, marginBottom: 6 }}>
+                          UNCLASSIFIED
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 6, fontStyle: 'italic' }}>
+                          We don't know if these are plant or animal yet — re-log with a library food to classify.
+                        </Text>
+                        {proteinBreakdown.unclassified.map((it, i) => (
+                          <View key={`u-${i}`} style={{
+                            flexDirection: 'row', alignItems: 'center',
+                            paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
+                            backgroundColor: colors.surface, borderRadius: 8,
+                            borderLeftWidth: 3, borderLeftColor: colors.border,
+                          }}>
+                            <Text style={{ flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary }}>{it.name}</Text>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textMuted }}>{Math.round(it.protein_g)}g</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    <View style={{ height: 24 }} />
+                  </ScrollView>
+                );
+              })()}
             </View>
           </View>
         </Modal>
