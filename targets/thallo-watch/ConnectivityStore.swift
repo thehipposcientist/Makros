@@ -258,7 +258,12 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     /// receives, kicks off its own workout state, then mirrors progress
     /// back via `progress` messages.
     func sendCommand(_ command: String, payload: [String: Any] = [:]) {
+        // CRITICAL: only `print()` in here, never `wlog()`. `wlog()`
+        // calls back into `sendCommand("watch_log", ...)` which would
+        // recurse forever. The unified-log entries are still visible
+        // in Console.app — just not forwarded to the phone.
         guard let session, session.activationState == .activated else {
+            print("[watch] sendCommand(\(command)) FAILED — session not activated")
             lastError = "Watch session not active — open the iPhone app once to pair."
             return
         }
@@ -267,12 +272,21 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         body["command"] = command
         body["tsMs"] = Date().timeIntervalSince1970 * 1000
         if session.isReachable {
+            // Skip the chatty per-message log for forwarded `watch_log`
+            // commands so the unified log doesn't double-up every line.
+            if command != "watch_log" {
+                print("[watch] sendCommand(\(command)) — reachable, sendMessage")
+            }
             session.sendMessage(body, replyHandler: nil) { [weak self] err in
+                print("[watch] sendMessage(\(command)) error: \(err.localizedDescription)")
                 DispatchQueue.main.async { self?.lastError = err.localizedDescription }
             }
         } else {
             // Queue for later delivery via transferUserInfo when phone
             // isn't reachable (locked / app backgrounded).
+            if command != "watch_log" {
+                print("[watch] sendCommand(\(command)) — NOT reachable, queuing via transferUserInfo")
+            }
             session.transferUserInfo(body)
         }
     }
@@ -280,4 +294,15 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
 extension Notification.Name {
     static let watchProgressUpdate = Notification.Name("watchProgressUpdate")
+}
+
+/// Watch-side logger. Prints to the unified log (visible in Mac
+/// Console.app) AND forwards the line to the paired iPhone via
+/// WCSession, where the phone's command listener routes it into the
+/// in-app DevLogsViewer. Use this instead of plain `print()` for
+/// anything you want to inspect from a TestFlight install without
+/// tethering the watch to a Mac.
+func wlog(_ msg: String) {
+    print(msg)
+    ConnectivityStore.shared.sendCommand("watch_log", payload: ["msg": msg])
 }

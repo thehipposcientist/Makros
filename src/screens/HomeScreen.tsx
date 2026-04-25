@@ -2395,6 +2395,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const liveSchedule = rePushStateRef.current.schedule as any[];
             const today = liveSchedule?.[0]?.workout ?? workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
+          } else if (command === 'watch_log') {
+            // Watch-side `wlog(...)` forwards Swift print lines so they
+            // land in the in-app DevLogsViewer (Account → Developer
+            // logs) alongside the phone's own console output. Lets you
+            // debug TestFlight watch builds without tethering to a Mac.
+            const msg = String(payload?.msg ?? '');
+            if (msg) console.log(msg);
           } else if (command === 'toggle_meal') {
             const mealType = String(payload?.mealType || '');
             const todayISO = new Date().toISOString().slice(0, 10);

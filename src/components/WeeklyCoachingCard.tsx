@@ -163,8 +163,10 @@ export default function WeeklyCoachingCard({
       borderRadius: radius.lg,
       padding: 14,
       marginBottom: 12,
-      borderWidth: 1,
-      borderColor: tc.primary + '44',
+      // Slightly heavier accent ring so the card reads as its own surface
+      // even on themes where surface ≈ background (void, obsidian).
+      borderWidth: 1.5,
+      borderColor: tc.primary + '66',
     }}>
       {/* Header: icon + "Weekly Coaching" + sessions chip */}
       <TouchableOpacity
@@ -203,7 +205,7 @@ export default function WeeklyCoachingCard({
           {/* Volume bars by muscle */}
           {volumeRows.length > 0 && (
             <View style={{ marginBottom: 12 }}>
-              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6, marginBottom: 6 }}>
+              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textSecondary, letterSpacing: 0.6, marginBottom: 6 }}>
                 VOLUME BY MUSCLE · THIS WEEK
               </Text>
               {volumeRows.map(row => {
@@ -211,26 +213,34 @@ export default function WeeklyCoachingCard({
                 const max = Math.max(row.range_max ?? 1, row.total_sets, 1);
                 const pct = Math.max(4, Math.min(100, (row.total_sets / max) * 100));
                 return (
-                  <View key={row.muscle} style={{ marginBottom: 8 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <View key={row.muscle} style={{ marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                       <Text style={{ flex: 1, fontSize: 12, fontWeight: '700', color: tc.textPrimary, textTransform: 'capitalize' }}>
                         {row.muscle}
                       </Text>
-                      <Text style={{ fontSize: 11, color: tc.textMuted, marginRight: 6 }}>
+                      <Text style={{ fontSize: 11, color: tc.textSecondary, marginRight: 6 }}>
                         {row.total_sets.toFixed(0)}
                         {row.range_min != null ? ` / ${row.range_min}–${row.range_max}` : ''}
                       </Text>
+                      {/* Status pill — bumped to ~33% bg alpha + 1px outline so
+                          the chip stays legible on every dark/light theme. The
+                          old `+ '22'` (13% alpha) vanished against deep blacks
+                          like void / obsidian. */}
                       <View style={{
-                        paddingHorizontal: 6, paddingVertical: 2,
-                        backgroundColor: color + '22', borderRadius: 4,
+                        paddingHorizontal: 7, paddingVertical: 2,
+                        backgroundColor: color + '55', borderRadius: 5,
+                        borderWidth: 1, borderColor: color + 'AA',
                       }}>
-                        <Text style={{ fontSize: 9, fontWeight: '800', color, letterSpacing: 0.5 }}>
+                        <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textPrimary, letterSpacing: 0.5 }}>
                           {STATUS_LABELS[row.status]}
                         </Text>
                       </View>
                     </View>
-                    <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden' }}>
-                      <View style={{ height: 5, width: `${pct}%` as any, backgroundColor: color }} />
+                    {/* Track tinted with the status color (low alpha) instead
+                        of `tc.border` — guarantees the track is visible against
+                        every theme's surface, including pure-OLED void. */}
+                    <View style={{ height: 6, borderRadius: 3, backgroundColor: color + '33', overflow: 'hidden' }}>
+                      <View style={{ height: 6, width: `${pct}%` as any, backgroundColor: color }} />
                     </View>
                   </View>
                 );
@@ -241,7 +251,7 @@ export default function WeeklyCoachingCard({
           {/* Recommendations */}
           {visibleRecs.length > 0 && (
             <View>
-              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6, marginBottom: 6 }}>
+              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textSecondary, letterSpacing: 0.6, marginBottom: 6 }}>
                 RECOMMENDED CHANGES
               </Text>
               {visibleRecs.map(rec => {
@@ -252,7 +262,12 @@ export default function WeeklyCoachingCard({
                     padding: 10,
                     borderRadius: 10,
                     backgroundColor: tc.surfaceRaised,
-                    borderLeftWidth: 3, borderLeftColor: pc,
+                    // Border on all sides plus a thicker priority bar on the
+                    // left. Without the outer border, surfaceRaised sits flush
+                    // against the parent surface on themes where the two are
+                    // close (void, obsidian, storm) and the rec disappears.
+                    borderWidth: 1, borderColor: tc.border,
+                    borderLeftWidth: 4, borderLeftColor: pc,
                   }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Text style={{

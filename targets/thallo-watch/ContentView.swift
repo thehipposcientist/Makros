@@ -75,12 +75,14 @@ struct ContentView: View {
                         // mid-prompt). Finally tell the phone. If any
                         // single step throws, the prior steps still
                         // succeeded and the watch stays foregrounded.
+                        wlog("[watch] Start tapped — flipping active=true, sending start_workout")
                         active = true
                         DispatchQueue.main.async {
                             heartRate.start()
                             conn.sendCommand("start_workout")
                         }
                     }, onSkip: {
+                        wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
                     })
                     MealsView(meals: conn.meals)
@@ -133,9 +135,11 @@ struct ContentView: View {
         // we unwind any local active state.
         .onReceive(conn.$workout) { w in
             guard let w = w else { return }
+            wlog("[watch] received workout status=\(w.status.rawValue) focus=\(w.focus) active(local)=\(active)")
             switch w.status {
             case .active:
                 if !active {
+                    wlog("[watch] phone pushed active — flipping local active=true")
                     active = true
                     heartRate.start()
                 }
@@ -273,10 +277,14 @@ private struct TodayView: View {
                     // Readiness chip reads from `conn.readiness` first so
                     // the Today chip and the Readiness tab share ONE
                     // source. Falls back to the value embedded in the
-                    // workout payload only when the readiness payload
-                    // hasn't landed yet (cold start before the phone's
-                    // first readiness push).
-                    if let r = conn.readiness?.score ?? workout.readiness {
+                    // workout payload when the readiness payload hasn't
+                    // landed yet, OR when it landed with a nil score.
+                    // The `flatMap` matters: a plain `?? workout.readiness`
+                    // would NOT fall through when conn.readiness exists
+                    // but its `score` is nil — `Optional<Optional<Int>>`
+                    // is non-nil at the outer level so `??` short-circuits.
+                    let resolvedReadiness: Int? = conn.readiness.flatMap { $0.score } ?? workout.readiness
+                    if let r = resolvedReadiness {
                         let color = r >= 70 ? theme.success
                             : r >= 40 ? theme.warning : theme.error
                         HStack(spacing: 4) {
@@ -768,7 +776,11 @@ private struct SleepView: View {
                             .font(.system(size: 9))
                             .foregroundColor(theme.textMuted)
                     }
-                    if let s = conn.sleep, s.score != nil || s.hoursLastNight != nil {
+                    // Show whatever sleep data we have. Earlier this required
+                    // a score OR hours, but RHR / HRV alone (which arrive even
+                    // when sleep wasn't tracked overnight) deserve to render
+                    // — empty-state was hiding useful vitals.
+                    if let s = conn.sleep, s.score != nil || s.hoursLastNight != nil || s.restingHr != nil || s.hrvMs != nil {
                         // Score dial — same visual language as the
                         // readiness chip on Today.
                         HStack(alignment: .center, spacing: 12) {

@@ -7,7 +7,8 @@ export type AppThemeName =
   | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
   | 'aurora'   | 'copper'  | 'storm'
   | 'linen'    | 'mint'
-  | 'butter'   | 'seaglass' | 'lilac' | 'cloud';
+  | 'butter'   | 'seaglass' | 'lilac' | 'cloud'
+  | 'paper'    | 'sky'      | 'sage';
 
 export interface ThemeColors {
   background: string;
@@ -1051,6 +1052,99 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#E8E0F0', strong: '#7040B0', text: '#2A0858' },
       planner: { soft: '#FFE0CC', strong: '#D45820', text: '#4A1A04' },
       account: { soft: '#FCE2D0', strong: '#C24A0A', text: '#2A1006' },
+    },
+  },
+
+  // ── LIGHT / NEW (paper, sky, sage) ──────────────────────────────────────────
+  // Three additions that fill genuine hue gaps in the light catalog:
+  //   • paper — the only true monochrome / minimalist light theme
+  //   • sky   — vivid sky-blue (arctic is navy, steel is steel-blue)
+  //   • sage  — muted eucalyptus (meadow is grass-green, mint is teal)
+
+  paper: {
+    name: 'paper',
+    label: 'Paper & Ink',
+    description: 'Crisp white background with deep ink-charcoal primary and a single warm orange accent — minimal and editorial.',
+    colors: {
+      background:    '#FCFCFA',  // paper-white, faintly warm
+      surface:       '#FFFFFF',
+      surfaceRaised: '#F2F1ED',
+      border:        '#D8D6D0',
+      primary:       '#1F2933',  // deep ink-charcoal
+      primaryDark:   '#0F1419',
+      primaryLight:  '#4A5560',
+      accent:        '#E0691A',  // warm burnt-orange pop
+      textPrimary:   '#0A0A0A',
+      textSecondary: '#4A4A48',
+      textMuted:     '#8A8884',
+      error:         '#C42030',
+      warning:       '#B07000',
+      success:       '#1A8A4A',
+    },
+    sections: {
+      workout: { soft: '#E4E8F0', strong: '#3A5BC8', text: '#101830' },  // tech blue
+      meals:   { soft: '#D8ECDF', strong: '#1F7A48', text: '#062818' },  // forest green
+      ai:      { soft: '#EAE0F4', strong: '#5848A8', text: '#1A0858' },  // editorial violet
+      planner: { soft: '#F8E8D0', strong: '#C07820', text: '#603810' },  // warm amber
+      account: { soft: '#F8E0E8', strong: '#A82858', text: '#48081E' },  // ink rose
+    },
+  },
+
+  sky: {
+    name: 'sky',
+    label: 'Open Sky',
+    description: 'Pale sky-cyan background with bright sky-blue primary and warm coral accent — airy, optimistic, light.',
+    colors: {
+      background:    '#EAF6FB',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#D4ECF6',
+      border:        '#A8D0E0',
+      primary:       '#0E7AB8',  // bright sky-blue
+      primaryDark:   '#075280',
+      primaryLight:  '#4FB0E0',
+      accent:        '#E06840',  // warm coral
+      textPrimary:   '#08202C',
+      textSecondary: '#285468',
+      textMuted:     '#5C8090',
+      error:         '#CC2E3C',
+      warning:       '#B87800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#CCE6F2', strong: '#0E7AB8', text: '#08303C' },  // sky blue
+      meals:   { soft: '#F8DCD0', strong: '#E06840', text: '#5A1808' },  // coral
+      ai:      { soft: '#E0E0F8', strong: '#4040C8', text: '#101058' },  // indigo
+      planner: { soft: '#F8ECC8', strong: '#B07820', text: '#503808' },  // gold
+      account: { soft: '#D0EDE8', strong: '#1A8888', text: '#063030' },  // teal
+    },
+  },
+
+  sage: {
+    name: 'sage',
+    label: 'Sage Garden',
+    description: 'Pale eucalyptus background with deep sage primary and warm clay accent — calm, grounded, herbal.',
+    colors: {
+      background:    '#EEF3EB',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#DDE8D8',
+      border:        '#B0C4A8',
+      primary:       '#3F6E48',  // deep sage-forest
+      primaryDark:   '#224830',
+      primaryLight:  '#78A082',
+      accent:        '#C4683A',  // warm clay
+      textPrimary:   '#142010',
+      textSecondary: '#38503C',
+      textMuted:     '#6A8068',
+      error:         '#C43030',
+      warning:       '#B07000',
+      success:       '#3F6E48',
+    },
+    sections: {
+      workout: { soft: '#D0E0CC', strong: '#3F6E48', text: '#142010' },  // sage
+      meals:   { soft: '#F0DCC8', strong: '#C4683A', text: '#4A1E08' },  // clay
+      ai:      { soft: '#E4DFEE', strong: '#6A4A98', text: '#28104A' },  // dusty violet
+      planner: { soft: '#F0E0C0', strong: '#A07020', text: '#503010' },  // amber
+      account: { soft: '#F0DCDC', strong: '#B05058', text: '#48181C' },  // muted rose
     },
   },
 
