@@ -4540,6 +4540,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     [],
   );
 
+  // MUST be called BEFORE any conditional return — hooks have to fire
+  // in the same order every render. The previous version sat below
+  // the `if (!userProfile || !workoutPlan)` early-return and blew up
+  // ("Rendered more hooks than during the previous render") on the
+  // first render when userProfile was still loading.
+  const adaptiveMacroWeightEntries = useMemo(
+    () => (userProfile?.weightEntries ?? []).map(e => ({ date: e.date, weight_lbs: e.weight_lbs })),
+    [userProfile?.weightEntries],
+  );
+
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
@@ -4574,15 +4584,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // that repopulates these days.
   const isFreeTier = (userProfile.subscriptionTier ?? 'pro') === 'free';
 
-  // Memoized weight entries for AdaptiveMacroCard so the array
-  // reference only changes when the actual data changes. Without this,
-  // every re-render minted a new array and the card's loading pill
-  // ("Checking your calorie trend…") flashed on every meal-card
-  // expand/collapse.
-  const adaptiveMacroWeightEntries = useMemo(
-    () => (userProfile.weightEntries ?? []).map(e => ({ date: e.date, weight_lbs: e.weight_lbs })),
-    [userProfile.weightEntries],
-  );
+  // (adaptiveMacroWeightEntries is declared above the early-return
+  // because hooks must fire in the same order every render.)
   const scheduleForRender = isFreeTier
     ? schedule.map(item => {
         // Keep completed/historical cards; only reset forward-looking days.
@@ -5310,32 +5313,51 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </Text>
                   </TouchableOpacity>
                 ) : null}
-                <View style={{ flexDirection: 'row', gap: 6 }}>
+                {/* Action row — icon-forward compact tiles. Labels are
+                    short verbs ("Custom" / "Log" / "Edit") so nothing
+                    truncates at typical iPhone widths. Long-press is
+                    NOT used (doesn't carry semantic affordance for
+                    fitness apps); the icon + caption pattern is the
+                    primary read. */}
+                <View style={{ flexDirection: 'row', gap: 8 }}>
                   <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: themeColors.primary + '66', flex: 1 }]}
+                    style={{
+                      flex: 1, alignItems: 'center', paddingVertical: 10,
+                      borderRadius: 12, borderWidth: 1, gap: 4,
+                      borderColor: themeColors.primary + '55',
+                      backgroundColor: themeColors.primary + '0E',
+                    }}
                     onPress={() => setShowLiveTracker(true)}
                     activeOpacity={0.7}>
-                    <Ionicons name="play-circle-outline" size={14} color={themeColors.primary} />
-                    <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]} numberOfLines={1}>
-                      Custom Workout
+                    <Ionicons name="flash" size={20} color={themeColors.primary} />
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>
+                      Custom
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: themeColors.primary + '44', flex: 1 }]}
+                    style={{
+                      flex: 1, alignItems: 'center', paddingVertical: 10,
+                      borderRadius: 12, borderWidth: 1, gap: 4,
+                      borderColor: themeColors.primary + '33',
+                    }}
                     onPress={() => setShowLogActivity(true)}
                     activeOpacity={0.7}>
-                    <Ionicons name="add-circle-outline" size={14} color={themeColors.primary} />
-                    <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]} numberOfLines={1}>
-                      Log Activity
+                    <Ionicons name="add-circle" size={20} color={themeColors.primary} />
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>
+                      Log
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: themeColors.textMuted + '44', flex: 1 }]}
+                    style={{
+                      flex: 1, alignItems: 'center', paddingVertical: 10,
+                      borderRadius: 12, borderWidth: 1, gap: 4,
+                      borderColor: themeColors.border,
+                    }}
                     onPress={() => setWorkoutSubTab('equipment')}
                     activeOpacity={0.7}>
-                    <Ionicons name="settings-outline" size={14} color={themeColors.textMuted} />
-                    <Text style={[styles.planNoteLinkText, { color: themeColors.textMuted }]} numberOfLines={1}>
-                      Edit Plan
+                    <Ionicons name="settings-sharp" size={20} color={themeColors.textMuted} />
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>
+                      Edit
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -6819,6 +6841,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               setWorkoutHistoryList(fresh);
             } catch { /* non-fatal */ }
           })();
+        }}
+        onStartStrengthWorkout={(focus) => {
+          // Strength pick from the Custom Workout sheet — mount the
+          // existing ActiveWorkoutScreen on an empty workout shell with
+          // the chosen focus. User adds their exercises inside, logs
+          // sets normally, finishes through the standard summary path.
+          // Same flow as plan-day Start but with no preloaded
+          // exercises so the user is in full manual mode.
+          const emptyDay: any = {
+            day: new Date().toLocaleDateString('en-US', { weekday: 'long' }),
+            focus,
+            exercises: [],
+            stimulus: 'mixed',
+          };
+          onStartWorkout?.(emptyDay);
         }}
       />
 

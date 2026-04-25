@@ -37,6 +37,14 @@ interface Props {
   /** Optional — called after the save completes so the parent can
    *  refresh history / fatigue. */
   onSaved?: () => void;
+  /** Strength picks (Push / Pull / Legs / Strength / etc) don't fit
+   *  the cardio stopwatch model — they need an exercise picker + per-
+   *  set logging. When this callback is provided, the strength rows
+   *  in QUICK_START close this modal and call back with the focus so
+   *  the parent can mount ActiveWorkoutScreen on an empty workout
+   *  the user populates manually. Falls back to the stopwatch path
+   *  when omitted. */
+  onStartStrengthWorkout?: (focus: string) => void;
 }
 
 // Minimal category + subtype picker — mirrors LogActivityModal's
@@ -88,7 +96,7 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onStartStrengthWorkout }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -174,6 +182,26 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
 
   const handleStart = (c: typeof QUICK_START[number]) => {
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+    // Strength picks don't belong in the stopwatch path — they need
+    // an exercise picker + per-set logging. Hand off to the parent's
+    // active-workout flow with an empty shell labeled by the focus.
+    if (c.category === 'strength' && onStartStrengthWorkout) {
+      const focusLabel =
+        c.subtype === 'lift'         ? 'Strength'
+        : c.subtype === 'push'        ? 'Push'
+        : c.subtype === 'pull'        ? 'Pull'
+        : c.subtype === 'legs'        ? 'Legs'
+        : c.subtype === 'upper'       ? 'Upper'
+        : c.subtype === 'lower'       ? 'Lower'
+        : c.subtype === 'full_body'   ? 'Full Body'
+        : c.subtype === 'powerlifting' ? 'Powerlifting'
+        : c.subtype === 'crossfit'    ? 'CrossFit'
+        : c.label;
+      onStartStrengthWorkout(focusLabel);
+      reset();
+      onClose();
+      return;
+    }
     setChoice(c);
     setStartedAtMs(Date.now());
     setPhase('running');
