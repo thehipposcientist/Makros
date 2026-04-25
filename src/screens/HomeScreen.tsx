@@ -4568,6 +4568,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // remains intact. When they upgrade to pro, the parent triggers a regen
   // that repopulates these days.
   const isFreeTier = (userProfile.subscriptionTier ?? 'pro') === 'free';
+
+  // Memoized weight entries for AdaptiveMacroCard so the array
+  // reference only changes when the actual data changes. Without this,
+  // every re-render minted a new array and the card's loading pill
+  // ("Checking your calorie trend…") flashed on every meal-card
+  // expand/collapse.
+  const adaptiveMacroWeightEntries = useMemo(
+    () => (userProfile.weightEntries ?? []).map(e => ({ date: e.date, weight_lbs: e.weight_lbs })),
+    [userProfile.weightEntries],
+  );
   const scheduleForRender = isFreeTier
     ? schedule.map(item => {
         // Keep completed/historical cards; only reset forward-looking days.
@@ -6299,10 +6309,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <AdaptiveMacroCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
-                weightEntries={(userProfile.weightEntries ?? []).map(e => ({
-                  date: e.date,
-                  weight_lbs: e.weight_lbs,
-                }))}
+                weightEntries={adaptiveMacroWeightEntries}
                 onAccept={(newTarget) => {
                   // Persist via onProfileUpdate — the profile store
                   // holds customMacros which the plan generator reads

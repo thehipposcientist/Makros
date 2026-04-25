@@ -35,19 +35,36 @@ export default function AdaptiveMacroCard({ authToken, themeName, weightEntries,
   const [data, setData] = useState<api.AdaptiveMacroResult | null>(null);
   const [expanded, setExpanded] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await api.getAdaptiveMacros(authToken, weightEntries || []);
-      setData(r);
-    } catch {
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [authToken, weightEntries]);
+  // Stable signature for weightEntries — without this, the `.map()`
+  // call site in HomeScreen passes a new array reference every render,
+  // making `load` a new function every render, making the effect
+  // re-fire every render. That re-fire flashed the "Checking your
+  // calorie trend…" loading pill every time a meal day card expanded
+  // or collapsed (any state change up the tree). Dedupe by the
+  // information content of the array, not its identity.
+  const weightSig = (() => {
+    const arr = weightEntries || [];
+    if (arr.length === 0) return 'empty';
+    const last = arr[arr.length - 1];
+    return `${arr.length}|${last?.date ?? ''}|${last?.weight_lbs ?? ''}`;
+  })();
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const r = await api.getAdaptiveMacros(authToken, weightEntries || []);
+        if (!cancelled) setData(r);
+      } catch {
+        if (!cancelled) setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authToken, weightSig]);
 
   if (loading && !data) {
     return (

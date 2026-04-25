@@ -383,6 +383,88 @@ def gut_health_signals(
     }
 
 
+@router.get("/protein-breakdown")
+def protein_breakdown_today(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Per-food plant vs animal protein contributions for today.
+
+    Joins MealItem → Food → FoodMetadata to bucket each item's protein
+    grams by `protein_source` ('plant' | 'animal' | 'mixed' | 'none' |
+    'unknown'). Powers the NutritionCard plant-vs-meat tile + drill-
+    down modal. Mixed items get their grams split 50/50 between plant
+    and animal so the totals add up to the day's total protein. Custom
+    foods without a metadata row default to 'unknown' and don't show
+    in either bucket — but their grams are surfaced under `unclassified`
+    so the UI can prompt the user to classify.
+    """
+    from app.models import Meal, MealItem, FoodMetadata
+    from sqlalchemy import func as _sa_func
+    today_d = date.today()
+    # Pull today's meal items joined to their food metadata. Custom
+    # foods (food_id=null) won't have a FoodMetadata row — handled
+    # below as 'unknown'.
+    rows = db.exec(
+        select(MealItem, FoodMetadata)
+        .join(Meal, Meal.id == MealItem.meal_id)
+        .join(FoodMetadata, FoodMetadata.food_id == MealItem.food_id, isouter=True)
+        .where(Meal.user_id == current_user.id)
+        .where(_sa_func.date(Meal.consumed_at) == today_d)
+    ).all()
+
+    plant: list[dict] = []
+    animal: list[dict] = []
+    unclassified: list[dict] = []
+    plant_total = 0.0
+    animal_total = 0.0
+    # Aggregate by food name within each bucket so a user who logs
+    # "Chicken" three times sees one row with combined grams, not three
+    # rows with 30g each.
+    plant_agg: dict[str, float] = {}
+    animal_agg: dict[str, float] = {}
+    uncls_agg: dict[str, float] = {}
+
+    for item, meta in rows:
+        protein_g = float(item.protein_g or 0.0)
+        if protein_g <= 0:
+            continue
+        source = (meta.protein_source if meta else "unknown") or "unknown"
+        name = item.food_name
+        if source == "plant":
+            plant_agg[name] = plant_agg.get(name, 0.0) + protein_g
+            plant_total += protein_g
+        elif source == "animal":
+            animal_agg[name] = animal_agg.get(name, 0.0) + protein_g
+            animal_total += protein_g
+        elif source == "mixed":
+            half = protein_g / 2.0
+            plant_agg[name] = plant_agg.get(name, 0.0) + half
+            animal_agg[name] = animal_agg.get(name, 0.0) + half
+            plant_total += half
+            animal_total += half
+        else:
+            # 'none' / 'unknown' — surface as unclassified so the UI
+            # can prompt the user. We don't bucket into either side.
+            uncls_agg[name] = uncls_agg.get(name, 0.0) + protein_g
+
+    plant = [{"name": n, "protein_g": round(g, 1)} for n, g in sorted(plant_agg.items(), key=lambda x: -x[1])]
+    animal = [{"name": n, "protein_g": round(g, 1)} for n, g in sorted(animal_agg.items(), key=lambda x: -x[1])]
+    unclassified = [{"name": n, "protein_g": round(g, 1)} for n, g in sorted(uncls_agg.items(), key=lambda x: -x[1])]
+
+    total_known = plant_total + animal_total
+    return {
+        "date": str(today_d),
+        "plant_total_g": round(plant_total, 1),
+        "animal_total_g": round(animal_total, 1),
+        "plant_pct": round(100.0 * plant_total / total_known) if total_known > 0 else 0,
+        "animal_pct": round(100.0 * animal_total / total_known) if total_known > 0 else 0,
+        "plant": plant,
+        "animal": animal,
+        "unclassified": unclassified,
+    }
+
+
 class DailyMacrosBody(BaseModel):
     """Body for /meals/daily-macros — the base weekly targets plus
     today's planned workout context. Returns macros redistributed for

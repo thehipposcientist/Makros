@@ -205,11 +205,35 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
       setDurationMin(Math.round(prefill.durationMin));
     }
     if (prefill.dateISO) {
+      // Date offset must be computed from LOCAL calendar dates, not raw
+      // timestamp diffs. The old code used `then.getTime() - midnightToday`
+      // which gave a rounded ms-diff: a Thursday 22:00 local workout
+      // about 2h before today's midnight rounded to 0 = "today" — even
+      // though Apple Health correctly recorded it as Thursday. Result:
+      // table said Thursday, but the log form defaulted to today (= Fri).
+      //
+      // Fix: build local-date keys (YYYY-MM-DD using getFullYear/Month/Date,
+      // NOT toISOString which is UTC) and diff by day count.
       const then = new Date(prefill.dateISO);
       const now = new Date();
-      // Compute offset in days (negative = past).
-      const msPerDay = 86400 * 1000;
-      const offset = Math.round((then.getTime() - now.setHours(0, 0, 0, 0)) / msPerDay);
+      const localDateKey = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const thenKey = localDateKey(then);
+      const nowKey = localDateKey(now);
+      // Walk back from today; matching date wins. Caps at 14 days to
+      // align with the picker's range.
+      let offset = 0;
+      for (let i = 0; i >= -14; i--) {
+        const probe = new Date();
+        probe.setDate(probe.getDate() + i);
+        if (localDateKey(probe) === thenKey) {
+          offset = i;
+          break;
+        }
+      }
+      // Defensive: if thenKey is older than 14 days OR (rarely) future,
+      // clamp. We never trust prefill to set a future date.
+      if (thenKey === nowKey) offset = 0;
       setDateOffset(Math.max(-14, Math.min(0, offset)));
     }
     if (prefill.distanceMiles != null) setDistance(String(prefill.distanceMiles));

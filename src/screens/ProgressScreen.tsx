@@ -1230,13 +1230,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <TouchableOpacity
                     onPress={() => {
                       Alert.alert(
-                        'Delete this summary?',
-                        'Removes the AI-generated workout summary. The workout itself stays in your history.',
+                        'Delete this workout?',
+                        'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
                         [
                           { text: 'Cancel', style: 'cancel' },
                           { text: 'Delete', style: 'destructive', onPress: async () => {
-                            await deleteWorkoutSummary(s.id!);
-                            setSummaries(prev => prev.filter(x => x.id !== s.id));
+                            try {
+                              // 1. Local: nuke summary + session.
+                              await deleteWorkoutSummary(s.id!);
+                              await deleteWorkoutSession(s.id!).catch(() => null);
+                              // 2. Backend: nuke the completion row +
+                              //    associated session/exercise/set rows.
+                              //    Without this the workout would
+                              //    re-appear after a sync (server is
+                              //    source of truth for fatigue).
+                              if (authToken && s.date) {
+                                const dateISO = s.date.slice(0, 10);
+                                const { deleteWorkoutCompletion } = await import('../services/api');
+                                await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                              }
+                              setSummaries(prev => prev.filter(x => x.id !== s.id));
+                              setHistory(prev => prev.filter(x => x.id !== s.id));
+                              import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                            } catch (e: any) {
+                              Alert.alert('Could not delete', String(e?.message ?? e));
+                            }
                           }},
                         ],
                       );

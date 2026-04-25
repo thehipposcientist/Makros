@@ -594,27 +594,29 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     label: 'Meadow Fresh',
     description: 'Crisp white background with vibrant grass-green primary — fresh, clean, outdoorsy.',
     colors: {
-      background:    '#F4FAF5',
+      // Greener tints across the board — user wanted "more green" instead
+      // of the old slightly-washed-out off-white feel.
+      background:    '#EBF7EE',
       surface:       '#FFFFFF',
-      surfaceRaised: '#E4F4E8',
-      border:        '#B8D8BE',
-      primary:       '#2A8048',  // rich grass-green
-      primaryDark:   '#1A5C30',
-      primaryLight:  '#72C890',
+      surfaceRaised: '#D6EFDD',
+      border:        '#9CC8A6',
+      primary:       '#1F7A3C',  // deeper grass-green
+      primaryDark:   '#0F5024',
+      primaryLight:  '#5CC480',
       accent:        '#E07830',  // warm terracotta contrast
-      textPrimary:   '#0E2418',
-      textSecondary: '#2E6040',
-      textMuted:     '#6A9870',
+      textPrimary:   '#06200C',
+      textSecondary: '#1F5230',
+      textMuted:     '#558C66',
       error:         '#CC2E28',
       warning:       '#AC6800',
-      success:       '#2A8048',
+      success:       '#1F7A3C',
     },
     sections: {
-      workout: { soft: '#D8EEE0', strong: '#2A8048', text: '#0A3818' },  // GRASS GREEN
-      meals:   { soft: '#E8F4E4', strong: '#3EA860', text: '#1A5C30' },  // EMERALD
+      workout: { soft: '#CFEAD8', strong: '#1F7A3C', text: '#06200C' },  // GRASS GREEN
+      meals:   { soft: '#DDF1D4', strong: '#2E9450', text: '#0F5024' },  // EMERALD
       ai:      { soft: '#E4EEFF', strong: '#3858C8', text: '#102080' },  // blue
       planner: { soft: '#FFF0E4', strong: '#E07830', text: '#6A2E08' },
-      account: { soft: '#F0FAF2', strong: '#2A8048', text: '#0A3818' },
+      account: { soft: '#E6F5EA', strong: '#1F7A3C', text: '#06200C' },
     },
   },
 
@@ -956,34 +958,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
   },
 
   seaglass: {
-    // Pale turquoise-aqua background with deep sea-teal primary and
-    // terra-cotta accent. Distinct from Arctic (cool blue) and Mint
-    // (green) — more green-cyan, evokes beach glass and tidepools.
+    // Replaced the old turquoise seaglass with a warm-red light theme.
+    // The 'seaglass' key is preserved for storage/backwards-compatibility
+    // (existing user themePreference values still load); only the colors
+    // and label changed. Pale rose background with rich crimson primary.
     name: 'seaglass',
-    label: 'Seaglass',
-    description: 'Pale turquoise background with deep sea-teal and terracotta — coastal, breezy, bright.',
+    label: 'Crimson',
+    description: 'Pale rose background with deep crimson primary and warm gold accent — bold, energetic, light.',
     colors: {
-      background:    '#E8F6F2',
+      background:    '#FCEEEC',
       surface:       '#FFFFFF',
-      surfaceRaised: '#CFEAE2',
-      border:        '#9AC8BE',
-      primary:       '#137A78',  // deep sea teal
-      primaryDark:   '#0A4F50',
-      primaryLight:  '#48B0A8',
-      accent:        '#D05830',  // terracotta
-      textPrimary:   '#08242A',
-      textSecondary: '#2C4E4E',
-      textMuted:     '#5C7878',
-      error:         '#CC2838',
-      warning:       '#B86808',
+      surfaceRaised: '#F7DCD8',
+      border:        '#E0A8A0',
+      primary:       '#B5202A',  // deep crimson
+      primaryDark:   '#8A0A1A',
+      primaryLight:  '#E26068',
+      accent:        '#C68A18',  // warm gold contrast
+      textPrimary:   '#2A0606',
+      textSecondary: '#5C1818',
+      textMuted:     '#8A5050',
+      error:         '#9A2820',
+      warning:       '#B07820',
       success:       '#1A8058',
     },
     sections: {
-      workout: { soft: '#B8E0D8', strong: '#137A78', text: '#062E2E' },
-      meals:   { soft: '#FBDACC', strong: '#D05830', text: '#5A1E0A' },
+      workout: { soft: '#F4D0CC', strong: '#B5202A', text: '#2A0606' },
+      meals:   { soft: '#F8E2BC', strong: '#C68A18', text: '#4A2E04' },
       ai:      { soft: '#DFE0FA', strong: '#4A4ACC', text: '#0E0E58' },
-      planner: { soft: '#FFEFC4', strong: '#B07010', text: '#4A2E04' },
-      account: { soft: '#F2DCE4', strong: '#B8347C', text: '#4A0A38' },
+      planner: { soft: '#F9DCD2', strong: '#D04830', text: '#4A0A0A' },
+      account: { soft: '#F4E0E4', strong: '#B5202A', text: '#2A0606' },
     },
   },
 
@@ -1020,35 +1023,34 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
   },
 
   cloud: {
-    // Cool pale gray-blue background with stormy blue primary and
-    // sunset orange accent. Cooler than Steel (which is more neutral
-    // gray); the background carries a bit more blue so the primary
-    // pops harder.
+    // Replaced 'cloud' (cool blue-gray) with a deep, warm orange theme.
+    // The 'cloud' key is preserved so existing user themePreference
+    // values still load — only the colors and label changed.
     name: 'cloud',
-    label: 'Cloud & Storm',
-    description: 'Cool pale sky background with stormy blue and sunset orange — crisp, clean, modern.',
+    label: 'Ember',
+    description: 'Warm cream background with deep ember orange and amber accents — bold, vibrant, energetic.',
     colors: {
-      background:    '#EFF3F8',
+      background:    '#FFF4E8',
       surface:       '#FFFFFF',
-      surfaceRaised: '#DCE4F0',
-      border:        '#AFC0D8',
-      primary:       '#3068A8',  // stormy blue
-      primaryDark:   '#1A4278',
-      primaryLight:  '#6A98D0',
-      accent:        '#E07028',  // sunset orange
-      textPrimary:   '#101824',
-      textSecondary: '#384860',
-      textMuted:     '#6A7E98',
-      error:         '#C42028',
-      warning:       '#B86408',
+      surfaceRaised: '#FCE0C8',
+      border:        '#E8B080',
+      primary:       '#C24A0A',  // deep ember orange
+      primaryDark:   '#8C2C00',
+      primaryLight:  '#F0894A',
+      accent:        '#7A4810',  // rich amber contrast
+      textPrimary:   '#2A1006',
+      textSecondary: '#5C2C10',
+      textMuted:     '#9A6840',
+      error:         '#A82820',
+      warning:       '#B07820',
       success:       '#1C7850',
     },
     sections: {
-      workout: { soft: '#C8D8EC', strong: '#3068A8', text: '#0A244A' },
-      meals:   { soft: '#FAE0CC', strong: '#E07028', text: '#4A2008' },
+      workout: { soft: '#FBD2B0', strong: '#C24A0A', text: '#2A1006' },
+      meals:   { soft: '#FCE6BC', strong: '#A86810', text: '#3A1E04' },
       ai:      { soft: '#E8E0F0', strong: '#7040B0', text: '#2A0858' },
-      planner: { soft: '#FFEEC0', strong: '#B06800', text: '#4A2C00' },
-      account: { soft: '#FCE0E8', strong: '#C83068', text: '#4A0828' },
+      planner: { soft: '#FFE0CC', strong: '#D45820', text: '#4A1A04' },
+      account: { soft: '#FCE2D0', strong: '#C24A0A', text: '#2A1006' },
     },
   },
 

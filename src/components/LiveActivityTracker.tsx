@@ -49,6 +49,17 @@ const QUICK_START: {
   icon: string;
   cardioStyle?: CardioStyle;
 }[] = [
+  // Strength entries first — most users opening "Custom Workout" want
+  // a free-form lift session (the planned plan handles structured days).
+  { category: 'strength', subtype: 'lift',         label: 'Strength',  icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'push',         label: 'Push',      icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'pull',         label: 'Pull',      icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'legs',         label: 'Legs',      icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'upper',        label: 'Upper',     icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'lower',        label: 'Lower',     icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'full_body',    label: 'Full Body', icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'powerlifting', label: 'Powerlifting', icon: 'barbell-outline' },
+  { category: 'strength', subtype: 'crossfit',     label: 'CrossFit',  icon: 'flame-outline' },
   { category: 'cardio', subtype: 'run',    label: 'Run',    icon: 'walk-outline', cardioStyle: 'steady' },
   { category: 'cardio', subtype: 'walk',   label: 'Walk',   icon: 'footsteps-outline', cardioStyle: 'easy' },
   { category: 'cardio', subtype: 'hike',   label: 'Hike',   icon: 'trail-sign-outline', cardioStyle: 'steady' },

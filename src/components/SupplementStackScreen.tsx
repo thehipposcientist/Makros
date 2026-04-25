@@ -104,6 +104,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
   };
 
   const [takingAll, setTakingAll] = useState(false);
+  const [skippingAll, setSkippingAll] = useState(false);
   const handleTakeAll = async () => {
     // Pending = scheduled today but not yet logged (taken or skipped).
     // We only flip those so a previously-skipped item isn't silently
@@ -126,6 +127,25 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
       Alert.alert('Could not log', String(e?.message ?? e));
     } finally {
       setTakingAll(false);
+    }
+  };
+  const handleSkipAll = async () => {
+    const pending = today.filter(item => {
+      const logs = item.logs_today || [];
+      return !logs.find(l => !l.skipped) && !logs.find(l => l.skipped);
+    });
+    if (pending.length === 0) return;
+    setSkippingAll(true);
+    try {
+      for (const item of pending) {
+        await api.logDose(authToken, item.id, { skipped: true }).catch(() => null);
+      }
+      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+      reload();
+    } catch (e: any) {
+      Alert.alert('Could not skip', String(e?.message ?? e));
+    } finally {
+      setSkippingAll(false);
     }
   };
 
@@ -168,24 +188,47 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
     return (
       <View style={{ gap: 8 }}>
         {pendingCount > 1 && (
-          <TouchableOpacity
-            onPress={handleTakeAll}
-            disabled={takingAll}
-            style={{
-              flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-              paddingVertical: 12, borderRadius: 12,
-              backgroundColor: tc.primary,
-              opacity: takingAll ? 0.6 : 1,
-            }}>
-            {takingAll ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Ionicons name="checkmark-done" size={18} color="#fff" />
-            )}
-            <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>
-              {takingAll ? 'Logging…' : `Take all (${pendingCount})`}
-            </Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TouchableOpacity
+              onPress={handleTakeAll}
+              disabled={takingAll || skippingAll}
+              style={{
+                flex: 2,
+                flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                paddingVertical: 12, borderRadius: 12,
+                backgroundColor: tc.primary,
+                opacity: takingAll || skippingAll ? 0.6 : 1,
+              }}>
+              {takingAll ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Ionicons name="checkmark-done" size={18} color="#fff" />
+              )}
+              <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>
+                {takingAll ? 'Logging…' : `Take all (${pendingCount})`}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={handleSkipAll}
+              disabled={takingAll || skippingAll}
+              style={{
+                flex: 1,
+                flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+                paddingVertical: 12, borderRadius: 12,
+                backgroundColor: tc.surfaceRaised,
+                borderWidth: 1, borderColor: tc.border,
+                opacity: takingAll || skippingAll ? 0.6 : 1,
+              }}>
+              {skippingAll ? (
+                <ActivityIndicator size="small" color={tc.textSecondary} />
+              ) : (
+                <Ionicons name="close" size={18} color={tc.textSecondary} />
+              )}
+              <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textSecondary }}>
+                {skippingAll ? 'Skipping…' : 'Skip all'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         )}
         {today.map(item => {
           const logs = item.logs_today || [];
