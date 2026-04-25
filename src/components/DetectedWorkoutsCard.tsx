@@ -144,7 +144,11 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
       <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 10 }}>
         Classify so Thallo can factor these into your recovery + fatigue signal.
       </Text>
-      {candidates.slice(0, 5).map((c) => {
+      {/* Show every candidate, not just the first 5. The user
+          legitimately needed to see all of them — clipping was
+          hiding the long tail. ScrollView ancestor handles the
+          overflow if the list grows. */}
+      {candidates.map((c) => {
         const when = new Date(c.startDate);
         const whenStr = when.toLocaleString(undefined, {
           weekday: 'short', month: 'short', day: 'numeric',
@@ -198,11 +202,6 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
           </View>
         );
       })}
-      {candidates.length > 5 && (
-        <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8 }}>
-          +{candidates.length - 5} more not shown.
-        </Text>
-      )}
       <LogActivityModal
         visible={modalVisible}
         onClose={() => { setModalVisible(false); setPrefill(null); }}

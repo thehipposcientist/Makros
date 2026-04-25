@@ -63,6 +63,10 @@ struct ContentView: View {
                     })
                     MealsView(meals: conn.meals)
                     SupplementsView()
+                    SleepView()
+                    ReadinessView()
+                    QuickStartView()
+                    WeightView()
                 }
                 .tabViewStyle(.page)
                 // watchOS doesn't expose `.indexViewStyle(.page(backgroundDisplayMode:))`
@@ -490,16 +494,34 @@ private struct MealsView: View {
     }
 
     private func macroLine(label: String, actual: Int, target: Int, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.system(size: 9, weight: .heavy))
-                .foregroundColor(color)
-            Text("\(actual)")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(theme.textPrimary)
-            Text("/\(target)g")
-                .font(.system(size: 9))
-                .foregroundColor(theme.textMuted)
+        // Progress-bar variant: numbers + a tiny fill bar so the user
+        // sees adherence at a glance without doing the % math. Cap the
+        // bar at 100% — overflow stays as text rather than visually
+        // implying "done."
+        let pct = target > 0 ? min(1.0, Double(actual) / Double(target)) : 0.0
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 3) {
+                Text(label)
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundColor(color)
+                Text("\(actual)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(theme.textPrimary)
+                Text("/\(target)g")
+                    .font(.system(size: 9))
+                    .foregroundColor(theme.textMuted)
+            }
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(color.opacity(0.18))
+                    .frame(height: 3)
+                    .cornerRadius(1.5)
+                Rectangle()
+                    .fill(color)
+                    .frame(width: max(2, CGFloat(pct) * 50), height: 3)
+                    .cornerRadius(1.5)
+            }
+            .frame(width: 50)
         }
     }
 
@@ -664,6 +686,470 @@ private struct SupplementsView: View {
                     }
                 }
                 .padding(10)
+            }
+        }
+    }
+}
+
+// ─── Sleep tab ──────────────────────────────────────────────────────
+
+private struct SleepView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "moon.zzz.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.primary)
+                        Text("SLEEP")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.0)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                        Text("last night")
+                            .font(.system(size: 9))
+                            .foregroundColor(theme.textMuted)
+                    }
+                    if let s = conn.sleep, s.score != nil || s.hoursLastNight != nil {
+                        // Score dial — same visual language as the
+                        // readiness chip on Today.
+                        HStack(alignment: .center, spacing: 12) {
+                            if let score = s.score {
+                                let color = scoreColor(score)
+                                ZStack {
+                                    Circle()
+                                        .stroke(color.opacity(0.25), lineWidth: 5)
+                                        .frame(width: 56, height: 56)
+                                    Circle()
+                                        .trim(from: 0, to: CGFloat(min(100, max(0, score))) / 100)
+                                        .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                        .frame(width: 56, height: 56)
+                                        .rotationEffect(.degrees(-90))
+                                    Text("\(score)")
+                                        .font(.system(size: 18, weight: .black, design: .rounded))
+                                        .foregroundColor(theme.textPrimary)
+                                }
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let h = s.hoursLastNight {
+                                    Text(String(format: "%.1f h", h))
+                                        .font(.system(size: 22, weight: .black, design: .rounded))
+                                        .foregroundColor(theme.textPrimary)
+                                }
+                                if let l = s.label {
+                                    Text(l.uppercased())
+                                        .font(.system(size: 10, weight: .heavy))
+                                        .tracking(0.6)
+                                        .foregroundColor(scoreColor(s.score ?? 0))
+                                }
+                            }
+                        }
+                        if let summary = s.summary {
+                            Text(summary)
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.textSecondary)
+                                .lineLimit(3)
+                                .padding(.top, 2)
+                        }
+                        // Vital tiles — RHR + HRV.
+                        HStack(spacing: 8) {
+                            if let rhr = s.restingHr {
+                                vitalTile(label: "RHR", value: "\(rhr)", unit: "bpm")
+                            }
+                            if let hrv = s.hrvMs {
+                                vitalTile(label: "HRV", value: "\(hrv)", unit: "ms")
+                            }
+                        }
+                        // Stage breakdown if available.
+                        if let asleep = s.asleepMin, asleep > 0 {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("STAGES")
+                                    .font(.system(size: 8, weight: .heavy))
+                                    .tracking(0.6)
+                                    .foregroundColor(theme.textMuted)
+                                HStack(spacing: 6) {
+                                    if let rem = s.remMin, rem > 0 {
+                                        stageChip(label: "REM", min: rem, color: theme.primary)
+                                    }
+                                    if let deep = s.deepMin, deep > 0 {
+                                        stageChip(label: "Deep", min: deep, color: theme.success)
+                                    }
+                                    let core = max(0, asleep - (s.remMin ?? 0) - (s.deepMin ?? 0))
+                                    if core > 0 {
+                                        stageChip(label: "Core", min: core, color: theme.warning)
+                                    }
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    } else {
+                        Text("Open Thallo on iPhone to sync sleep.")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.textMuted)
+                            .multilineTextAlignment(.center)
+                            .padding(.vertical, 24)
+                    }
+                }
+                .padding(10)
+            }
+        }
+    }
+
+    private func scoreColor(_ score: Int) -> Color {
+        if score >= 80 { return theme.success }
+        if score >= 60 { return theme.primary }
+        if score >= 40 { return theme.warning }
+        return theme.error
+    }
+
+    private func vitalTile(label: String, value: String, unit: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.system(size: 8, weight: .heavy))
+                .tracking(0.6)
+                .foregroundColor(theme.textMuted)
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
+                Text(value)
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundColor(theme.textPrimary)
+                Text(unit)
+                    .font(.system(size: 9))
+                    .foregroundColor(theme.textMuted)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.surface)
+        .cornerRadius(8)
+    }
+
+    private func stageChip(label: String, min: Int, color: Color) -> some View {
+        let h = min / 60
+        let m = min % 60
+        let txt = h > 0 ? "\(h)h \(m)m" : "\(m)m"
+        return HStack(spacing: 3) {
+            Circle().fill(color).frame(width: 5, height: 5)
+            Text("\(label) \(txt)")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(theme.textSecondary)
+        }
+    }
+}
+
+// ─── Quick-start tab — start a custom workout from the watch ────────
+
+private struct QuickStartView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+
+    // Same activity menu as the phone's LiveActivityTracker so the
+    // two surfaces feel consistent. Tapping any of these fires a
+    // `start_custom_workout` command to the phone, which mounts its
+    // ActiveWorkoutScreen / live tracker. Watch HR session begins
+    // locally so the user sees the live BPM regardless.
+    private static let activities: [(category: String, subtype: String, label: String, icon: String)] = [
+        ("cardio", "run",     "Run",        "figure.run"),
+        ("cardio", "walk",    "Walk",       "figure.walk"),
+        ("cardio", "hike",    "Hike",       "figure.hiking"),
+        ("cardio", "ride",    "Ride",       "figure.outdoor.cycle"),
+        ("cardio", "swim",    "Swim",       "figure.pool.swim"),
+        ("cardio", "row",     "Row",        "figure.rower"),
+        ("cardio", "spin",    "Spin",       "figure.indoor.cycle"),
+        ("cardio", "stair",   "Stair",      "figure.stairs"),
+        ("cardio", "bootcamp","HIIT",       "flame.fill"),
+        ("sport",  "basketball", "Basket",  "basketball.fill"),
+        ("sport",  "tennis", "Tennis",      "tennis.racket"),
+        ("mobility", "yoga", "Yoga",        "figure.yoga"),
+    ]
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.primary)
+                        Text("CUSTOM WORKOUT")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.0)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                    }
+                    Text("Pick an activity to start tracking now.")
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.textMuted)
+                        .padding(.bottom, 4)
+                    ForEach(0..<Self.activities.count, id: \.self) { i in
+                        let a = Self.activities[i]
+                        Button {
+                            WKInterfaceDevice.current().play(.start)
+                            conn.sendCommand("start_custom_workout", payload: [
+                                "category": a.category,
+                                "subtype": a.subtype,
+                                "label": a.label,
+                            ])
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: a.icon)
+                                    .font(.system(size: 14))
+                                    .foregroundColor(theme.primary)
+                                    .frame(width: 22, height: 22)
+                                Text(a.label)
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(theme.textPrimary)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(theme.textMuted)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(theme.surface)
+                            .cornerRadius(10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(10)
+            }
+        }
+    }
+}
+
+// ─── Readiness drill-down tab ──────────────────────────────────────
+
+private struct ReadinessView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "bolt.heart.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.primary)
+                        Text("READINESS")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.0)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                        Text("today")
+                            .font(.system(size: 9))
+                            .foregroundColor(theme.textMuted)
+                    }
+                    if let r = conn.readiness {
+                        // Score dial + label.
+                        HStack(alignment: .center, spacing: 12) {
+                            if let score = r.score {
+                                let color = scoreColor(score)
+                                ZStack {
+                                    Circle()
+                                        .stroke(color.opacity(0.25), lineWidth: 5)
+                                        .frame(width: 60, height: 60)
+                                    Circle()
+                                        .trim(from: 0, to: CGFloat(min(100, max(0, score))) / 100)
+                                        .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                        .frame(width: 60, height: 60)
+                                        .rotationEffect(.degrees(-90))
+                                    Text("\(score)")
+                                        .font(.system(size: 20, weight: .black, design: .rounded))
+                                        .foregroundColor(theme.textPrimary)
+                                }
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let l = r.label {
+                                    Text(l.uppercased())
+                                        .font(.system(size: 11, weight: .heavy))
+                                        .tracking(0.6)
+                                        .foregroundColor(scoreColor(r.score ?? 0))
+                                }
+                                if let s = r.summary {
+                                    Text(s)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(theme.textSecondary)
+                                        .lineLimit(3)
+                                }
+                            }
+                        }
+                        // Per-factor bars.
+                        if !r.factors.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("FACTORS")
+                                    .font(.system(size: 8, weight: .heavy))
+                                    .tracking(0.6)
+                                    .foregroundColor(theme.textMuted)
+                                    .padding(.top, 4)
+                                ForEach(r.factors, id: \.label) { f in
+                                    let color = factorColor(f.status)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text(f.label)
+                                                .font(.system(size: 10, weight: .bold))
+                                                .foregroundColor(theme.textPrimary)
+                                            Spacer()
+                                            if let detail = f.detail {
+                                                Text(detail)
+                                                    .font(.system(size: 9))
+                                                    .foregroundColor(theme.textMuted)
+                                            }
+                                        }
+                                        ZStack(alignment: .leading) {
+                                            Rectangle()
+                                                .fill(theme.surface)
+                                                .frame(height: 4)
+                                                .cornerRadius(2)
+                                            Rectangle()
+                                                .fill(color)
+                                                .frame(width: max(2, CGFloat(min(100, max(0, f.value))) * 1.0), height: 4)
+                                                .cornerRadius(2)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Text("Open Thallo on iPhone to sync readiness signals.")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.textMuted)
+                            .multilineTextAlignment(.center)
+                            .padding(.vertical, 24)
+                    }
+                }
+                .padding(10)
+            }
+        }
+    }
+
+    private func scoreColor(_ score: Int) -> Color {
+        if score >= 75 { return theme.success }
+        if score >= 55 { return theme.primary }
+        if score >= 35 { return theme.warning }
+        return theme.error
+    }
+
+    private func factorColor(_ status: String) -> Color {
+        switch status {
+        case "good": return theme.success
+        case "ok":   return theme.warning
+        case "low":  return theme.error
+        default:     return theme.primary
+        }
+    }
+}
+
+// ─── Body weight quick-log tab ────────────────────────────────────
+
+private struct WeightView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+    @State private var pendingLbs: Double = 170
+    @State private var seeded: Bool = false
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "scalemass.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.primary)
+                        Text("WEIGHT")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.0)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                        if let d = conn.weight?.daysSinceLastLog {
+                            Text(d == 0 ? "logged today" : (d == 1 ? "1d ago" : "\(d)d ago"))
+                                .font(.system(size: 9))
+                                .foregroundColor(d > 3 ? theme.warning : theme.textMuted)
+                        }
+                    }
+                    // Headline EMA + slope.
+                    if let ema = conn.weight?.emaLbs {
+                        HStack(alignment: .lastTextBaseline, spacing: 4) {
+                            Text(String(format: "%.1f", ema))
+                                .font(.system(size: 32, weight: .black, design: .rounded))
+                                .foregroundColor(theme.textPrimary)
+                            Text("lb avg")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.textMuted)
+                        }
+                        if let slope = conn.weight?.slopeLbsPerWeek, abs(slope) > 0.05 {
+                            let arrow = slope > 0 ? "arrow.up" : "arrow.down"
+                            let color = abs(slope) > 1.5 ? theme.warning : theme.textSecondary
+                            HStack(spacing: 3) {
+                                Image(systemName: arrow)
+                                    .font(.system(size: 9))
+                                Text(String(format: "%.1f lb / wk", abs(slope)))
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(color)
+                        }
+                    }
+                    // Quick-log dial.
+                    Text("LOG TODAY")
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(0.6)
+                        .foregroundColor(theme.textMuted)
+                        .padding(.top, 6)
+                    ZStack {
+                        Capsule()
+                            .fill(theme.surface)
+                            .overlay(
+                                Capsule().stroke(theme.primary.opacity(0.4), lineWidth: 1.5),
+                            )
+                        Text(String(format: "%.1f lb", pendingLbs))
+                            .font(.system(size: 22, weight: .black, design: .rounded))
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .frame(height: 44)
+                    .focusable(true)
+                    .digitalCrownRotation(
+                        $pendingLbs,
+                        from: 50,
+                        through: 600,
+                        by: 0.2,
+                        sensitivity: .low,
+                        isContinuous: false,
+                        isHapticFeedbackEnabled: true,
+                    )
+                    Button {
+                        WKInterfaceDevice.current().play(.success)
+                        conn.sendCommand("log_weight", payload: ["lbs": pendingLbs])
+                    } label: {
+                        Text("Log")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(theme.primary)
+                            .foregroundColor(theme.background)
+                            .cornerRadius(9)
+                    }
+                    .buttonStyle(.plain)
+                    Text("Turn the Digital Crown to adjust.")
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.textMuted)
+                }
+                .padding(10)
+            }
+        }
+        .onAppear {
+            // Seed pendingLbs once with the latest known weight so
+            // the user lands at a sensible value rather than 170.
+            if !seeded, let latest = conn.weight?.latestLbs {
+                pendingLbs = latest
+                seeded = true
             }
         }
     }

@@ -105,3 +105,67 @@ struct WatchSupplementsDay: Codable, Equatable {
     let items: [WatchSupplementItem]
     let syncedAtMs: Double
 }
+
+// ─── Sleep ──────────────────────────────────────────────────────────
+
+// ─── Readiness drill-down ──────────────────────────────────────────
+
+struct WatchReadinessFactor: Codable, Equatable {
+    /// "Sleep" / "RHR" / "HRV" / "Recovery" / "Fueling".
+    let label: String
+    /// 0–100 sub-score for that factor. Watch renders as a colored bar.
+    let value: Int
+    /// "good" / "ok" / "low" — drives the bar color independent of value.
+    let status: String
+    /// Short human note like "7.4h last night" or "elevated 4 bpm".
+    let detail: String?
+}
+
+struct WatchReadinessSnapshot: Codable, Equatable {
+    /// 0–100 composite readiness (mirrors the phone's TrainingReadinessCard).
+    let score: Int?
+    /// "Primed" / "Ready" / "Moderate" / "Fatigued" / "Hold" — same
+    /// label set the phone surfaces.
+    let label: String?
+    /// One-line takeaway phrased like a coach.
+    let summary: String?
+    /// Per-factor breakdown so the user sees which signals are low.
+    let factors: [WatchReadinessFactor]
+    let syncedAtMs: Double
+}
+
+// ─── Body weight quick-log ─────────────────────────────────────────
+
+struct WatchWeightSnapshot: Codable, Equatable {
+    /// Most recently logged weight (lbs). Used to seed the Digital
+    /// Crown wheel so the user lands on a sensible value.
+    let latestLbs: Double?
+    /// Days since the last log — drives the "log today" prompt.
+    let daysSinceLastLog: Int?
+    /// 7-day EMA trend for the headline display.
+    let emaLbs: Double?
+    /// Slope in lbs/wk — positive = gaining, negative = losing.
+    let slopeLbsPerWeek: Double?
+    let syncedAtMs: Double
+}
+
+struct WatchSleepSnapshot: Codable, Equatable {
+    /// 0–100 sleep score. Mirrors the phone's `scoreSleep()` output.
+    let score: Int?
+    /// Hours slept last night (in-bed time, not strictly asleep).
+    let hoursLastNight: Double?
+    /// Minutes of asleep / awake / REM / deep / core if HK provided
+    /// stage breakdown; nil otherwise.
+    let asleepMin: Int?
+    let remMin: Int?
+    let deepMin: Int?
+    /// Resting heart rate (latest 7-day average from HealthKit).
+    let restingHr: Int?
+    /// Average HRV over recent days (ms); nil if HRV not authorised.
+    let hrvMs: Int?
+    /// Short label: "Excellent" / "Good" / "OK" / "Low".
+    let label: String?
+    /// Brief one-line takeaway phrased like a coach's note.
+    let summary: String?
+    let syncedAtMs: Double
+}

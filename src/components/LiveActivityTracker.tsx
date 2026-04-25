@@ -262,7 +262,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                 <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
                   <Ionicons name="close" size={22} color={tc.textPrimary} />
                 </TouchableOpacity>
-                <Text style={[styles.headerTitle, { color: tc.textPrimary }]}>Start Workout</Text>
+                <Text style={[styles.headerTitle, { color: tc.textPrimary }]}>Custom Workout</Text>
                 <View style={styles.headerBtn} />
               </View>
               <Text style={{ fontSize: 12, color: tc.textMuted, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>

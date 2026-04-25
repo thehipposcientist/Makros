@@ -56,6 +56,18 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendContext(["supplements": payload])
         }
 
+        AsyncFunction("syncSleep") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["sleep": payload])
+        }
+
+        AsyncFunction("syncReadiness") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["readiness": payload])
+        }
+
+        AsyncFunction("syncWeight") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["weight": payload])
+        }
+
         // Live progress messages during an active session. We use
         // sendMessage (not applicationContext) so the watch sees each
         // tick when reachable; transferUserInfo is the fallback so

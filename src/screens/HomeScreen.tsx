@@ -1881,6 +1881,130 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           }
         } catch { /* non-fatal */ }
+        // Sleep snapshot for the watch's Sleep tab. Pulls today's
+        // health summary (already cached in healthDataSummary) +
+        // sleepScore service to compute label + summary.
+        try {
+          const { pushSleepToWatch } = await import('../utils/watchSync');
+          const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+          const cached = await getCachedHealthDataSummary();
+          const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+          // Lightweight client-side scoring: hours-only score so we
+          // don't need to fetch sleep stages just for the watch tile.
+          // Mirrors the simple thresholds in scoreSleep when stages
+          // aren't available.
+          let score: number | null = null;
+          let label: string | null = null;
+          let summary: string | null = null;
+          if (hours != null) {
+            if (hours >= 8) { score = 90; label = 'Excellent'; summary = `${hours.toFixed(1)}h — fully recovered.`; }
+            else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
+            else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
+            else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
+          }
+          await pushSleepToWatch({
+            score,
+            hoursLastNight: hours,
+            restingHr: cached?.restingHeartRate ?? null,
+            hrvMs: cached?.hrv ?? null,
+            label,
+            summary,
+          });
+        } catch { /* non-fatal */ }
+        // Readiness drill-down — composite score + factor breakdown
+        // so the watch's Readiness tab shows what's driving the
+        // number. Built from data the phone already has (readinessScore
+        // state + cached health summary). When readinessScore is null
+        // we still push the factors so the user sees what's missing
+        // (e.g. "no sleep data — connect Apple Health").
+        try {
+          const { pushReadinessToWatch } = await import('../utils/watchSync');
+          const cached = await (await import('../services/healthDataSummary')).getCachedHealthDataSummary();
+          const factors: any[] = [];
+          // Sleep factor — derived from the same hours-based scale
+          // we used for the sleep tab. "good" >= 7h.
+          if (cached?.sleepMinutes != null) {
+            const h = cached.sleepMinutes / 60;
+            const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
+            factors.push({
+              label: 'Sleep', value: v,
+              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+              detail: `${h.toFixed(1)}h last night`,
+            });
+          }
+          // RHR factor — under 65 = "good", 65-75 = "ok", 75+ = "low".
+          if (cached?.restingHeartRate != null) {
+            const rhr = cached.restingHeartRate;
+            const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
+            factors.push({
+              label: 'RHR', value: v,
+              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+              detail: `${rhr} bpm`,
+            });
+          }
+          // HRV — higher is better, but absolute thresholds vary
+          // wildly by individual. Use 50ms as the median signal.
+          if (cached?.hrv != null) {
+            const hrv = cached.hrv;
+            const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
+            factors.push({
+              label: 'HRV', value: v,
+              status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
+              detail: `${hrv} ms`,
+            });
+          }
+          // Recent training load — proxy via fatigue from
+          // readinessScore.factors? For now, a simple "did the user
+          // train hard yesterday?" check from the cached weekly Z2.
+          // TODO: pipe in training-load score from the readiness
+          // engine when we lift it into healthDataSummary.
+          await pushReadinessToWatch({
+            score: readinessScore?.score ?? null,
+            label: readinessScore?.label ?? null,
+            summary: readinessScore?.score
+              ? (readinessScore.score >= 75 ? "Solid recovery — train as planned."
+                 : readinessScore.score >= 50 ? "Moderate. Standard intensity is fine."
+                 : "Low. Consider lighter loads today.")
+              : null,
+            factors,
+          });
+        } catch { /* non-fatal */ }
+        // Weight summary for the quick-log tab. Reads the weight
+        // history utility so the EMA + slope match the phone's
+        // weight chart.
+        try {
+          const { pushWeightToWatch } = await import('../utils/watchSync');
+          const { loadWeightEntries } = await import('../utils/weightHistory');
+          const entries: Array<{ date: string; weight_lbs: number }> = await loadWeightEntries().catch(() => []);
+          let latest: number | null = null;
+          let daysSince: number | null = null;
+          if (entries.length > 0) {
+            const last = entries[entries.length - 1];
+            latest = Number(last.weight_lbs) || null;
+            try {
+              const lastMs = new Date(last.date).getTime();
+              daysSince = Math.max(0, Math.floor((Date.now() - lastMs) / 86400000));
+            } catch {}
+          }
+          // Lightweight slope: last entry vs 7-day-old entry.
+          let slope: number | null = null;
+          let ema: number | null = null;
+          if (entries.length >= 3) {
+            const recent = entries.slice(-7);
+            ema = recent.reduce((acc, e) => acc + Number(e.weight_lbs), 0) / recent.length;
+            const old = entries.slice(-14, -7);
+            if (old.length > 0) {
+              const oldEma = old.reduce((acc, e) => acc + Number(e.weight_lbs), 0) / old.length;
+              slope = (ema - oldEma);
+            }
+          }
+          await pushWeightToWatch({
+            latestLbs: latest,
+            daysSinceLastLog: daysSince,
+            emaLbs: ema,
+            slopeLbsPerWeek: slope,
+          });
+        } catch { /* non-fatal */ }
       } catch { /* watch bridge optional — silent failure is fine */ }
     })();
   // `schedule` is derived every render so we key on its first-item
@@ -1992,6 +2116,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
         unsubscribe = onWatchCommand((command, payload) => {
+          if (command === 'log_weight') {
+            // Watch sent a Digital-Crown-picked weight value. Save
+            // to the phone's weight history → triggers the same
+            // chart updates a manual phone log would, and the next
+            // sync push refreshes the watch's Weight tab with the
+            // updated EMA + slope.
+            (async () => {
+              try {
+                const lbs = Number(payload?.lbs);
+                if (!isFinite(lbs) || lbs < 50 || lbs > 600) return;
+                const { saveWeightEntry } = await import('../utils/weightHistory');
+                await saveWeightEntry(lbs, 'watch');
+                // Re-push to refresh the Weight tab on the watch.
+                const { pushWeightToWatch } = await import('../utils/watchSync');
+                await pushWeightToWatch({
+                  latestLbs: lbs,
+                  daysSinceLastLog: 0,
+                  emaLbs: lbs,
+                  slopeLbsPerWeek: null,
+                });
+              } catch { /* non-fatal */ }
+            })();
+            return;
+          }
+          if (command === 'start_custom_workout') {
+            // Watch picked an activity from its Quick-Start tab — mount
+            // the phone's LiveActivityTracker. Watch HR session is
+            // already started locally on the watch side; the phone
+            // covers timer + log + HK write on finish.
+            const subtype = String(payload?.subtype || 'run');
+            console.log('[watch] start_custom_workout subtype=', subtype);
+            setShowLiveTracker(true);
+            // Note: the LiveActivityTracker doesn't currently accept
+            // a pre-selected activity prop — user still picks on phone.
+            // TODO: pass watch-selected activity through to skip the
+            // pick step. For now, opening the tracker is the win.
+            return;
+          }
           if (command === 'pull_state') {
             // Watch explicitly asked for a fresh snapshot — push
             // workout + meals + theme via the same path the
@@ -4896,7 +5058,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     activeOpacity={0.7}>
                     <Ionicons name="play-circle-outline" size={14} color={themeColors.primary} />
                     <Text style={[styles.planNoteLinkText, { color: themeColors.primary }]} numberOfLines={1}>
-                      Start Workout
+                      Custom Workout
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity

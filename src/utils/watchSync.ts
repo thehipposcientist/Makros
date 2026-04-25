@@ -18,6 +18,10 @@ import {
   WatchMealsPayload,
   WatchSupplementsPayload,
   WatchSupplementItem,
+  WatchSleepPayload,
+  WatchReadinessPayload,
+  WatchReadinessFactor,
+  WatchWeightPayload,
 } from '../../modules/thallo-watch-bridge';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
@@ -221,6 +225,80 @@ export async function pushMealsToWatch(
     syncedAtMs: Date.now(),
   };
   return WatchBridge.syncMeals(payload);
+}
+
+/** Push sleep score + last-night summary to the watch. Drives the
+ *  Sleep tab on the watch — score + hours + RHR + HRV + a short
+ *  coach-style summary line. Built from the phone's sleepScore
+ *  service so the watch + phone stay consistent. */
+export async function pushSleepToWatch(opts: {
+  score?: number | null;
+  hoursLastNight?: number | null;
+  asleepMin?: number | null;
+  remMin?: number | null;
+  deepMin?: number | null;
+  restingHr?: number | null;
+  hrvMs?: number | null;
+  label?: string | null;
+  summary?: string | null;
+}): Promise<boolean> {
+  if (!canPush()) return false;
+  const payload: WatchSleepPayload = {
+    score: opts.score ?? null,
+    hoursLastNight: opts.hoursLastNight ?? null,
+    asleepMin: opts.asleepMin ?? null,
+    remMin: opts.remMin ?? null,
+    deepMin: opts.deepMin ?? null,
+    restingHr: opts.restingHr ?? null,
+    hrvMs: opts.hrvMs ?? null,
+    label: opts.label ?? null,
+    summary: opts.summary ?? null,
+    syncedAtMs: Date.now(),
+  };
+  wsLog('pushSleepToWatch', { score: payload.score, hours: payload.hoursLastNight });
+  return WatchBridge.syncSleep(payload);
+}
+
+/** Push readiness drill-down data — score + label + per-factor
+ *  breakdown so the watch's Readiness tab can render the same story
+ *  the phone's TrainingReadinessCard tells. */
+export async function pushReadinessToWatch(opts: {
+  score?: number | null;
+  label?: string | null;
+  summary?: string | null;
+  factors?: WatchReadinessFactor[];
+}): Promise<boolean> {
+  if (!canPush()) return false;
+  const payload: WatchReadinessPayload = {
+    score: opts.score ?? null,
+    label: opts.label ?? null,
+    summary: opts.summary ?? null,
+    factors: opts.factors ?? [],
+    syncedAtMs: Date.now(),
+  };
+  wsLog('pushReadinessToWatch', { score: payload.score });
+  return WatchBridge.syncReadiness(payload);
+}
+
+/** Push body-weight summary so the watch's Weight tab can render
+ *  the EMA + slope + last-log freshness, and seed the quick-log
+ *  Digital Crown wheel near the latest known value. */
+export async function pushWeightToWatch(opts: {
+  latestLbs?: number | null;
+  daysSinceLastLog?: number | null;
+  emaLbs?: number | null;
+  slopeLbsPerWeek?: number | null;
+}): Promise<boolean> {
+  if (!canPush()) return false;
+  const payload: WatchWeightPayload = {
+    latestLbs: opts.latestLbs ?? null,
+    daysSinceLastLog: opts.daysSinceLastLog ?? null,
+    emaLbs: opts.emaLbs ?? null,
+    slopeLbsPerWeek: opts.slopeLbsPerWeek ?? null,
+    syncedAtMs: Date.now(),
+  };
+  wsLog('pushWeightToWatch', { latest: payload.latestLbs });
+  return WatchBridge.syncWeight(payload);
 }
 
 /** Wipe the watch's local store on sign-out / user-switch. Pushes

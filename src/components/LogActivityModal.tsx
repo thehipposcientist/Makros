@@ -215,12 +215,34 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
     if (prefill.distanceMiles != null) setDistance(String(prefill.distanceMiles));
     if (prefill.caloriesBurned != null) setCalories(String(Math.round(prefill.caloriesBurned)));
     if (prefill.avgHeartRate != null) setHeartRate(String(Math.round(prefill.avgHeartRate)));
-    // Show "Advanced" when any of its fields are pre-filled so the user
-    // sees the imported metrics rather than them hiding behind the
-    // collapsible.
-    if (prefill.distanceMiles != null || prefill.caloriesBurned != null || prefill.avgHeartRate != null) {
-      setShowAdvanced(true);
+    // Intensity inference — HK doesn't label intensity, but we can
+    // derive it. Prefer HR zones when we have HR + a decent signal;
+    // otherwise fall back to cardio_style (intervals=hard, steady=
+    // moderate, easy=easy). No more asking the user to pick something
+    // we can infer from the imported data.
+    let inferredIntensity: ActivityIntensity | null = null;
+    const bpm = prefill.avgHeartRate;
+    if (typeof bpm === 'number' && bpm > 0) {
+      // Age-free heuristic: 140+ bpm sustained = hard, 110-140 =
+      // moderate, <110 = easy. Works without needing the user age
+      // field; a 40-year-old's 150 bpm still reads as "hard effort."
+      if (bpm >= 140) inferredIntensity = 'hard';
+      else if (bpm >= 110) inferredIntensity = 'moderate';
+      else inferredIntensity = 'easy';
+    } else if (prefill.cardioStyle === 'intervals') {
+      inferredIntensity = 'hard';
+    } else if (prefill.cardioStyle === 'easy') {
+      inferredIntensity = 'easy';
+    } else if (prefill.cardioStyle === 'steady') {
+      inferredIntensity = 'moderate';
     }
+    if (inferredIntensity) setIntensity(inferredIntensity);
+    // NOTE: do NOT auto-open the Advanced section when prefill is
+    // present. The read-only summary card already shows distance /
+    // calories / HR clearly. Auto-expanding was hiding the summary
+    // and forcing users to re-pick date + duration that HK already
+    // gave us. (The "Edit values" link on the summary exposes the
+    // full pickers on demand.)
   }, [visible, prefill]);
 
   const selectCategory = (cat: ActivityCategory) => {
@@ -467,6 +489,10 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 14, marginTop: 8 }}>
                       <SummaryPill label="When" value={formatDate(dateOffset)} tc={tc} />
                       <SummaryPill label="Duration" value={`${durationMin} min`} tc={tc} />
+                      {/* Inferred intensity — derived from HR or
+                          cardio_style. User can still override via
+                          "Edit values". */}
+                      <SummaryPill label="Intensity" value={intensity.charAt(0).toUpperCase() + intensity.slice(1)} tc={tc} />
                       {distance ? <SummaryPill label="Distance" value={`${distance} mi`} tc={tc} /> : null}
                       {calories ? <SummaryPill label="Calories" value={`${calories} kcal`} tc={tc} /> : null}
                       {heartRate ? <SummaryPill label="Avg HR" value={`${heartRate} bpm`} tc={tc} /> : null}

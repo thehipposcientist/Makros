@@ -74,6 +74,42 @@ export type WatchSupplementsPayload = {
   syncedAtMs: number;
 };
 
+export type WatchReadinessFactor = {
+  label: string;
+  value: number;
+  status: 'good' | 'ok' | 'low';
+  detail: string | null;
+};
+
+export type WatchReadinessPayload = {
+  score: number | null;
+  label: string | null;
+  summary: string | null;
+  factors: WatchReadinessFactor[];
+  syncedAtMs: number;
+};
+
+export type WatchWeightPayload = {
+  latestLbs: number | null;
+  daysSinceLastLog: number | null;
+  emaLbs: number | null;
+  slopeLbsPerWeek: number | null;
+  syncedAtMs: number;
+};
+
+export type WatchSleepPayload = {
+  score: number | null;
+  hoursLastNight: number | null;
+  asleepMin: number | null;
+  remMin: number | null;
+  deepMin: number | null;
+  restingHr: number | null;
+  hrvMs: number | null;
+  label: string | null;
+  summary: string | null;
+  syncedAtMs: number;
+};
+
 export type WatchPalette = {
   background: string;
   surface: string;
@@ -124,6 +160,21 @@ export const WatchBridge = {
   async syncSupplements(payload: WatchSupplementsPayload): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncSupplements(payload); } catch { return false; }
+  },
+
+  async syncSleep(payload: WatchSleepPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncSleep(payload); } catch { return false; }
+  },
+
+  async syncReadiness(payload: WatchReadinessPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncReadiness(payload); } catch { return false; }
+  },
+
+  async syncWeight(payload: WatchWeightPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncWeight(payload); } catch { return false; }
   },
 
   async updateProgress(progress: WatchProgress): Promise<boolean> {

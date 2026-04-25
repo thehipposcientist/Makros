@@ -20,6 +20,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var workout: WatchWorkout?
     @Published var meals: WatchMealsDay?
     @Published var supplements: WatchSupplementsDay?
+    @Published var sleep: WatchSleepSnapshot?
+    @Published var readiness: WatchReadinessSnapshot?
+    @Published var weight: WatchWeightSnapshot?
     @Published var theme: WatchPalette = .midnight
     @Published var isReachable: Bool = false
     @Published var lastError: String?
@@ -114,6 +117,30 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                let decoded = try? JSONDecoder().decode(WatchSupplementsDay.self, from: data) {
                 if supplements == nil || decoded.syncedAtMs >= (supplements?.syncedAtMs ?? 0) {
                     self.supplements = decoded
+                }
+            }
+        }
+        if let s = ctx["sleep"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: s),
+               let decoded = try? JSONDecoder().decode(WatchSleepSnapshot.self, from: data) {
+                if sleep == nil || decoded.syncedAtMs >= (sleep?.syncedAtMs ?? 0) {
+                    self.sleep = decoded
+                }
+            }
+        }
+        if let r = ctx["readiness"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: r),
+               let decoded = try? JSONDecoder().decode(WatchReadinessSnapshot.self, from: data) {
+                if readiness == nil || decoded.syncedAtMs >= (readiness?.syncedAtMs ?? 0) {
+                    self.readiness = decoded
+                }
+            }
+        }
+        if let w = ctx["weight"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: w),
+               let decoded = try? JSONDecoder().decode(WatchWeightSnapshot.self, from: data) {
+                if weight == nil || decoded.syncedAtMs >= (weight?.syncedAtMs ?? 0) {
+                    self.weight = decoded
                 }
             }
         }
