@@ -36,7 +36,10 @@
         "NSSupportsLiveActivitiesFrequentUpdates": true
       },
       "entitlements": {
-        "com.apple.developer.healthkit": true
+        "com.apple.developer.healthkit": true,
+        "com.apple.security.application-groups": [
+          "group.com.thallo.app"
+        ]
       },
       "buildNumber": "13"
     },

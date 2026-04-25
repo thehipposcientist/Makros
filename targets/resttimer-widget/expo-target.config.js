@@ -9,6 +9,11 @@ module.exports = {
     $accent: '#15C7B8',
   },
   entitlements: {
-    // Widget extensions don't need HealthKit — only Live Activities support.
+    // Widget extensions don't need HealthKit. App Groups added so the
+    // widget extension and the main app can share state via SharedDefaults
+    // — required for the future watch-complication target to read the
+    // current rest-timer payload, and silences the prebuild warning
+    // about a missing App Groups entitlement.
+    'com.apple.security.application-groups': ['group.com.thallo.app'],
   },
 };

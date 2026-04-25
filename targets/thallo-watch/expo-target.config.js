@@ -17,9 +17,11 @@ module.exports = {
   entitlements: {
     // HealthKit for live heart rate during workouts. WatchConnectivity
     // needs NO entitlement — it's enabled for every paired watch app
-    // automatically. App Groups omitted intentionally: we don't share
-    // files between phone + watch (all data flows via WCSession),
-    // and adding them would force a second provisioning profile.
+    // automatically. App Groups added so the watch app can read the
+    // SharedDefaults payload the iOS app writes (powers the future
+    // watch-complication on the watch face, and lets the watch survive
+    // a phone restart with last-known plan + readiness cached).
     'com.apple.developer.healthkit': true,
+    'com.apple.security.application-groups': ['group.com.thallo.app'],
   },
 };
