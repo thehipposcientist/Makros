@@ -203,27 +203,18 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
               <Text style={{ fontSize: 12, fontWeight: '800', color: tc.background }}>Classify</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => {
-                // Dismiss without classifying. Persists the externalId
-                // so the SAME HK workout doesn't re-surface on the next
-                // poll — the previous in-memory-only behavior was the
-                // exact "skipped workouts keep coming back" bug.
-                Alert.alert(
-                  'Skip this one?',
-                  'We won\'t factor this workout into recovery. It won\'t re-appear unless you re-import via Apple Health.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Skip',
-                      style: 'destructive',
-                      onPress: async () => {
-                        await dismissHkImports([c.externalId]);
-                        setCandidates(prev => (prev ?? []).filter(x => x.externalId !== c.externalId));
-                      },
-                    },
-                  ],
-                );
+              onPress={async () => {
+                // Single-tap dismiss — no confirmation. The previous
+                // Alert-on-every-X felt like the workouts kept coming
+                // back even after the user had said no. Persists the
+                // externalId so the same HK workout truly doesn't
+                // re-surface on the next poll. Use Clear All for the
+                // bulk-destructive flow that keeps its confirmation.
+                await dismissHkImports([c.externalId]);
+                setCandidates(prev => (prev ?? []).filter(x => x.externalId !== c.externalId));
+                import('../utils/feedback').then(f => f.hapticSelection?.()).catch(() => {});
               }}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 6 }}>
               <Ionicons name="close" size={16} color={tc.textMuted} />
             </TouchableOpacity>

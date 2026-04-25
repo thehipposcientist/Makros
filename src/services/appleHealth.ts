@@ -202,6 +202,109 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
   };
 }
 
+// ── Per-day snapshot reader ─────────────────────────────────────────────────
+//
+// `readHealthSummary` returns 7-day averages — useless for daily
+// persistence. This helper pulls a SPECIFIC day's totals so we can
+// store one row per day in `daily_health_snapshots`. Used for today,
+// yesterday backfill, and permission-grant 30-day backfill.
+
+export interface DailySnapshot {
+  dateISO: string;
+  steps: number | null;
+  activeEnergyKcal: number | null;
+  workoutMinutes: number | null;
+  cardioMinutes: number | null;
+  zone2Minutes: number | null;
+  restingHr: number | null;
+  hrv: number | null;
+  vo2Max: number | null;
+  weightLbs: number | null;
+}
+
+const _CARDIO_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin/i;
+
+function _sumSamplesInWindow(samples: any[], startMs: number, endMs: number): number {
+  if (!Array.isArray(samples)) return 0;
+  let total = 0;
+  for (const s of samples) {
+    const t = new Date(s.startDate ?? s.date ?? 0).getTime();
+    if (t >= startMs && t < endMs) total += Number(s.value) || 0;
+  }
+  return total;
+}
+
+function _avgSamplesInWindow(samples: any[], startMs: number, endMs: number): number | null {
+  if (!Array.isArray(samples)) return null;
+  let sum = 0; let n = 0;
+  for (const s of samples) {
+    const t = new Date(s.startDate ?? s.date ?? 0).getTime();
+    if (t >= startMs && t < endMs) {
+      const v = Number(s.value);
+      if (v > 0) { sum += v; n++; }
+    }
+  }
+  return n > 0 ? sum / n : null;
+}
+
+/** Read one day's HealthKit numbers. Day window is [dayStartMs, dayEndMs).
+ *  All fields nullable — null means HK had no data in that window. */
+export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): Promise<DailySnapshot | null> {
+  const mod = getModule();
+  if (!mod) return null;
+  try {
+    const [
+      stepsSamples, energySamples, workouts,
+      hrvSamples, rhrSamples, vo2Samples, weightSamples,
+    ] = await Promise.all([
+      typeof mod.getDailySteps === 'function' ? mod.getDailySteps(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getActiveEnergyBurned === 'function' ? mod.getActiveEnergyBurned(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getWorkouts === 'function' ? mod.getWorkouts(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getHRV === 'function' ? mod.getHRV(dayStartMs, dayEndMs, 50).catch(() => []) : [],
+      typeof mod.getRestingHeartRate === 'function' ? mod.getRestingHeartRate(dayStartMs, dayEndMs, 5).catch(() => []) : [],
+      typeof mod.getVO2Max === 'function' ? mod.getVO2Max(dayStartMs, dayEndMs, 1).catch(() => []) : [],
+      typeof mod.getWeight === 'function' ? mod.getWeight(dayStartMs, dayEndMs, 5).catch(() => []) : [],
+    ]);
+
+    const steps = _sumSamplesInWindow(stepsSamples, dayStartMs, dayEndMs);
+    const activeEnergy = _sumSamplesInWindow(energySamples, dayStartMs, dayEndMs);
+
+    let workoutMinutes = 0;
+    let cardioMinutes = 0;
+    let zone2Minutes = 0;
+    if (Array.isArray(workouts)) {
+      for (const w of workouts) {
+        const start = new Date(w.startDate ?? 0).getTime();
+        if (start < dayStartMs || start >= dayEndMs) continue;
+        const mins = Number(w.duration ?? 0);
+        if (!mins) continue;
+        workoutMinutes += mins;
+        const name = String(w.activityName ?? '');
+        if (_CARDIO_RX.test(name)) {
+          cardioMinutes += mins;
+          if (mins >= 20 && !/hiit|interval|tabata/i.test(name)) zone2Minutes += mins;
+        }
+      }
+    }
+
+    const dateISO = new Date(dayStartMs).toISOString().slice(0, 10);
+    return {
+      dateISO,
+      steps: steps > 0 ? Math.round(steps) : null,
+      activeEnergyKcal: activeEnergy > 0 ? Math.round(activeEnergy) : null,
+      workoutMinutes: workoutMinutes > 0 ? Math.round(workoutMinutes) : null,
+      cardioMinutes: cardioMinutes > 0 ? Math.round(cardioMinutes) : null,
+      zone2Minutes: zone2Minutes > 0 ? Math.round(zone2Minutes) : null,
+      restingHr: _avgSamplesInWindow(rhrSamples, dayStartMs, dayEndMs),
+      hrv: _avgSamplesInWindow(hrvSamples, dayStartMs, dayEndMs),
+      vo2Max: Array.isArray(vo2Samples) && vo2Samples.length > 0 ? Number(vo2Samples[0]?.value) || null : null,
+      weightLbs: _avgSamplesInWindow(weightSamples, dayStartMs, dayEndMs),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Workout HR annotation ───────────────────────────────────────────────────
 //
 /** Returns the most recent heart rate sample from the last 30 seconds.

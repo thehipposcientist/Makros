@@ -2265,6 +2265,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }, healthMetrics);
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 
+        // Refresh the daily health snapshot so today's workout minutes
+        // + active energy land in the backend's daily_health_snapshots
+        // row before the user moves on. Without this, the post-workout
+        // numbers wouldn't push until the next app foreground.
+        import('../services/healthDataSummary')
+          .then(({ refreshHealthDataSummary }) => refreshHealthDataSummary())
+          .catch(() => undefined);
+
         // PR toast + persist on session for Progress history to show "🏆 PR!"
         const prs: PRAchievement[] = completeResp?.prs ?? [];
         if (prs.length > 0) {

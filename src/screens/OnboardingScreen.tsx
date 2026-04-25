@@ -1832,6 +1832,13 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             if (granted) {
               setAppleHealthEnabled(true);
               await persistHealthEnabled(true);
+              // Backfill the last 30 days of HK data so weekly_review +
+              // recovery_flags have history to reason about from day one
+              // (otherwise the server's daily_health_snapshots stays
+              // empty until the user opens the app for 30 separate days).
+              import('../services/healthDataSummary')
+                .then(({ backfillSnapshotsToBackend }) => backfillSnapshotsToBackend(30))
+                .catch(() => undefined);
             } else {
               Alert.alert('Permission Needed', 'Please enable Health access in Settings > Privacy > Health > Thallo.');
             }

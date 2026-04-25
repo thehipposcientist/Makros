@@ -130,34 +130,94 @@ export async function refreshHealthDataSummary(
   return _inflight;
 }
 
-async function pushSnapshotToBackend(s: HealthDataSummary): Promise<void> {
+async function pushSnapshotToBackend(_s: HealthDataSummary): Promise<void> {
   try {
     const token = await AsyncStorage.getItem('authToken');
     if (!token) return;
-    // Skip the empty-payload case — every field null means we have no
-    // useful data to write, and the upsert would just create a junk row.
-    const fields = [
-      s.steps, s.activeEnergyKcal, s.workoutMinutes, s.cardioMinutes,
-      s.zone2Minutes, s.restingHeartRate, s.hrv, s.vo2Max, s.weightLbs,
-    ];
-    if (fields.every((v) => v == null)) return;
-    const { upsertDailyHealthSnapshot } = await import('./api');
-    await upsertDailyHealthSnapshot(token, {
-      snapshot_date: s.dateISO,
-      steps: s.steps,
-      active_energy_kcal: s.activeEnergyKcal,
-      workout_minutes: s.workoutMinutes,
-      cardio_minutes: s.cardioMinutes,
-      zone2_minutes: s.zone2Minutes,
-      resting_hr: s.restingHeartRate,
-      hrv_ms: s.hrv,
-      vo2_max: s.vo2Max,
-      weight_lbs: s.weightLbs,
-      source: 'apple_health',
-    });
+    // The aggregator's flat fields are 7-day averages, not today's
+    // totals — pulling per-day numbers requires a separate HK read.
+    // Push today AND yesterday: today catches partial-day numbers,
+    // yesterday locks in the final-day numbers (steps, active energy
+    // continue accruing till midnight; an evening or next-morning
+    // refresh fills the gap).
+    const { readDailySnapshot } = await import('./appleHealth');
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yesterdayStart = todayStart - 86400000;
+    const tomorrowStart = todayStart + 86400000;
+
+    const [today, yesterday] = await Promise.all([
+      readDailySnapshot(todayStart, tomorrowStart),
+      readDailySnapshot(yesterdayStart, todayStart),
+    ]);
+
+    const { upsertDailyHealthSnapshotBatch } = await import('./api');
+    const payloads = [today, yesterday]
+      .filter((d): d is NonNullable<typeof d> => !!d && _hasAnyValue(d))
+      .map((d) => ({
+        snapshot_date: d.dateISO,
+        steps: d.steps,
+        active_energy_kcal: d.activeEnergyKcal,
+        workout_minutes: d.workoutMinutes,
+        cardio_minutes: d.cardioMinutes,
+        zone2_minutes: d.zone2Minutes,
+        resting_hr: d.restingHr,
+        hrv_ms: d.hrv,
+        vo2_max: d.vo2Max,
+        weight_lbs: d.weightLbs,
+        source: 'apple_health',
+      }));
+    if (payloads.length === 0) return;
+    await upsertDailyHealthSnapshotBatch(token, payloads);
   } catch {
     // Network / not-signed-in — silent. Local cache still has the data
     // and the next refresh will retry the push.
+  }
+}
+
+function _hasAnyValue(d: { steps: number | null; activeEnergyKcal: number | null; workoutMinutes: number | null; restingHr: number | null; hrv: number | null; weightLbs: number | null; vo2Max: number | null }): boolean {
+  return d.steps != null || d.activeEnergyKcal != null || d.workoutMinutes != null
+    || d.restingHr != null || d.hrv != null || d.weightLbs != null || d.vo2Max != null;
+}
+
+/** Batch-push the last `days` daily snapshots. Called once after the
+ *  user grants HealthKit permission so we don't lose history that's
+ *  already in the user's HK store. Safe to call repeatedly — the
+ *  backend upsert is idempotent. */
+export async function backfillSnapshotsToBackend(days: number = 30): Promise<{ pushed: number }> {
+  try {
+    const token = await AsyncStorage.getItem('authToken');
+    if (!token) return { pushed: 0 };
+    const { readDailySnapshot } = await import('./appleHealth');
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const reads: Promise<any>[] = [];
+    for (let i = 0; i < Math.min(days, 90); i++) {
+      const start = todayStart - i * 86400000;
+      reads.push(readDailySnapshot(start, start + 86400000));
+    }
+    const snapshots = await Promise.all(reads);
+    const payloads = snapshots
+      .filter((d): d is NonNullable<typeof d> => !!d && _hasAnyValue(d))
+      .map((d) => ({
+        snapshot_date: d.dateISO,
+        steps: d.steps,
+        active_energy_kcal: d.activeEnergyKcal,
+        workout_minutes: d.workoutMinutes,
+        cardio_minutes: d.cardioMinutes,
+        zone2_minutes: d.zone2Minutes,
+        resting_hr: d.restingHr,
+        hrv_ms: d.hrv,
+        vo2_max: d.vo2Max,
+        weight_lbs: d.weightLbs,
+        source: 'apple_health',
+      }));
+    if (payloads.length === 0) return { pushed: 0 };
+    const { upsertDailyHealthSnapshotBatch } = await import('./api');
+    await upsertDailyHealthSnapshotBatch(token, payloads);
+    return { pushed: payloads.length };
+  } catch {
+    return { pushed: 0 };
   }
 }
 

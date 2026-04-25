@@ -1,8 +1,7 @@
-import { useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { useEffect, useRef } from 'react';
+import { AppState, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { colors } from '../src/constants/theme';
 import { configureWorkoutNotifications } from '../src/utils/restNotifications';
 import { installDevLogs } from '../src/utils/devLogs';
 
@@ -18,9 +17,38 @@ try {
   if (gh?.GestureHandlerRootView) GestureWrapper = gh.GestureHandlerRootView;
 } catch {}
 
+// Throttle health refreshes to once every 15 min on foreground transitions
+// so a user who briefly backgrounds + returns doesn't trigger redundant
+// HealthKit reads.
+const HEALTH_REFRESH_THROTTLE_MS = 15 * 60_000;
+
 export default function RootLayout() {
+  const lastHealthRefreshMs = useRef(0);
+
   useEffect(() => {
     configureWorkoutNotifications().catch(() => undefined);
+  }, []);
+
+  // Foreground hook: every time the app becomes active, kick off a
+  // healthDataSummary refresh. The refresh internally posts today's +
+  // yesterday's snapshot to the backend, so users who only ever open
+  // HomeScreen still get daily persistence (was: only ProgressScreen
+  // triggered any refresh, so most users wrote zero rows).
+  useEffect(() => {
+    const onChange = (next: string) => {
+      if (next !== 'active') return;
+      const now = Date.now();
+      if (now - lastHealthRefreshMs.current < HEALTH_REFRESH_THROTTLE_MS) return;
+      lastHealthRefreshMs.current = now;
+      import('../src/services/healthDataSummary')
+        .then(({ refreshHealthDataSummary }) => refreshHealthDataSummary())
+        .catch(() => undefined);
+    };
+    const sub = AppState.addEventListener('change', onChange);
+    // Trigger once on mount as well — the first cold open is "active"
+    // by the time RootLayout renders, so addEventListener won't fire.
+    onChange(AppState.currentState);
+    return () => sub.remove();
   }, []);
 
   return (
