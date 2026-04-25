@@ -2191,6 +2191,37 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           (s as any).hrMax = healthMetrics.hrSummary.maxBpm;
           (s as any).hrZoneMinutes = healthMetrics.hrSummary.zoneMinutes;
         }
+        // Compute training score from what we just gathered. Fed into
+        // the summary view + persisted on StoredWorkoutSummary so the
+        // Progress chart can plot it against the day's readiness.
+        try {
+          const { computeTrainingScore, focusKindFromName } = await import('../services/trainingScore');
+          const setsCompleted = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
+          const setsPlanned = session.exercises.reduce((sum, ex) => sum + (typeof ex.targetSets === 'number' ? ex.targetSets : 0), 0);
+          const exercisesCompleted = session.exercises.filter(ex => (ex.sets?.length ?? 0) > 0).length;
+          const exercisesPlanned = session.exercises.length;
+          const estimatedSec = (workout as any)?.estimatedDurationMinutes
+            ? Number((workout as any).estimatedDurationMinutes) * 60
+            : null;
+          const ts = computeTrainingScore({
+            focusKind: focusKindFromName(workout.focus),
+            actualDurationSec: session.durationSeconds,
+            estimatedDurationSec: estimatedSec,
+            setsCompleted, setsPlanned: setsPlanned > 0 ? setsPlanned : null,
+            exercisesCompleted, exercisesPlanned,
+            hrAvg: healthMetrics?.hrSummary?.avgBpm ?? null,
+            hrMax: healthMetrics?.hrSummary?.maxBpm ?? null,
+            hrZoneMinutes: healthMetrics?.hrSummary?.zoneMinutes
+              ? healthMetrics.hrSummary.zoneMinutes.slice(0, 5) as [number, number, number, number, number]
+              : null,
+          });
+          (s as any).trainingScore = ts.score;
+          (s as any).trainingRating = ts.rating;
+          (s as any).trainingPillars = ts.pillars;
+          console.log(`[training-score] ${ts.score} (${ts.rating}) pillars=${JSON.stringify(ts.pillars)}`);
+        } catch (e) {
+          console.log('[training-score] compute failed (non-fatal):', e);
+        }
         setSummaryData(s);
         // Persist summary so user can review it later in Progress.
         // Now includes the full per-exercise detail (name, equipment,
@@ -3676,6 +3707,45 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         </View>
                       </View>
                     ) : null}
+
+                    {/* Training score — 0-100 productivity dial. Same
+                        visual language as the readiness dial so users
+                        can mentally compare effort vs recovery later
+                        on the Progress tab. */}
+                    {summaryData?.trainingScore != null && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 10 }}>
+                        <View style={{
+                          width: 56, height: 56, borderRadius: 28,
+                          borderWidth: 4,
+                          borderColor: summaryData.trainingScore >= 85 ? themeColors.success
+                            : summaryData.trainingScore >= 65 ? themeColors.primary
+                            : summaryData.trainingScore >= 45 ? themeColors.warning
+                            : themeColors.error,
+                          backgroundColor: themeColors.surface,
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Text style={{ fontSize: 18, fontWeight: '900',
+                            color: summaryData.trainingScore >= 85 ? themeColors.success
+                              : summaryData.trainingScore >= 65 ? themeColors.primary
+                              : summaryData.trainingScore >= 45 ? themeColors.warning
+                              : themeColors.error,
+                            lineHeight: 20 }}>
+                            {summaryData.trainingScore}
+                          </Text>
+                          <Text style={{ fontSize: 7, fontWeight: '700', letterSpacing: 0.4, marginTop: -1, color: themeColors.textMuted }}>
+                            SCORE
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary }}>
+                            {summaryData.trainingRating ?? '—'}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                            Effort {summaryData.trainingPillars?.effort ?? 0}/40 · Volume {summaryData.trainingPillars?.volume ?? 0}/25 · Time {summaryData.trainingPillars?.duration ?? 0}/20
+                          </Text>
+                        </View>
+                      </View>
+                    )}
 
                     {/* Best sets */}
                     {(summaryData?.achievements?.length ?? 0) > 0 && (

@@ -158,6 +158,7 @@ def most_recent_completed_focus(
     *,
     hours: int = 36,
     limit: int = 2,
+    include_skipped: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Return normalized focus buckets for the user's most-recent
     completed workouts within the last `hours` hours, newest first.
@@ -282,6 +283,42 @@ def most_recent_completed_focus(
             buckets.append(bucket)
         if family and len(families) < limit:
             families.append(family)
+    # Skipped days: a workout the user planned but didn't do is STILL
+    # signal — the planner should know "Pull was yesterday's slot" so
+    # tomorrow's pick rotates AWAY from Pull, not back to it. Without
+    # this, a user with [Legs, Pull, Skipped(Pull)] looked to the
+    # planner like [Legs, Pull] only and could happily get Pull again.
+    if include_skipped:
+        try:
+            from app.models import UserDayState
+            from datetime import timedelta as _td
+            window_start_date = today - _td(days=max(2, hours // 24))
+            skip_rows = db_session.exec(
+                select(UserDayState)
+                .where(UserDayState.user_id == user_id)
+                .where(UserDayState.day_key >= window_start_date)
+                .where(UserDayState.day_key <= today)
+                .where(UserDayState.skipped_focus.is_not(None))
+                .order_by(UserDayState.day_key.desc())
+            ).all()
+            for sr in skip_rows:
+                raw = (sr.skipped_focus or "").strip()
+                if not raw or raw.lower() in ("skipped", "rest"):
+                    continue
+                bk = normalize_focus_to_bucket(raw)
+                fm = normalize_focus_to_family(raw)
+                # Skipped days are NOT prepended (they're not "more
+                # recent" than completions for adjacency purposes), but
+                # they ARE included so the planner avoids the same
+                # focus tomorrow.
+                if bk and bk not in buckets and len(buckets) < limit:
+                    buckets.append(bk)
+                if fm and fm not in families and len(families) < limit:
+                    families.append(fm)
+                print(f"[history] skipped focus: day={sr.day_key} raw={raw!r} bucket={bk!r} family={fm!r}")
+        except Exception as e:
+            print(f"[history] skipped-focus merge failed (non-fatal): {e}")
+
     print(
         f"[history] recent focus buckets (last {hours}h, up to {limit}): {buckets} "
         f"families: {families}"

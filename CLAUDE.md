@@ -68,6 +68,13 @@ chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, calves, core
 - Workout completion upsert key is `(user, date, focus)` — legs morning + sauna evening = 2 rows, both affect fatigue
 - Prevents second activity from overwriting the first
 
+### Generation Consistency (single-day, full regen, switch-day)
+All three generation entry points must hand the planner the **same shape** of inputs so they produce the same kind of plan. Audited Apr 2026:
+- **All three** now query `most_recent_completed_focus(hours=240, limit=10)` and pass `recent_focus_buckets` + `recent_focus_families`.
+- **All three** now compute `muscle_fatigue` (via `compute_rolling_fatigue` + `injury_muscle_fatigue_boost`) and pass it to `PlannerInputs.muscle_fatigue` — full regen used to skip this entirely, so the fatigue-aware rotation in `weekly_recipe.py` was dead code for cold regens. Fixed in `routers/ai/plans.py::_build_deterministic_workout`.
+- **All three** route through `generate_workout_plan` → `generate_weekly_recipe` → `_repair_adjacent_duplicates`, so adjacency repair + split-identity guards run uniformly.
+- **Focus mismatch fallback** (single-day `focus_override` + switch-day `pin_focus`): when the requested focus isn't in the recipe (e.g. user picks Push on a U/L split), both endpoints now regenerate with `preferred_split` forced to the family containing that focus (push/pull/legs→ppl, upper/lower→upper_lower, full body→full_body, chest/back/shoulders/arms→bro) and lift the matching day's exercises. Old behavior was label-only — kept Lower exercises under a "Push" header. Logged at WARNING when the substitution itself fails.
+
 ### Recovery/Mobility Day Scaling
 - `generate_recovery_day()` and `generate_mobility_day()` scale to `session_minutes` (20–60 min progressive exercise additions)
 

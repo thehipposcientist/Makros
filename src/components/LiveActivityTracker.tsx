@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import {
@@ -79,6 +80,7 @@ function fmtElapsed(seconds: number): string {
 export default function LiveActivityTracker({ visible, onClose, themeName, onSaved }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<Phase>('pick');
   const [choice, setChoice] = useState<typeof QUICK_START[number] | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
@@ -258,9 +260,9 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
         <View style={[styles.root, { backgroundColor: tc.background }]}>
           {phase === 'pick' ? (
             <>
-              <View style={[styles.header, { borderBottomColor: tc.border }]}>
-                <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
-                  <Ionicons name="close" size={22} color={tc.textPrimary} />
+              <View style={[styles.header, { borderBottomColor: tc.border, paddingTop: insets.top + 6 }]}>
+                <TouchableOpacity onPress={onClose} style={styles.headerBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                  <Ionicons name="close" size={26} color={tc.textPrimary} />
                 </TouchableOpacity>
                 <Text style={[styles.headerTitle, { color: tc.textPrimary }]}>Custom Workout</Text>
                 <View style={styles.headerBtn} />
@@ -295,7 +297,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
               </ScrollView>
             </>
           ) : (
-            <View style={{ flex: 1, padding: 20, justifyContent: 'space-between' }}>
+            <View style={{ flex: 1, padding: 20, paddingTop: insets.top + 12, justifyContent: 'space-between' }}>
               <View>
                 <Text style={{ fontSize: 12, color: tc.textMuted, letterSpacing: 1.4, fontWeight: '700' }}>
                   {choice?.label.toUpperCase()}

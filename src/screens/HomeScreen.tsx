@@ -1878,30 +1878,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           }
         } catch { /* non-fatal */ }
-        // Sleep snapshot for the watch's Sleep tab. Pulls today's
-        // health summary (already cached in healthDataSummary) +
-        // sleepScore service to compute label + summary.
+        // Sleep snapshot for the watch's Sleep tab. Use the REAL
+        // phone-computed sleep score (pillars-based) instead of the
+        // old simplified hours-based proxy. Sources from the same
+        // healthDataSummary the phone Progress tab reads, so watch
+        // and phone always show the same number.
         try {
           const { pushSleepToWatch } = await import('../utils/watchSync');
           const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
           const cached = await getCachedHealthDataSummary();
+          const ss = (cached?.raw as any)?.sleepScore ?? null;
           const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
-          // Lightweight client-side scoring: hours-only score so we
-          // don't need to fetch sleep stages just for the watch tile.
-          // Mirrors the simple thresholds in scoreSleep when stages
-          // aren't available.
-          let score: number | null = null;
-          let label: string | null = null;
+          // Prefer the full sleep score when available; fall back to
+          // hours-band when sleepScore is null (no Apple Health data).
+          let score: number | null = ss?.score ?? null;
+          let label: string | null = ss?.rating ?? null;
           let summary: string | null = null;
-          if (hours != null) {
+          if (score != null && hours != null) {
+            summary = `${hours.toFixed(1)}h slept · ${label}`;
+          } else if (hours != null) {
             if (hours >= 8) { score = 90; label = 'Excellent'; summary = `${hours.toFixed(1)}h — fully recovered.`; }
             else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
-            else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
-            else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
+            else if (hours >= 6) { score = 55; label = 'Fair'; summary = `${hours.toFixed(1)}h — a touch short.`; }
+            else if (hours > 0) { score = 30; label = 'Poor'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
           }
           await pushSleepToWatch({
             score,
             hoursLastNight: hours,
+            asleepMin: cached?.sleepMinutes ?? null,
+            remMin: ss?.stages?.rem != null ? Math.round(ss.stages.rem * 60) : null,
+            deepMin: ss?.stages?.deep != null ? Math.round(ss.stages.deep * 60) : null,
             restingHr: cached?.restingHeartRate ?? null,
             hrvMs: cached?.hrv ?? null,
             label,
@@ -1955,12 +1961,54 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // train hard yesterday?" check from the cached weekly Z2.
           // TODO: pipe in training-load score from the readiness
           // engine when we lift it into healthDataSummary.
+          // Use the SAME 6-pillar preparedness score the phone's
+          // TrainingReadinessCard shows on Progress tab. Previously we
+          // were pushing the backend muscle-fatigue readiness which
+          // differs from the 6-pillar composite — that's why the user
+          // saw different numbers on watch vs phone. Compute inline so
+          // the watch sees the same value.
+          let prepScore: number | null = null;
+          let prepLabel: string | null = null;
+          try {
+            const { scorePreparedness } = await import('../services/preparedness');
+            const { loadSleepHistory } = await import('../services/appleHealth');
+            const history = await loadSleepHistory().catch(() => []);
+            // Recent meal averages drive the nutrition pillar. We don't
+            // need the full network call — read the last-known protein /
+            // calorie from the home-screen's nutritionScore state if
+            // available, else skip nutrition pillar.
+            const proteinG = (nutritionScoreData as any)?.adherence?.proteinG ?? null;
+            const proteinTarget = userProfile?.proteinGoal ?? null;
+            const calIntake = (nutritionScoreData as any)?.adherence?.calorieIntake ?? null;
+            const calTarget = userProfile?.calorieGoal ?? null;
+            const prep = scorePreparedness({
+              sleepScore: (cached?.raw as any)?.sleepScore ?? null,
+              hrvMs: cached?.hrv ?? null,
+              hrvHistory: (history as any[]).map((n: any) => n.hrv).filter((v: number) => typeof v === 'number' && v > 0),
+              restingHeartRate: cached?.restingHeartRate ?? null,
+              rhrHistory: [],
+              readinessFromBackend: readinessScore?.score ?? null,
+              proteinGrams: proteinG,
+              proteinTargetGrams: proteinTarget,
+              calorieIntake: calIntake,
+              calorieTarget: calTarget,
+              yesterdayWorkoutMinutes: null,
+              age: userProfile?.age ?? null,
+              cyclePhase: null,
+            });
+            prepScore = prep.score;
+            prepLabel = prep.label;
+          } catch (e) {
+            console.log('[watch readiness] preparedness compute failed, falling back to muscle fatigue', e);
+            prepScore = readinessScore?.score ?? null;
+            prepLabel = readinessScore?.label ?? null;
+          }
           await pushReadinessToWatch({
-            score: readinessScore?.score ?? null,
-            label: readinessScore?.label ?? null,
-            summary: readinessScore?.score
-              ? (readinessScore.score >= 75 ? "Solid recovery — train as planned."
-                 : readinessScore.score >= 50 ? "Moderate. Standard intensity is fine."
+            score: prepScore,
+            label: prepLabel,
+            summary: prepScore != null
+              ? (prepScore >= 75 ? "Solid recovery — train as planned."
+                 : prepScore >= 50 ? "Moderate. Standard intensity is fine."
                  : "Low. Consider lighter loads today.")
               : null,
             factors,
@@ -2298,10 +2346,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             return;
           }
           if (command === 'start_workout') {
-            const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
+            // Read from rePushStateRef (always current) instead of the
+            // closure-captured schedule, which froze on the value at
+            // listener-registration time. Watch starts now use the
+            // freshest plan, so "Start Workout" works even after
+            // schedule re-derivations that didn't re-register the
+            // listener.
+            const liveSchedule = rePushStateRef.current.schedule as any[];
+            const today = liveSchedule?.[0]?.workout ?? workoutPlan?.days?.[0];
+            console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) watchCmdHandlersRef.current.start(today);
+            else console.warn('[watch cmd] start_workout: no today workout available');
           } else if (command === 'skip_workout') {
-            const today = (schedule as any[])?.[0]?.workout ?? workoutPlan?.days?.[0];
+            const liveSchedule = rePushStateRef.current.schedule as any[];
+            const today = liveSchedule?.[0]?.workout ?? workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'toggle_meal') {
             const mealType = String(payload?.mealType || '');
@@ -5352,13 +5410,42 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // as an escape hatch, not a primary choice.
               const allOptions = [...focusOptions, ...plusCardioOptions, ...extraOptions, 'Empty'];
 
-              // Map dateKey → completed focus so when schedule index 0 is
-              // today, we can still see yesterday's focus (outside schedule).
+              // Map dateKey → focus the user EITHER did or planned-then-skipped.
+              // Skipped days now contribute to adjacency checks because a
+              // user who skipped Pull yesterday still doesn't want Pull
+              // today (the muscle group hasn't been "done" but the slot is
+              // claimed for that pattern in the rotation). Was previously
+              // excluding skipped, which made the picker recommend Pull
+              // again right after a skip.
               const focusByDate = new Map<string, string>();
               for (const s of workoutHistoryList) {
-                if (!s?.date || s.skipped) continue;
+                if (!s?.date) continue;
                 const k = (s.date || '').slice(0, 10);
-                if (k && !focusByDate.has(k)) focusByDate.set(k, s.focus || '');
+                // Completion takes precedence over skip; skip fills in
+                // the gap where no completion exists for that day.
+                if (!s.skipped && k && !focusByDate.has(k)) {
+                  focusByDate.set(k, s.focus || '');
+                }
+              }
+              for (const s of workoutHistoryList) {
+                if (!s?.date || !s.skipped) continue;
+                const k = (s.date || '').slice(0, 10);
+                if (k && !focusByDate.has(k) && s.focus) {
+                  focusByDate.set(k, s.focus);
+                }
+              }
+              // Also pull skipped focus from the in-memory skippedDates
+              // set + skipReasonsByDate, in case workoutHistoryList hasn't
+              // hydrated the skip yet (skip persists locally before history
+              // refreshes).
+              for (const dk of skippedDates) {
+                if (!focusByDate.has(dk)) {
+                  // Skip rows in workoutHistory carry the focus, but the
+                  // local skippedDates set doesn't — best effort: use the
+                  // schedule's planned focus for that date if available.
+                  const planned = scheduleForRender.find(it => dateKey(it.date) === dk)?.workout?.focus;
+                  if (planned) focusByDate.set(dk, planned);
+                }
               }
 
               // Helpers closed over schedule so the filter can read
@@ -5395,10 +5482,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // Compute per-option warnings (don't filter — let user pick
               // anything, but flag conflicts and low readiness so they
               // see the trade-off before confirming).
+              //
+              // Conflict window EXTENDED:
+              //  - i-1 / i+1 (immediate neighbors) — full conflict
+              //  - i-2 (2 days back) — counts ONLY if the day between is
+              //    "easy" (mobility/recovery/skipped/cardio). For 7-day
+              //    users this prevents [Pull, Mobility, Pull] looking
+              //    fine just because mobility broke the strict adjacency.
               const conflictFamilies = new Set<string>();
               if (isFixedNeighbor(i - 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i - 1)));
               if (isFixedNeighbor(i + 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i + 1)));
+              const isEasyFocus = (f?: string) => {
+                const x = (f || '').toLowerCase();
+                return /recover|rest|mobil|stretch|yoga|flow|cardio|zone.?2|easy/.test(x);
+              };
+              const between = scheduleFocusAt(i - 1);
+              if (isFixedNeighbor(i - 2) && (between == null || isEasyFocus(between))) {
+                conflictFamilies.add(normFamily(scheduleFocusAt(i - 2)));
+              }
+              const betweenAfter = scheduleFocusAt(i + 1);
+              if (isFixedNeighbor(i + 2) && (betweenAfter == null || isEasyFocus(betweenAfter))) {
+                conflictFamilies.add(normFamily(scheduleFocusAt(i + 2)));
+              }
               conflictFamilies.delete('unknown'); conflictFamilies.delete('');
+              // Easy focuses don't compete for hard-family adjacency —
+              // mobility/recovery/cardio shouldn't be blocked just
+              // because they share a "neutral" slot with another easy day.
+              for (const fam of Array.from(conflictFamilies)) {
+                if (['easy', 'cardio'].includes(fam)) conflictFamilies.delete(fam);
+              }
 
               const mf = readinessScore?.muscleFatigue ?? {};
               const readinessFor = (focus: string): number | null => {
@@ -5437,6 +5549,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const readiness = readinessFor(opt);
                 optionWarnings[opt] = { conflict, readiness };
               }
+              // Sort options so the BEST (no conflict + high readiness)
+              // ones appear first in the picker. Empty stays last.
+              // Without this, picker presented Push/Pull/Legs in a fixed
+              // order — a user who did Pull yesterday saw Pull as a
+              // first-row option even though it was the wrong choice.
+              const optionRank = (opt: string): number => {
+                if (opt === 'Empty') return 1000;
+                const w = optionWarnings[opt];
+                const conflictPenalty = w?.conflict ? 200 : 0;
+                const readinessPenalty = 100 - (w?.readiness ?? 50);
+                // Mobility/Recovery sit slightly below pure lifts when
+                // readiness is similar so users don't accidentally pick
+                // them as a first-instinct.
+                const easyTie = /recover|mobil/i.test(opt) ? 5 : 0;
+                return conflictPenalty + readinessPenalty + easyTie;
+              };
+              const sortedOptions = [...allOptions].sort((a, b) => optionRank(a) - optionRank(b));
 
               return (
                 <FadeInView key={i} delay={i * 80}>
@@ -5463,7 +5592,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                   onUndoComplete={isToday ? () => handleUndoComplete(key) : undefined}
-                  splitOptions={allOptions}
+                  splitOptions={sortedOptions}
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
                   onToggleSwitch={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}

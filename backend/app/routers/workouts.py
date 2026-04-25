@@ -490,15 +490,47 @@ def generate_single_day(
             )
             logger.debug("[generate-day] focus override → generated Cardio day")
         else:
+            matched = False
             for alt_idx, alt_day in enumerate(days):
                 if alt_day.get("focus", "").lower().strip() == override_lower:
                     day = alt_day
                     idx = alt_idx
                     logger.debug(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
+                    matched = True
                     break
-            else:
-                day = {**day, "focus": body.focus_override}
-                logger.debug(f"[generate-day] focus override '{body.focus_override}' — no matching recipe day, relabeled day {idx}")
+            if not matched:
+                # Same fix as switch-day: regenerate with the split that
+                # contains the requested focus, then lift that day's
+                # exercises. Avoids the "Push label on Lower exercises"
+                # mislabel bug.
+                _SPLIT_FOR_FOCUS_DAY = {
+                    "push": "ppl", "pull": "ppl", "legs": "ppl",
+                    "upper": "upper_lower", "lower": "upper_lower",
+                    "full body": "full_body", "full_body": "full_body",
+                    "chest": "bro", "back": "bro", "shoulders": "bro", "arms": "bro",
+                }
+                forced_split = _SPLIT_FOR_FOCUS_DAY.get(override_lower)
+                substituted = False
+                if forced_split and forced_split != (body.preferred_split or "auto"):
+                    try:
+                        from dataclasses import replace as _dc_replace
+                        alt_inputs = _dc_replace(inputs, preferred_split=forced_split)
+                        alt_plan = generate_workout_plan(
+                            alt_inputs, SEED_EXERCISES,
+                            history_familiarity=history_familiarity,
+                            recent_muscle_exercises=recent_muscle_exercises,
+                        )
+                        for ad in alt_plan.get("workout_plan", {}).get("days", []):
+                            if (ad.get("focus") or "").lower().strip() == override_lower:
+                                day = ad
+                                substituted = True
+                                logger.debug(f"[generate-day] focus override '{body.focus_override}' → split substitution (split={forced_split})")
+                                break
+                    except Exception as e:
+                        logger.warning(f"[generate-day] focus override substitution failed: {e}")
+                if not substituted:
+                    day = {**day, "focus": body.focus_override}
+                    logger.warning(f"[generate-day] focus override '{body.focus_override}' — relabel-only fallback (no matching day)")
 
     # Graduated fatigue response — 5 tiers from force-recovery to proceed
     if fatigue_snapshot and not body.focus_override:
@@ -812,10 +844,56 @@ def generate_full_week(
                         f"focuses now {[d.get('focus') for d in days]}"
                     )
             elif src_lift_idx is None:
-                # Focus not in plan (e.g. user picked a focus the split
-                # doesn't have) — label-only fallback
-                days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
-                logger.info(f"[generate-week] pin fallback: label-only for {body.pin_focus}")
+                # Focus not in this plan's split (e.g. user picked Push
+                # while their split is Upper/Lower). The OLD fallback was
+                # label-only — relabeled the day but kept the wrong
+                # exercises (Lower-day exercises under a "Push" header).
+                # NEW: regenerate the plan with preferred_split forced to
+                # the family that contains the requested focus, then lift
+                # the matching day's exercises into the target slot. This
+                # makes the day's exercises actually match the focus.
+                _SPLIT_FOR_FOCUS = {
+                    "push": "ppl", "pull": "ppl", "legs": "ppl",
+                    "upper": "upper_lower", "lower": "upper_lower",
+                    "full body": "full_body", "full_body": "full_body",
+                    "chest": "bro", "back": "bro", "shoulders": "bro", "arms": "bro",
+                }
+                forced_split = _SPLIT_FOR_FOCUS.get(base_focus_lower)
+                substituted = False
+                if forced_split and forced_split != (body.preferred_split or "auto"):
+                    try:
+                        from dataclasses import replace as _dc_replace
+                        alt_inputs = _dc_replace(inputs, preferred_split=forced_split)
+                        alt_plan = generate_workout_plan(
+                            alt_inputs, SEED_EXERCISES,
+                            history_familiarity=history_familiarity,
+                            recent_muscle_exercises=recent_muscle_exercises,
+                        )
+                        alt_days = alt_plan.get("workout_plan", {}).get("days", [])
+                        for ad in alt_days:
+                            af = (ad.get("focus") or "").lower().strip()
+                            if af == base_focus_lower or af == override_lower:
+                                # Inherit image enrichment by re-running the
+                                # same image map lookup on the substituted
+                                # day's exercises.
+                                days[target_idx] = ad
+                                substituted = True
+                                logger.info(
+                                    f"[generate-week] pin substitution: regen with split={forced_split} → "
+                                    f"using day with focus '{ad.get('focus')}' for pin '{body.pin_focus}'"
+                                )
+                                break
+                    except Exception as e:
+                        logger.warning(f"[generate-week] pin substitution failed: {e}")
+                if not substituted:
+                    # Last-resort: label-only (preserves old behavior so
+                    # the user at least sees their pick reflected). Logged
+                    # at WARNING so we can spot it in production.
+                    days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
+                    logger.warning(
+                        f"[generate-week] pin fallback: label-only for {body.pin_focus} "
+                        f"(no matching day found even after split substitution)"
+                    )
 
             # Promote the target day to PLUS_CARDIO if the user asked for
             # the cardio-finisher variant and the day isn't already one.

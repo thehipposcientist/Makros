@@ -489,6 +489,13 @@ export interface WorkoutSummary {
   hrMax?: number;
   /** Minutes in each HR zone Z1..Z5. */
   hrZoneMinutes?: [number, number, number, number, number];
+  /** Training score — 0-100 measure of "how productive was this session?".
+   *  Computed at finish time from HR zones + duration + sets vs plan.
+   *  Stored so Progress charts can compare it against the day's
+   *  readiness / sleep score over time. */
+  trainingScore?: number;
+  trainingRating?: 'Crushed' | 'Solid' | 'Light' | 'Below';
+  trainingPillars?: { effort: number; volume: number; duration: number; consistency: number };
 }
 
 /** Per-exercise logged detail kept alongside the AI summary so the

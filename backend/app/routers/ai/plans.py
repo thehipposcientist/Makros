@@ -549,6 +549,32 @@ def _build_deterministic_workout(
     except Exception:
         user_age = None
 
+    # Muscle fatigue — same source the single-day + switch-day endpoints use.
+    # Without this the weekly recipe's fatigue-aware rotation (skip muscles
+    # the user is wrecked on) NEVER fires for full-plan regen, so a user with
+    # fried quads still gets quads on day 1 of the new plan. Generate-day
+    # and switch-day already pass this; full regen was the odd one out.
+    fatigue_dict = None
+    if db is not None and user_id is not None:
+        try:
+            from app.services.workout.history import get_recent_completions_for_fatigue
+            from app.services.workout.activity_impact import compute_rolling_fatigue, recompute_readiness
+            from app.services.workout.planner import injury_muscle_fatigue_boost
+            completions = get_recent_completions_for_fatigue(user_id, db)
+            if completions:
+                snap = compute_rolling_fatigue(completions)
+                injury_boosts = injury_muscle_fatigue_boost(tuple(req.injuriesOrLimitations or ()))
+                for muscle, boost in injury_boosts.items():
+                    current = snap.muscle_fatigue.get(muscle)
+                    if current < boost:
+                        snap.muscle_fatigue.add(muscle, boost - current)
+                if injury_boosts:
+                    snap.readiness_score, snap.focus_readiness = recompute_readiness(snap.muscle_fatigue)
+                fatigue_dict = snap.muscle_fatigue.to_dict()
+                print(f"[plan-gen workout] fatigue: readiness={snap.readiness_score} top={snap.muscle_fatigue.top_fatigued(3)}")
+        except Exception as e:
+            print(f"[plan-gen workout] fatigue lookup failed (non-fatal): {e}")
+
     inputs = PlannerInputs(
         goal=req.goal,
         days_per_week=max(1, min(7, req.daysPerWeek)),
@@ -564,6 +590,7 @@ def _build_deterministic_workout(
         rng_seed=int(user_id or 0),
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
+        muscle_fatigue=fatigue_dict,
         user_age=user_age,
     )
 
