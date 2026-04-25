@@ -2637,6 +2637,27 @@ export async function getTodaySupplements(token: string): Promise<TodayStackItem
   return request('/supplements/today', { headers: { Authorization: `Bearer ${token}` } });
 }
 
+// AI-layered supplement recommendations — catches supplements the
+// deterministic engine doesn't know about (adaptogens, niche stuff
+// like CoQ10 for statin users, collagen for joint goals). Cached
+// server-side per user, 14-day TTL, auto-invalidates on context change.
+export type AISupplementRecommendation = SupplementRecommendation & {
+  ai_generated?: boolean;
+};
+export async function getAISupplementRecommendations(
+  token: string,
+  force_refresh: boolean = false,
+): Promise<{
+  recommendations: AISupplementRecommendation[];
+  generated_at: string;
+  from_cache: boolean;
+}> {
+  const qs = force_refresh ? '?force_refresh=true' : '';
+  return request(`/supplements/ai-recommendations${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 60000);
+}
+
 export async function getSupplementRecommendations(token: string): Promise<{
   recommendations: SupplementRecommendation[];
   warnings: { duplicate_ingredient_ids: number[] };

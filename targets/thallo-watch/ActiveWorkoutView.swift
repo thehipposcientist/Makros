@@ -382,6 +382,48 @@ private struct ExerciseTab: View {
                             logSetCard(ex)
                         }
                         footer()
+                    } else if workout.exercises.isEmpty {
+                        // Placeholder / empty-shell workout — keep the
+                        // screen ALIVE with live HR + timer so watchOS
+                        // doesn't background the app during the first
+                        // few seconds while HKWorkoutSession spins up
+                        // and the phone push lands. Without this, an
+                        // empty-exercises shell rendered "Workout done"
+                        // immediately and watchOS pre-empted the app
+                        // (the "watch closes on Start" bug).
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(workout.focus.uppercased())
+                                .font(.system(size: 11, weight: .heavy))
+                                .tracking(1.2)
+                                .foregroundColor(theme.textMuted)
+                            HStack(spacing: 6) {
+                                Image(systemName: "heart.fill")
+                                    .foregroundColor(theme.error)
+                                    .font(.system(size: 14))
+                                Text(hr.heartRate.map { "\($0)" } ?? "—")
+                                    .font(.system(size: 36, weight: .black, design: .rounded))
+                                    .foregroundColor(theme.textPrimary)
+                                Text("BPM")
+                                    .font(.system(size: 9, weight: .heavy))
+                                    .foregroundColor(theme.textMuted)
+                            }
+                            Text("Loading workout from phone…")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(theme.textSecondary)
+                            if let err = hr.errorMessage {
+                                Text("HR: \(err)")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(theme.warning)
+                                    .lineLimit(3)
+                            }
+                            Text(hr.running ? "HR session active" : "Starting HR session…")
+                                .font(.system(size: 10))
+                                .foregroundColor(hr.running ? theme.success : theme.textMuted)
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(theme.surface)
+                        .cornerRadius(8)
                     } else {
                         Text("Workout done")
                             .font(.headline)

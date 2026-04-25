@@ -1834,27 +1834,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
         } = await import('../utils/watchSync');
         const todayISO = new Date().toISOString().slice(0, 10);
-        // `schedule` is the post-skip/post-switch today row — the same
-        // source the on-screen day card reads. Using this (instead of
-        // `workoutPlan.days[0]`) was the fix for "watch shows push
-        // even though I skipped today".
         const todayItem = (schedule as any[])?.[0] ?? null;
         const todayWorkout = todayItem?.workout ?? null;
-        // Derive lifecycle status from the app's actual flags.
         const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
           todayDone ? 'completed'
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
           : 'scheduled';
-        // Compute the 6-pillar preparedness score ONCE so the small
-        // readiness icon on the workout payload matches the watch's
-        // Readiness tab (and the phone's Progress tab). Earlier the
-        // workout payload used `readinessScore?.score` (backend
-        // muscle-fatigue) while the Readiness tab used the 6-pillar
-        // preparedness — that's why the user saw "icon 14 off, page 2 off"
-        // on watch. Both now share the same number.
-        let workoutReadinessScore: number | null = readinessScore?.score ?? null;
-        let workoutReadinessLabel: string | null = readinessScore?.label ?? null;
+        // ── Single readiness compute for the WHOLE sync cycle ──
+        // Compute the 6-pillar preparedness ONCE here at the top.
+        // Both pushWorkoutToWatch (workout-card lightning bolt icon) AND
+        // pushReadinessToWatch (Readiness tab) get the EXACT same number.
+        // Earlier they each had their own compute path with their own
+        // network calls, producing drift even with the shared loader
+        // (different snapshots ms apart). One source of truth fixes that.
+        let unifiedPrepScore: number | null = readinessScore?.score ?? null;
+        let unifiedPrepLabel: string | null = readinessScore?.label ?? null;
         try {
           if (authToken) {
             const { scorePreparedness } = await import('../services/preparedness');
@@ -1867,15 +1862,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               todaysFocus: todayItem?.workout?.focus ?? null,
             });
             const prep = scorePreparedness(inputs);
-            workoutReadinessScore = prep.score;
-            workoutReadinessLabel = prep.label;
+            unifiedPrepScore = prep.score;
+            unifiedPrepLabel = prep.label;
           }
         } catch { /* fall back to backend score */ }
         await pushWorkoutToWatch(todayWorkout, {
           dateISO: todayISO,
           status,
-          readiness: workoutReadinessScore,
-          readinessLabel: workoutReadinessLabel,
+          readiness: unifiedPrepScore,
+          readinessLabel: unifiedPrepLabel,
         });
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
@@ -1991,40 +1986,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // train hard yesterday?" check from the cached weekly Z2.
           // TODO: pipe in training-load score from the readiness
           // engine when we lift it into healthDataSummary.
-          // Phone TrainingReadinessCard and this watch push now share
-          // a SINGLE loader (`loadPreparednessInputs`) so they compute
-          // against IDENTICAL inputs. Previously they had their own
-          // ad-hoc paths with subtly different sources for protein /
-          // yesterday-strain / cycle, producing the "phone 94, watch 79"
-          // mismatch the user kept reporting.
-          let prepScore: number | null = null;
-          let prepLabel: string | null = null;
-          try {
-            const { scorePreparedness } = await import('../services/preparedness');
-            const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-            if (!authToken) throw new Error('no_auth');
-            const inputs = await loadPreparednessInputs({
-              authToken,
-              age: userProfile?.age ?? null,
-              proteinTarget: userProfile?.proteinGoal ?? null,
-              calorieTarget: userProfile?.calorieGoal ?? null,
-              todaysFocus: ((schedule as any[])?.[0]?.workout?.focus ?? null) as string | null,
-              cachedHealthSummary: cached?.raw ?? null,
-            });
-            const prep = scorePreparedness(inputs);
-            prepScore = prep.score;
-            prepLabel = prep.label;
-          } catch (e) {
-            console.log('[watch readiness] preparedness compute failed, falling back to muscle fatigue', e);
-            prepScore = readinessScore?.score ?? null;
-            prepLabel = readinessScore?.label ?? null;
-          }
+          // Reuse the SAME score that was already pushed via
+          // pushWorkoutToWatch above (the workout-card lightning bolt).
+          // Two pushes, one number — the watch's Today icon and the
+          // Readiness tab now show the EXACT same value, regardless of
+          // any meal-fetch timing drift between separate compute calls.
           await pushReadinessToWatch({
-            score: prepScore,
-            label: prepLabel,
-            summary: prepScore != null
-              ? (prepScore >= 75 ? "Solid recovery — train as planned."
-                 : prepScore >= 50 ? "Moderate. Standard intensity is fine."
+            score: unifiedPrepScore,
+            label: unifiedPrepLabel,
+            summary: unifiedPrepScore != null
+              ? (unifiedPrepScore >= 75 ? "Solid recovery — train as planned."
+                 : unifiedPrepScore >= 50 ? "Moderate. Standard intensity is fine."
                  : "Low. Consider lighter loads today.")
               : null,
             factors,
@@ -2132,32 +2104,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             : todayItem?.isRest ? 'rest'
             : 'scheduled';
           console.log('[watch] reachable — re-pushing full home snapshot', { status });
-          // Compute 6-pillar preparedness for the workout-payload
-          // readiness icon so it matches the watch Readiness tab.
-          (async () => {
-            let prepScoreFinal: number | null = s.readinessScore?.score ?? null;
-            let prepLabelFinal: string | null = s.readinessScore?.label ?? null;
+
+          // Compute prep ONCE for this reachability re-push and share
+          // the result across BOTH the workout payload AND the
+          // readiness payload. Resolves the "Today icon vs Readiness
+          // tab" drift on the watch — both fields now show the same
+          // number every reachability event. Promise resolves to
+          // {score, label} so dependent push calls can await it.
+          const prepPromise: Promise<{ score: number | null; label: string | null }> = (async () => {
             try {
-              if (authToken) {
-                const { scorePreparedness } = await import('../services/preparedness');
-                const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-                const inputs = await loadPreparednessInputs({
-                  authToken,
-                  age: userProfile?.age ?? null,
-                  proteinTarget: userProfile?.proteinGoal ?? null,
-                  calorieTarget: userProfile?.calorieGoal ?? null,
-                  todaysFocus: todayItem?.workout?.focus ?? null,
-                });
-                const prep = scorePreparedness(inputs);
-                prepScoreFinal = prep.score;
-                prepLabelFinal = prep.label;
+              if (!authToken) {
+                return { score: s.readinessScore?.score ?? null, label: s.readinessScore?.label ?? null };
               }
-            } catch { /* fall back to backend score */ }
+              const { scorePreparedness } = await import('../services/preparedness');
+              const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+              const inputs = await loadPreparednessInputs({
+                authToken,
+                age: userProfile?.age ?? null,
+                proteinTarget: userProfile?.proteinGoal ?? null,
+                calorieTarget: userProfile?.calorieGoal ?? null,
+                todaysFocus: todayItem?.workout?.focus ?? null,
+              });
+              const prep = scorePreparedness(inputs);
+              return { score: prep.score, label: prep.label };
+            } catch {
+              return { score: s.readinessScore?.score ?? null, label: s.readinessScore?.label ?? null };
+            }
+          })();
+
+          (async () => {
+            const prep = await prepPromise;
             pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
               status,
-              readiness: prepScoreFinal,
-              readinessLabel: prepLabelFinal,
+              readiness: prep.score,
+              readinessLabel: prep.label,
             }).catch(() => {});
           })();
           pushThemeToWatch(s.themePreference).catch(() => {});
@@ -2214,38 +2195,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
                 factors.push({ label: 'HRV', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${hrv} ms` });
               }
-              // Use the shared loader so this reachability re-push
-              // matches both (a) the phone TrainingReadinessCard and
-              // (b) the regular sync useEffect's readiness compute.
-              // Without this, the watch could see THREE different
-              // readiness numbers depending on which path fired most
-              // recently. All three paths now go through
-              // loadPreparednessInputs → scorePreparedness.
-              let prepScoreFinal: number | null = s.readinessScore?.score ?? null;
-              let prepLabelFinal: string | null = s.readinessScore?.label ?? null;
-              try {
-                if (authToken) {
-                  const { scorePreparedness } = await import('../services/preparedness');
-                  const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-                  const inputs = await loadPreparednessInputs({
-                    authToken,
-                    age: userProfile?.age ?? null,
-                    proteinTarget: userProfile?.proteinGoal ?? null,
-                    calorieTarget: userProfile?.calorieGoal ?? null,
-                    todaysFocus: ((s.schedule as any[])?.[0]?.workout?.focus ?? null) as string | null,
-                    cachedHealthSummary: cached?.raw ?? null,
-                  });
-                  const prep = scorePreparedness(inputs);
-                  prepScoreFinal = prep.score;
-                  prepLabelFinal = prep.label;
-                }
-              } catch { /* fall back to backend-only score */ }
+              // Reuse the SAME prep promise the workout-payload push
+              // is awaiting. Single source of truth for this reachability
+              // event — Today icon and Readiness tab on the watch will
+              // ALWAYS show the same number since they read from one
+              // computation.
+              const prep = await prepPromise;
               await pushReadinessToWatch({
-                score: prepScoreFinal,
-                label: prepLabelFinal,
-                summary: prepScoreFinal != null
-                  ? (prepScoreFinal >= 75 ? "Solid recovery — train as planned."
-                     : prepScoreFinal >= 50 ? "Moderate. Standard intensity is fine."
+                score: prep.score,
+                label: prep.label,
+                summary: prep.score != null
+                  ? (prep.score >= 75 ? "Solid recovery — train as planned."
+                     : prep.score >= 50 ? "Moderate. Standard intensity is fine."
                      : "Low. Consider lighter loads today.")
                   : null,
                 factors,

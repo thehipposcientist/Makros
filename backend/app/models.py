@@ -96,6 +96,23 @@ class UserDayState(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SupplementAICache(SQLModel, table=True):
+    """Per-user cache for AI-generated supplement recommendations.
+
+    Signature-based invalidation: if `signature` matches the current
+    user state (goal + stack + age decade + diet shape) AND
+    `generated_at` is within TTL, return cached recs. Otherwise
+    regenerate. Keeps AI cost predictable and load instant.
+    """
+    __tablename__ = "supplement_ai_cache"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_supplement_ai_cache_user"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    signature: str = Field(default="")          # input-hash for invalidation
+    recs_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class SleepLog(SQLModel, table=True):
     """Per-night sleep snapshot. Lets us:
       1. survive device wipes (sleep history was AsyncStorage-only),

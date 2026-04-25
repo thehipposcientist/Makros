@@ -217,17 +217,72 @@ def today_schedule(
 
 # ─── Recommendations + insights ──────────────────────────────────────────────
 
+@router.get("/ai-recommendations")
+def ai_recommendations(
+    force_refresh: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """AI-augmented supplement suggestions BEYOND the deterministic floor.
+
+    Catches supplements the rule-based engine doesn't know about
+    (adaptogens, niche performance supplements, context-specific picks
+    like CoQ10 for statin users, collagen for joint goals, etc).
+
+    Cache strategy:
+      - Per-user signature hash from goal + stack + age decade + diet
+        shape + training bracket
+      - 14-day TTL
+      - Cache invalidates automatically when signature changes
+        (e.g., user adds a supplement, changes goal, ages a decade)
+      - `?force_refresh=true` query param skips cache
+    """
+    from app.services.supplement_ai_recs import get_or_generate_ai_recs
+    from app.services.supplement_recs import build_recommendations
+    # Need the deterministic slugs so the AI doesn't duplicate them.
+    det = build_recommendations(db, current_user.id)
+    deterministic_slugs = [
+        r.get("slug") for r in det.get("recommendations", []) if r.get("slug")
+    ]
+    result = get_or_generate_ai_recs(
+        db, current_user.id,
+        deterministic_slugs=deterministic_slugs,
+        force_refresh=force_refresh,
+    )
+    return result
+
+
 @router.get("/recommendations")
 def recommendations(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Generate cautious, food-gap-driven supplement suggestions. Uses
-    the same 14-day gut/nutrition rollup that powers the Progress
-    screen so suggestions are backed by actual logged data.
+    """Goal/training/diet/profile-aware supplement suggestions.
 
-    Cautious language: "may support", "consider", "useful for". Never
-    "fixes" / "boosts hormones" / "prevents disease"."""
+    Delegates to `services.supplement_recs.build_recommendations` which
+    composes signals from:
+      - User profile (age, gender, weight)
+      - Active goal (type + pace)
+      - Last 14 days of workouts (hard sessions, cardio volume)
+      - 14-day diet rollup (fiber, omega-3, plants, protein adequacy,
+        plant/animal split, sat fat, fermented foods)
+      - Current stack (avoids duplicates, respects category overlaps)
+
+    Cautious language enforced: "may support", "consider", "useful for".
+    Never "fixes" / "boosts hormones" / "prevents disease"."""
+    from app.services.supplement_recs import build_recommendations
+    return build_recommendations(db, current_user.id)
+
+
+# Old inline implementation kept below as `_legacy_recommendations` for
+# reference + as a safety fallback if the new engine throws. Routes use
+# `build_recommendations` directly. Remove after a few releases of stable
+# operation.
+def _legacy_recommendations(
+    current_user: User,
+    db: Session,
+):
+    """Old food-gap-only recommendations. Use build_recommendations()."""
     from app.services.nutrition.gut_health import compute_weekly_rollup
 
     rec: list[dict] = []

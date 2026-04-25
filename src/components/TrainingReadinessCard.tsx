@@ -154,6 +154,23 @@ export default function TrainingReadinessCard({
       setFatigue(f);
       const res = scorePreparedness(inputs);
       setPrep(res);
+
+      // Push the EXACT score the user is looking at on this card to
+      // the watch as the authoritative reading. Eliminates the few-point
+      // drift between phone-render time and the watch-sync useEffect's
+      // independent compute. Now the watch always shows what the phone
+      // most-recently displayed.
+      try {
+        const { pushReadinessToWatch } = await import('../utils/watchSync');
+        await pushReadinessToWatch({
+          score: res.score,
+          label: res.label,
+          summary: res.score >= 75 ? 'Solid recovery — train as planned.'
+            : res.score >= 50 ? 'Moderate. Standard intensity is fine.'
+            : 'Low. Consider lighter loads today.',
+          factors: [],
+        }).catch(() => {});
+      } catch { /* watch bridge optional */ }
     } catch {
       setPrep(null);
     } finally {
