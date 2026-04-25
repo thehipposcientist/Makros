@@ -1,7 +1,7 @@
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const LOCAL_BACKEND_IP = '192.168.1.220'; // your dev machine's LAN IP
+const LOCAL_BACKEND_IP = '192.168.1.246'; // your dev machine's LAN IP
 
 /** Exported for callers that need to hit the API outside the `request`
  *  helper (e.g. direct `fetch` for endpoints that return binary/large
@@ -1036,6 +1036,12 @@ export async function generateWorkoutWeek(
      *  around that choice. All other days rotate away from the pinned focus. */
     pin_day_index?: number | null;
     pin_focus?: string | null;
+    /** User's CURRENT plan in visual order. When provided alongside a
+     *  pin, the backend pins against this week (single-day swap)
+     *  instead of generating a fresh week. Without this, the pin
+     *  lands on a freshly-generated plan whose day indices may not
+     *  match the visual schedule the user tapped. */
+    current_days?: any[] | null;
   },
 ): Promise<{
   days: any[];

@@ -257,9 +257,12 @@ def normalize_focus_to_family(raw_focus: Optional[str]) -> FocusBucket:
             return "recovery"
 
     # Fine-grained push/pull/legs detection BEFORE coarse upper/lower
+    # Shoulders mapped to push to match `archetype_to_focus_family`'s
+    # mapping for `LIFT_BRO_SHOULDERS` — without this, pinning Shoulders
+    # on a bro plan and family-based rotation logic disagree.
     _PUSH_PATTERNS = [
         r"\bpush\b", r"\bchest\b", r"\bpressing\b",
-        r"\bbench\b", r"\btriceps?\b",
+        r"\bbench\b", r"\btriceps?\b", r"\bshoulders?\b", r"\bdelts?\b",
     ]
     _PULL_PATTERNS = [
         r"\bpull\b", r"\bback\b", r"\blats?\b",

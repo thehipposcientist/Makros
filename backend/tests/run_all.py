@@ -57,6 +57,40 @@ _TEST_MODULES = (
     "tests.test_carb_distribution",
     "tests.test_quick_intents",
     "tests.test_rolling_e1rm",
+    # Switch Day pin/rotate/swap algorithm — pure-function helper.
+    "tests.test_switch_day",
+    # Switch Day INTEGRATION — pin every position × every focus on
+    # real recipes from the planner. Asserts the result week still
+    # satisfies the split contract.
+    "tests.test_switch_day_integration",
+    # Generation matrix — split × goal × days/week assertions on
+    # fresh-week recipes (bro canonical, cardio alignment, no
+    # PLUS_CARDIO downgrade on bro, recovery placement, etc.).
+    "tests.test_generation_matrix",
+    # Single-day regen pieces — focus normalization, recent_focus
+    # rotation, focus_override matching.
+    "tests.test_single_day_regen",
+    # End-to-end /workouts/generate-week with current_days (pin-against-
+    # current-week single-day swap behavior).
+    "tests.test_generate_week_endpoint",
+    # Coach apply-action: every action type, every safety cap, every
+    # mutation path on UserPreferences/UserCoachingState/UserDayState.
+    "tests.test_apply_action",
+    # Decision-rules gate: data sufficiency, cooldowns, kcal clamping,
+    # flag-severity gating for AI suggestions.
+    "tests.test_decision_rules",
+    # Recovery flags: tri-state computations + the metabolic_support
+    # bug-fix (zero-cal placeholder rows now correctly return
+    # not_enough_data, not green).
+    "tests.test_recovery_flags",
+    # Deterministic weekly review: scenario-driven recommendations.
+    "tests.test_plan_review_v2",
+    # Food classifier: per-food tagging (probiotic, omega3, processing
+    # bucket, protein source, v3 flags).
+    "tests.test_food_classifier",
+    # Allergen filter safety net: plural matching + macro re-sum
+    # (real bugs found and fixed).
+    "tests.test_allergen_filter",
     # Plateau detection: 4-week flat 1RM → suggestion.
     "tests.test_plateau_detection",
     # Streak + compliance coaching.

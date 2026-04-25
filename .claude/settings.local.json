@@ -188,7 +188,10 @@
       "Bash(export PATH=\"$HOME/.nvm/versions/node/*/bin:$PATH\")",
       "Bash(sed -n '1020,1050p' src/screens/HomeScreen.tsx)",
       "Bash(sed -n '3665,3685p' src/screens/HomeScreen.tsx)",
-      "Bash(sed -n '1,90p' src/components/FormVideoModal.tsx)"
+      "Bash(sed -n '1,90p' src/components/FormVideoModal.tsx)",
+      "Bash(ipconfig getifaddr *)",
+      "Bash(sort -t: -k2 -n -r)",
+      "Bash(xargs -I{} basename {} .py)"
     ]
   }
 }

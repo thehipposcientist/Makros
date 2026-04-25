@@ -556,6 +556,27 @@ def _athletic_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
 # ── Fat loss mixed mode ─────────────────────────────────────────────
 
 
+def _min_cond_for_band(conditioning_frac: float, days: int) -> int:
+    """The minimum cardio days that must be preserved for this band
+    when the force-even-lifts / mult-of-3-lifts rules try to steal
+    from cond_days. Without this floor, body_recomp 6d PPL silently
+    drops its 1 cardio day and fat_loss 5d UL drops 1 of 2 cardio
+    days, contradicting the band contracts.
+
+    body_recomp band (0.10-0.30): always preserve 1 cardio at 4+d.
+    fat_loss band (≥0.30): preserve 1 at 3-4d, 2 at 5+d.
+    Below 0.10: no cardio reserved, nothing to preserve.
+    """
+    if conditioning_frac < 0.10:
+        return 0
+    if conditioning_frac < 0.30:
+        return 0 if days <= 3 else 1
+    # fat_loss / endurance band
+    if days <= 2: return 0
+    if days <= 4: return 1
+    return 2
+
+
 def _lifting_plus_cardio_recipe(
     profile: GoalProfile,
     days: int,
@@ -673,7 +694,7 @@ def _lifting_plus_cardio_recipe(
                 "[weekly_recipe] U/L force-even-lifts: "
                 "moved 1 recovery day → lift_days=%d", lift_days,
             )
-        elif cond_days > 1:
+        elif cond_days > _min_cond_for_band(conditioning_frac, days):
             cond_days -= 1
             lift_days += 1
             logger.debug(
@@ -732,7 +753,7 @@ def _lifting_plus_cardio_recipe(
                 "[weekly_recipe] PPL force-mult-of-3-lifts: "
                 "moved 1 recovery day → lift_days=%d", lift_days,
             )
-        elif cond_days > 0:
+        elif cond_days > _min_cond_for_band(conditioning_frac, days):
             cond_days -= 1
             lift_days += 1
             logger.debug(
@@ -740,9 +761,16 @@ def _lifting_plus_cardio_recipe(
                 "moved 1 conditioning day → lift_days=%d", lift_days,
             )
         else:
-            # Can't satisfy (e.g. no recovery/cond left to donate —
-            # 3d PPL with no slack, or full-lift weeks). Fall through;
-            # downstream rotation/repair will cope with the imbalance.
+            # Can't satisfy without dropping below the goal band's
+            # cardio minimum. Accept the imbalance; the next regen
+            # or PPL→UL auto-convert will resolve. The user's cardio
+            # contract is more important than perfect PPL family
+            # balance for body_recomp / fat_loss goals.
+            logger.debug(
+                "[weekly_recipe] PPL force-mult-of-3-lifts: "
+                "cannot steal cardio (would drop below band minimum), "
+                "keeping lift_days=%d cond_days=%d", lift_days, cond_days,
+            )
             break
 
     if cond_days == 0 and recovery_days == 0:
@@ -2855,15 +2883,11 @@ def generate_weekly_recipe(
         f"(mode={mode} split={lifting_split})"
     )
 
-    # Direct hybrid injection — for pure-lifting modes that don't emit
-    # dedicated cardio days (muscle_gain, strength, general_health),
-    # promote N lift days to PLUS_CARDIO per the goal × days table.
-    # Runs AFTER all adjacency repair + intensity spacing so the repair
-    # passes (which only swap pure-lift archetypes) don't trip over
-    # hybrid family changes. PLUS_CARDIO and its base lift share the
-    # same focus_family so adjacency state is preserved.
-    if mode in ("lifting", "strength", "maintain"):
-        final = _inject_hybrid_cardio(final, profile=profile, days_per_week=days)
+    # NOTE: hybrid cardio injection moved BELOW the strict-split guard
+    # (used to be here). The guard's rebuild path stripped PLUS_CARDIO
+    # by overwriting lift slots with pure-lift archetypes; running
+    # injection after the guard means promotion isn't undone.
+    from .day_templates import SPLIT_BRO as _SPLIT_BRO
 
     exposures = {"lift": 0, "cardio": 0, "mobility": 0, "recovery": 0, "hybrid": 0}
     for a in final:
@@ -2892,6 +2916,14 @@ def generate_weekly_recipe(
             )
         except Exception as e:
             logger.warning(f"[weekly_recipe] strict-split guard failed: {e}")
+
+    # Hybrid cardio injection — promote N lift days to PLUS_CARDIO per
+    # the goal × days table (`_DIRECT_PROMOTE_COUNT`). Runs AFTER the
+    # strict-split guard so the guard's rebuild path can't strip the
+    # promotion. Bro split skipped — _HYBRID_PAIR maps bro archetypes
+    # to coarser PLUS_CARDIO families which loses per-muscle labels.
+    if mode in ("lifting", "strength", "maintain") and lifting_split != _SPLIT_BRO:
+        final = _inject_hybrid_cardio(final, profile=profile, days_per_week=days)
 
     return final
 
@@ -2931,10 +2963,12 @@ def _enforce_strict_split_composition(
     # Identify lift-slot positions and their current families.
     lift_positions: list[int] = []
     lift_families: list[str] = []
+    lift_archetypes: list[DayArchetype] = []
     for idx, a in enumerate(recipe):
         cat = ARCHETYPE_META[a].category
         if cat == "lift" or cat == "hybrid":
             lift_positions.append(idx)
+            lift_archetypes.append(a)
             try:
                 lift_families.append(archetype_to_focus_family(a) or "unknown")
             except Exception:
@@ -2943,29 +2977,98 @@ def _enforce_strict_split_composition(
     if n_lifts == 0:
         return recipe
 
+    # ── Bro split: per-archetype + canonical ORDER check ────────────
+    # Bro families collide (LIFT_BRO_CHEST and LIFT_BRO_SHOULDERS both
+    # map to "push" family), so the family-count framework can't tell
+    # Chest from Shoulders. AND the recent-focus rotation pass treats
+    # them as interchangeable, producing scrambled orderings like
+    # [Shoulders, Back, Chest, Legs, Arms] that pass count validation
+    # but break the bro split's deliberate sequence. Bro is a structured
+    # per-muscle choice — the canonical Chest→Back→Shoulders→Arms→Legs
+    # rotation IS the user's pick. Validate ORDER, not just counts:
+    # if lift positions don't match the canonical sequence in order,
+    # rebuild.
+    if lifting_split == SPLIT_BRO:
+        from .day_templates import SPLIT_BRO as _SB  # noqa: F401 — re-import for clarity
+        bro_seq = [
+            DayArchetype.LIFT_BRO_CHEST,
+            DayArchetype.LIFT_BRO_BACK,
+            DayArchetype.LIFT_BRO_SHOULDERS,
+            DayArchetype.LIFT_BRO_ARMS,
+            DayArchetype.LIFT_BRO_LEGS,
+        ]
+        canonical_bro = [bro_seq[i % 5] for i in range(n_lifts)]
+        if lift_archetypes == canonical_bro:
+            return recipe
+        logger.warning(
+            f"[weekly_recipe] STRICT-SPLIT VIOLATION (bro): days={days} "
+            f"n_lifts={n_lifts} expected={[a.value for a in canonical_bro]} "
+            f"actual={[a.value for a in lift_archetypes]}"
+        )
+        if not user_chose_split:
+            return recipe
+        rebuilt = list(recipe)
+        for slot_idx, canonical_arch in zip(lift_positions, canonical_bro):
+            rebuilt[slot_idx] = canonical_arch
+        logger.info(
+            f"[weekly_recipe] strict-split REBUILD (bro): replaced lift slots "
+            f"with canonical bro sequence → {[a.value for a in rebuilt]}"
+        )
+        return rebuilt
+
     def _expected(split: str) -> dict[str, int] | None:
         """Expected family counts for n_lifts under this split."""
         if split == SPLIT_PPL:
-            base = n_lifts // 3
-            rem = n_lifts % 3
-            return {"push": base + (1 if rem >= 1 else 0),
-                    "pull": base + (1 if rem >= 2 else 0),
-                    "legs": base}
+            # Source of truth for PPL counts is the canonical
+            # `_lifting_recipe`, which encodes goal-specific stimulus
+            # variation (e.g. 5-day muscle_gain intentionally yields
+            # 2 Push / 1 Pull / 2 Legs — comment in `_ppl_stimulus_mix`:
+            # "5-day sequences deliberately DROP the duplicate Pull").
+            # Computing this with bare integer division (`n//3 + rem`)
+            # produces 2/2/1 and false-alarms the user's plan.
+            try:
+                canonical = _lifting_recipe(
+                    profile, SPLIT_PPL, n_lifts,
+                    priority_region=priority_region,
+                )
+                expected_counts: dict[str, int] = {}
+                for a in canonical:
+                    fam = archetype_to_focus_family(a) or "unknown"
+                    expected_counts[fam] = expected_counts.get(fam, 0) + 1
+                return expected_counts
+            except Exception:
+                base = n_lifts // 3
+                rem = n_lifts % 3
+                return {"push": base + (1 if rem >= 1 else 0),
+                        "pull": base + (1 if rem >= 2 else 0),
+                        "legs": base}
         if split == SPLIT_UPPER_LOWER:
             base = n_lifts // 2
             rem = n_lifts % 2
             return {"upper": base + rem, "lower": base}
         if split == SPLIT_PPL_UL:
-            # 5-day baseline = 1 each of push/pull/legs/upper/lower.
-            # Extras follow a balanced pool — accept ±1 per family.
-            base = {"push": 1, "pull": 1, "legs": 1, "upper": 1, "lower": 1}
-            extras = max(0, n_lifts - 5)
-            for _ in range(extras):
-                # Default extras pool: push, pull, legs cycling
-                for fam in ("legs", "pull", "push"):
-                    base[fam] += 1
-                    break
-            return base
+            # Same fix as PPL: source of truth is `_lifting_recipe`.
+            # The hardcoded extras pool was wrong — actual code's
+            # adjacency check skips Legs (last seq item is Lower, in
+            # _LOWER_OVERLAP) and picks Pull instead. The mismatch
+            # caused false-alarm rebuilds that stripped PLUS_CARDIO
+            # from muscle_gain/body_recomp PPL+UL recipes.
+            try:
+                canonical = _lifting_recipe(
+                    profile, SPLIT_PPL_UL, n_lifts,
+                    priority_region=priority_region,
+                )
+                expected_counts: dict[str, int] = {}
+                for a in canonical:
+                    fam = archetype_to_focus_family(a) or "unknown"
+                    expected_counts[fam] = expected_counts.get(fam, 0) + 1
+                return expected_counts
+            except Exception:
+                base = {"push": 1, "pull": 1, "legs": 1, "upper": 1, "lower": 1}
+                extras = max(0, n_lifts - 5)
+                for _ in range(extras):
+                    base["legs"] += 1
+                return base
         if split == SPLIT_LOWER_FOCUSED:
             lower = (n_lifts + 1) // 2
             upper = n_lifts - lower
@@ -2977,8 +3080,10 @@ def _enforce_strict_split_composition(
         if split == SPLIT_FULL_BODY:
             return {"full_body": n_lifts}
         if split == SPLIT_BRO:
-            # First 5 are the 5 bros, then cycles.
-            return None  # tolerate any composition for bro
+            # Bro is handled above with per-archetype validation, not
+            # the family-count framework (chest+shoulders both share
+            # the "push" family so family counts can't distinguish them).
+            return None
         return None
 
     expected = _expected(lifting_split)
@@ -3012,18 +3117,47 @@ def _enforce_strict_split_composition(
     )
 
     # If user explicitly chose the split, rebuild lift slots from the
-    # canonical `_lifting_recipe`. Preserve non-lift positions.
+    # canonical `_lifting_recipe`. Preserve non-lift positions AND
+    # preserve PLUS_CARDIO COUNT — the original recipe may have had
+    # N hybrid days; we promote that many promotable positions in the
+    # rebuilt canonical so the cardio component count is preserved.
+    # Without this, the strict guard silently strips cardio from
+    # body_recomp/fat_loss/strength PPL/UL recipes.
     if not user_chose_split:
         return recipe
 
     canonical = _lifting_recipe(profile, lifting_split, n_lifts, priority_region=priority_region)
     if len(canonical) != n_lifts:
         return recipe
+
+    # How many PLUS_CARDIO did the original have?
+    plus_cardio_count = sum(
+        1 for slot_idx in lift_positions
+        if recipe[slot_idx].value.endswith("_plus_cardio")
+    )
+
     rebuilt = list(recipe)
     for slot_idx, canonical_arch in zip(lift_positions, canonical):
         rebuilt[slot_idx] = canonical_arch
+
+    # Promote N positions in the rebuilt recipe to PLUS_CARDIO. Walk
+    # lift_positions in order and promote each promotable archetype
+    # until we've matched the original count. Skip Legs (no hybrid
+    # pair). This preserves the cardio component count even when the
+    # canonical positions don't line up with where the originals were.
+    if plus_cardio_count > 0:
+        promoted = 0
+        for slot_idx in lift_positions:
+            if promoted >= plus_cardio_count:
+                break
+            arch = rebuilt[slot_idx]
+            hybrid = _HYBRID_PAIR.get(arch)
+            if hybrid is not None and hybrid in profile.allowed_archetypes:
+                rebuilt[slot_idx] = hybrid
+                promoted += 1
     logger.info(
         f"[weekly_recipe] strict-split REBUILD: replaced lift slots with "
-        f"canonical {lifting_split} sequence → {[a.value for a in rebuilt]}"
+        f"canonical {lifting_split} sequence (preserved {plus_cardio_count} "
+        f"plus_cardio) → {[a.value for a in rebuilt]}"
     )
     return rebuilt

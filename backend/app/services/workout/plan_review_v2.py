@@ -200,9 +200,11 @@ def compute_weekly_review(
         .where(WorkoutPlan.user_id == user_id, WorkoutPlan.is_active == True)
     ).first()
     planned = 0
-    if plan and plan.plans_json:
+    # NOTE: WorkoutPlan column is `plan_json` (singular). The plural
+    # `plans_json` lives on NutritionPlan only — easy to mix up.
+    if plan and plan.plan_json:
         try:
-            days_list = plan.plans_json.get("days") or []
+            days_list = plan.plan_json.get("days") or []
             planned = len([d for d in days_list if d.get("focus") and (d.get("focus") or "").lower() != "rest"])
         except Exception:
             planned = 0

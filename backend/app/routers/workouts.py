@@ -270,12 +270,23 @@ class GenerateDayRequest(BaseModel):
 
 
 class GenerateWeekRequest(BaseModel):
-    """Generate the full N-day rotation using one coherent recipe.
+    """Build / pin a workout week.
 
-    Built so the Switch-Day flow can rebuild the whole week around a user's
-    pick (e.g. "change day 2 to Legs") while still respecting every normal
-    plan rule — split, session minutes, training days, injuries, dislikes,
-    recent completions (pulled server-side), and muscle fatigue.
+    Two modes:
+
+      A) `current_days` is None → fresh full-week regen. Used for the
+         "regenerate plan" button in Settings or for cold starts.
+
+      B) `current_days` is provided → Switch-Day single-day swap. The
+         caller sends their EXISTING week; the router applies the pin
+         against it (decide_pin → swap) and returns the modified week.
+         Only the pinned day + swap partner change. This matches the
+         user's mental model: tap day X → only day X changes.
+
+         Without this mode the router regenerated a fresh week before
+         pinning, which (a) changed every day on the schedule and
+         (b) made the pin land on a different visual day than the
+         user tapped because the fresh plan re-anchored from today.
     """
     goal: str
     days_per_week: int = 4
@@ -286,12 +297,12 @@ class GenerateWeekRequest(BaseModel):
     priority_region: str = "balanced"
     injuries: list[str] = []
     disliked_exercises: list[str] = []
-    # Optional pin — the planner builds a coherent split, then the day at
-    # this index is relabeled/regenerated to the requested focus. All
-    # other days rotate away from the pinned focus automatically via
-    # prev_focuses injection.
+    # Switch-Day pin.
     pin_day_index: int | None = None
     pin_focus: str | None = None
+    # User's current plan in visual order. When set, the pin is applied
+    # to THIS week (single-day swap) instead of a freshly generated one.
+    current_days: list[dict] | None = None
 
 
 @router.post("/generate-day")
@@ -738,14 +749,33 @@ def generate_full_week(
         user_age=user_age,
     )
 
-    plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
-    )
-    days = plan.get("workout_plan", {}).get("days", [])
-    if not days:
-        raise HTTPException(status_code=500, detail="Planner produced no days")
+    # Single-day swap mode: caller sent their current week. Skip the
+    # full regen — pin against the user's existing plan so only the
+    # tapped day + its swap partner change. Without this, the visual
+    # plan would be replaced with a freshly generated week and the
+    # pin would land at a different visual position than the user
+    # selected (the user-reported bug: "tap day 4, it updates day 1").
+    if (
+        body.current_days
+        and len(body.current_days) >= body.days_per_week
+        and body.pin_day_index is not None
+        and body.pin_focus
+    ):
+        days = list(body.current_days)
+        plan = {"workout_plan": {"name": "", "days": days}}
+        logger.info(
+            f"[generate-week] using current_days for pin (skip full regen) "
+            f"pin_idx={body.pin_day_index} pin_focus={body.pin_focus}"
+        )
+    else:
+        plan = generate_workout_plan(
+            inputs, SEED_EXERCISES,
+            history_familiarity=history_familiarity,
+            recent_muscle_exercises=recent_muscle_exercises,
+        )
+        days = plan.get("workout_plan", {}).get("days", [])
+        if not days:
+            raise HTTPException(status_code=500, detail="Planner produced no days")
 
     # Image enrichment — mirrors generate-day.
     try:
@@ -769,169 +799,114 @@ def generate_full_week(
     except Exception:
         pass
 
-    # Pin resolution — rotate lifting days so the pinned focus lands at
-    # the target index while preserving split order. A naive swap of two
-    # days breaks adjacency (e.g. PPL becomes L-Pull-Push-Push-Pull-L).
-    # Instead we circularly rotate the lifting sub-sequence so the whole
-    # pattern shifts, then non-lifting days (mobility/recovery/cardio)
-    # stay in their original positions.
+    # Pin resolution — delegate to the pure `switch_day` helper so the
+    # algorithm is unit-tested in isolation. The router still owns the
+    # IO callbacks (regen-with-forced-split, generate-cardio-finisher).
     if body.pin_day_index is not None and body.pin_focus:
-        target_idx = max(0, min(len(days) - 1, int(body.pin_day_index)))
-        override_lower = body.pin_focus.lower().strip()
-
-        NON_LIFTING = {"mobility", "recovery", "active recovery", "stretching",
-                       "cardio", "conditioning", "mobility_flow", "recovery_easy"}
-
-        # "Push + Cardio" / "Pull + Cardio" / "Upper + Cardio" /
-        # "Full Body + Cardio" — the user asked for a lift day with a
-        # same-day cardio finisher. We still treat it as a lifting
-        # override, but after rotation we promote the target day by
-        # appending a cardio finisher if one isn't already there.
-        wants_cardio_finisher = " + cardio" in override_lower
-        base_focus_lower = (
-            override_lower.replace(" + cardio", "").strip()
-            if wants_cardio_finisher else override_lower
+        from app.services.workout.switch_day import (
+            decide_pin, apply_swap,
         )
+        decision = decide_pin(
+            days,
+            pin_day_index=body.pin_day_index,
+            pin_focus=body.pin_focus,
+            preferred_split=body.preferred_split,
+        )
+        target_idx = decision.target_idx
 
-        if override_lower in ("recovery", "active recovery"):
-            from app.services.workout.planner import generate_recovery_day
-            days[target_idx] = generate_recovery_day(body.session_minutes or 45)
-        elif override_lower in ("mobility", "stretching"):
-            from app.services.workout.planner import generate_mobility_day
-            days[target_idx] = generate_mobility_day(body.session_minutes or 45)
-        elif override_lower == "cardio":
-            from app.services.workout.planner import generate_cardio_day
-            days[target_idx] = generate_cardio_day(
-                body.session_minutes or 45,
-                body.goal or "body_recomp",
-                equipment_owned=body.equipment,
+        if decision.action == "replace_day":
+            from app.services.workout.planner import (
+                generate_recovery_day, generate_mobility_day, generate_cardio_day,
             )
-        else:
-            # Separate lifting days from non-lifting days
-            lift_positions: list[int] = []
-            lift_days: list[dict] = []
-            for idx, d in enumerate(days):
-                f = (d.get("focus") or "").lower().strip()
-                if f not in NON_LIFTING:
-                    lift_positions.append(idx)
-                    lift_days.append(d)
-
-            # Find which lifting slot has the desired focus. Prefer an
-            # exact match first; if the user asked for a PLUS_CARDIO
-            # variant that the recipe didn't produce, fall back to a
-            # matching base lift day (we promote it to PLUS_CARDIO below).
-            src_lift_idx: int | None = None
-            for li, ld in enumerate(lift_days):
-                if (ld.get("focus") or "").lower().strip() == override_lower:
-                    src_lift_idx = li
-                    break
-            if src_lift_idx is None and wants_cardio_finisher:
-                for li, ld in enumerate(lift_days):
-                    lf = (ld.get("focus") or "").lower().strip()
-                    if lf == base_focus_lower or lf.startswith(base_focus_lower + " "):
-                        src_lift_idx = li
-                        break
-
-            if src_lift_idx is not None and target_idx in lift_positions:
-                dst_lift_idx = lift_positions.index(target_idx)
-                if src_lift_idx != dst_lift_idx:
-                    shift = src_lift_idx - dst_lift_idx
-                    rotated = lift_days[shift:] + lift_days[:shift]
-                    for pos, orig_idx in enumerate(lift_positions):
-                        days[orig_idx] = rotated[pos]
-                    logger.info(
-                        f"[generate-week] pin rotation: shifted lifting days by {shift}, "
-                        f"focuses now {[d.get('focus') for d in days]}"
-                    )
-            elif src_lift_idx is None:
-                # Focus not in this plan's split (e.g. user picked Push
-                # while their split is Upper/Lower). The OLD fallback was
-                # label-only — relabeled the day but kept the wrong
-                # exercises (Lower-day exercises under a "Push" header).
-                # NEW: regenerate the plan with preferred_split forced to
-                # the family that contains the requested focus, then lift
-                # the matching day's exercises into the target slot. This
-                # makes the day's exercises actually match the focus.
-                _SPLIT_FOR_FOCUS = {
-                    "push": "ppl", "pull": "ppl", "legs": "ppl",
-                    "upper": "upper_lower", "lower": "upper_lower",
-                    "full body": "full_body", "full_body": "full_body",
-                    "chest": "bro", "back": "bro", "shoulders": "bro", "arms": "bro",
-                }
-                forced_split = _SPLIT_FOR_FOCUS.get(base_focus_lower)
-                substituted = False
-                if forced_split and forced_split != (body.preferred_split or "auto"):
-                    try:
-                        from dataclasses import replace as _dc_replace
-                        alt_inputs = _dc_replace(inputs, preferred_split=forced_split)
-                        alt_plan = generate_workout_plan(
-                            alt_inputs, SEED_EXERCISES,
-                            history_familiarity=history_familiarity,
-                            recent_muscle_exercises=recent_muscle_exercises,
-                        )
-                        alt_days = alt_plan.get("workout_plan", {}).get("days", [])
-                        for ad in alt_days:
-                            af = (ad.get("focus") or "").lower().strip()
-                            if af == base_focus_lower or af == override_lower:
-                                # Inherit image enrichment by re-running the
-                                # same image map lookup on the substituted
-                                # day's exercises.
-                                days[target_idx] = ad
-                                substituted = True
-                                logger.info(
-                                    f"[generate-week] pin substitution: regen with split={forced_split} → "
-                                    f"using day with focus '{ad.get('focus')}' for pin '{body.pin_focus}'"
-                                )
-                                break
-                    except Exception as e:
-                        logger.warning(f"[generate-week] pin substitution failed: {e}")
-                if not substituted:
-                    # Last-resort: label-only (preserves old behavior so
-                    # the user at least sees their pick reflected). Logged
-                    # at WARNING so we can spot it in production.
-                    days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
-                    logger.warning(
-                        f"[generate-week] pin fallback: label-only for {body.pin_focus} "
-                        f"(no matching day found even after split substitution)"
-                    )
-
-            # Promote the target day to PLUS_CARDIO if the user asked for
-            # the cardio-finisher variant and the day isn't already one.
-            if wants_cardio_finisher:
-                target_day = days[target_idx]
-                current_focus = (target_day.get("focus") or "").lower()
-                already_hybrid = " + cardio" in current_focus
-                if not already_hybrid:
-                    from app.services.workout.planner import generate_cardio_day
-                    # Pull one lightweight finisher from the cardio pool —
-                    # the first exercise (Zone 2 steady-state) is a good
-                    # finisher anchor.
-                    finisher_day = generate_cardio_day(
-                        min(25, max(15, (body.session_minutes or 45) // 3)),
-                        "body_recomp",  # easy-pool: zone 2 preferred as a finisher
-                        equipment_owned=body.equipment,
-                    )
-                    finisher_exs = finisher_day.get("exercises", [])
-                    finisher_exs = [ex for ex in finisher_exs if ex.get("slot_role") != "warmup"]
-                    if finisher_exs:
-                        pick = finisher_exs[0].copy()
-                        pick["slot_role"] = "isolation"
-                        pick["name"] = f"{pick.get('name', 'Cardio')} (Finisher)"
-                        # Generated cardio exercises emit `rest_seconds`;
-                        # the rest of the plan uses camelCase `restSeconds`.
-                        # Normalize inline so the day stays consistent.
-                        if "rest_seconds" in pick and "restSeconds" not in pick:
-                            pick["restSeconds"] = pick.pop("rest_seconds")
-                        else:
-                            pick.pop("rest_seconds", None)
-                        updated = {**target_day}
-                        updated["exercises"] = [*(target_day.get("exercises") or []), pick]
-                        updated["focus"] = body.pin_focus
-                        days[target_idx] = updated
+            mins = body.session_minutes or 45
+            if decision.day_kind == "recovery":
+                days[target_idx] = generate_recovery_day(mins)
+            elif decision.day_kind == "mobility":
+                days[target_idx] = generate_mobility_day(mins)
+            else:  # cardio
+                days[target_idx] = generate_cardio_day(
+                    mins, body.goal or "body_recomp",
+                    equipment_owned=body.equipment,
+                )
+        elif decision.action == "noop":
+            logger.info(
+                f"[generate-week] pin no-op: target day {target_idx} already "
+                f"matches focus '{body.pin_focus}'"
+            )
+        elif decision.action == "swap":
+            apply_swap(days, decision)
+            logger.info(
+                f"[generate-week] pin swap: target {target_idx} swapped with "
+                f"day {decision.swap_with_idx}, focuses now "
+                f"{[d.get('focus') for d in days]}"
+            )
+        elif decision.action == "regen":
+            substituted = False
+            try:
+                from dataclasses import replace as _dc_replace
+                alt_inputs = _dc_replace(inputs, preferred_split=decision.regen_split)
+                alt_plan = generate_workout_plan(
+                    alt_inputs, SEED_EXERCISES,
+                    history_familiarity=history_familiarity,
+                    recent_muscle_exercises=recent_muscle_exercises,
+                )
+                alt_days = alt_plan.get("workout_plan", {}).get("days", [])
+                for ad in alt_days:
+                    af = (ad.get("focus") or "").lower().strip()
+                    if af == decision.regen_match_focus or af == decision.full_focus:
+                        days[target_idx] = ad
+                        substituted = True
                         logger.info(
-                            f"[generate-week] pin promote: appended cardio finisher "
-                            f"'{pick.get('name')}' to target day"
+                            f"[generate-week] pin substitution: regen with split="
+                            f"{decision.regen_split} → using day '{ad.get('focus')}'"
                         )
+                        break
+            except Exception as e:
+                logger.warning(f"[generate-week] pin substitution failed: {e}")
+            if not substituted:
+                days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
+                logger.warning(
+                    f"[generate-week] pin fallback: label-only for {body.pin_focus} "
+                    f"(no matching day after split substitution)"
+                )
+        elif decision.action == "label_only":
+            days[target_idx] = {**days[target_idx], "focus": body.pin_focus}
+            logger.warning(
+                f"[generate-week] pin fallback: label-only for {body.pin_focus}"
+            )
+
+        # Cardio-finisher promotion — applies after the primary action
+        # for any lifting pin where the user requested "X + Cardio".
+        if decision.wants_cardio_finisher and decision.action != "replace_day":
+            target_day = days[target_idx]
+            current_focus = (target_day.get("focus") or "").lower()
+            if " + cardio" not in current_focus:
+                from app.services.workout.planner import generate_cardio_day
+                finisher_day = generate_cardio_day(
+                    min(25, max(15, (body.session_minutes or 45) // 3)),
+                    "body_recomp",
+                    equipment_owned=body.equipment,
+                )
+                finisher_exs = [
+                    ex for ex in finisher_day.get("exercises", [])
+                    if ex.get("slot_role") != "warmup"
+                ]
+                if finisher_exs:
+                    pick = finisher_exs[0].copy()
+                    pick["slot_role"] = "isolation"
+                    pick["name"] = f"{pick.get('name', 'Cardio')} (Finisher)"
+                    if "rest_seconds" in pick and "restSeconds" not in pick:
+                        pick["restSeconds"] = pick.pop("rest_seconds")
+                    else:
+                        pick.pop("rest_seconds", None)
+                    updated = {**target_day}
+                    updated["exercises"] = [*(target_day.get("exercises") or []), pick]
+                    updated["focus"] = body.pin_focus
+                    days[target_idx] = updated
+                    logger.info(
+                        f"[generate-week] pin promote: appended cardio finisher "
+                        f"'{pick.get('name')}' to target day"
+                    )
 
     result_plan = {
         "days": days,

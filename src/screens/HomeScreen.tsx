@@ -5781,15 +5781,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onChangeFocus={async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
-                    // Use the VISUAL schedule index `i` directly. The
-                    // backend `pin_day_index` indexes into the freshly
-                    // generated 7-day output (same shape as the visual
-                    // schedule). Earlier we computed dayIdx from
-                    // `workoutPlan.days.indexOf(item.workout)` which can
-                    // map differently than the visual schedule when rest
-                    // days are reordered — the bug user reported as
-                    // "tap tomorrow's switch → it changes today's plan."
-                    const dayIdx = i;
+                    // Map the tapped VISUAL schedule item back to its
+                    // RECIPE index so the backend pins the right entry
+                    // in `current_days` (which we send in recipe order).
+                    //
+                    // The visual schedule is `workoutPlan.days` rotated
+                    // by `weekOffset` and interleaved with rest days
+                    // (see `get7DaySchedule`). Using the visual index
+                    // `i` directly would target the wrong recipe entry
+                    // — the user's "tap day 4, day 1 changes" bug.
+                    //
+                    // `indexOf` works because each schedule item carries
+                    // a reference to the exact same `workoutPlan.days[k]`
+                    // object that was assigned in `get7DaySchedule`.
+                    const recipeIdx = workoutPlan.days.indexOf(item.workout as any);
+                    const dayIdx = recipeIdx >= 0 ? recipeIdx : i;
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -5819,7 +5825,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         .filter(i => i.status !== 'resolved')
                         .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
 
-                      // 1. Generate full week with pin — backend saves to DB
+                      // 1. Pin day in current week — backend swaps target with
+                      //    closest matching lift. We send `current_days` so the
+                      //    pin operates on the user's existing plan instead of
+                      //    a freshly regenerated week (which would replace
+                      //    every day and the pin would land at the wrong
+                      //    visual index).
                       const { generateWorkoutWeek, getActiveWorkoutPlan } = await import('../services/api');
                       await generateWorkoutWeek(authToken, {
                         goal: userProfile.goal,
@@ -5833,6 +5844,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         disliked_exercises: userProfile.dislikedExercises ?? [],
                         pin_day_index: dayIdx,
                         pin_focus: newFocus,
+                        current_days: workoutPlan.days,
                       });
 
                       // 2. Read back from DB — single source of truth

@@ -297,6 +297,23 @@ def _metabolic_support_flag(*, rows: list) -> "FlagState":
         if cals <= 0:
             continue
         cal_values.append(cals)
+    # Re-check after filtering zero-calorie placeholder rows. Without
+    # this, a user with 10 placeholder rows (no actual food logged)
+    # falls through to "green" — misleading, looks like the user is
+    # eating well when they have no logged data at all.
+    if len(cal_values) < MIN_DAYS_FOR_FLAG:
+        return FlagState(
+            key="metabolic_support", state="not_enough_data",
+            label="Metabolic support",
+            detail="Log at least 5 days of meals to assess dietary-pattern metabolic risk signals.",
+        )
+
+    # Re-iterate to count concern days (we need both passes — first
+    # builds cal_values for the gate, second counts day-level concerns).
+    for r in rows:
+        cals = float(r.calories_total or 0)
+        if cals <= 0:
+            continue
         added = float(getattr(r, "added_sugar_g", 0) or 0)
         sat = float(r.saturated_fat_g or 0)
         fiber = float(r.fiber_total_g or 0)
