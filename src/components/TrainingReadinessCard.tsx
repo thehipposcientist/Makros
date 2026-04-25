@@ -19,9 +19,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
-import { loadSleepHistory, getCycleStatus, isHealthKitAvailable } from '../services/appleHealth';
-import { getFatigueScore, getMealAverages, FatigueScore } from '../services/api';
-import { loadWorkoutHistory, loadHealthSummary } from '../utils/workoutHistory';
+import { loadPreparednessInputs } from '../services/preparednessLoader';
+import { isHealthKitAvailable } from '../services/appleHealth';
+import { getFatigueScore, FatigueScore } from '../services/api';
+import { loadHealthSummary } from '../utils/workoutHistory';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -131,50 +132,27 @@ export default function TrainingReadinessCard({
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // Both this card AND the watch push now go through
+      // `loadPreparednessInputs` so they compute against IDENTICAL
+      // inputs and produce IDENTICAL scores. Earlier they had separate
+      // ad-hoc paths and the user saw "phone says 94, watch says 79".
       const summary = parentSummary ?? (await loadHealthSummary().catch(() => null));
       const ahAvailable = isHealthKitAvailable() && summary != null;
       setHasAppleHealth(ahAvailable);
 
-      const [history, f, meals, cycle] = await Promise.all([
-        loadSleepHistory().catch(() => []),
+      const [inputs, f] = await Promise.all([
+        loadPreparednessInputs({
+          authToken,
+          age: age ?? null,
+          proteinTarget: proteinTarget ?? null,
+          calorieTarget: calorieTarget ?? null,
+          todaysFocus: todaysFocus ?? null,
+          cachedHealthSummary: summary ?? null,
+        }),
         getFatigueScore(authToken).catch(() => null),
-        getMealAverages(authToken, 7).catch(() => null),
-        ahAvailable ? getCycleStatus().catch(() => null) : Promise.resolve(null),
       ]);
       setFatigue(f);
-
-      const workouts = await loadWorkoutHistory().catch(() => []);
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const yesterdayMin = workouts
-        .filter(s => s.date?.slice(0, 10) === yesterday && s.completed)
-        .reduce((sum, s) => sum + ((s.durationSeconds ?? 0) / 60), 0);
-
-      // When a specific focus is planned, prefer the backend's per-focus
-      // readiness (it weights the relevant muscle groups). When focus changes
-      // the card re-computes against the correct readiness number.
-      // NOTE: backend returns focus_readiness as 0.0-1.0 floats but
-      // readiness_score as 0-100 int — normalize to 0-100 before passing.
-      const focusKey = (todaysFocus ?? '').toLowerCase().replace(/\s+/g, '_');
-      const focusReadiness =
-        focusKey && f?.focus_readiness?.[focusKey] != null
-          ? Math.round(f.focus_readiness[focusKey] * 100)
-          : f?.readiness_score ?? null;
-
-      const res = scorePreparedness({
-        sleepScore: ahAvailable ? summary?.sleepScore ?? null : null,
-        hrvMs: ahAvailable ? summary?.hrvAvg ?? null : null,
-        hrvHistory: history.map(n => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0),
-        restingHeartRate: ahAvailable ? summary?.restingHeartRate ?? null : null,
-        rhrHistory: [],
-        readinessFromBackend: focusReadiness,
-        proteinGrams: meals?.avg_protein_g ?? null,
-        proteinTargetGrams: proteinTarget ?? null,
-        calorieIntake: meals?.avg_calories ?? null,
-        calorieTarget: calorieTarget ?? null,
-        yesterdayWorkoutMinutes: yesterdayMin > 0 ? yesterdayMin : null,
-        age: age ?? null,
-        cyclePhase: cycle && cycle.phase !== 'unknown' ? cycle.phase : null,
-      });
+      const res = scorePreparedness(inputs);
       setPrep(res);
     } catch {
       setPrep(null);

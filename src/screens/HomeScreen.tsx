@@ -1966,41 +1966,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // train hard yesterday?" check from the cached weekly Z2.
           // TODO: pipe in training-load score from the readiness
           // engine when we lift it into healthDataSummary.
-          // Use the SAME 6-pillar preparedness score the phone's
-          // TrainingReadinessCard shows on Progress tab. Previously we
-          // were pushing the backend muscle-fatigue readiness which
-          // differs from the 6-pillar composite — that's why the user
-          // saw different numbers on watch vs phone. Compute inline so
-          // the watch sees the same value.
+          // Phone TrainingReadinessCard and this watch push now share
+          // a SINGLE loader (`loadPreparednessInputs`) so they compute
+          // against IDENTICAL inputs. Previously they had their own
+          // ad-hoc paths with subtly different sources for protein /
+          // yesterday-strain / cycle, producing the "phone 94, watch 79"
+          // mismatch the user kept reporting.
           let prepScore: number | null = null;
           let prepLabel: string | null = null;
           try {
             const { scorePreparedness } = await import('../services/preparedness');
-            const { loadSleepHistory } = await import('../services/appleHealth');
-            const history = await loadSleepHistory().catch(() => []);
-            // Recent meal averages drive the nutrition pillar. We don't
-            // need the full network call — read the last-known protein /
-            // calorie from the home-screen's nutritionScore state if
-            // available, else skip nutrition pillar.
-            const proteinG = (nutritionScoreData as any)?.adherence?.proteinG ?? null;
-            const proteinTarget = userProfile?.proteinGoal ?? null;
-            const calIntake = (nutritionScoreData as any)?.adherence?.calorieIntake ?? null;
-            const calTarget = userProfile?.calorieGoal ?? null;
-            const prep = scorePreparedness({
-              sleepScore: (cached?.raw as any)?.sleepScore ?? null,
-              hrvMs: cached?.hrv ?? null,
-              hrvHistory: (history as any[]).map((n: any) => n.hrv).filter((v: number) => typeof v === 'number' && v > 0),
-              restingHeartRate: cached?.restingHeartRate ?? null,
-              rhrHistory: [],
-              readinessFromBackend: readinessScore?.score ?? null,
-              proteinGrams: proteinG,
-              proteinTargetGrams: proteinTarget,
-              calorieIntake: calIntake,
-              calorieTarget: calTarget,
-              yesterdayWorkoutMinutes: null,
+            const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+            if (!authToken) throw new Error('no_auth');
+            const inputs = await loadPreparednessInputs({
+              authToken,
               age: userProfile?.age ?? null,
-              cyclePhase: null,
+              proteinTarget: userProfile?.proteinGoal ?? null,
+              calorieTarget: userProfile?.calorieGoal ?? null,
+              todaysFocus: ((schedule as any[])?.[0]?.workout?.focus ?? null) as string | null,
+              cachedHealthSummary: cached?.raw ?? null,
             });
+            const prep = scorePreparedness(inputs);
             prepScore = prep.score;
             prepLabel = prep.label;
           } catch (e) {
@@ -2181,12 +2167,38 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
                 factors.push({ label: 'HRV', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${hrv} ms` });
               }
+              // Use the shared loader so this reachability re-push
+              // matches both (a) the phone TrainingReadinessCard and
+              // (b) the regular sync useEffect's readiness compute.
+              // Without this, the watch could see THREE different
+              // readiness numbers depending on which path fired most
+              // recently. All three paths now go through
+              // loadPreparednessInputs → scorePreparedness.
+              let prepScoreFinal: number | null = s.readinessScore?.score ?? null;
+              let prepLabelFinal: string | null = s.readinessScore?.label ?? null;
+              try {
+                if (authToken) {
+                  const { scorePreparedness } = await import('../services/preparedness');
+                  const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+                  const inputs = await loadPreparednessInputs({
+                    authToken,
+                    age: userProfile?.age ?? null,
+                    proteinTarget: userProfile?.proteinGoal ?? null,
+                    calorieTarget: userProfile?.calorieGoal ?? null,
+                    todaysFocus: ((s.schedule as any[])?.[0]?.workout?.focus ?? null) as string | null,
+                    cachedHealthSummary: cached?.raw ?? null,
+                  });
+                  const prep = scorePreparedness(inputs);
+                  prepScoreFinal = prep.score;
+                  prepLabelFinal = prep.label;
+                }
+              } catch { /* fall back to backend-only score */ }
               await pushReadinessToWatch({
-                score: s.readinessScore?.score ?? null,
-                label: s.readinessScore?.label ?? null,
-                summary: s.readinessScore?.score
-                  ? (s.readinessScore.score >= 75 ? "Solid recovery — train as planned."
-                     : s.readinessScore.score >= 50 ? "Moderate. Standard intensity is fine."
+                score: prepScoreFinal,
+                label: prepLabelFinal,
+                summary: prepScoreFinal != null
+                  ? (prepScoreFinal >= 75 ? "Solid recovery — train as planned."
+                     : prepScoreFinal >= 50 ? "Moderate. Standard intensity is fine."
                      : "Low. Consider lighter loads today.")
                   : null,
                 factors,
