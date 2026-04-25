@@ -526,6 +526,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   has no muscle tag (e.g. AI-generated entries before
                   the muscle plumbing landed). */}
               {(() => {
+                // Build muscle lookup from history. This map is SPARSE —
+                // older sessions and AI-generated exercises don't carry
+                // `primaryMuscle`, so a lot of PRs miss the lookup.
                 const _exMuscle: Record<string, string> = {};
                 for (const s of history) {
                   for (const e of (s.exercises ?? [])) {
@@ -534,6 +537,28 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     if (nm && pm && !_exMuscle[nm]) _exMuscle[nm] = String(pm).toLowerCase();
                   }
                 }
+                // Name-based inference fallback. Order matters: more-
+                // specific patterns must come first so e.g. "leg
+                // extension" maps to quads instead of triceps, "shoulder
+                // press" maps to shoulders instead of chest.
+                const inferMuscleFromName = (name: string): string => {
+                  const n = name.toLowerCase();
+                  if (/calf/.test(n)) return 'calves';
+                  if (/leg curl|hamstring|romanian|\brdl\b|good morning/.test(n)) return 'hamstrings';
+                  if (/glute|hip thrust|hip bridge/.test(n)) return 'glutes';
+                  if (/leg extension|squat|lunge|split squat|step.?up|leg press/.test(n)) return 'quads';
+                  if (/deadlift|\brow\b|pulldown|pull.?up|chin.?up|\blat\b|lat pull/.test(n)) return 'back';
+                  if (/lateral raise|front raise|rear delt|shoulder|overhead press|military press|arnold|upright row/.test(n)) return 'shoulders';
+                  if (/bicep|preacher|hammer curl|\bcurl\b/.test(n)) return 'biceps';
+                  if (/tricep|skull crusher|pushdown|kickback|close.?grip bench/.test(n)) return 'triceps';
+                  if (/\bdip\b/.test(n)) return 'triceps';
+                  if (/bench|chest|\bfly\b|push.?up|\bpec\b/.test(n)) return 'chest';
+                  if (/\babs?\b|crunch|plank|\bcore\b|russian twist|leg raise|sit.?up|hollow|knee raise|woodchopper/.test(n)) return 'core';
+                  return '';
+                };
+                const muscleFor = (name: string): string =>
+                  _exMuscle[name.toLowerCase()] || inferMuscleFromName(name);
+
                 // Coarse muscle buckets shown as filter chips. Order
                 // is the most-likely-tapped muscles first.
                 const _MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) => boolean }[] = [
@@ -549,14 +574,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   { id: 'core',      label: 'Core',      matches: m => m === 'core' || m === 'abs' || m === 'obliques' },
                 ];
                 const activeBucket = _MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? _MUSCLE_BUCKETS[0];
-                const filteredPrs = prs.filter(pr => {
+
+                // Only show PRs with enough sessions to draw a real
+                // trend (2+). buildExerciseTrend already returns the
+                // points used by the chart below — reusing it keeps the
+                // selector and the chart in sync.
+                const chartablePrs = prs.filter(pr => buildExerciseTrend(history, pr.exerciseName).length >= 2);
+                const filteredPrs = chartablePrs.filter(pr => {
                   if (chartMuscleFilter === 'all') return true;
-                  const m = _exMuscle[pr.exerciseName.toLowerCase()] ?? '';
-                  return activeBucket.matches(m);
+                  return activeBucket.matches(muscleFor(pr.exerciseName));
                 });
-                // If the active filter has no PRs, drop back to 'all'
-                // so the user doesn't see an empty selector.
-                const showPrs = filteredPrs.length > 0 ? filteredPrs : prs;
                 return (
                   <>
                     {/* Muscle filter row */}
@@ -577,20 +604,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       })}
                     </ScrollView>
 
-                    {/* Exercise selector — filtered by chosen muscle */}
+                    {/* Exercise selector — filtered by chosen muscle.
+                        Explicit empty state instead of silently falling
+                        back to all PRs (which made the filter look
+                        broken). */}
                     <Text style={styles.sectionLabel}>Select exercise</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                      {showPrs.map((pr, i) => (
-                        <TouchableOpacity
-                          key={i}
-                          style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
-                          onPress={() => setSelectedExercise(pr.exerciseName)}>
-                          <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
-                            {pr.exerciseName}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
+                    {filteredPrs.length === 0 ? (
+                      <Text style={{ color: tc.textMuted, fontSize: 12, marginBottom: 12 }}>
+                        {chartablePrs.length === 0
+                          ? 'Log at least 2 sessions of an exercise to chart its trend.'
+                          : `No ${activeBucket.label.toLowerCase()} exercises with enough data yet.`}
+                      </Text>
+                    ) : (
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                        {filteredPrs.map((pr, i) => (
+                          <TouchableOpacity
+                            key={i}
+                            style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
+                            onPress={() => setSelectedExercise(pr.exerciseName)}>
+                            <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
+                              {pr.exerciseName}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    )}
                   </>
                 );
               })()}
