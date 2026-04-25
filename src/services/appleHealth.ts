@@ -157,6 +157,20 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     history,
   });
 
+  // Mirror last night to the backend so history survives device wipes
+  // and feeds personalized score on a new device. Fire-and-forget —
+  // the push is best-effort and never blocks the summary.
+  pushNightlySleepToBackend({
+    stages: lastNightStages,
+    inBedMinutes: lastNightInBedMinutes,
+    hrvMs: avgValue(lastNightHRV),
+    rhr: avgValue(restingHR),
+    respRate: avgValue(lastNightResp),
+    spo2: avgValue(lastNightSpo2),
+    sleepScore,
+    lastNightSleep: lastNightSleep as SleepSample[],
+  }).catch(() => null);
+
   // Standing hours: only count samples where user actually stood (value=1 in our mapping)
   const stoodCount = Array.isArray(standSamples) && standSamples.length > 0
     ? standSamples.filter((s: any) => s.value === 1).length
@@ -596,6 +610,57 @@ export async function loadSleepHistory(): Promise<NightRecord[]> {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch { return []; }
+}
+
+/** Mirror last night's sleep snapshot to the backend (fire-and-forget).
+ *  Keyed on the waking date so today's score uses today's row. Auth
+ *  token is read fresh from AsyncStorage so callers don't need to pass it. */
+async function pushNightlySleepToBackend(input: {
+  stages: SleepStages;
+  inBedMinutes: number | null;
+  hrvMs: number | null;
+  rhr: number | null;
+  respRate: number | null;
+  spo2: number | null;
+  sleepScore: any | null;
+  lastNightSleep: SleepSample[];
+}): Promise<void> {
+  try {
+    const token = await AsyncStorage.getItem('authToken');
+    if (!token) return;
+    // Waking date — use today's local date if we have any sleep total.
+    if (!input.stages || (input.stages.total ?? 0) <= 0) return;
+    const nightDate = new Date().toISOString().slice(0, 10);
+    // Bedtime: take the EARLIEST start across last-night samples.
+    let bedtimeMin: number | null = null;
+    for (const s of input.lastNightSleep) {
+      if (!s?.startDate) continue;
+      const d = new Date(s.startDate);
+      const m = minutesFromMidnight(d);
+      if (bedtimeMin == null || m < bedtimeMin) bedtimeMin = m;
+    }
+    const { upsertNightlySleep } = await import('./api');
+    await upsertNightlySleep(token, {
+      night_date: nightDate,
+      total_hours: input.stages.total ?? null,
+      in_bed_minutes: input.inBedMinutes,
+      deep_hours: input.stages.deep ?? null,
+      rem_hours: input.stages.rem ?? null,
+      core_hours: input.stages.core ?? null,
+      awake_minutes: Math.round((input.stages.awake ?? 0) * 60),
+      hrv_ms: input.hrvMs,
+      resting_hr: input.rhr,
+      respiratory_rate: input.respRate,
+      spo2_percent: input.spo2,
+      bedtime_minutes_from_midnight: bedtimeMin,
+      score: input.sleepScore?.score ?? null,
+      rating: input.sleepScore?.rating ?? null,
+      mode: input.sleepScore?.mode ?? null,
+      source: 'apple_health',
+    });
+  } catch {
+    // Network / not-signed-in — silent. Local cache still has the data.
+  }
 }
 
 async function persistSleepHistory(nights: NightRecord[]): Promise<void> {

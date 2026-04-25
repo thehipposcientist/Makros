@@ -187,6 +187,22 @@ export default function TrainingReadinessCard({
 
   if (loading && !prep) return null;
   if (!prep) return null;
+  // Zero real signals → don't show a misleading "0 Fatigued" dial. Show
+  // a neutral CTA instead. The user can still open Apple Health from
+  // Settings to grant permissions.
+  if (prep.signalsPresent === 0) {
+    return (
+      <View style={{
+        backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
+        borderWidth: 1, borderColor: tc.border, flexDirection: 'row', alignItems: 'center', gap: 8,
+      }}>
+        <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
+        <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
+          Connect Apple Health and log a meal to see today's readiness.
+        </Text>
+      </View>
+    );
+  }
 
   // Status colors — lean into the theme. Primed/Ready both wear the theme's
   // primary (varying intensity), and only Moderate/Fatigued switch to the
@@ -223,18 +239,18 @@ export default function TrainingReadinessCard({
     setExpanded(e => !e);
   };
 
-  // Only show pillars whose input was actually available. This way users
-  // without Apple Health don't see a bunch of grayed-out 60%-neutral rows.
+  // Only show pillars whose input was actually available. Honors both
+  // (a) "Apple Health not connected" and (b) "AH connected but this
+  // specific signal not yet logged" via prep.missing. Without (b), HRV
+  // would appear as a flat "12 / 20" bar even when the user's watch
+  // never wrote an HRV sample.
+  const isPresent = (key: string) => !prep.missing.includes(key);
   const pillarRows: Array<[string, number, number]> = [];
-  if (hasAppleHealth) {
-    pillarRows.push(['Sleep', prep.pillars.sleep, 30]);
-    pillarRows.push(['HRV', prep.pillars.hrv, 20]);
-  }
-  pillarRows.push(['Muscle recovery', prep.pillars.fatigue, 20]);
-  pillarRows.push(['Nutrition', prep.pillars.nutrition, 15]);
-  if (hasAppleHealth) {
-    pillarRows.push(['Resting HR', prep.pillars.restingHr, 10]);
-  }
+  if (hasAppleHealth && isPresent('sleep')) pillarRows.push(['Sleep', prep.pillars.sleep, 30]);
+  if (hasAppleHealth && isPresent('hrv')) pillarRows.push(['HRV', prep.pillars.hrv, 20]);
+  if (isPresent('fatigue')) pillarRows.push(['Muscle recovery', prep.pillars.fatigue, 20]);
+  if (isPresent('nutrition')) pillarRows.push(['Nutrition', prep.pillars.nutrition, 15]);
+  if (hasAppleHealth && isPresent('rhr')) pillarRows.push(['Resting HR', prep.pillars.restingHr, 10]);
   pillarRows.push(['Yesterday\'s load', prep.pillars.yesterdayStrain, 5]);
 
   const focusLabel = todaysFocus
@@ -296,11 +312,11 @@ export default function TrainingReadinessCard({
               without competing with the workout card. */}
           {focusLabel ? (
             <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }} numberOfLines={1}>
-              for {focusLabel}
+              for {focusLabel} · {prep.signalsPresent}/{prep.signalsTotal} signals
             </Text>
           ) : (
             <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }}>
-              Today's training readiness
+              Today's training readiness · {prep.signalsPresent}/{prep.signalsTotal} signals
             </Text>
           )}
           {!expanded && (

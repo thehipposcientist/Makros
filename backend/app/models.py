@@ -96,6 +96,60 @@ class UserDayState(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SleepLog(SQLModel, table=True):
+    """Per-night sleep snapshot. Lets us:
+      1. survive device wipes (sleep history was AsyncStorage-only),
+      2. compute personalized sleep score from server-side history,
+      3. expose nightly sleep to the check-in / weekly-review coaches.
+    night_date is the date the sleep ENDED (waking date) so today's
+    score uses today's row.
+    """
+    __tablename__ = "sleep_logs"
+    __table_args__ = (UniqueConstraint("user_id", "night_date", name="uq_sleep_log_night"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    night_date: date = Field(index=True)
+    total_hours: float | None = Field(default=None)
+    in_bed_minutes: int | None = Field(default=None)
+    deep_hours: float | None = Field(default=None)
+    rem_hours: float | None = Field(default=None)
+    core_hours: float | None = Field(default=None)
+    awake_minutes: int | None = Field(default=None)
+    hrv_ms: float | None = Field(default=None)
+    resting_hr: float | None = Field(default=None)
+    respiratory_rate: float | None = Field(default=None)
+    spo2_percent: float | None = Field(default=None)
+    bedtime_minutes_from_midnight: int | None = Field(default=None)
+    score: int | None = Field(default=None)              # last-computed score 0-100
+    rating: str | None = Field(default=None)             # "Excellent" / "Good" / "Fair" / "Poor"
+    mode: str | None = Field(default=None)               # "mvp" | "personalized"
+    source: str = Field(default="apple_health")          # apple_health | manual | watch
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SleepLogUpsert(SQLModel):
+    """Client → server payload for nightly sleep persistence. Fields
+    optional so the client can patch a partial record (e.g. score
+    re-computed after a stage data backfill)."""
+    night_date: date
+    total_hours: float | None = None
+    in_bed_minutes: int | None = None
+    deep_hours: float | None = None
+    rem_hours: float | None = None
+    core_hours: float | None = None
+    awake_minutes: int | None = None
+    hrv_ms: float | None = None
+    resting_hr: float | None = None
+    respiratory_rate: float | None = None
+    spo2_percent: float | None = None
+    bedtime_minutes_from_midnight: int | None = None
+    score: int | None = None
+    rating: str | None = None
+    mode: str | None = None
+    source: str | None = None
+
+
 class WeeklyCheckIn(SQLModel, table=True):
     __tablename__ = "weekly_checkins"
     __table_args__ = (UniqueConstraint("user_id", "checkin_date", name="uq_weekly_checkin"),)
@@ -984,8 +1038,13 @@ class OnboardingSync(SQLModel):
 
 
 class DayStateUpsert(SQLModel):
+    # All fields optional — `None` means "leave existing value untouched" so
+    # callers can patch a single field without re-asserting the others.
+    # Pass an explicit `{}` to clear meal_checks; pass `""` to clear skipped_focus
+    # via the `clear_skipped_focus` flag below.
     skipped_focus: str | None = None
-    meal_checks: dict = Field(default_factory=dict)
+    clear_skipped_focus: bool = False
+    meal_checks: dict | None = None
     nutrition_plan: dict | None = None
 
 

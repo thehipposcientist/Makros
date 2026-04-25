@@ -1264,10 +1264,22 @@ export async function upsertDayState(
   dayKey: string,
   payload: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any },
 ) {
+  // Patch semantics — only send fields the caller actually wants to change.
+  // Backend treats omitted fields as "leave existing value alone" (since the
+  // old behavior of always re-writing meal_checks from React state was
+  // propagating stale check state across plan regenerations).
+  const body: Record<string, any> = {};
+  if (payload.skipped_focus === null) {
+    body.clear_skipped_focus = true;
+  } else if (payload.skipped_focus !== undefined) {
+    body.skipped_focus = payload.skipped_focus;
+  }
+  if (payload.meal_checks !== undefined) body.meal_checks = payload.meal_checks;
+  if (payload.nutrition_plan !== undefined) body.nutrition_plan = payload.nutrition_plan;
   return request('/profile/day-state/' + dayKey, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
 }
 
@@ -1284,6 +1296,46 @@ export async function submitWeeklyCheckin(
 
 export async function getInsights(token: string) {
   return request('/profile/insights', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Sleep persistence ─────────────────────────────────────────────────
+//
+// Mirror per-night sleep snapshots to the backend so history survives
+// device wipes, sign-in on a new device, and feeds the personalized
+// sleep score baseline (needs 14+ nights). Endpoint is upsert-by
+// (user, night_date), so calling repeatedly is safe.
+
+export type SleepNightlyPayload = {
+  night_date: string;                          // YYYY-MM-DD (waking date)
+  total_hours?: number | null;
+  in_bed_minutes?: number | null;
+  deep_hours?: number | null;
+  rem_hours?: number | null;
+  core_hours?: number | null;
+  awake_minutes?: number | null;
+  hrv_ms?: number | null;
+  resting_hr?: number | null;
+  respiratory_rate?: number | null;
+  spo2_percent?: number | null;
+  bedtime_minutes_from_midnight?: number | null;
+  score?: number | null;
+  rating?: string | null;
+  mode?: string | null;
+  source?: string | null;
+};
+
+export async function upsertNightlySleep(token: string, payload: SleepNightlyPayload) {
+  return request('/sleep/nightly', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getSleepHistory(token: string, days: number = 30) {
+  return request<any[]>(`/sleep/history?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

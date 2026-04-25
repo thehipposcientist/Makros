@@ -1588,18 +1588,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
     try {
-      const currentChecks = checkedMealsByDate[dayKey] ?? {};
-      const currentPlan = nutritionPlansByDate[dayKey] ?? null;
-      const isSkipped = skippedDates.has(dayKey);
-      await upsertDayState(authToken, dayKey, {
-        skipped_focus: patch.skipped_focus !== undefined ? patch.skipped_focus : (isSkipped ? 'skipped' : null),
-        meal_checks: patch.meal_checks ?? currentChecks,
-        nutrition_plan: patch.nutrition_plan ?? currentPlan,
-      });
+      // Strict patch: only send fields the caller passed. Don't fall back to
+      // React state for the un-patched fields — that's how stale meal_checks
+      // got re-propagated to the DB on every plan-only save (and ended up
+      // marking future-day meals as "complete" on cold open).
+      await upsertDayState(authToken, dayKey, patch);
     } catch {
       // Keep app responsive even if backend persistence fails
     }
-  }, [authToken, checkedMealsByDate, nutritionPlansByDate, skippedDates]);
+  }, [authToken]);
 
   useEffect(() => {
     AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
@@ -2054,8 +2051,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     let unsubscribe: (() => void) | null = null;
     (async () => {
       try {
-        const { onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch } =
-          await import('../utils/watchSync');
+        const watchSync = await import('../utils/watchSync');
+        const {
+          onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
+          pushSleepToWatch, pushReadinessToWatch, pushSupplementsToWatch, pushWeightToWatch,
+        } = watchSync;
         unsubscribe = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
           const s = rePushStateRef.current;
@@ -2067,7 +2067,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             : s.skippedDates.has(todayKey()) ? 'skipped'
             : todayItem?.isRest ? 'rest'
             : 'scheduled';
-          console.log('[watch] reachable — re-pushing home snapshot', { status });
+          console.log('[watch] reachable — re-pushing full home snapshot', { status });
           pushWorkoutToWatch(todayWorkout, {
             dateISO: todayISO,
             status,
@@ -2083,11 +2083,115 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             todayISO,
             s.nutritionScoreData?.score ?? null,
           ).catch(() => {});
+
+          // Sleep / readiness / weight pulled from cached health summary so
+          // we don't re-query Apple Health on every reachability flip.
+          // Supplements pull from the API when authToken is present.
+          (async () => {
+            try {
+              const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+              const cached = await getCachedHealthDataSummary();
+              const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+              let score: number | null = null;
+              let label: string | null = null;
+              let summary: string | null = null;
+              if (hours != null) {
+                if (hours >= 8) { score = 90; label = 'Excellent'; summary = `${hours.toFixed(1)}h — fully recovered.`; }
+                else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
+                else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
+                else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
+              }
+              await pushSleepToWatch({
+                score, hoursLastNight: hours,
+                restingHr: cached?.restingHeartRate ?? null,
+                hrvMs: cached?.hrv ?? null,
+                label, summary,
+              });
+            } catch { /* non-fatal */ }
+          })();
+          (async () => {
+            try {
+              const cached = await (await import('../services/healthDataSummary')).getCachedHealthDataSummary();
+              const factors: any[] = [];
+              if (cached?.sleepMinutes != null) {
+                const h = cached.sleepMinutes / 60;
+                const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
+                factors.push({ label: 'Sleep', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${h.toFixed(1)}h last night` });
+              }
+              if (cached?.restingHeartRate != null) {
+                const rhr = cached.restingHeartRate;
+                const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
+                factors.push({ label: 'RHR', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${rhr} bpm` });
+              }
+              if (cached?.hrv != null) {
+                const hrv = cached.hrv;
+                const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
+                factors.push({ label: 'HRV', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${hrv} ms` });
+              }
+              await pushReadinessToWatch({
+                score: s.readinessScore?.score ?? null,
+                label: s.readinessScore?.label ?? null,
+                summary: s.readinessScore?.score
+                  ? (s.readinessScore.score >= 75 ? "Solid recovery — train as planned."
+                     : s.readinessScore.score >= 50 ? "Moderate. Standard intensity is fine."
+                     : "Low. Consider lighter loads today.")
+                  : null,
+                factors,
+              });
+            } catch { /* non-fatal */ }
+          })();
+          (async () => {
+            try {
+              if (!authToken) return;
+              const { getTodaySupplements } = await import('../services/api');
+              const stack = await getTodaySupplements(authToken).catch(() => null);
+              if (stack) {
+                await pushSupplementsToWatch(
+                  stack.map(sup => ({
+                    id: sup.id,
+                    name: sup.custom_name || 'Supplement',
+                    dose: `${sup.dose_amount}${sup.dose_unit}`,
+                    timing: sup.timing ?? null,
+                    taken: !!(sup.logs_today || []).find(l => !l.skipped),
+                    skipped: !!(sup.logs_today || []).find(l => l.skipped),
+                  })),
+                );
+              }
+            } catch { /* non-fatal */ }
+          })();
+          (async () => {
+            try {
+              const { loadWeightEntries } = await import('../utils/weightHistory');
+              const entries: Array<{ date: string; weight_lbs: number }> = await loadWeightEntries().catch(() => []);
+              let latest: number | null = null;
+              let daysSince: number | null = null;
+              if (entries.length > 0) {
+                const last = entries[entries.length - 1];
+                latest = Number(last.weight_lbs) || null;
+                try {
+                  const lastMs = new Date(last.date).getTime();
+                  daysSince = Math.max(0, Math.floor((Date.now() - lastMs) / 86400000));
+                } catch {}
+              }
+              let slope: number | null = null;
+              let ema: number | null = null;
+              if (entries.length >= 3) {
+                const recent = entries.slice(-7);
+                ema = recent.reduce((acc, e) => acc + Number(e.weight_lbs), 0) / recent.length;
+                const old = entries.slice(-14, -7);
+                if (old.length > 0) {
+                  const oldEma = old.reduce((acc, e) => acc + Number(e.weight_lbs), 0) / old.length;
+                  slope = (ema - oldEma);
+                }
+              }
+              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
+            } catch { /* non-fatal */ }
+          })();
         });
       } catch { /* bridge optional */ }
     })();
     return () => { if (unsubscribe) unsubscribe(); };
-  }, []);
+  }, [authToken]);
 
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
@@ -2265,15 +2369,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             })();
           } else if (command === 'cancel_workout') {
             // Watch-originated cancel — drop any in-progress phone-side
-            // workout state. We don't persist anything: past AsyncStorage
-            // keys for active sessions get cleared so the user doesn't
-            // resume into a stale half-done session next time.
+            // workout state AND mark today as skipped so the next watch
+            // sync push goes out as status:'skipped' instead of
+            // re-displaying the workout that was just cancelled.
             (async () => {
               try {
                 const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
                 const keys = await AsyncStorage.getAllKeys();
                 const sessionKeys = keys.filter(k => k.startsWith('workoutSessionState_') || k.startsWith('activeWorkoutLogs_'));
                 if (sessionKeys.length > 0) await AsyncStorage.multiRemove(sessionKeys);
+              } catch { /* non-fatal */ }
+              // Mark today's planned focus as skipped via the same handler
+              // the phone Skip button uses. Without this, cancel-on-watch
+              // would silently leave the workout "scheduled" and the next
+              // reachability re-push would re-show it on the wrist.
+              try {
+                const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
+                const focus = String(todayItem?.workout?.focus || todayItem?.focus || 'workout');
+                watchCmdHandlersRef.current.skip(focus);
               } catch { /* non-fatal */ }
             })();
           }
@@ -2327,16 +2440,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const checkMap: Record<string, MealChecks> = {};
     const skipped = new Set<string>();
 
+    // Forward dates (strictly after today) should NEVER have meal checks —
+    // you can't have eaten a meal that's still in the future. Drop any
+    // checks the backend returns for those dates as a self-healing
+    // measure against historical pollution. Today + past keep their
+    // checks (those are the user's actual log).
+    const dropForwardChecks = (dayKey: string, checks: MealChecks): MealChecks => {
+      return dayKey > today ? {} : checks;
+    };
+
     if (authToken) {
       const states = await Promise.all(mealDays.map(d => getDayState(authToken, d.key).catch(() => null)));
       mealDays.forEach((d, i) => {
         const s = states[i] as any;
-        checkMap[d.key] = s?.meal_checks ?? {};
+        checkMap[d.key] = dropForwardChecks(d.key, s?.meal_checks ?? {});
         if (s?.skipped_focus) skipped.add(d.key);
       });
+      // If we dropped any forward-date checks, mirror the cleanup back to
+      // the DB so the next device sign-in doesn't re-pull the polluted data.
+      const polluted = mealDays.filter((d, i) => {
+        const s = states[i] as any;
+        return d.key > today && s?.meal_checks && Object.keys(s.meal_checks).length > 0;
+      });
+      if (polluted.length > 0) {
+        polluted.forEach(d => {
+          upsertDayState(authToken, d.key, { meal_checks: {} }).catch(() => {});
+        });
+      }
     } else {
       const checksList = await Promise.all(mealDays.map(d => getMealChecks(d.key)));
-      mealDays.forEach((d, i) => { checkMap[d.key] = checksList[i] as MealChecks; });
+      mealDays.forEach((d, i) => { checkMap[d.key] = dropForwardChecks(d.key, checksList[i] as MealChecks); });
     }
 
     // Merge historical meal checks (past days) so the calendar strip and
@@ -3692,8 +3825,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [checkedMealsByDate, persistDayState, nutritionPlansByDate, authToken]);
 
-  const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion, opts?: { routineScope?: 'today' | 'all' }) => {
-    console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0} routineScope=${opts?.routineScope ?? '—'}`);
+  const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion, opts?: { routineScope?: 'today' | 'all'; userInitiated?: boolean }) => {
+    // userInitiated defaults to true — every existing call site is a
+    // user-tap (Edit modal Save, Add Snack, recipe Save). Hydration paths
+    // that loop saves across forward dates must explicitly pass false.
+    const userInitiated = opts?.userInitiated !== false;
+    console.log(`[handleMealSave] date=${date} mealType=${mealType} updatedMeal=${updated.meal} items=${updated.items?.length ?? 0} routineScope=${opts?.routineScope ?? '—'} userInitiated=${userInitiated}`);
     // Routine detach: when the editor opts into "Just today" scope on a
     // routine-backed meal, strip the _routineId + tag a fresh _localId
     // so applyRoutines on the next plan load leaves our edit alone.
@@ -3748,7 +3885,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // replace the old history row on the next sync.
     const isNewMeal = mealType === 'new_meal' || mealType === 'new_extra';
     const wasAlreadyChecked = !!(checkedMealsByDate[date] ?? {})[savedMealType];
-    const shouldLog = isNewMeal || wasAlreadyChecked;
+    // Auto-check + auto-log are reserved for user-initiated saves only.
+    // Hydration paths (routine application, plan migration) call this
+    // with `userInitiated=false` and must NOT silently mark meals
+    // complete on the user's behalf.
+    const shouldLog = userInitiated && (isNewMeal || wasAlreadyChecked);
     if (shouldLog && authToken && savedIdx >= 0) {
       if (isNewMeal) {
         // Auto-check: persist the check state + snapshot the preserved meal.

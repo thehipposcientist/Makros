@@ -326,16 +326,25 @@ def upsert_day_state(
         select(UserDayState).where(UserDayState.user_id == current_user.id, UserDayState.day_key == day_key)
     ).first()
     if state:
-        state.skipped_focus = body.skipped_focus
-        state.meal_checks = body.meal_checks
-        state.nutrition_plan = body.nutrition_plan
+        # Patch semantics — only update fields the caller actually passed.
+        # `None` means "leave existing value alone". `clear_skipped_focus`
+        # is the explicit way to null out skipped_focus (since `None` on
+        # `skipped_focus` is otherwise indistinguishable from "no patch").
+        if body.clear_skipped_focus:
+            state.skipped_focus = None
+        elif body.skipped_focus is not None:
+            state.skipped_focus = body.skipped_focus
+        if body.meal_checks is not None:
+            state.meal_checks = body.meal_checks
+        if body.nutrition_plan is not None:
+            state.nutrition_plan = body.nutrition_plan
         state.updated_at = now
     else:
         state = UserDayState(
             user_id=current_user.id,
             day_key=day_key,
-            skipped_focus=body.skipped_focus,
-            meal_checks=body.meal_checks,
+            skipped_focus=None if body.clear_skipped_focus else body.skipped_focus,
+            meal_checks=body.meal_checks or {},
             nutrition_plan=body.nutrition_plan,
             updated_at=now,
         )

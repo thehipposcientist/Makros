@@ -18,6 +18,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full setup instructions.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Key files, data flow, module responsibilities |
 | [docs/GOALS_AND_SPLITS.md](docs/GOALS_AND_SPLITS.md) | Goals, training splits, stimulus types, target focus |
 | [docs/AI_USAGE.md](docs/AI_USAGE.md) | Every AI call, cost estimates, feature flags |
+| [docs/SCORING.md](docs/SCORING.md) | Every scored algorithm: sleep, readiness, nutrition, fitness, fatigue, e1RM, weekly volume |
 | [docs/SETUP.md](docs/SETUP.md) | Dev environment, Docker, Expo, env vars |
 
 ## Architecture at a Glance

@@ -50,11 +50,26 @@ export interface PreparednessResult {
   pillars: PreparednessPillars;
   insights: string[];
   missing: string[]; // which inputs were missing (for UI hints)
+  /** Number of pillars that received real input data (max 6). UI uses
+   *  this to show e.g. "62 · 3/6 signals" so the user understands the
+   *  score is partial. */
+  signalsPresent: number;
+  signalsTotal: number;
+  /** Raw sum across pillars before reweighting, and the max possible
+   *  given which pillars had real data. score = raw / maxPossible * 100. */
+  raw: number;
+  maxPossible: number;
 }
 
 export function scorePreparedness(input: PreparednessInput): PreparednessResult {
   const insights: string[] = [];
   const missing: string[] = [];
+  // Track which pillars received real signal so we can reweight the
+  // total against just what's present. Without this, missing inputs
+  // collapsed to ~60% neutral and the score floated around 60 forever
+  // — a user with no Apple Health saw "Moderate Ready" before logging
+  // a single thing. Now: 0/6 signals → no score until at least 2 pillars.
+  const present: Record<string, boolean> = {};
 
   // ── Sleep pillar (30) ─────────────────────────────────────────────────────
   let sleep: number;
@@ -62,17 +77,19 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
     // Map sleep score 0-100 onto 0-30, lightly compressed so 70+ sleep = strong.
     sleep = Math.round((input.sleepScore.score / 100) * 30);
     if (input.sleepScore.score < 55) insights.push('Last night’s sleep was below par');
+    present.sleep = true;
   } else {
-    sleep = 18; // neutral ~60%
+    sleep = 0;
     missing.push('sleep');
   }
 
   // ── HRV vs baseline (20) ─────────────────────────────────────────────────
   let hrv: number;
   if (input.hrvMs == null) {
-    hrv = 12;
+    hrv = 0;
     missing.push('hrv');
   } else {
+    present.hrv = true;
     const hist = input.hrvHistory ?? [];
     const baseline = hist.length >= 7 ? rollingMedian(hist) : null;
     if (baseline && baseline > 0) {
@@ -96,14 +113,14 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   // ── Muscle fatigue pillar (20) ───────────────────────────────────────────
   let fatigue: number;
   if (input.readinessFromBackend != null) {
-    // Backend readiness is already 0-100 and respects our 12-muscle model.
     fatigue = Math.round((input.readinessFromBackend / 100) * 20);
     if (input.readinessFromBackend < 40) insights.push('Accumulated fatigue is high');
+    present.fatigue = true;
   } else if (input.muscleFatigueAvg != null) {
-    // 0 = fresh, 1 = wrecked. Map inverse to 0-20.
     fatigue = Math.round((1 - clamp(input.muscleFatigueAvg, 0, 1)) * 20);
+    present.fatigue = true;
   } else {
-    fatigue = 12;
+    fatigue = 0;
     missing.push('fatigue');
   }
 
@@ -112,9 +129,10 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   const hasProtein = input.proteinGrams != null && input.proteinTargetGrams != null && input.proteinTargetGrams > 0;
   const hasCalories = input.calorieIntake != null && input.calorieTarget != null && input.calorieTarget > 0;
   if (!hasProtein && !hasCalories) {
-    nutrition = 9;
+    nutrition = 0;
     missing.push('nutrition');
   } else {
+    present.nutrition = true;
     let pts = 0;
     // Protein (8 pts): hit at least 85% of target.
     if (hasProtein) {
@@ -143,9 +161,10 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   // ── Resting HR vs baseline (10) ──────────────────────────────────────────
   let restingHr: number;
   if (input.restingHeartRate == null) {
-    restingHr = 6;
+    restingHr = 0;
     missing.push('rhr');
   } else {
+    present.restingHr = true;
     const hist = (input.rhrHistory ?? []).filter((v) => v > 0);
     const base = hist.length >= 7 ? rollingMedian(hist) : null;
     if (base && base > 0) {
@@ -165,9 +184,11 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   }
 
   // ── Yesterday strain (5) — inverse modifier ──────────────────────────────
+  // Treated as always-present: zero training is a known signal (= max
+  // strain credit), not missing data. Don't gate signalsPresent on this.
   let yesterdayStrain: number;
   if (input.yesterdayWorkoutMinutes == null) {
-    yesterdayStrain = 3;
+    yesterdayStrain = 5; // assume rested if we have no data
   } else {
     const m = input.yesterdayWorkoutMinutes;
     if (m < 30) yesterdayStrain = 5;
@@ -182,13 +203,29 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   if (input.cyclePhase === 'ovulation') cycleMod = 3;
   else if (input.cyclePhase === 'follicular') cycleMod = 1;
   else if (input.cyclePhase === 'menses') cycleMod = -2;
-  // luteal: 0 — too variable to generalize.
 
-  const total = clamp(
-    sleep + hrv + fatigue + nutrition + restingHr + yesterdayStrain + cycleMod,
-    0,
-    100,
-  );
+  // Reweight: only count pillar maxes for pillars that received real
+  // data. yesterdayStrain (5) is always counted. Score = raw / max * 100.
+  // This means a user with only sleep + nutrition data gets a score
+  // honestly representing those two pillars — not anchored at ~60 by
+  // neutral fallbacks for the four they don't have.
+  const PILLAR_MAX = { sleep: 30, hrv: 20, fatigue: 20, nutrition: 15, restingHr: 10 };
+  const STRAIN_MAX = 5;
+  let maxPossible = STRAIN_MAX; // strain always contributes
+  if (present.sleep) maxPossible += PILLAR_MAX.sleep;
+  if (present.hrv) maxPossible += PILLAR_MAX.hrv;
+  if (present.fatigue) maxPossible += PILLAR_MAX.fatigue;
+  if (present.nutrition) maxPossible += PILLAR_MAX.nutrition;
+  if (present.restingHr) maxPossible += PILLAR_MAX.restingHr;
+
+  const raw = sleep + hrv + fatigue + nutrition + restingHr + yesterdayStrain + cycleMod;
+  // If we have nothing real, surface a 0-score that the UI can recognize
+  // and replace with a "Connect Apple Health to see readiness" empty
+  // state. 5/100 (just strain credit) would be misleading otherwise.
+  const signalsPresent = Object.values(present).filter(Boolean).length;
+  const total = signalsPresent === 0
+    ? 0
+    : clamp((raw / maxPossible) * 100, 0, 100);
 
   const label: PreparednessResult['label'] =
     total >= 85 ? 'Primed' :
@@ -201,6 +238,10 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
     pillars: { sleep, hrv, fatigue, nutrition, restingHr, yesterdayStrain },
     insights: insights.slice(0, 4),
     missing,
+    signalsPresent,
+    signalsTotal: 5, // sleep, hrv, fatigue, nutrition, rhr (strain not user-driven)
+    raw,
+    maxPossible,
   };
 }
 

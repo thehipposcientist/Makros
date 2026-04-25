@@ -97,6 +97,22 @@ export default function PreparednessCard({
 
   if (loading && !result) return null;
   if (!result) return null;
+  // Zero real signals → don't pretend we have a score. The reweighted
+  // total is 0 only when nothing was readable. Show an empty-state CTA
+  // instead of "Fatigued (0)" which would alarm users with no AH data.
+  if (result.signalsPresent === 0) {
+    return (
+      <View style={{
+        backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
+        borderWidth: 1, borderColor: tc.border, flexDirection: 'row', alignItems: 'center', gap: 8,
+      }}>
+        <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
+        <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
+          Connect Apple Health and log a meal to see today's readiness.
+        </Text>
+      </View>
+    );
+  }
 
   // Use theme color tokens so every palette reads correctly (not hardcoded hex).
   const labelColor =
@@ -109,13 +125,17 @@ export default function PreparednessCard({
     setExpanded(e => !e);
   };
 
-  const pillarRows: Array<[string, number, number]> = [
-    ['Sleep',            result.pillars.sleep,            30],
-    ['HRV',              result.pillars.hrv,              20],
-    ['Muscle recovery',  result.pillars.fatigue,          20],
-    ['Nutrition',        result.pillars.nutrition,        15],
-    ['Resting HR',       result.pillars.restingHr,        10],
-    ["Yesterday's load", result.pillars.yesterdayStrain,  5],
+  // Each pillar row carries an explicit `missingKey` so the UI can
+  // render "—" instead of a fake bar at 0 when the input is genuinely
+  // unavailable. Without this, missing HRV looked like "low HRV" even
+  // though the user just doesn't wear an Apple Watch overnight.
+  const pillarRows: Array<{ label: string; pts: number; max: number; missingKey: string }> = [
+    { label: 'Sleep',            pts: result.pillars.sleep,            max: 30, missingKey: 'sleep' },
+    { label: 'HRV',              pts: result.pillars.hrv,              max: 20, missingKey: 'hrv' },
+    { label: 'Muscle recovery',  pts: result.pillars.fatigue,          max: 20, missingKey: 'fatigue' },
+    { label: 'Nutrition',        pts: result.pillars.nutrition,        max: 15, missingKey: 'nutrition' },
+    { label: 'Resting HR',       pts: result.pillars.restingHr,        max: 10, missingKey: 'rhr' },
+    { label: "Yesterday's load", pts: result.pillars.yesterdayStrain,  max: 5,  missingKey: '__never__' },
   ];
 
   return (
@@ -133,6 +153,11 @@ export default function PreparednessCard({
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
             Ready to train: <Text style={{ color: labelColor }}>{result.label}</Text> ({result.score})
+            {result.signalsTotal > 0 && (
+              <Text style={{ fontSize: 11, fontWeight: '500', color: tc.textMuted }}>
+                {' '}· {result.signalsPresent}/{result.signalsTotal} signals
+              </Text>
+            )}
           </Text>
           {result.insights.length > 0 && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={expanded ? undefined : 1}>
@@ -145,7 +170,8 @@ export default function PreparednessCard({
 
       {expanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
-          {pillarRows.map(([label, pts, max]) => {
+          {pillarRows.map(({ label, pts, max, missingKey }) => {
+            const isMissing = result.missing.includes(missingKey);
             const pct = Math.max(0, Math.min(1, pts / max));
             const barColor = pct >= 0.75 ? tc.success : pct >= 0.50 ? tc.primary : pct >= 0.30 ? tc.warning : tc.error;
             return (
@@ -153,14 +179,18 @@ export default function PreparednessCard({
                 <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                   {label}
                 </Text>
-                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                  <View style={{
-                    width: `${Math.max(3, pct * 100)}%` as any,
-                    height: 5, borderRadius: 3, backgroundColor: barColor,
-                  }} />
-                </View>
-                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
-                  {pts}/{max}
+                {isMissing ? (
+                  <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border, opacity: 0.4 }} />
+                ) : (
+                  <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                    <View style={{
+                      width: `${Math.max(3, pct * 100)}%` as any,
+                      height: 5, borderRadius: 3, backgroundColor: barColor,
+                    }} />
+                  </View>
+                )}
+                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: isMissing ? tc.textMuted : tc.textSecondary, textAlign: 'right' }}>
+                  {isMissing ? '—' : `${pts}/${max}`}
                 </Text>
               </View>
             );
