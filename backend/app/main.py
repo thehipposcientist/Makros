@@ -14,7 +14,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.database import create_db_and_tables, engine
 from app.limiter import limiter
 from app.logging_setup import configure_logging, get_logger, new_request_id, set_request_context
-from app.routers import auth, profile, workouts, meals, meta, ai, coach, saved_meals, supplements, sleep
+from app.routers import auth, profile, workouts, meals, meta, ai, coach, saved_meals, supplements, sleep, health as health_router
 
 # Install JSON logging first so every subsequent log line is structured.
 configure_logging()
@@ -379,6 +379,7 @@ app.include_router(meta.router)
 app.include_router(ai.router)
 app.include_router(coach.router)
 app.include_router(sleep.router)
+app.include_router(health_router.router)
 
 
 @app.get("/health")

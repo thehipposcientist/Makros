@@ -167,6 +167,59 @@ class SleepLogUpsert(SQLModel):
     source: str | None = None
 
 
+class DailyHealthSnapshot(SQLModel, table=True):
+    """One row per user per day with everything Apple Health (and the
+    Apple Watch via HealthKit) reports. Lets weekly_review + recovery
+    flags read real history instead of the in-memory phone aggregator
+    (which only knows about today + a 30-min stale window).
+
+    All fields optional — phone can patch a partial snapshot when the
+    user only granted some HealthKit permissions, and the upsert path
+    fills in what's available without overwriting prior good values.
+
+    Source: 'apple_health' (default) | 'manual' | 'watch'.
+    """
+    __tablename__ = "daily_health_snapshots"
+    __table_args__ = (UniqueConstraint("user_id", "snapshot_date", name="uq_daily_health_snapshot"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    snapshot_date: date = Field(index=True)
+    # Activity + steps
+    steps: int | None = Field(default=None)
+    active_energy_kcal: float | None = Field(default=None)
+    workout_minutes: int | None = Field(default=None)
+    cardio_minutes: int | None = Field(default=None)         # any HR-elevated activity
+    zone2_minutes: int | None = Field(default=None)          # specifically Z2
+    # Cardiovascular
+    resting_hr: float | None = Field(default=None)
+    hrv_ms: float | None = Field(default=None)
+    vo2_max: float | None = Field(default=None)
+    # Body
+    weight_lbs: float | None = Field(default=None)
+    # Optional readiness composite (computed phone-side)
+    readiness_score: int | None = Field(default=None)
+    source: str = Field(default="apple_health")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DailyHealthSnapshotUpsert(SQLModel):
+    """Client → server payload for the daily HealthKit snapshot. All
+    fields optional so a partial-permissions user can still patch."""
+    snapshot_date: date
+    steps: int | None = None
+    active_energy_kcal: float | None = None
+    workout_minutes: int | None = None
+    cardio_minutes: int | None = None
+    zone2_minutes: int | None = None
+    resting_hr: float | None = None
+    hrv_ms: float | None = None
+    vo2_max: float | None = None
+    weight_lbs: float | None = None
+    readiness_score: int | None = None
+    source: str | None = None
+
+
 class WeeklyCheckIn(SQLModel, table=True):
     __tablename__ = "weekly_checkins"
     __table_args__ = (UniqueConstraint("user_id", "checkin_date", name="uq_weekly_checkin"),)
@@ -629,6 +682,16 @@ class WorkoutCompletion(SQLModel, table=True):
     calories_burned: int | None = Field(default=None)
     hr_summary: dict | None = Field(default=None, sa_column=Column(JSON))
     resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
+    # Post-workout feedback. Used by weekly_review for struggle metrics
+    # and by the trainer for context. All optional — pre-feedback
+    # completions and silent log paths still work.
+    #   feeling: "great" | "good" | "okay" | "rough"
+    #   intensity: 1..5 (1 = way too easy, 5 = too hard)
+    #   soreness_areas: list of body-part keys ["lower_back", "knees"]
+    feeling: str | None = Field(default=None)
+    intensity: int | None = Field(default=None)
+    soreness_areas: list | None = Field(default=None, sa_column=Column(JSON))
+    feedback_notes: str | None = Field(default=None)
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

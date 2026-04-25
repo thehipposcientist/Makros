@@ -117,6 +117,10 @@ export async function refreshHealthDataSummary(
       const summary = await compute(opts);
       if (summary) {
         AsyncStorage.setItem(CACHE_KEY, JSON.stringify(summary)).catch(() => {});
+        // Fire-and-forget per-day persistence to backend. Keeps the
+        // server's daily_health_snapshots row current so weekly_review
+        // + recovery_flags can read history without re-querying HK.
+        if (summary.hkAvailable) pushSnapshotToBackend(summary).catch(() => {});
       }
       return summary;
     } finally {
@@ -124,6 +128,37 @@ export async function refreshHealthDataSummary(
     }
   })();
   return _inflight;
+}
+
+async function pushSnapshotToBackend(s: HealthDataSummary): Promise<void> {
+  try {
+    const token = await AsyncStorage.getItem('authToken');
+    if (!token) return;
+    // Skip the empty-payload case — every field null means we have no
+    // useful data to write, and the upsert would just create a junk row.
+    const fields = [
+      s.steps, s.activeEnergyKcal, s.workoutMinutes, s.cardioMinutes,
+      s.zone2Minutes, s.restingHeartRate, s.hrv, s.vo2Max, s.weightLbs,
+    ];
+    if (fields.every((v) => v == null)) return;
+    const { upsertDailyHealthSnapshot } = await import('./api');
+    await upsertDailyHealthSnapshot(token, {
+      snapshot_date: s.dateISO,
+      steps: s.steps,
+      active_energy_kcal: s.activeEnergyKcal,
+      workout_minutes: s.workoutMinutes,
+      cardio_minutes: s.cardioMinutes,
+      zone2_minutes: s.zone2Minutes,
+      resting_hr: s.restingHeartRate,
+      hrv_ms: s.hrv,
+      vo2_max: s.vo2Max,
+      weight_lbs: s.weightLbs,
+      source: 'apple_health',
+    });
+  } catch {
+    // Network / not-signed-in — silent. Local cache still has the data
+    // and the next refresh will retry the push.
+  }
 }
 
 async function compute(opts: { age?: number | null }): Promise<HealthDataSummary | null> {

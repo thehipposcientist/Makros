@@ -657,6 +657,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       targetWeightLbs: (ex as any).targetWeightLbs ?? null,
       slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
       primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? null,
+      weightRecommendationSource: (ex as any).weightRecommendationSource ?? null,
     }));
   });
   // Debounced backend sync of the in-progress workout. Fires 1.5s after the
@@ -726,6 +727,77 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         console.log(`[ActiveWorkout] restored ${saved.filter(s => s.sets.length > 0).length} exercises with logged sets`);
       } catch {}
     }).catch(() => {});
+  }, []);
+
+  // ── Lazy AI weight refresh on workout start ─────────────────────────
+  // The planner's `recommend_starting_weight` falls through to a fixed
+  // category-default table (tier 5) when the user has no transferable
+  // history. That table ignores bodyweight, age, sex, and recent
+  // same-muscle work entirely — a 220-lb advanced user gets the same
+  // 95-lb bench rec as a 130-lb beginner.
+  //
+  // Fix: scan exercises whose `weightRecommendationSource === 'default'`
+  // and fire `/ai/recommend-weight` for each in parallel. The endpoint
+  // routes through the AI first-time helper which DOES use bodyweight +
+  // age + sex + recent same-muscle sessions. Replace `targetWeightLbs`
+  // before the user logs their first set.
+  //
+  // Skipped:
+  //  - exercises that already have a real source (exact_history, sub_group, etc)
+  //  - exercises with logged sets restored from a prior session (the
+  //    AI rec for "next set" path takes over from there)
+  //  - exercises where the first set is already logged (race-safe)
+  //  - workout has no auth token (offline)
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getWeightRecommendation } = await import('../services/api');
+        const targets = exercises
+          .map((ex, i) => ({ ex, i }))
+          .filter(({ ex }) =>
+            (ex.weightRecommendationSource === 'default' || !ex.weightRecommendationSource)
+            && (!ex.sets || ex.sets.length === 0)
+          );
+        if (!targets.length) return;
+        const results = await Promise.allSettled(
+          targets.map(({ ex }) => getWeightRecommendation(
+            authToken, ex.name, goal,
+            [],  // no logged sets — first time
+            1,   // setNumber 1
+            {
+              targetSets: typeof ex.targetSets === 'number' ? ex.targetSets : undefined,
+              targetReps: ex.targetReps,
+              experienceLevel: userProfile?.experienceLevel as any,
+              exerciseSlug: ex.slug ?? undefined,
+              equipment: ex.equipment,
+              primaryMuscle: ex.primaryMuscle ?? undefined,
+              plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+            },
+          )),
+        );
+        if (cancelled) return;
+        const updates: Record<number, number> = {};
+        results.forEach((r, k) => {
+          if (r.status === 'fulfilled' && r.value && typeof r.value.weightLbs === 'number' && r.value.weightLbs > 0) {
+            updates[targets[k].i] = r.value.weightLbs;
+          }
+        });
+        if (Object.keys(updates).length === 0) return;
+        setExercisesRaw(prev => prev.map((ex, i) =>
+          i in updates
+            ? { ...ex, targetWeightLbs: updates[i], weightRecommendationSource: 'ai_first_time' }
+            : ex,
+        ));
+        console.log(`[ActiveWorkout] AI weight refresh: ${Object.keys(updates).length}/${targets.length} exercises updated`);
+      } catch (e) {
+        console.log('[ActiveWorkout] AI weight refresh failed (non-fatal):', e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Run ONCE on mount — we don't want this firing every state update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
@@ -1131,7 +1203,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     };
   }, []);
 
-  // Preload last-session data and pre-populate inline set inputs from history
+  // Preload last-session data so the "last time" label next to each
+  // input has something to display. Inputs themselves stay EMPTY — per
+  // user feedback, prefilling with last session's numbers led to
+  // accidental "log same as last time" taps without thinking. The
+  // reference is shown to the right of the input via `lastTimeLabel`
+  // (see render block) so the user can SEE what they did before, but
+  // they have to actively type today's set.
+  //
+  // Timed cardio exercises (treadmill, bike) are exceptions — there
+  // the last session's duration IS pre-filled because users typically
+  // repeat the same time block (25 min Zone 2). Only the
+  // weight/reps inputs for strength work are intentionally left blank.
   useEffect(() => {
     Promise.all(
       workout.exercises.map(async ex => {
@@ -1143,18 +1226,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       results.forEach(r => { if (r.sets.length > 0) map[r.name] = r.sets; });
       setLastExerciseSets(map);
 
-      // Pre-populate inputs from last session for each exercise slot
+      // Only pre-fill duration inputs for timed exercises (cardio /
+      // holds). Weight + reps stay empty so the user always commits to
+      // a specific number for today's set.
       const inputs: Record<string, { weight: string; reps: string; duration: string }> = {};
       workout.exercises.forEach((ex, exIdx) => {
         const lastSets = map[ex.name] ?? [];
+        if (!isTimedExercise(ex.name, ex.reps)) return;
         for (let slot = 0; slot < ex.sets; slot++) {
           const last = lastSets[slot] ?? lastSets[lastSets.length - 1];
-          if (last) {
-            if (isTimedExercise(ex.name, ex.reps) && last.durationSeconds != null) {
-              inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: formatDurationForInput(last.durationSeconds) };
-            } else {
-              inputs[`${exIdx}-${slot}`] = { weight: String(last.weightLbs), reps: String(last.reps), duration: '' };
-            }
+          if (last && last.durationSeconds != null) {
+            inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: formatDurationForInput(last.durationSeconds) };
           }
         }
       });
@@ -1162,20 +1244,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     });
   }, []);
 
-  // Pre-fill from history when modal opens
-  const openLogModal = useCallback(async (exIdx: number) => {
+  // Modal opens with EMPTY inputs — the user explicitly enters
+  // today's values. Last session's set is shown via `lastExerciseSets`
+  // as a reference label elsewhere in the UI, but the modal inputs
+  // start blank to prevent accidental "log same as last time" taps.
+  const openLogModal = useCallback((exIdx: number) => {
     setLogExIdx(exIdx);
     setLogWeight('');
     setLogReps('');
     setLogModalVisible(true);
-
-    const lastSets = await getLastSetsForExercise(exercises[exIdx].name);
-    if (lastSets && lastSets.length > 0) {
-      const last = lastSets[lastSets.length - 1];
-      setLogWeight(String(last.weightLbs));
-      setLogReps(String(last.reps));
-    }
-  }, [exercises]);
+  }, []);
 
   const openEditSet = useCallback((exIdx: number, setIdx: number) => {
     const set = exercises[exIdx]?.sets[setIdx];
@@ -1869,13 +1947,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   };
 
+  // A ref that tracks the LIVE rest-remaining value so rapid taps on
+  // +/-15s accumulate properly. Without this, two fast clicks both
+  // close over the same stale `restRemaining` and only add the delta
+  // once. The interval already advances `restRemaining` independently;
+  // we keep the ref in sync so the next tap reads the most recent
+  // value, not whatever was current when the closure was built.
+  const restRemainingRef = useRef(restRemaining);
+  useEffect(() => { restRemainingRef.current = restRemaining; }, [restRemaining]);
+
   const adjustActiveRestRemaining = useCallback(async (delta: number) => {
-    if (restRemaining <= 0 || !restForExercise) return;
-    const nextRemaining = Math.max(0, restRemaining + delta);
+    const current = restRemainingRef.current;
+    if (current <= 0 || !restForExercise) return;
+    const nextRemaining = Math.max(0, current + delta);
     if (nextRemaining <= 0) {
       clearRestState();
       return;
     }
+    // Update the ref synchronously so a follow-up tap fired before
+    // React commits the next render still reads the new value.
+    restRemainingRef.current = nextRemaining;
     // Restart the timestamp-based timer with the adjusted duration
     startRestTimer(nextRemaining, restForExercise);
     setRestRemaining(nextRemaining);
@@ -1890,7 +1981,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       aiCue: restCue,
       includeStartAlert: false,
     });
-  }, [clearRestState, rescheduleRestNotifications, restCue, restForExercise, restNextTarget, restRemaining, startRestTimer]);
+  }, [clearRestState, rescheduleRestNotifications, restCue, restForExercise, restNextTarget, startRestTimer]);
 
   const refreshRecommendationForExercise = useCallback(async (exIdx: number, setsForExercise: CompletedSet[]) => {
     const ex = exercises[exIdx];
@@ -2007,6 +2098,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               notes: captured.notes.trim() || undefined,
             },
           });
+          // Patch the backend WorkoutCompletion row with the feedback
+          // so the weekly review's struggle metrics + the trainer can
+          // see it. Re-uses the upsert path on /workouts/complete.
+          if (authToken) {
+            try {
+              await logWorkoutDone(
+                authToken,
+                dateKey(new Date(captured.session.date)),
+                captured.session.focus,
+                captured.session.durationSeconds,
+                undefined, undefined, undefined,
+                {
+                  feeling: captured.feeling,
+                  intensity: captured.intensity,
+                  sorenessAreas: captured.soreness,
+                  notes: captured.notes.trim() || undefined,
+                },
+              );
+            } catch (e) {
+              console.log('[handleSubmitFeedback] backend feedback patch failed:', e);
+            }
+          }
         }
         if (!authToken || (!captured.feeling && !captured.intensity)) return;
 

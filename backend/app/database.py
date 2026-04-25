@@ -111,7 +111,10 @@ def _ensure_workout_completion_stimulus_column() -> None:
 
 
 def _ensure_workout_completion_health_columns() -> None:
-    """Add calories_burned + hr_summary columns to workout_completions if missing."""
+    """Add calories_burned + hr_summary + post-workout feedback columns
+    to workout_completions if missing. Feedback fields (feeling /
+    intensity / soreness_areas / feedback_notes) are read by
+    weekly_review's struggle metrics + the trainer context."""
     if engine.dialect.name != "postgresql":
         return
     try:
@@ -123,6 +126,22 @@ def _ensure_workout_completion_health_columns() -> None:
             conn.execute(text(
                 "ALTER TABLE workout_completions "
                 "ADD COLUMN IF NOT EXISTS hr_summary JSONB"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS feeling VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS intensity INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS soreness_areas JSONB"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS feedback_notes TEXT"
             ))
     except Exception as e:
         print(f"[migration] workout_completions health columns add failed (non-fatal): {e}")
@@ -575,6 +594,26 @@ def _ensure_food_metadata_amounts_columns() -> None:
         print(f"[migration] food_metadata / daily_metrics amount columns add failed (non-fatal): {e}")
 
 
+def _ensure_daily_health_snapshot_table() -> None:
+    """Create `daily_health_snapshots` if missing and add the unique
+    `(user_id, snapshot_date)` constraint. SQLModel.create_all already
+    handles the table itself, so this guarantees the constraint exists
+    on legacy DBs that may have an older partial table.
+
+    Idempotent — safe to run on every startup.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_health_snapshot "
+                "ON daily_health_snapshots (user_id, snapshot_date)"
+            ))
+    except Exception as e:
+        print(f"[migration] daily_health_snapshots constraint ensure failed (non-fatal): {e}")
+
+
 def _ensure_user_profile_birthdate_column() -> None:
     """Add nullable `birthdate` to user_profiles. Existing rows get NULL;
     the profile router treats a NULL birthdate as "not filled in" and
@@ -593,7 +632,7 @@ def _ensure_user_profile_birthdate_column() -> None:
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -610,6 +649,7 @@ def create_db_and_tables():
     _ensure_user_profile_birthdate_column()
     _ensure_food_metadata_amounts_columns()
     _ensure_exercise_set_actual_rir_column()
+    _ensure_daily_health_snapshot_table()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

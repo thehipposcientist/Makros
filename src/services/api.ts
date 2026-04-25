@@ -1130,6 +1130,12 @@ export async function logWorkoutDone(
     caloriesBurned?: number;
     hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] };
   },
+  feedback?: {
+    feeling?: string;       // "great"|"good"|"okay"|"rough"
+    intensity?: number;     // 1..5
+    sorenessAreas?: string[];
+    notes?: string;
+  },
 ): Promise<WorkoutCompleteResponse> {
   return request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
@@ -1148,6 +1154,10 @@ export async function logWorkoutDone(
       } : {}),
       ...(healthMetrics?.caloriesBurned ? { calories_burned: healthMetrics.caloriesBurned } : {}),
       ...(healthMetrics?.hrSummary ? { hr_summary: healthMetrics.hrSummary } : {}),
+      ...(feedback?.feeling ? { feeling: feedback.feeling } : {}),
+      ...(feedback?.intensity ? { intensity: feedback.intensity } : {}),
+      ...(feedback?.sorenessAreas && feedback.sorenessAreas.length > 0 ? { soreness_areas: feedback.sorenessAreas } : {}),
+      ...(feedback?.notes ? { feedback_notes: feedback.notes } : {}),
     }),
   });
 }
@@ -1342,6 +1352,50 @@ export async function upsertNightlySleep(token: string, payload: SleepNightlyPay
 
 export async function getSleepHistory(token: string, days: number = 30) {
   return request<any[]>(`/sleep/history?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Daily Apple Health snapshot (per user per day) ──────────────────────────
+//
+// Phone-side aggregator (`healthDataSummary.ts`) only knows today + a
+// 30-min stale window. Persisting per-day means weekly_review,
+// recovery_flags, and check-in coach can read real history server-side
+// without re-querying HealthKit.
+
+export type DailyHealthSnapshotPayload = {
+  snapshot_date: string;                      // YYYY-MM-DD
+  steps?: number | null;
+  active_energy_kcal?: number | null;
+  workout_minutes?: number | null;
+  cardio_minutes?: number | null;
+  zone2_minutes?: number | null;
+  resting_hr?: number | null;
+  hrv_ms?: number | null;
+  vo2_max?: number | null;
+  weight_lbs?: number | null;
+  readiness_score?: number | null;
+  source?: string | null;
+};
+
+export async function upsertDailyHealthSnapshot(token: string, payload: DailyHealthSnapshotPayload) {
+  return request('/health/snapshot', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function upsertDailyHealthSnapshotBatch(token: string, payloads: DailyHealthSnapshotPayload[]) {
+  return request('/health/snapshot/batch', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payloads),
+  });
+}
+
+export async function getDailyHealthHistory(token: string, days: number = 30) {
+  return request<any[]>(`/health/history?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

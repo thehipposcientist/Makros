@@ -73,6 +73,13 @@ class WorkoutCompleteRequest(BaseModel):
     cardio_style: str | None = None
     calories_burned: int | None = None
     hr_summary: dict | None = None  # {avgBpm, maxBpm, zoneMinutes}
+    # Post-workout feedback. Used by weekly_review's struggle metrics
+    # (e.g. 3 of 4 sessions felt rough → trainer suggests pulling back).
+    # All optional — silent log paths still work.
+    feeling: str | None = None              # "great"|"good"|"okay"|"rough"
+    intensity: int | None = None            # 1..5
+    soreness_areas: list[str] | None = None  # ["lower_back", "knees"]
+    feedback_notes: str | None = None
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -804,7 +811,7 @@ def generate_full_week(
     # IO callbacks (regen-with-forced-split, generate-cardio-finisher).
     if body.pin_day_index is not None and body.pin_focus:
         from app.services.workout.switch_day import (
-            decide_pin, apply_swap,
+            decide_pin, apply_swap, apply_rotate, apply_bro_canonical_swap,
         )
         decision = decide_pin(
             days,
@@ -839,6 +846,19 @@ def generate_full_week(
                 f"[generate-week] pin swap: target {target_idx} swapped with "
                 f"day {decision.swap_with_idx}, focuses now "
                 f"{[d.get('focus') for d in days]}"
+            )
+        elif decision.action == "rotate":
+            apply_rotate(days, decision, session_minutes=inputs.session_minutes)
+            logger.info(
+                f"[generate-week] pin canonical-rebuild: target {target_idx} "
+                f"got '{body.pin_focus}', cycle restored, focuses now "
+                f"{[d.get('focus') for d in days]}"
+            )
+        elif decision.action == "bro_canonical_swap":
+            apply_bro_canonical_swap(days, decision, session_minutes=inputs.session_minutes)
+            logger.info(
+                f"[generate-week] pin canonical-swap (non-lifting target): "
+                f"focuses now {[d.get('focus') for d in days]}"
             )
         elif decision.action == "regen":
             substituted = False
@@ -1009,6 +1029,10 @@ def mark_workout_complete(
         existing.cardio_style       = body.cardio_style or existing.cardio_style
         existing.calories_burned    = body.calories_burned if body.calories_burned is not None else existing.calories_burned
         existing.hr_summary         = body.hr_summary if body.hr_summary is not None else existing.hr_summary
+        existing.feeling            = body.feeling if body.feeling is not None else existing.feeling
+        existing.intensity          = body.intensity if body.intensity is not None else existing.intensity
+        existing.soreness_areas     = body.soreness_areas if body.soreness_areas is not None else existing.soreness_areas
+        existing.feedback_notes     = body.feedback_notes if body.feedback_notes is not None else existing.feedback_notes
         existing.completed_at       = datetime.now(timezone.utc)
         db.add(existing)
     else:
@@ -1025,6 +1049,10 @@ def mark_workout_complete(
             cardio_style=body.cardio_style,
             calories_burned=body.calories_burned,
             hr_summary=body.hr_summary,
+            feeling=body.feeling,
+            intensity=body.intensity,
+            soreness_areas=body.soreness_areas,
+            feedback_notes=body.feedback_notes,
         ))
 
     # Also persist structured per-exercise data if the client sent it.

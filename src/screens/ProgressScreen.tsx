@@ -136,7 +136,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
-  const [chartMode, setChartMode] = useState<'weight' | 'volume'>('weight');
+  // Default to 'volume' — most users care about total work done per
+  // session more than max load on a single set. Toggleable.
+  const [chartMode, setChartMode] = useState<'weight' | 'volume'>('volume');
+  // Optional muscle filter for the exercise picker. 'all' = no filter.
+  const [chartMuscleFilter, setChartMuscleFilter] = useState<string>('all');
   const [prs, setPrs] = useState<PR[]>([]);
   const [prSearch, setPrSearch] = useState('');
   const [prFocusFilter, setPrFocusFilter] = useState<string | null>(null);
@@ -516,20 +520,80 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {/* Exercise selector */}
-              <Text style={styles.sectionLabel}>Select exercise</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                {prs.map((pr, i) => (
-                  <TouchableOpacity
-                    key={i}
-                    style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
-                    onPress={() => setSelectedExercise(pr.exerciseName)}>
-                    <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
-                      {pr.exerciseName}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              {/* Build a map of exerciseName → primary_muscle from
+                  history so we can filter the PR list by muscle.
+                  Falls back to 'unknown' bucket when the exercise
+                  has no muscle tag (e.g. AI-generated entries before
+                  the muscle plumbing landed). */}
+              {(() => {
+                const _exMuscle: Record<string, string> = {};
+                for (const s of history) {
+                  for (const e of (s.exercises ?? [])) {
+                    const nm = e.name?.toLowerCase();
+                    const pm = (e as any).primaryMuscle ?? (e as any).primary_muscle;
+                    if (nm && pm && !_exMuscle[nm]) _exMuscle[nm] = String(pm).toLowerCase();
+                  }
+                }
+                // Coarse muscle buckets shown as filter chips. Order
+                // is the most-likely-tapped muscles first.
+                const _MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) => boolean }[] = [
+                  { id: 'all',       label: 'All',       matches: () => true },
+                  { id: 'chest',     label: 'Chest',     matches: m => m === 'chest' },
+                  { id: 'back',      label: 'Back',      matches: m => m === 'back' || m === 'lats' },
+                  { id: 'shoulders', label: 'Shoulders', matches: m => m === 'shoulders' || m === 'delts' || m === 'rear_delts' },
+                  { id: 'arms',      label: 'Arms',      matches: m => m === 'biceps' || m === 'triceps' },
+                  { id: 'quads',     label: 'Quads',     matches: m => m === 'quads' },
+                  { id: 'hamstrings',label: 'Hamstrings',matches: m => m === 'hamstrings' },
+                  { id: 'glutes',    label: 'Glutes',    matches: m => m === 'glutes' },
+                  { id: 'calves',    label: 'Calves',    matches: m => m === 'calves' },
+                  { id: 'core',      label: 'Core',      matches: m => m === 'core' || m === 'abs' || m === 'obliques' },
+                ];
+                const activeBucket = _MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? _MUSCLE_BUCKETS[0];
+                const filteredPrs = prs.filter(pr => {
+                  if (chartMuscleFilter === 'all') return true;
+                  const m = _exMuscle[pr.exerciseName.toLowerCase()] ?? '';
+                  return activeBucket.matches(m);
+                });
+                // If the active filter has no PRs, drop back to 'all'
+                // so the user doesn't see an empty selector.
+                const showPrs = filteredPrs.length > 0 ? filteredPrs : prs;
+                return (
+                  <>
+                    {/* Muscle filter row */}
+                    <Text style={styles.sectionLabel}>Filter by muscle</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                      {_MUSCLE_BUCKETS.map(b => {
+                        const active = chartMuscleFilter === b.id;
+                        return (
+                          <TouchableOpacity
+                            key={b.id}
+                            style={[styles.exerciseChip, active && styles.exerciseChipActive]}
+                            onPress={() => setChartMuscleFilter(b.id)}>
+                            <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
+                              {b.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+
+                    {/* Exercise selector — filtered by chosen muscle */}
+                    <Text style={styles.sectionLabel}>Select exercise</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                      {showPrs.map((pr, i) => (
+                        <TouchableOpacity
+                          key={i}
+                          style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
+                          onPress={() => setSelectedExercise(pr.exerciseName)}>
+                          <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
+                            {pr.exerciseName}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </>
+                );
+              })()}
 
               {selectedExercise ? (() => {
                 const trend = buildExerciseTrend(history, selectedExercise);

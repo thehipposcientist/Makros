@@ -55,10 +55,123 @@ SPLIT_FOR_FOCUS: dict[str, str] = {
 }
 
 
-# Canonical bro cycle. Used by `_bro_canonical_pin` to compute the
-# correct rotation when n_lifts > 5 (where a focus appears twice and
-# simple array rotation produces back-to-back duplicates).
+# Canonical cycles per split. The pinning algorithm picks a starting
+# offset of the cycle that places the requested focus at the requested
+# position, then rebuilds the lift sequence from there. This preserves
+# the split's intended ordering across successive pins (a series of
+# single-day swaps would scramble the cycle — see the user-reported
+# back-to-back-Legs / split-broken bugs).
 BRO_CYCLE = ["chest", "back", "shoulders", "arms", "legs"]
+PPL_CYCLE = ["push", "pull", "legs"]
+UL_CYCLE = ["upper", "lower"]
+LOWER_FOCUSED_CYCLE = ["lower", "upper"]
+UPPER_FOCUSED_CYCLE = ["upper", "lower"]
+
+
+def _canonical_cycle_for_split(preferred_split: Optional[str]) -> Optional[list[str]]:
+    """The canonical cycle for a given split id. Returns None for
+    splits that don't have a cycle (full_body, ppl_upper_lower, or
+    when no split is set)."""
+    if not preferred_split:
+        return None
+    s = preferred_split.lower().strip()
+    if s == "ppl":
+        return PPL_CYCLE
+    if s == "upper_lower":
+        return UL_CYCLE
+    if s == "bro":
+        return BRO_CYCLE
+    if s == "lower_focused":
+        return LOWER_FOCUSED_CYCLE
+    if s == "upper_focused":
+        return UPPER_FOCUSED_CYCLE
+    return None
+
+
+def _canonical_pin_rotation(
+    lift_days: list[dict],
+    target_lift_idx: int,
+    base_focus: str,
+    cycle: list[str],
+) -> Optional[list[dict]]:
+    """Compute a lift sequence that's a contiguous slice of `cycle`
+    placed so the requested focus lands at `target_lift_idx`.
+
+    Generalized version of the bro-specific algorithm. Works for PPL
+    (cycle=push/pull/legs), U/L, bro, lower/upper-focused. Reuses
+    existing exercise content from `lift_days` keyed by focus family
+    (so we don't lose the user's logged data or the planner's
+    exercise selections).
+
+    Returns None if the requested focus isn't in this split's cycle —
+    caller falls through to the regen path.
+    """
+    if base_focus not in cycle:
+        return None
+    cycle_idx = cycle.index(base_focus)
+    n = len(lift_days)
+
+    # Group existing lift_days by their family. Same focus map regardless
+    # of variant ("Push", "Push (Heavy)", "Push + Cardio" all map to
+    # "push" family).
+    def _family(focus_str: str) -> str:
+        f = normalize_focus(focus_str).replace(" + cardio", "").strip()
+        if " — " in f:
+            f = f.split(" — ")[0].strip()
+        # Bro-specific synonyms.
+        if "chest" in f: return "chest"
+        if "back" in f: return "back"
+        if "shoulders" in f or "shoulder" in f: return "shoulders"
+        if "arms" in f or "arm" in f: return "arms"
+        # PPL/UL/focused.
+        if "legs" in f: return "legs"
+        if "push" in f: return "push"
+        if "pull" in f: return "pull"
+        if "upper" in f: return "upper"
+        if "lower" in f: return "lower"
+        return f
+
+    by_family: dict[str, list[dict]] = {}
+    for d in lift_days:
+        fam = _family(d.get("focus") or "")
+        by_family.setdefault(fam, []).append(d)
+
+    if not by_family:
+        return None
+
+    # Bro caps at 5 unique lifts (the recipe path enforces this in
+    # weekly_recipe.py). If the caller passes more lift slots than the
+    # cycle length, the canonical walk would wrap and produce duplicate
+    # focuses (e.g. [Back, Shoulders, Arms, Legs, Chest, Back, ...]).
+    # That violates the bro split's "max recovery per muscle" intent.
+    # Cap output at len(cycle) and mark overflow positions with a
+    # sentinel — `apply_rotate` swaps these for recovery day stubs.
+    is_bro = cycle is BRO_CYCLE
+    overflow_cap = len(cycle) if is_bro else n
+
+    new_lift_days: list[dict] = []
+    used: dict[str, int] = {f: 0 for f in cycle}
+    for i in range(n):
+        if i >= overflow_cap:
+            # Past the bro cap — slot becomes a recovery day stub.
+            new_lift_days.append({"_overflow_recovery": True})
+            continue
+        canon_pos = (cycle_idx + (i - target_lift_idx)) % len(cycle)
+        wanted = cycle[canon_pos]
+        pool = by_family.get(wanted, [])
+        if used.get(wanted, 0) < len(pool):
+            new_lift_days.append(pool[used[wanted]])
+            used[wanted] = used.get(wanted, 0) + 1
+        elif pool:
+            new_lift_days.append(pool[0])
+        else:
+            # This family isn't in the original recipe at all. For bro
+            # 6d this shouldn't happen (every cycle focus appears at
+            # least once). For PPL where the recipe might have been
+            # imbalanced (e.g. only Push + Pull, no Legs), bail and
+            # let caller fall back to swap.
+            return None
+    return new_lift_days
 
 
 def _bro_canonical_pin(
@@ -178,22 +291,123 @@ def _classify_target(focus: str) -> Optional[DayKind]:
     return None
 
 
+def _focus_family(focus: str) -> str:
+    """Coarse family for adjacency checking. Strips '+ Cardio' suffix
+    and the '— Variant' trailer so 'Push (Heavy)', 'Push', and
+    'Push + Cardio' all map to 'push'.
+
+    Bro split: chest/shoulders → 'push', back → 'pull', arms → 'upper',
+    legs → 'legs'. Mirrors archetype_to_focus_family in the planner so
+    adjacency checks here agree with the rest of the system."""
+    f = normalize_focus(focus).replace(" + cardio", "").strip()
+    if " — " in f:
+        f = f.split(" — ")[0].strip()
+    if "legs" in f or "leg " in f:
+        return "legs"
+    if "chest" in f:
+        return "push"
+    if "back" in f:
+        return "pull"
+    if "shoulders" in f or "shoulder" in f:
+        return "push"
+    if "arms" in f or "arm" in f:
+        return "upper"
+    if "push" in f:
+        return "push"
+    if "pull" in f:
+        return "pull"
+    if "upper" in f:
+        return "upper"
+    if "lower" in f:
+        return "lower"
+    if "full body" in f or "full_body" in f:
+        return "full_body"
+    return f or "?"
+
+
+def _swap_creates_adjacency(
+    days: list[dict],
+    target_idx: int,
+    src_orig_idx: int,
+) -> bool:
+    """True if swapping days[target_idx] and days[src_orig_idx] would
+    create same-family adjacency at EITHER end (around target or src).
+    Adjacency is checked against the actual neighbors in the days list,
+    skipping non-lifting days (rest doesn't break adjacency rules)."""
+    if target_idx == src_orig_idx:
+        return False
+    n = len(days)
+    # After swap: days[target_idx] holds old days[src_orig_idx];
+    # days[src_orig_idx] holds old days[target_idx].
+    new_at_target = days[src_orig_idx]
+    new_at_src = days[target_idx]
+    new_target_fam = _focus_family(new_at_target.get("focus") or "")
+    new_src_fam = _focus_family(new_at_src.get("focus") or "")
+
+    def _neighbor_fam(idx: int, direction: int) -> Optional[str]:
+        """Walk in direction (-1 or +1) from idx, skip non-lifting days
+        AND the OTHER swap position, return the first lift family found."""
+        i = idx + direction
+        while 0 <= i < n:
+            if i == target_idx or i == src_orig_idx:
+                i += direction
+                continue
+            f = normalize_focus(days[i].get("focus") or "")
+            if f in NON_LIFTING_FOCUSES:
+                i += direction
+                continue
+            return _focus_family(days[i].get("focus") or "")
+        return None
+
+    # Check target's neighbors against new content at target.
+    if new_target_fam != "?":
+        for direction in (-1, 1):
+            nf = _neighbor_fam(target_idx, direction)
+            if nf is not None and nf == new_target_fam:
+                return True
+    # Check src's neighbors against new content at src.
+    if new_src_fam != "?":
+        for direction in (-1, 1):
+            nf = _neighbor_fam(src_orig_idx, direction)
+            if nf is not None and nf == new_src_fam:
+                return True
+    return False
+
+
 def _pick_closest(
     matches: list[int],
     *,
     dst_lift_idx: Optional[int],
     target_idx: int,
     lift_positions: list[int],
+    days: Optional[list[dict]] = None,
 ) -> Optional[int]:
     """Pick the match closest to the target. For lifting targets, distance
     is in the lift-day sequence (minimizes rotation). For non-lifting
     targets, distance is in the full day-of-week sequence (minimizes
-    swap displacement)."""
+    swap displacement).
+
+    When `days` is provided, candidates are SORTED by distance, then we
+    pick the first one whose swap doesn't create same-family adjacency
+    at either end. Falls back to the unconditional closest if every
+    candidate creates adjacency (rare). Without `days`, behaves as the
+    pure-distance selector for backwards compat."""
     if not matches:
         return None
     if dst_lift_idx is not None:
-        return min(matches, key=lambda li: abs(li - dst_lift_idx))
-    return min(matches, key=lambda li: abs(lift_positions[li] - target_idx))
+        sorted_matches = sorted(matches, key=lambda li: abs(li - dst_lift_idx))
+    else:
+        sorted_matches = sorted(matches, key=lambda li: abs(lift_positions[li] - target_idx))
+    if days is None:
+        return sorted_matches[0]
+    # Adjacency-aware: walk candidates from closest outward, return the
+    # first that doesn't create adjacency. Falls through to closest if
+    # all of them do.
+    for li in sorted_matches:
+        src_orig = lift_positions[li]
+        if not _swap_creates_adjacency(days, target_idx, src_orig):
+            return li
+    return sorted_matches[0]
 
 
 def decide_pin(
@@ -233,46 +447,48 @@ def decide_pin(
         if target_idx in lift_positions else None
     )
 
-    exact_matches = [
+    # Build candidate pool. Each candidate is tagged with whether it's
+    # an EXACT focus match or a BASE-focus match (relaxed: ignores
+    # "+ Cardio" suffix / variant trailers). We then rank candidates
+    # so the picker prefers in this order:
+    #   1. Doesn't create same-family adjacency (the user-reported
+    #      back-to-back-Legs bug was the absence of this check)
+    #   2. Exact focus match over base match
+    #   3. Closest distance to target
+    #
+    # Without combining the two pools, an exact-match-with-adjacency
+    # would be picked even when a base-match-without-adjacency exists
+    # (e.g. pin "Push + Cardio" → only one Push+Cardio at day 2 creates
+    # adjacency; a plain "Push" at day 3 doesn't and is the better swap).
+    def _base_of(focus_str: str) -> str:
+        f = normalize_focus(focus_str).replace(" + cardio", "").strip()
+        if " — " in f:
+            f = f.split(" — ")[0].strip()
+        return f
+
+    exact_set = {
         li for li, ld in enumerate(lift_days)
         if normalize_focus(ld.get("focus") or "") == full_focus
-    ]
-    src_lift_idx = _pick_closest(
-        exact_matches,
-        dst_lift_idx=dst_lift_idx,
-        target_idx=target_idx,
-        lift_positions=lift_positions,
-    )
+    }
+    base_set = {
+        li for li, ld in enumerate(lift_days)
+        if _base_of(ld.get("focus") or "") == base_focus
+    }
+    candidates = sorted(exact_set | base_set)
 
-    # Symmetric base-focus fallback: matches lift days whose focus has
-    # the SAME BASE as the requested focus, ignoring "+ Cardio" suffix
-    # and "— Variant" trailers in BOTH directions.
-    #
-    # Examples:
-    #   pin "Push" + recipe has "Push + Cardio"  → match (rotate it in)
-    #   pin "Push + Cardio" + recipe has "Push"  → match (rotate +
-    #     cardio-finisher promotion adds the finisher)
-    #   pin "Push" + recipe has "Push — Heavy"   → match
-    #
-    # Without this, plans that the planner produced with PLUS_CARDIO
-    # promotion silently fall through to label-only and the user sees
-    # no rotation when picking the plain focus name.
-    if src_lift_idx is None:
-        def _base_of(focus_str: str) -> str:
-            f = normalize_focus(focus_str).replace(" + cardio", "").strip()
-            if " — " in f:
-                f = f.split(" — ")[0].strip()
-            return f
-        base_matches = [
-            li for li, ld in enumerate(lift_days)
-            if _base_of(ld.get("focus") or "") == base_focus
-        ]
-        src_lift_idx = _pick_closest(
-            base_matches,
-            dst_lift_idx=dst_lift_idx,
-            target_idx=target_idx,
-            lift_positions=lift_positions,
-        )
+    def _rank(li: int) -> tuple:
+        src_orig = lift_positions[li]
+        creates_adj = _swap_creates_adjacency(days, target_idx, src_orig) if dst_lift_idx is not None or True else False
+        is_exact = li in exact_set
+        if dst_lift_idx is not None:
+            distance = abs(li - dst_lift_idx)
+        else:
+            distance = abs(lift_positions[li] - target_idx)
+        # Lower is better. Tuple ordering: adjacency-free first, then
+        # exact match, then proximity.
+        return (1 if creates_adj else 0, 0 if is_exact else 1, distance)
+
+    src_lift_idx = min(candidates, key=_rank) if candidates else None
 
     common = dict(
         target_idx=target_idx,
@@ -281,18 +497,46 @@ def decide_pin(
         full_focus=full_focus,
     )
 
-    # Single-day swap model. Pin day X to focus Y → swap days[X] with
-    # the closest lift day whose focus matches Y. Every other day in
-    # the week is byte-identical to the original.
+    # Pin model: CANONICAL-CYCLE rebuild for splits with a stable cycle
+    # (PPL, U/L, Bro, lower/upper-focused). Falls back to single-day
+    # swap when the split has no canonical cycle (full_body, ppl_ul) or
+    # when the focus isn't in the cycle.
     #
-    # Why not whole-week rotation: rotating shifts content across days
-    # the user didn't touch (pin day 3 → Push could move Legs onto day
-    # 0). Users found this confusing and surprising. Single-day swap
-    # matches the mental model "I tapped this day, it changed."
+    # Why not pure single-day swap: cumulative pins scramble the
+    # canonical Push→Pull→Legs ordering even though each individual
+    # swap looks fine — the user-reported "plan is broken, not
+    # following split" bug. Canonical-cycle rebuild keeps the split
+    # cycle intact across any number of pins.
     #
-    # Tradeoff: successive pins can break split balance (e.g. pin two
-    # days to Push). Acceptable — the user explicitly chose. The next
-    # full regen restores balance via the planner.
+    # Why not whole-week rotation: only the lift sequence is rebuilt;
+    # non-lifting positions (rest, cardio, mobility) stay where they
+    # were. So the user's rest day on Saturday stays on Saturday.
+    cycle = _canonical_cycle_for_split(preferred_split)
+    if cycle is not None and base_focus in cycle and dst_lift_idx is not None:
+        # If target already matches AND no other change is needed,
+        # report noop. Compute what canonical would produce and check.
+        if src_lift_idx == dst_lift_idx:
+            return PinDecision(
+                action="noop",
+                src_lift_idx=src_lift_idx,
+                dst_lift_idx=dst_lift_idx,
+                **common,
+            )
+        new_lift_days = _canonical_pin_rotation(
+            lift_days, dst_lift_idx, base_focus, cycle,
+        )
+        if new_lift_days is not None:
+            return PinDecision(
+                action="rotate",
+                src_lift_idx=src_lift_idx,
+                dst_lift_idx=dst_lift_idx,
+                rotation_shift=0,  # not used for canonical rebuild
+                rotated_lift_days=new_lift_days,
+                **common,
+            )
+
+    # Fallback: single-day swap when there's no canonical cycle.
+    # Used for full_body / ppl_upper_lower / unknown splits.
     if src_lift_idx is not None and dst_lift_idx is not None:
         if src_lift_idx == dst_lift_idx:
             return PinDecision(
@@ -310,9 +554,28 @@ def decide_pin(
         )
 
     # Non-lifting target (rest/cardio/recovery) with a matching lift day.
-    # Same single-day swap: target gets the lift day, src gets the
-    # non-lifting day. Lift count preserved.
+    # For canonical-cycle splits, use the bro_canonical_swap path so
+    # the new lift positions get re-canonicalized.
     if src_lift_idx is not None and dst_lift_idx is None:
+        cycle = _canonical_cycle_for_split(preferred_split)
+        if cycle is not None and base_focus in cycle:
+            src_orig = lift_positions[src_lift_idx]
+            new_lift_positions = sorted(
+                [p for p in lift_positions if p != src_orig] + [target_idx]
+            )
+            new_target_lift_idx = new_lift_positions.index(target_idx)
+            new_lift_days = _canonical_pin_rotation(
+                lift_days, new_target_lift_idx, base_focus, cycle,
+            )
+            if new_lift_days is not None:
+                return PinDecision(
+                    action="bro_canonical_swap",
+                    src_lift_idx=src_lift_idx,
+                    dst_lift_idx=None,
+                    swap_with_idx=src_orig,
+                    rotated_lift_days=new_lift_days,
+                    **common,
+                )
         return PinDecision(
             action="swap",
             src_lift_idx=src_lift_idx,
@@ -338,24 +601,30 @@ def decide_pin(
     )
 
 
-def apply_rotate(days: list[dict], decision: PinDecision) -> list[dict]:
+def apply_rotate(days: list[dict], decision: PinDecision, session_minutes: int = 45) -> list[dict]:
     """Apply a `rotate` decision in place and return the mutated list.
 
     Iterates the original lift_positions and overwrites them with the
     rotated lift days from the decision. Non-lifting positions are
     untouched.
+
+    `_overflow_recovery` sentinels (emitted by `_canonical_pin_rotation`
+    when bro has more lift slots than its 5-cycle can fill without
+    duplicates) are swapped for fresh recovery-day stubs.
     """
     if decision.action != "rotate":
         return days
-    # Reconstruct lift_positions from the days list — they're stable
-    # because the rotate action doesn't change which positions are
-    # lifting (rotation only moves contents around within those slots).
     lift_positions = [
         idx for idx, d in enumerate(days)
         if normalize_focus(d.get("focus") or "") not in NON_LIFTING_FOCUSES
     ]
     for pos, orig_idx in enumerate(lift_positions):
-        days[orig_idx] = decision.rotated_lift_days[pos]
+        new_day = decision.rotated_lift_days[pos]
+        if new_day.get("_overflow_recovery"):
+            from app.services.workout.planner import generate_recovery_day
+            days[orig_idx] = generate_recovery_day(session_minutes)
+        else:
+            days[orig_idx] = new_day
     return days
 
 
@@ -369,7 +638,7 @@ def apply_swap(days: list[dict], decision: PinDecision) -> list[dict]:
     return days
 
 
-def apply_bro_canonical_swap(days: list[dict], decision: PinDecision) -> list[dict]:
+def apply_bro_canonical_swap(days: list[dict], decision: PinDecision, session_minutes: int = 45) -> list[dict]:
     """Apply a `bro_canonical_swap` decision. The non-lifting day at
     `swap_with_idx` (the original position of the matched lift day)
     moves to the OLD non-lifting slot's position; lift positions are
@@ -395,9 +664,14 @@ def apply_bro_canonical_swap(days: list[dict], decision: PinDecision) -> list[di
     new_lift_positions = sorted(
         [p for p in old_lift_positions if p != src_orig_idx] + [target_idx]
     )
-    # Place rotated_lift_days at new_lift_positions in order.
+    # Place rotated_lift_days at new_lift_positions in order. Swap
+    # bro overflow sentinels for fresh recovery stubs.
     for slot_idx, new_day in zip(new_lift_positions, decision.rotated_lift_days):
-        days[slot_idx] = new_day
+        if new_day.get("_overflow_recovery"):
+            from app.services.workout.planner import generate_recovery_day
+            days[slot_idx] = generate_recovery_day(session_minutes)
+        else:
+            days[slot_idx] = new_day
     # Place the displaced non-lifting day at src_orig_idx.
     days[src_orig_idx] = non_lifting_day
     return days

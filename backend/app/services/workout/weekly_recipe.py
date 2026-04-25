@@ -442,6 +442,17 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
         return out
 
     if split == SPLIT_BRO:
+        # Cap bro at 5 unique lifts. Body-part splits exist FOR maximum
+        # recovery per muscle — duplicating any focus (e.g. 2x Chest in
+        # 7 days) defeats the whole purpose. The visual schedule also
+        # rotates the recipe to today, which can place the two
+        # duplicate days dangerously close once the rotation lands
+        # (user-reported "Chest, Mobility, Chest" = 1 day rest between
+        # two chest workouts). Returning only 5 lifts here forces the
+        # caller (`_derive_recovery_days` + cardio injection) to fill
+        # extra days with rest / cardio / mobility — which is the
+        # correct interpretation of "I want the bro split AND 7 training
+        # days a week".
         seq = [
             DayArchetype.LIFT_BRO_CHEST,
             DayArchetype.LIFT_BRO_BACK,
@@ -449,7 +460,7 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
             DayArchetype.LIFT_BRO_ARMS,
             DayArchetype.LIFT_BRO_LEGS,
         ]
-        return seq[:days] + [seq[i % len(seq)] for i in range(len(seq), days)]
+        return seq[:min(days, len(seq))]
 
     # ── Region-emphasis splits (Apr 2026) ────────────────────────────
     # Replace the old priority_region tilt for users who explicitly
@@ -925,11 +936,18 @@ def _lifting_plus_cardio_recipe(
     # cardio moves from dedicated day → same-day finisher on a
     # cardio-compatible lift. Legs never auto-merged (hard lower +
     # cardio = bad).
-    out = _promote_same_day_cardio(
-        out,
-        profile=profile,
-        lifting_split=lifting_split,
-    )
+    # Skip same-day promotion for bro split. _promote_same_day_cardio
+    # both converts bro_chest → LIFT_PUSH_PLUS_CARDIO (losing per-muscle
+    # identity — same reason _inject_hybrid_cardio is disabled for bro)
+    # AND replaces the freed cardio slot with LIFT_FULL_BODY (the bro
+    # rotation_pool fallback), turning a clean bro recipe into a mishmash.
+    from .day_templates import SPLIT_BRO as _SPLIT_BRO_LOCAL
+    if lifting_split != _SPLIT_BRO_LOCAL:
+        out = _promote_same_day_cardio(
+            out,
+            profile=profile,
+            lifting_split=lifting_split,
+        )
 
     return _repair_adjacent_duplicates(
         out,
@@ -2997,7 +3015,17 @@ def _enforce_strict_split_composition(
             DayArchetype.LIFT_BRO_ARMS,
             DayArchetype.LIFT_BRO_LEGS,
         ]
-        canonical_bro = [bro_seq[i % 5] for i in range(n_lifts)]
+        # Bro is capped at 5 unique lifts (each muscle gets max recovery,
+        # which is the whole point of body-part splits). At 6+ training
+        # days the extras come from rest / cardio / mobility, NOT a
+        # duplicated Chest. The canonical here is `bro_seq[:n_lifts]`
+        # — taking only the first n_lifts entries with no cycling.
+        canonical_bro = bro_seq[:min(n_lifts, len(bro_seq))]
+        # If n_lifts somehow exceeds 5 here (e.g. legacy plan written
+        # by an older planner version with the cycled-with-repeat rule),
+        # accept the recipe as-is rather than truncating user content.
+        if n_lifts > len(bro_seq):
+            return recipe
         if lift_archetypes == canonical_bro:
             return recipe
         logger.warning(

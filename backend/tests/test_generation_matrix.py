@@ -199,17 +199,47 @@ def test_bro_5d_canonical_order_with_recent_chest_history():
 
 
 def test_bro_6d_canonical_with_recent_history():
+    """Bro is now CAPPED at 5 unique lifts (max-recovery contract).
+    Extra days fill with rest/cardio, never a 6th lift duplicating
+    a focus."""
     recipe = _gen(
         goal="muscle_gain", days_per_week=6, preferred_split="bro",
         experience="advanced",
         recent_focus_families=("push", "pull"),
     )
     focuses = [d.get("focus") for d in recipe if is_lift(_focus(d))]
-    assert focuses == ["Chest", "Back", "Shoulders", "Arms", "Legs", "Chest"]
+    assert focuses == ["Chest", "Back", "Shoulders", "Arms", "Legs"]
 
 
-def test_bro_7d_canonical_lift_sequence():
-    """7-day bro: 6 lifts (Chest..Legs, Chest) + 1 recovery day."""
+def test_user_scenario_body_recomp_7d_bro_no_back_to_back_chest():
+    """User's reported bug: body_recomp 7d bro produced
+    [Chest, Back, Shoulders, Arms, Legs, Chest, Mobility] which the
+    visual schedule rotation made look like
+    [Chest, Mobility, Chest, Back, Shoulders, Arms, Legs] — chests
+    only 1 rest day apart.
+
+    Fix: cap bro at 5 unique lifts. body_recomp 7d bro now produces
+    exactly 5 bro focuses + 1 cardio + 1 mobility (or similar). No
+    duplicate focus → visual rotation can't create back-to-back."""
+    recipe = _gen(
+        goal="body_recomp", days_per_week=7, preferred_split="bro",
+        experience="advanced",
+    )
+    focuses = [d.get("focus") for d in recipe]
+    # All 5 bro muscles present.
+    bro_muscles = {"Chest", "Back", "Shoulders", "Arms", "Legs"}
+    present = bro_muscles & set(focuses)
+    assert present == bro_muscles, \
+        f"missing bro muscles: {bro_muscles - present}; got {focuses}"
+    # No duplicate bro focus.
+    bro_focuses_in_recipe = [f for f in focuses if f in bro_muscles]
+    assert len(bro_focuses_in_recipe) == len(set(bro_focuses_in_recipe)), \
+        f"duplicate bro focus: {focuses}"
+
+
+def test_bro_7d_max_5_unique_lifts():
+    """7-day bro: exactly 5 lift days (one per muscle), 2 non-lift days
+    (recovery / cardio / mobility). No repeated focus."""
     recipe = _gen(
         goal="muscle_gain", days_per_week=7, preferred_split="bro",
         experience="advanced",
@@ -217,7 +247,9 @@ def test_bro_7d_canonical_lift_sequence():
     lift_focuses_in_order = [
         d.get("focus") for d in recipe if is_lift(_focus(d))
     ]
-    assert lift_focuses_in_order == ["Chest", "Back", "Shoulders", "Arms", "Legs", "Chest"]
+    assert lift_focuses_in_order == ["Chest", "Back", "Shoulders", "Arms", "Legs"]
+    # No duplicate focus in lift days.
+    assert len(set(lift_focuses_in_order)) == len(lift_focuses_in_order)
 
 
 def test_muscle_gain_bro_5d_zero_plus_cardio():
