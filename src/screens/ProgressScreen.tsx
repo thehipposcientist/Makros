@@ -1073,10 +1073,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
                 const isExpanded = expandedSessionId === session.id;
                 const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
+                // Composite key: id + index. HK auto-imports can collide
+                // on session.id when the dedup helper sees the same HK
+                // workout twice across import attempts; the index makes
+                // the key unique even on collision so React stops warning.
+                const rowKey = `${session.id ?? 'sess'}-${i}`;
                 return (
-                  <FadeInView key={session.id ?? i} delay={i * 60}>
+                  <FadeInView key={rowKey} delay={i * 60}>
                   <TouchableOpacity
-                    key={session.id ?? i}
                     style={styles.sessionCard}
                     activeOpacity={0.8}
                     onPress={() => { configureExpandAnimation(300); setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`)); }}>
@@ -1224,7 +1228,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const s = new Date(entry.startedAt);
             const e = new Date(entry.endedAt);
             return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
-          }).map((entry, i) => {
+          }).map((entry, i, arr) => {
+            const goalKey = `${entry.id ?? 'goal'}-${i}`;
             // Goal label preference: registered meta label → humanized
             // fallback (e.g. "body_recomp" → "Body Recomp"). Previously
             // the fallback was the raw enum value, so any goal not in
@@ -1236,7 +1241,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               ? Math.round((end.getTime() - start.getTime()) / 86400000)
               : Math.round((Date.now() - start.getTime()) / 86400000);
             return (
-              <View key={entry.id} style={[styles.sessionCard, { marginBottom: 8 }]}>
+              <View key={goalKey} style={[styles.sessionCard, { marginBottom: 8 }]}>
                 <View style={styles.sessionHeader}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.sessionFocus}>{goalLabel}</Text>
@@ -1276,7 +1281,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
             </View>
           ) : summaries.slice(0, 30).map((s, i) => (
-            <View key={s.id ?? i} style={[styles.sessionCard, { gap: 8 }]}>
+            <View key={`${s.id ?? 'sum'}-${i}`} style={[styles.sessionCard, { gap: 8 }]}>
               <View style={styles.sessionHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.sessionFocus}>{s.focus}</Text>

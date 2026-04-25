@@ -392,16 +392,17 @@ def filter_candidates(
         if slot.role == "isolation" and slot.primary_muscle_hint:
             if ex.get("primary_muscle") != slot.primary_muscle_hint:
                 continue
-        # Compound muscle-family enforcement: on push/pull/legs/upper/
-        # lower days, compound slots must use exercises whose primary
-        # muscle belongs to the day's family. Without this, a
-        # horizontal_pull slot on an upper day could admit a pull
-        # exercise on what should be a push day (if the archetype
-        # dispatch table ever produces such a slot). The slot builders
-        # already separate push/pull patterns correctly, but this is
-        # belt-and-suspenders defense against misrouted exercises.
+        # Muscle-family enforcement: on push/pull/legs/upper/lower days,
+        # every strength slot must use exercises whose primary muscle
+        # belongs to the day's family. Without this, a Pull day's
+        # accessory or isolation slot could admit a chest exercise (the
+        # day-card aggregator on the client would then show "Chest" on
+        # a Pull workout — the user-reported "muscle under workouts
+        # doesn't match" bug). Warm-ups (role=warmup) keep their pass
+        # since their primary_muscle is the drill's target, not the
+        # day's focus.
         if (
-            slot.role in ("primary", "secondary")
+            slot.role in ("primary", "secondary", "isolation", "accessory")
             and family_muscles is not None
             and mp not in ("cardio", "mobility", "plyometric")
         ):

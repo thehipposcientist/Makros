@@ -9361,6 +9361,14 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             for (const ex of item.workout!.exercises) {
               const key = (ex.primary_muscle ?? '').toLowerCase().replace(/\s+/g, '_');
               if (key === 'mobility' || key === 'systemic') continue;
+              // Skip warm-ups + accessories whose primary_muscle can be
+              // anything (a hip-flexor stretch on a Pull day still has
+              // primary_muscle='hamstrings'). Without this, day-card
+              // chips drift across families. _slot/_role come from the
+              // planner; fall back to slot_role for legacy plans.
+              const role = ((ex as any)._role ?? (ex as any).slot_role ?? '').toLowerCase();
+              const slot = ((ex as any)._slot ?? '').toLowerCase();
+              if (role === 'warmup' || slot.includes('warm')) continue;
               if (allowedForFocus && !allowedForFocus.has(key)) continue;
               const label = PRIMARY_TO_LABEL[key] ?? (ex.primary_muscle ? humanizeToken(ex.primary_muscle) : null);
               if (label && label !== 'Other' && !labels.includes(label)) labels.push(label);
