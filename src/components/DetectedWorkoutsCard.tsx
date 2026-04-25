@@ -17,7 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, WorkoutSession } from '../types';
 import { isHealthKitAvailable } from '../services/appleHealth';
-import { detectUnloggedWorkouts, ImportCandidate } from '../utils/workoutAutoImport';
+import { detectUnloggedWorkouts, dismissHkImports, ImportCandidate } from '../utils/workoutAutoImport';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 
@@ -140,6 +140,32 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
           Detected {candidates.length} workout{candidates.length === 1 ? '' : 's'} from Apple Health
         </Text>
         {loading && <ActivityIndicator size="small" color={tc.textMuted} />}
+        {candidates.length > 1 && !loading && (
+          <TouchableOpacity
+            onPress={() => {
+              Alert.alert(
+                'Clear all detected workouts?',
+                `${candidates.length} workouts will be hidden. They won't factor into recovery and won't re-appear unless you re-import via Apple Health.`,
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Clear all',
+                    style: 'destructive',
+                    onPress: async () => {
+                      const ids = (candidates ?? []).map(c => c.externalId);
+                      await dismissHkImports(ids);
+                      setCandidates([]);
+                      import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                    },
+                  },
+                ],
+              );
+            }}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>Clear all</Text>
+          </TouchableOpacity>
+        )}
       </View>
       <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 10 }}>
         Classify so Thallo can factor these into your recovery + fatigue signal.
@@ -178,18 +204,20 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => {
-                // Dismiss without classifying — remove from the list
-                // but don't persist anything. Next poll will re-surface
-                // it if HK still has it and it still isn't matched.
+                // Dismiss without classifying. Persists the externalId
+                // so the SAME HK workout doesn't re-surface on the next
+                // poll — the previous in-memory-only behavior was the
+                // exact "skipped workouts keep coming back" bug.
                 Alert.alert(
                   'Skip this one?',
-                  'We won\'t factor this workout into recovery. You can re-surface it by pulling to refresh.',
+                  'We won\'t factor this workout into recovery. It won\'t re-appear unless you re-import via Apple Health.',
                   [
                     { text: 'Cancel', style: 'cancel' },
                     {
                       text: 'Skip',
                       style: 'destructive',
-                      onPress: () => {
+                      onPress: async () => {
+                        await dismissHkImports([c.externalId]);
                         setCandidates(prev => (prev ?? []).filter(x => x.externalId !== c.externalId));
                       },
                     },

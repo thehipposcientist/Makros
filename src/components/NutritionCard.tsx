@@ -552,6 +552,49 @@ export default function NutritionCard({
                   );
                 })()}
 
+                {/* ── Plant vs Meat protein breakdown ──
+                    Mirrors the tile on the card body so users who
+                    open the overview modal also see the comparison
+                    + can drill into per-food sources. */}
+                {proteinBreakdown && (proteinBreakdown.plant_total_g + proteinBreakdown.animal_total_g) > 0 && (() => {
+                  const plantG = proteinBreakdown.plant_total_g;
+                  const animalG = proteinBreakdown.animal_total_g;
+                  const total = plantG + animalG;
+                  const plantPct = total > 0 ? (plantG / total) * 100 : 0;
+                  return (
+                    <View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}>
+                      <Text style={[styles.modalSectionTitle, { marginBottom: 8 }]}>Plant vs Meat Protein</Text>
+                      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+                        <View style={{ flex: 1, padding: 10, backgroundColor: '#22C55E22', borderRadius: 8 }}>
+                          <Text style={{ fontSize: 10, color: '#16803D', fontWeight: '800', letterSpacing: 0.5 }}>PLANT</Text>
+                          <Text style={{ fontSize: 20, fontWeight: '900', color: '#16803D', marginTop: 2 }}>
+                            {Math.round(plantG)}<Text style={{ fontSize: 11, fontWeight: '700' }}>g</Text>
+                          </Text>
+                          <Text style={{ fontSize: 10, color: '#16803D' }}>{Math.round(plantPct)}%</Text>
+                        </View>
+                        <View style={{ flex: 1, padding: 10, backgroundColor: '#E0783022', borderRadius: 8 }}>
+                          <Text style={{ fontSize: 10, color: '#9A4810', fontWeight: '800', letterSpacing: 0.5 }}>ANIMAL</Text>
+                          <Text style={{ fontSize: 20, fontWeight: '900', color: '#9A4810', marginTop: 2 }}>
+                            {Math.round(animalG)}<Text style={{ fontSize: 11, fontWeight: '700' }}>g</Text>
+                          </Text>
+                          <Text style={{ fontSize: 10, color: '#9A4810' }}>{Math.round(100 - plantPct)}%</Text>
+                        </View>
+                      </View>
+                      <View style={{ flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden', backgroundColor: colors.border, marginBottom: 10 }}>
+                        <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />
+                        <View style={{ flex: 1, backgroundColor: '#E07830' }} />
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => { setShowDetailModal(false); setTimeout(() => setShowProteinModal(true), 220); }}
+                        style={{ alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.background }}>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }}>
+                          See per-food breakdown ({proteinBreakdown.plant.length + proteinBreakdown.animal.length} sources)
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })()}
+
                 {/* ── Section 5: Micronutrients ── */}
                 <View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}>
                   <Text style={[styles.modalSectionTitle, { marginBottom: 8 }]}>Essentials</Text>

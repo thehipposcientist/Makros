@@ -30,23 +30,36 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             theme.background.ignoresSafeArea()
-            if active, let workout = conn.workout {
+            if active {
+                // Active mode: ALWAYS show the active workout view, even
+                // if conn.workout is nil. Previously `if active, let
+                // workout = conn.workout` short-circuited to TabView
+                // when workout was nil, which is exactly when the watch
+                // app would visually "close" right after tapping Start.
+                // We synthesize a placeholder workout so the user always
+                // lands on the active screen with HR + timer; the real
+                // workout payload lands seconds later when the phone
+                // pushes status:.active.
+                let displayedWorkout = conn.workout ?? WatchWorkout(
+                    focus: "Workout",
+                    durationMinutes: 60,
+                    dateISO: String(ISO8601DateFormatter().string(from: Date()).prefix(10)),
+                    status: .active,
+                    readiness: nil,
+                    readinessLabel: nil,
+                    exercises: [],
+                    warmupSteps: nil,
+                    syncedAtMs: Date().timeIntervalSince1970 * 1000
+                )
                 ActiveWorkoutView(
-                    workout: workout,
+                    workout: displayedWorkout,
                     hr: heartRate,
                     onEndWorkout: {
-                        // End workout — writes to Health AND tells the
-                        // phone to finalize its workout state (logs
-                        // completed sets, shows completion banner).
                         active = false
                         heartRate.end()
                         conn.sendCommand("end_workout")
                     },
                     onCancelWorkout: {
-                        // Cancel — discard the session on both ends.
-                        // Tear down HR without finishWorkout() so
-                        // nothing lands in Health, and tell the phone
-                        // to drop its in-progress state.
                         active = false
                         heartRate.discard()
                         conn.sendCommand("cancel_workout")

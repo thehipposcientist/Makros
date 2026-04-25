@@ -6,7 +6,7 @@ import { View, Text, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
-import { detectUnloggedWorkouts, importCandidate, ImportCandidate } from '../utils/workoutAutoImport';
+import { detectUnloggedWorkouts, dismissHkImports, importCandidate, ImportCandidate } from '../utils/workoutAutoImport';
 
 interface Props {
   healthSummary?: HealthSummary | null;
@@ -67,7 +67,37 @@ export default function WorkoutImportCard({ healthSummary, themeName, onImported
         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
           {visible.length} workout{visible.length !== 1 ? 's' : ''} from Apple Health
         </Text>
-        <Text style={{ fontSize: 10, color: tc.textMuted }}>Not in Thallo</Text>
+        {visible.length > 1 ? (
+          <TouchableOpacity
+            onPress={() => {
+              Alert.alert(
+                'Clear all detected workouts?',
+                `${visible.length} workouts will be hidden and won't re-appear unless you re-import via Apple Health.`,
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Clear all',
+                    style: 'destructive',
+                    onPress: async () => {
+                      const ids = visible.map(c => c.externalId);
+                      await dismissHkImports(ids);
+                      setDismissed(prev => {
+                        const next = new Set(prev);
+                        for (const id of ids) next.add(id);
+                        return next;
+                      });
+                    },
+                  },
+                ],
+              );
+            }}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>Clear all</Text>
+          </TouchableOpacity>
+        ) : (
+          <Text style={{ fontSize: 10, color: tc.textMuted }}>Not in Thallo</Text>
+        )}
       </View>
       {visible.slice(0, 5).map((c, i) => (
         <View
@@ -97,6 +127,29 @@ export default function WorkoutImportCard({ healthSummary, themeName, onImported
             }}
           >
             <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Import</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              Alert.alert(
+                'Skip this one?',
+                'It won\'t factor into recovery and won\'t re-appear unless you re-import via Apple Health.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Skip',
+                    style: 'destructive',
+                    onPress: async () => {
+                      await dismissHkImports([c.externalId]);
+                      setDismissed(prev => new Set(prev).add(c.externalId));
+                    },
+                  },
+                ],
+              );
+            }}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            style={{ paddingHorizontal: 6, paddingVertical: 6 }}
+          >
+            <Ionicons name="close" size={16} color={tc.textMuted} />
           </TouchableOpacity>
         </View>
       ))}
