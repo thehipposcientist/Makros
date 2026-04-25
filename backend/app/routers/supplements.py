@@ -258,6 +258,46 @@ def recommendations(
     avg_cals = rollup.get("avg_calories", 0)
     fiber = rollup.get("avg_fiber_g", 0)
 
+    # Pull goal + training context so recs go beyond pure food-gap heuristics.
+    # The user explicitly asked for goal-aware + training-aware recommendations.
+    user_goal = ""
+    try:
+        from app.models import UserGoal as _UserGoal
+        goal_row = db.exec(
+            select(_UserGoal)
+            .where(_UserGoal.user_id == current_user.id)
+            .where(_UserGoal.active == True)  # noqa: E712
+            .order_by(_UserGoal.created_at.desc())
+        ).first()
+        if goal_row:
+            user_goal = (goal_row.goal or "").lower()
+    except Exception:
+        user_goal = ""
+
+    # Training-load signal: count completed workouts in last 14 days
+    # and categorize by intensity / focus.
+    hard_sessions_14d = 0
+    avg_session_min = 0
+    try:
+        from app.models import WorkoutCompletion as _WC
+        from datetime import timedelta as _td
+        cutoff = date.today() - _td(days=14)
+        completions = db.exec(
+            select(_WC)
+            .where(_WC.user_id == current_user.id)
+            .where(_WC.workout_date >= cutoff)
+        ).all()
+        if completions:
+            durations = [c.duration_seconds or 0 for c in completions]
+            avg_session_min = (sum(durations) / max(1, len(durations))) / 60.0
+            hard_sessions_14d = sum(
+                1 for c in completions
+                if (c.duration_seconds or 0) >= 45 * 60
+                and (c.intensity or "").lower() in ("hard", "moderate")
+            )
+    except Exception:
+        hard_sessions_14d = 0
+
     # Omega-3 — low food intake.
     if (omega3 or 0) < 1 and (seafood or 0) < 1 and "omega_3" not in stack_slugs:
         rec.append({
@@ -282,13 +322,67 @@ def recommendations(
             "priority": "moderate",
         })
 
-    # Creatine — training performance recommendation.
+    # Creatine — training performance recommendation. Priority is bumped
+    # for goals where creatine has the strongest evidence (strength,
+    # muscle_gain, body_recomp) AND for users training hard 4+ days/wk.
     if "creatine_monohydrate" not in stack_slugs:
+        creatine_priority = "low"
+        creatine_reason = "One of the most-studied supplements for strength and lean mass."
+        if user_goal in ("strength", "muscle_gain", "body_recomp", "athletic_performance"):
+            creatine_priority = "high" if hard_sessions_14d >= 4 else "moderate"
+            creatine_reason = (
+                f"Strong evidence base for your {user_goal.replace('_', ' ')} goal — "
+                f"reliable strength + lean-mass gains in trained lifters."
+            )
         rec.append({
             "slug": "creatine_monohydrate",
             "title": "Creatine may support training performance",
-            "reason": "One of the most-studied supplements for strength and lean mass.",
+            "reason": creatine_reason,
             "cautious_guidance": "5g daily. Consistency matters more than timing. Stay well-hydrated. Discuss with a clinician if you have kidney disease.",
+            "evidence_tier": "strong",
+            "risk_tier": "low",
+            "priority": creatine_priority,
+        })
+
+    # Goal-driven additions (Apr 2026): protein/electrolytes for hard
+    # trainers, ashwagandha for fat-loss/stress, beta-alanine for
+    # endurance/intervals. All gated by stack to avoid duplicates.
+    if user_goal in ("muscle_gain", "body_recomp", "strength") and "whey_protein" not in stack_slugs:
+        rec.append({
+            "slug": "whey_protein",
+            "title": "Whey protein for hitting your protein target",
+            "reason": f"Your {user_goal.replace('_', ' ')} goal needs ~0.8-1g/lb protein daily. A scoop closes the gap on busy days.",
+            "cautious_guidance": "20-40g per shake post-workout or with a meal. Whey isolate if lactose-sensitive.",
+            "evidence_tier": "strong",
+            "risk_tier": "low",
+            "priority": "moderate",
+        })
+    if hard_sessions_14d >= 5 and "magnesium_glycinate" not in stack_slugs and "magnesium" not in stack_slugs:
+        rec.append({
+            "slug": "magnesium_glycinate",
+            "title": "Magnesium may support recovery on heavy training weeks",
+            "reason": f"You logged {hard_sessions_14d} hard sessions in 14 days — magnesium aids muscle relaxation + sleep quality.",
+            "cautious_guidance": "200-400mg glycinate or citrate in the evening. Avoid oxide (poor absorption).",
+            "evidence_tier": "moderate",
+            "risk_tier": "low",
+            "priority": "moderate",
+        })
+    if user_goal in ("endurance", "athletic_performance") and "beta_alanine" not in stack_slugs:
+        rec.append({
+            "slug": "beta_alanine",
+            "title": "Beta-alanine for sustained-effort cardio",
+            "reason": f"Your {user_goal.replace('_', ' ')} goal benefits from carnosine buffering — useful for 1-4 min interval work.",
+            "cautious_guidance": "3-6g daily, split across the day to reduce paresthesia (skin tingling — harmless but uncomfortable).",
+            "evidence_tier": "strong",
+            "risk_tier": "low",
+            "priority": "moderate",
+        })
+    if user_goal == "fat_loss" and "caffeine" not in stack_slugs:
+        rec.append({
+            "slug": "caffeine",
+            "title": "Caffeine pre-workout for performance under a deficit",
+            "reason": "Caffeine reliably preserves output when calories are restricted. 200mg ~30min before training.",
+            "cautious_guidance": "Cap at 400mg/day. Avoid within 8h of bedtime — sleep quality matters more than the workout boost.",
             "evidence_tier": "strong",
             "risk_tier": "low",
             "priority": "low",

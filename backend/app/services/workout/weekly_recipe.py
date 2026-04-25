@@ -451,6 +451,29 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
         ]
         return seq[:days] + [seq[i % len(seq)] for i in range(len(seq), days)]
 
+    # ── Region-emphasis splits (Apr 2026) ────────────────────────────
+    # Replace the old priority_region tilt for users who explicitly
+    # want a lower- or upper-body bias. Cleaner mental model: the
+    # split itself encodes the emphasis.
+    #
+    # LOWER_FOCUSED — 2× Lower per week starting day 1, Upper between
+    # to allow recovery. Days table:
+    #   3d: [Lower, Upper, Lower]
+    #   4d: [Lower, Upper, Lower, Upper]
+    #   5d: [Lower, Upper, Lower, Upper, Lower]   (3 Lower / 2 Upper)
+    #   6d: [Lower, Upper, Lower, Upper, Lower, Upper]
+    #   7d: [Lower, Upper, Lower, Upper, Lower, Upper, Lower]
+    if split == "lower_focused":
+        return [
+            DayArchetype.LIFT_LOWER if i % 2 == 0 else DayArchetype.LIFT_UPPER
+            for i in range(days)
+        ]
+    if split == "upper_focused":
+        return [
+            DayArchetype.LIFT_UPPER if i % 2 == 0 else DayArchetype.LIFT_LOWER
+            for i in range(days)
+        ]
+
     # Unknown split — conservative full-body fallback.
     return [DayArchetype.LIFT_FULL_BODY] * days
 
@@ -2851,4 +2874,156 @@ def generate_weekly_recipe(
         f"[weekly_recipe] recipe={[a.value for a in final]} "
         f"exposures={exposures}"
     )
+
+    # ── Strict split-composition guard (Apr 2026) ────────────────────
+    # Final safety net: assert that the lift days in the final recipe
+    # match the user's split contract. Without this, post-processing
+    # passes (rotation / repair / hybrid injection) could silently
+    # produce e.g. [Push, Pull, Pull, Pull, Legs, Push] for a 6-lift
+    # PPL week (the bug user reported: 3×Pull, 1×Legs, 2×Push). We
+    # check the EXPECTED family count for the split and warn loudly
+    # when it diverges, then attempt a rebuild from the canonical
+    # `_lifting_recipe` baseline if the user explicitly chose the split.
+    if mode in ("lifting", "strength", "lifting_plus_cardio") and lifting_split:
+        try:
+            final = _enforce_strict_split_composition(
+                final, lifting_split, user_chose_split, profile, days,
+                priority_region=priority_region,
+            )
+        except Exception as e:
+            logger.warning(f"[weekly_recipe] strict-split guard failed: {e}")
+
     return final
+
+
+def _enforce_strict_split_composition(
+    recipe: list[DayArchetype],
+    lifting_split: str,
+    user_chose_split: bool,
+    profile: GoalProfile,
+    days: int,
+    *,
+    priority_region: str = "balanced",
+) -> list[DayArchetype]:
+    """Validate that the final recipe's lift days conform to the split's
+    expected family distribution. If not, rebuild from `_lifting_recipe`
+    when user explicitly chose the split (most-trustable signal).
+
+    Tolerances:
+      - Allow ±1 deviation from canonical lift-day distribution to
+        accommodate hybrid-cardio promotions and goal-specific extras.
+      - Always preserve non-lift days (cardio / mobility / recovery)
+        and their POSITIONS — this guard only re-fills the lift slots.
+
+    For PPL: lift days should be evenly distributed Push/Pull/Legs.
+    For UL:  lift days should be evenly distributed Upper/Lower.
+    For LOWER_FOCUSED: 2:1 Lower:Upper ratio (rounded to total lifts).
+    For UPPER_FOCUSED: 2:1 Upper:Lower ratio.
+    For BRO: each of {Chest, Back, Shoulders, Arms, Legs} appears
+        once before any repeats.
+    """
+    from .day_templates import (
+        SPLIT_PPL, SPLIT_UPPER_LOWER, SPLIT_PPL_UL, SPLIT_BRO,
+        SPLIT_FULL_BODY, SPLIT_LOWER_FOCUSED, SPLIT_UPPER_FOCUSED,
+    )
+    from .archetypes import archetype_to_focus_family
+
+    # Identify lift-slot positions and their current families.
+    lift_positions: list[int] = []
+    lift_families: list[str] = []
+    for idx, a in enumerate(recipe):
+        cat = ARCHETYPE_META[a].category
+        if cat == "lift" or cat == "hybrid":
+            lift_positions.append(idx)
+            try:
+                lift_families.append(archetype_to_focus_family(a) or "unknown")
+            except Exception:
+                lift_families.append("unknown")
+    n_lifts = len(lift_positions)
+    if n_lifts == 0:
+        return recipe
+
+    def _expected(split: str) -> dict[str, int] | None:
+        """Expected family counts for n_lifts under this split."""
+        if split == SPLIT_PPL:
+            base = n_lifts // 3
+            rem = n_lifts % 3
+            return {"push": base + (1 if rem >= 1 else 0),
+                    "pull": base + (1 if rem >= 2 else 0),
+                    "legs": base}
+        if split == SPLIT_UPPER_LOWER:
+            base = n_lifts // 2
+            rem = n_lifts % 2
+            return {"upper": base + rem, "lower": base}
+        if split == SPLIT_PPL_UL:
+            # 5-day baseline = 1 each of push/pull/legs/upper/lower.
+            # Extras follow a balanced pool — accept ±1 per family.
+            base = {"push": 1, "pull": 1, "legs": 1, "upper": 1, "lower": 1}
+            extras = max(0, n_lifts - 5)
+            for _ in range(extras):
+                # Default extras pool: push, pull, legs cycling
+                for fam in ("legs", "pull", "push"):
+                    base[fam] += 1
+                    break
+            return base
+        if split == SPLIT_LOWER_FOCUSED:
+            lower = (n_lifts + 1) // 2
+            upper = n_lifts - lower
+            return {"lower": lower, "upper": upper}
+        if split == SPLIT_UPPER_FOCUSED:
+            upper = (n_lifts + 1) // 2
+            lower = n_lifts - upper
+            return {"upper": upper, "lower": lower}
+        if split == SPLIT_FULL_BODY:
+            return {"full_body": n_lifts}
+        if split == SPLIT_BRO:
+            # First 5 are the 5 bros, then cycles.
+            return None  # tolerate any composition for bro
+        return None
+
+    expected = _expected(lifting_split)
+    if expected is None:
+        return recipe
+
+    # Tally actual.
+    actual: dict[str, int] = {}
+    for fam in lift_families:
+        actual[fam] = actual.get(fam, 0) + 1
+
+    # Compare expected vs actual. diff_total = sum of |actual - expected|
+    # per family. A clean PPL 6-lift week is push=2,pull=2,legs=2 → 0.
+    # Even a SINGLE-day swap (push×2,pull×3,legs×1) gives diff=2 and IS
+    # a structural violation — that's the exact bug the user reported.
+    # Threshold = 0 means no violations tolerated. 1 means we accept
+    # only families with a single ±1 (e.g. odd day count remainders).
+    diff_total = 0
+    for fam, exp in expected.items():
+        diff_total += abs(actual.get(fam, 0) - exp)
+    # Allow remainder offsets at odd day counts (PPL at 7 lifts = 3/2/2),
+    # which produces diff_total=1 vs the integer-divided baseline. Strict
+    # mode: anything ≥2 is a real violation.
+    if diff_total <= 1:
+        return recipe
+
+    logger.warning(
+        f"[weekly_recipe] STRICT-SPLIT VIOLATION: split={lifting_split} "
+        f"days={days} n_lifts={n_lifts} expected={expected} actual={actual} "
+        f"diff_total={diff_total} recipe={[a.value for a in recipe]}"
+    )
+
+    # If user explicitly chose the split, rebuild lift slots from the
+    # canonical `_lifting_recipe`. Preserve non-lift positions.
+    if not user_chose_split:
+        return recipe
+
+    canonical = _lifting_recipe(profile, lifting_split, n_lifts, priority_region=priority_region)
+    if len(canonical) != n_lifts:
+        return recipe
+    rebuilt = list(recipe)
+    for slot_idx, canonical_arch in zip(lift_positions, canonical):
+        rebuilt[slot_idx] = canonical_arch
+    logger.info(
+        f"[weekly_recipe] strict-split REBUILD: replaced lift slots with "
+        f"canonical {lifting_split} sequence → {[a.value for a in rebuilt]}"
+    )
+    return rebuilt

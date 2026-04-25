@@ -607,8 +607,13 @@ function AddSupplementModal({
         Alert.alert('Camera permission needed', 'Enable camera access in Settings to scan supplement labels.');
         return;
       }
+      // Quality 0.35 keeps text readable for the AI label scan while
+      // shrinking the base64 payload from ~3-5MB to ~700KB-1MB. The
+      // larger payloads were the main cause of the post-scan freeze
+      // — slow upload over cellular plus a 30s default request
+      // timeout meant the UI sat on the spinner past the timeout.
       const result = await ImagePicker.launchCameraAsync({
-        base64: true, quality: 0.6,
+        base64: true, quality: 0.35,
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
       });
       if (result.canceled || !result.assets?.[0]?.base64) return;
@@ -653,8 +658,13 @@ function AddSupplementModal({
         Alert.alert('Camera permission needed', 'Enable camera access in Settings to scan.');
         return;
       }
+      // Quality 0.35 keeps text readable for the AI label scan while
+      // shrinking the base64 payload from ~3-5MB to ~700KB-1MB. The
+      // larger payloads were the main cause of the post-scan freeze
+      // — slow upload over cellular plus a 30s default request
+      // timeout meant the UI sat on the spinner past the timeout.
       const result = await ImagePicker.launchCameraAsync({
-        base64: true, quality: 0.6,
+        base64: true, quality: 0.35,
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
       });
       if (result.canceled || !result.assets?.[0]?.base64) return;

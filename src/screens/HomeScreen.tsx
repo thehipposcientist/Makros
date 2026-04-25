@@ -1846,11 +1846,36 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
           : 'scheduled';
+        // Compute the 6-pillar preparedness score ONCE so the small
+        // readiness icon on the workout payload matches the watch's
+        // Readiness tab (and the phone's Progress tab). Earlier the
+        // workout payload used `readinessScore?.score` (backend
+        // muscle-fatigue) while the Readiness tab used the 6-pillar
+        // preparedness — that's why the user saw "icon 14 off, page 2 off"
+        // on watch. Both now share the same number.
+        let workoutReadinessScore: number | null = readinessScore?.score ?? null;
+        let workoutReadinessLabel: string | null = readinessScore?.label ?? null;
+        try {
+          if (authToken) {
+            const { scorePreparedness } = await import('../services/preparedness');
+            const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+            const inputs = await loadPreparednessInputs({
+              authToken,
+              age: userProfile?.age ?? null,
+              proteinTarget: userProfile?.proteinGoal ?? null,
+              calorieTarget: userProfile?.calorieGoal ?? null,
+              todaysFocus: todayItem?.workout?.focus ?? null,
+            });
+            const prep = scorePreparedness(inputs);
+            workoutReadinessScore = prep.score;
+            workoutReadinessLabel = prep.label;
+          }
+        } catch { /* fall back to backend score */ }
         await pushWorkoutToWatch(todayWorkout, {
           dateISO: todayISO,
           status,
-          readiness: readinessScore?.score ?? null,
-          readinessLabel: readinessScore?.label ?? null,
+          readiness: workoutReadinessScore,
+          readinessLabel: workoutReadinessLabel,
         });
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
@@ -2107,12 +2132,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             : todayItem?.isRest ? 'rest'
             : 'scheduled';
           console.log('[watch] reachable — re-pushing full home snapshot', { status });
-          pushWorkoutToWatch(todayWorkout, {
-            dateISO: todayISO,
-            status,
-            readiness: s.readinessScore?.score ?? null,
-            readinessLabel: s.readinessScore?.label ?? null,
-          }).catch(() => {});
+          // Compute 6-pillar preparedness for the workout-payload
+          // readiness icon so it matches the watch Readiness tab.
+          (async () => {
+            let prepScoreFinal: number | null = s.readinessScore?.score ?? null;
+            let prepLabelFinal: string | null = s.readinessScore?.label ?? null;
+            try {
+              if (authToken) {
+                const { scorePreparedness } = await import('../services/preparedness');
+                const { loadPreparednessInputs } = await import('../services/preparednessLoader');
+                const inputs = await loadPreparednessInputs({
+                  authToken,
+                  age: userProfile?.age ?? null,
+                  proteinTarget: userProfile?.proteinGoal ?? null,
+                  calorieTarget: userProfile?.calorieGoal ?? null,
+                  todaysFocus: todayItem?.workout?.focus ?? null,
+                });
+                const prep = scorePreparedness(inputs);
+                prepScoreFinal = prep.score;
+                prepLabelFinal = prep.label;
+              }
+            } catch { /* fall back to backend score */ }
+            pushWorkoutToWatch(todayWorkout, {
+              dateISO: todayISO,
+              status,
+              readiness: prepScoreFinal,
+              readinessLabel: prepLabelFinal,
+            }).catch(() => {});
+          })();
           pushThemeToWatch(s.themePreference).catch(() => {});
           const todayPlan = s.nutritionPlansByDate[todayISO]
             ?? (Object.values(s.nutritionPlansByDate)[0] as any);

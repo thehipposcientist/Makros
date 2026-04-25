@@ -112,6 +112,38 @@ _SPLIT_DEFS: dict[str, dict] = {
         "pros": ["Maximum per-session volume", "Deep focus per muscle", "Simple day planning"],
         "cons": ["Each muscle only 1x/week", "Requires 5+ days", "Intermediate+ only"],
     },
+    "lower_focused": {
+        "name": "Lower Focused",
+        "short_name": "Lower Focus",
+        "description": "Lower-body emphasis split. 2× Lower per week with Upper between for recovery.",
+        "days_per_week_range": "3-7",
+        "day_labels_by_days": {
+            3: ["Lower", "Upper", "Lower"],
+            4: ["Lower", "Upper", "Lower", "Upper"],
+            5: ["Lower", "Upper", "Lower", "Upper", "Lower"],
+            6: ["Lower", "Upper", "Lower", "Upper", "Lower", "Upper"],
+            7: ["Lower", "Upper", "Lower", "Upper", "Lower", "Upper", "Lower"],
+        },
+        "stimulus_note": "Lower days are the priority focus. Upper days maintain balance + give legs recovery time.",
+        "pros": ["Maximum lower-body frequency", "Built-in upper recovery", "Strict structure — no surprises"],
+        "cons": ["Less upper-body volume", "Not ideal if you want balanced development"],
+    },
+    "upper_focused": {
+        "name": "Upper Focused",
+        "short_name": "Upper Focus",
+        "description": "Upper-body emphasis split. 2× Upper per week with Lower between for recovery.",
+        "days_per_week_range": "3-7",
+        "day_labels_by_days": {
+            3: ["Upper", "Lower", "Upper"],
+            4: ["Upper", "Lower", "Upper", "Lower"],
+            5: ["Upper", "Lower", "Upper", "Lower", "Upper"],
+            6: ["Upper", "Lower", "Upper", "Lower", "Upper", "Lower"],
+            7: ["Upper", "Lower", "Upper", "Lower", "Upper", "Lower", "Upper"],
+        },
+        "stimulus_note": "Upper days are the priority focus. Lower days maintain balance + give upper recovery time.",
+        "pros": ["Maximum upper-body frequency", "Built-in lower recovery", "Strict structure — no surprises"],
+        "cons": ["Less lower-body volume", "Not ideal if you want balanced development"],
+    },
 }
 
 
@@ -184,6 +216,8 @@ def _fit_score(split_id: str, goal: str, days: int, experience: str, target_focu
         SPLIT_PPL: (3, 6),
         SPLIT_PPL_UL: (5, 5),
         SPLIT_BRO: (5, 6),
+        "lower_focused": (3, 6),
+        "upper_focused": (3, 6),
     }
     lo, hi = ideal_ranges.get(split_id, (1, 7))
     if lo <= days <= hi:
@@ -215,6 +249,19 @@ def _fit_score(split_id: str, goal: str, days: int, experience: str, target_focu
             score += 15
         if exp != "advanced":
             score -= 15
+    elif split_id == "lower_focused":
+        # Strong fit when target_focus is lower-body
+        tf = (target_focus or "").lower()
+        if tf in {"glutes", "quads", "hamstrings", "calves", "hips", "legs", "lower_body", "lower"}:
+            score += 25
+        if bucket in ("muscle_gain", "body_recomp", "strength"):
+            score += 5
+    elif split_id == "upper_focused":
+        tf = (target_focus or "").lower()
+        if tf in {"chest", "back", "shoulders", "arms", "biceps", "triceps", "lats", "upper_body", "upper"}:
+            score += 25
+        if bucket in ("muscle_gain", "body_recomp", "strength"):
+            score += 5
 
     # Experience penalty for complex splits
     if exp == "beginner" and split_id in (SPLIT_BRO, SPLIT_PPL_UL):

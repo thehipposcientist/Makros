@@ -92,18 +92,28 @@ SPLIT_UPPER_LOWER = "upper_lower"
 SPLIT_PPL = "ppl"                  # push / pull / legs
 SPLIT_BRO = "bro"                  # chest / back / shoulders / arms / legs
 SPLIT_PPL_UL = "ppl_upper_lower"   # 5-day hybrid
+# Region-emphasis splits (Apr 2026). Replaces the priority_region tilt
+# for users who explicitly want a lower- or upper-body focus. Cleaner
+# mental model than orthogonal-region: the split IS the choice; no
+# cross-product of (split × region) to test or maintain.
+#   LOWER_FOCUSED — 2× Lower per week, 1× Upper, balanced upper exposure
+#   UPPER_FOCUSED — 2× Upper per week, 1× Lower, balanced lower exposure
+SPLIT_LOWER_FOCUSED = "lower_focused"
+SPLIT_UPPER_FOCUSED = "upper_focused"
 SPLIT_ENDURANCE = "endurance"      # legacy endurance split id (kept for _day_meta lookup)
 SPLIT_HYBRID = "hybrid"            # legacy athletic split id
 
 
 _SPLIT_MIN_DAYS = {
-    SPLIT_FULL_BODY:   1,
-    SPLIT_UPPER_LOWER: 2,
-    SPLIT_PPL:         3,
-    SPLIT_BRO:         5,
-    SPLIT_PPL_UL:      5,
-    SPLIT_ENDURANCE:   1,
-    SPLIT_HYBRID:      3,
+    SPLIT_FULL_BODY:    1,
+    SPLIT_UPPER_LOWER:  2,
+    SPLIT_PPL:          3,
+    SPLIT_BRO:          5,
+    SPLIT_PPL_UL:       5,
+    SPLIT_LOWER_FOCUSED: 3,
+    SPLIT_UPPER_FOCUSED: 3,
+    SPLIT_ENDURANCE:    1,
+    SPLIT_HYBRID:       3,
 }
 
 

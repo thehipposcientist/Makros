@@ -1831,11 +1831,14 @@ export async function lookupSupplementFromPhoto(
   goodFor?: string[];
   cautions?: string;
 }> {
+  // 60s timeout — AI vision calls on label photos routinely take
+  // 25-45s. Default 30s was timing out mid-flight, leaving the UI
+  // stuck on the spinner state and reading as "frozen."
   return request('/ai/supplement-photo', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 60000);
 }
 
 export type ScannedSupplement = {
