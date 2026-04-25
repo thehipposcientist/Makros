@@ -33,6 +33,28 @@ final class HeartRateStore: NSObject, ObservableObject {
 
     var maxHR: Int { max(120, 220 - userAge) }
 
+    /// Request HealthKit authorization at app launch — no session start.
+    /// The HK auth dialog is the slow step in the start-workout flow; if
+    /// it appears the moment the user taps Start, watchOS can suspend
+    /// the app before HKWorkoutSession is established (no foreground
+    /// claim → no extended runtime). Pre-warming here means by the time
+    /// the user taps Start, requestAuthorization returns immediately and
+    /// `beginSession` runs in milliseconds. Safe to call repeatedly —
+    /// watchOS only shows the dialog once per install.
+    func prewarmAuth() {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        let read: Set<HKObjectType> = [
+            HKObjectType.quantityType(forIdentifier: .heartRate)!,
+            HKObjectType.workoutType(),
+        ]
+        let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
+        store.requestAuthorization(toShare: write, read: read) { _, _ in
+            // Result intentionally ignored — `start()` re-runs auth and
+            // surfaces any error there. We just want the dialog to have
+            // appeared (and been answered) before the first Start tap.
+        }
+    }
+
     func start() {
         guard HKHealthStore.isHealthDataAvailable() else {
             errorMessage = "HealthKit unavailable on this device."

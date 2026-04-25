@@ -115,6 +115,17 @@ struct ContentView: View {
                 }
             }
         }
+        .onAppear {
+            // Pre-warm HealthKit authorization the moment the watch app
+            // mounts so the auth dialog is resolved well before the user
+            // taps Start. Without this, the dialog could pop on first
+            // tap and watchOS would suspend the app during the
+            // auth → session-start window (no HK session = no foreground
+            // claim), which the user perceived as "tap Start → app
+            // closes." Cheap + idempotent — watchOS only shows the
+            // dialog once per install.
+            heartRate.prewarmAuth()
+        }
         .onReceive(conn.$theme) { palette in theme.palette = palette }
         // React to phone-pushed status changes so the watch mirrors
         // whatever the phone is doing. If phone starts the workout,

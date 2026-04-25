@@ -2126,43 +2126,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const todayISO = new Date().toISOString().slice(0, 10);
           const todayItem = (s.schedule as any[])?.[0] ?? null;
           const todayWorkout = todayItem?.workout ?? null;
-          // Detect in-progress workout — same reasoning as the main
-          // sync useEffect (must override 'scheduled' to 'active' or
-          // the watch app will close mid-workout).
-          let isWorkoutInProgressRP = false;
-          try {
-            // Synchronous-ish AsyncStorage read inside the listener;
-            // if it's slow we just default to scheduled (worst case
-            // the watch sees a stale state for one extra cycle).
-            AsyncStorage.getItem('activeWorkoutStartTime').then(raw => {
-              if (raw) {
-                const t = parseInt(raw, 10);
-                if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
-                  isWorkoutInProgressRP = true;
-                  // Re-push with active status if we just discovered
-                  // we're mid-workout. Idempotent on the watch side.
-                  pushWorkoutToWatch(todayWorkout, {
-                    dateISO: todayISO, status: 'active',
-                    readiness: null, readinessLabel: null,
-                  }).catch(() => {});
-                }
-              }
-            }).catch(() => {});
-          } catch { /* non-fatal */ }
-          const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
-            isWorkoutInProgressRP ? 'active'
-            : s.todayDone ? 'completed'
-            : s.skippedDates.has(todayKey()) ? 'skipped'
-            : todayItem?.isRest ? 'rest'
-            : 'scheduled';
-          console.log('[watch] reachable — re-pushing full home snapshot', { status });
 
-          // Compute prep ONCE for this reachability re-push and share
-          // the result across BOTH the workout payload AND the
-          // readiness payload. Resolves the "Today icon vs Readiness
-          // tab" drift on the watch — both fields now show the same
-          // number every reachability event. Promise resolves to
-          // {score, label} so dependent push calls can await it.
+          // Kick off prep computation in parallel so we don't add latency
+          // by serialising it behind the AsyncStorage read below.
           const prepPromise: Promise<{ score: number | null; label: string | null }> = (async () => {
             try {
               if (!authToken) {
@@ -2184,7 +2150,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           })();
 
+          // Workout payload waits on BOTH the AsyncStorage check AND the
+          // prep result so `status` is computed with the correct
+          // in-progress signal — earlier this read was kicked off inside
+          // a `.then()` and `status` was computed synchronously above
+          // it, so the first push went out as 'scheduled' (or
+          // 'completed' if todayDone) and only a corrective second push
+          // arrived later. The race force-ended the watch's active view
+          // when the watch fired pull_state right after tapping Start.
           (async () => {
+            let isWorkoutInProgress = false;
+            try {
+              const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
+              if (startTimeRaw) {
+                const t = parseInt(startTimeRaw, 10);
+                if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
+                  isWorkoutInProgress = true;
+                }
+              }
+            } catch { /* AsyncStorage flake — assume not in workout */ }
+            const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
+              isWorkoutInProgress ? 'active'
+              : s.todayDone ? 'completed'
+              : s.skippedDates.has(todayKey()) ? 'skipped'
+              : todayItem?.isRest ? 'rest'
+              : 'scheduled';
+            console.log('[watch] reachable — re-pushing full home snapshot', { status });
             const prep = await prepPromise;
             pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
@@ -2398,8 +2389,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const todayISO = new Date().toISOString().slice(0, 10);
                 const todayItem = (s.schedule as any[])?.[0] ?? null;
                 const todayWorkout = todayItem?.workout ?? null;
-                const status: 'scheduled' | 'completed' | 'skipped' | 'rest' =
-                  s.todayDone ? 'completed'
+                // Detect in-progress workout BEFORE computing status —
+                // ActiveWorkoutScreen writes activeWorkoutStartTime on
+                // mount and clears it on end/cancel. Without this check
+                // a watch-initiated start that races with a pull_state
+                // got status:'completed' (when todayDone was true from
+                // an earlier session) which force-ended the watch's
+                // active view — exactly the "tap Start → app closes on
+                // watch" symptom. The regular sync useEffect already
+                // does this check; the pull_state handler was missing it.
+                let isWorkoutInProgress = false;
+                try {
+                  const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
+                  if (startTimeRaw) {
+                    const t = parseInt(startTimeRaw, 10);
+                    if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
+                      isWorkoutInProgress = true;
+                    }
+                  }
+                } catch { /* AsyncStorage flake — assume not in workout */ }
+                const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
+                  isWorkoutInProgress ? 'active'
+                  : s.todayDone ? 'completed'
                   : s.skippedDates.has(todayKey()) ? 'skipped'
                   : todayItem?.isRest ? 'rest'
                   : 'scheduled';
