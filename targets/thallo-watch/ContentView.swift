@@ -128,32 +128,20 @@ struct ContentView: View {
         // we unwind any local active state.
         .onReceive(conn.$workout) { w in
             guard let w = w else { return }
-            wlog("[watch] received workout status=\(w.status.rawValue) focus=\(w.focus) active(local)=\(active)")
+            HeartRateStore.saveDiag("rcv status=\(w.status.rawValue) active=\(active)")
             switch w.status {
             case .active:
                 if !active {
-                    wlog("[watch] phone pushed active — flipping local active=true")
                     active = true
                     heartRate.start()
                 }
             case .completed, .skipped:
-                // Only TRUE terminal states unwind active. Earlier we
-                // also unwound on `.scheduled` and `.rest` — but the
-                // phone re-pushes those on every regular sync (it
-                // doesn't know the watch just started locally), and
-                // the watch's freshly-started active workout would
-                // get force-ended within 1-2 seconds of tapping Start.
-                // The phone-side ActiveWorkoutScreen is responsible
-                // for pushing `.active` when it mounts; absent that,
-                // we trust the watch's own `active` flag.
                 if active {
+                    HeartRateStore.saveDiag("ENDING: rcv \(w.status.rawValue) while active")
                     active = false
                     heartRate.end()
                 }
             case .rest, .scheduled:
-                // Don't force-end. If the watch initiated the start,
-                // the workout stays active until the user taps End
-                // here or the phone pushes a true terminal status.
                 break
             }
         }

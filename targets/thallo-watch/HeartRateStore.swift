@@ -124,6 +124,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     func end() {
+        Self.saveDiag("end() called")
         guard let sess = session, let bld = builder else {
             running = false
             return
@@ -145,6 +146,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     /// nothing lands in the Health app. Rolls back HR / session refs
     /// so the next `start()` begins cleanly.
     func discard() {
+        Self.saveDiag("discard() called")
         session?.end()
         builder?.discardWorkout()
         heartRate = nil
