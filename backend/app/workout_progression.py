@@ -169,7 +169,14 @@ class WorkoutProgressionEngine:
     def round_to_increment(weight: float, increment: float) -> float:
         if increment <= 0:
             return round(weight, 2)
-        return round(weight / increment) * increment
+        # Half-up rounding (not Python's default banker's). Without
+        # this, an off-grid anchor like 275 + 10-lb increment can
+        # round-half-to-even back to 280 instead of advancing to 290.
+        # Same family of bug as set_programming.py — fixed there with
+        # _bump_load/_drop_load wrappers; here we fix the helper itself
+        # because callers don't have a direction-aware wrapper.
+        import math
+        return math.floor(weight / increment + 0.5) * increment
 
     @staticmethod
     def clamp_weight_change(current_weight: float, proposed_weight: float, max_up_pct: float, max_down_pct: float) -> float:

@@ -410,15 +410,53 @@ def _pick_closest(
     return sorted_matches[0]
 
 
+def _rebuild_clobbers_existing_pins(
+    lift_positions: list[int],
+    new_lift_days: list[dict],
+    new_pin_target_idx: int,
+    existing_pins: dict[int, str],
+) -> bool:
+    """True if the canonical rebuild would change any prior-pinned day
+    to a different focus base. The new pin's own target is excluded
+    (it's allowed to overwrite its own previous pin)."""
+    for pin_pos, pinned_focus in existing_pins.items():
+        if pin_pos == new_pin_target_idx:
+            continue
+        if pin_pos not in lift_positions:
+            continue
+        li = lift_positions.index(pin_pos)
+        new_focus = normalize_focus(new_lift_days[li].get("focus") or "")
+        new_base = new_focus.replace(" + cardio", "").strip()
+        if " — " in new_base:
+            new_base = new_base.split(" — ")[0].strip()
+        pinned_base = (pinned_focus or "").lower().strip().replace(" + cardio", "").strip()
+        if new_base != pinned_base:
+            return True
+    return False
+
+
 def decide_pin(
     days: list[dict],
     *,
     pin_day_index: int,
     pin_focus: str,
     preferred_split: Optional[str] = None,
+    existing_pins: Optional[dict[int, str]] = None,
 ) -> PinDecision:
     """Compute the action needed to honor a Switch Day pin. Pure — no
-    side effects. Returns a PinDecision the caller applies."""
+    side effects. Returns a PinDecision the caller applies.
+
+    `existing_pins`: optional {position: focus_base} map of days the
+    user has already pinned in earlier interactions. When provided:
+      - The canonical-rebuild path checks whether the rebuild would
+        change any pinned position to a different focus base; if so,
+        it falls back to single-day swap so prior pins are preserved
+        (cycle purity sacrificed in favor of honoring user intent).
+      - Single-day swap excludes prior-pinned positions from the
+        candidate swap-partner pool.
+    Without this param, behavior matches pre-fix (cumulative pins lose
+    earlier pins to canonical-cycle rebuilds)."""
+    pins = existing_pins or {}
     target_idx = max(0, min(len(days) - 1, int(pin_day_index)))
     full_focus = normalize_focus(pin_focus)
     base_focus, wants_cardio_finisher = split_lifting_focus(pin_focus)
@@ -476,6 +514,15 @@ def decide_pin(
     }
     candidates = sorted(exact_set | base_set)
 
+    # Exclude prior-pinned positions from the swap-candidate pool so a
+    # swap can't clobber an earlier pin. The new pin's own target is
+    # always allowed (it's overwriting its own previous pin).
+    if pins:
+        candidates = [
+            li for li in candidates
+            if lift_positions[li] not in pins or lift_positions[li] == target_idx
+        ]
+
     def _rank(li: int) -> tuple:
         src_orig = lift_positions[li]
         creates_adj = _swap_creates_adjacency(days, target_idx, src_orig) if dst_lift_idx is not None or True else False
@@ -526,17 +573,28 @@ def decide_pin(
             lift_days, dst_lift_idx, base_focus, cycle,
         )
         if new_lift_days is not None:
-            return PinDecision(
-                action="rotate",
-                src_lift_idx=src_lift_idx,
-                dst_lift_idx=dst_lift_idx,
-                rotation_shift=0,  # not used for canonical rebuild
-                rotated_lift_days=new_lift_days,
-                **common,
-            )
+            # If canonical rebuild would clobber a prior user pin, fall
+            # through to single-day swap so both pins are honored. The
+            # cycle ends up "broken" (cumulative pins can produce a
+            # valid week that isn't a contiguous cycle slice) — that's
+            # the explicit tradeoff. The next FULL regen restores the
+            # canonical cycle from scratch.
+            if not _rebuild_clobbers_existing_pins(
+                lift_positions, new_lift_days, target_idx, pins
+            ):
+                return PinDecision(
+                    action="rotate",
+                    src_lift_idx=src_lift_idx,
+                    dst_lift_idx=dst_lift_idx,
+                    rotation_shift=0,  # not used for canonical rebuild
+                    rotated_lift_days=new_lift_days,
+                    **common,
+                )
 
-    # Fallback: single-day swap when there's no canonical cycle.
-    # Used for full_body / ppl_upper_lower / unknown splits.
+    # Fallback: single-day swap when there's no canonical cycle, or
+    # when the canonical rebuild would clobber a prior user pin. Used
+    # for full_body / ppl_upper_lower / unknown splits + prior-pin
+    # conflict cases.
     if src_lift_idx is not None and dst_lift_idx is not None:
         if src_lift_idx == dst_lift_idx:
             return PinDecision(
@@ -568,14 +626,21 @@ def decide_pin(
                 lift_days, new_target_lift_idx, base_focus, cycle,
             )
             if new_lift_days is not None:
-                return PinDecision(
-                    action="bro_canonical_swap",
-                    src_lift_idx=src_lift_idx,
-                    dst_lift_idx=None,
-                    swap_with_idx=src_orig,
-                    rotated_lift_days=new_lift_days,
-                    **common,
-                )
+                # Same clobber check as the canonical-rebuild path —
+                # bro_canonical_swap also rebuilds the lift sequence
+                # and can clobber prior pins.
+                if not _rebuild_clobbers_existing_pins(
+                    new_lift_positions, new_lift_days, target_idx, pins
+                ):
+                    return PinDecision(
+                        action="bro_canonical_swap",
+                        src_lift_idx=src_lift_idx,
+                        dst_lift_idx=None,
+                        swap_with_idx=src_orig,
+                        rotated_lift_days=new_lift_days,
+                        **common,
+                    )
+                # Fall through to plain swap below.
         return PinDecision(
             action="swap",
             src_lift_idx=src_lift_idx,

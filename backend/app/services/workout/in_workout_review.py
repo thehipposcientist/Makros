@@ -28,6 +28,8 @@ from typing import Any, Literal, Optional
 from .set_programming import (
     NextSetRecommendation,
     PlannedSet,
+    _bump_load,
+    _drop_load,
     load_increment_for,
     parse_rep_range,
     recommend_next_set,
@@ -419,6 +421,28 @@ def reviewed_next_set_recommendation(
     action = ai.get("action") or det.action
     if action not in ("increase_load", "hold_load", "reduce_load", "keep_reps", "add_rep"):
         action = det.action
+
+    # Forward/backward-progress guarantee on AI weights: rounding to the
+    # grid can collapse "+5" into "+0" on off-grid anchors. If the
+    # action says progress in a direction, enforce it. The user's
+    # `actual_weight_lbs` is the reference (not det.next_set_weight_lbs,
+    # which itself already passes through _bump_load/_drop_load).
+    if (
+        action == "increase_load"
+        and ai_weight is not None
+        and actual_weight_lbs > 0
+        and ai_weight <= actual_weight_lbs
+        and inc > 0
+    ):
+        ai_weight = _bump_load(actual_weight_lbs, inc)
+    elif (
+        action == "reduce_load"
+        and ai_weight is not None
+        and actual_weight_lbs > 0
+        and ai_weight >= actual_weight_lbs
+        and inc > 0
+    ):
+        ai_weight = _drop_load(actual_weight_lbs, inc)
 
     return ReviewedRecommendation(
         next_set_weight_lbs=ai_weight,

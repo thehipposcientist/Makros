@@ -147,6 +147,37 @@ def round_to_increment(weight_lbs: float, increment: float) -> float:
     return round(round(weight_lbs / increment) * increment, 1)
 
 
+def _bump_load(current: float, increment: float) -> float:
+    """Add `increment` to `current` and snap to the grid, GUARANTEEING
+    *at least* one full increment of forward progress.
+
+    Why ceil instead of round-to-nearest: with an off-grid anchor (e.g.
+    275 + 10 lb increment), nearest-rounding lands on 280 — only +5
+    effective, while the explanation says "+10". Ceil guarantees the
+    user actually gets the increment they were promised, even if it
+    means +15 in the worst case. The slight over-progression is
+    preferable to a lying explanation + under-progression."""
+    if increment <= 0 or current <= 0:
+        return current
+    import math
+    target = current + increment
+    return round(math.ceil(target / increment) * increment, 1)
+
+
+def _drop_load(current: float, increment: float) -> float:
+    """Subtract `increment` and snap to the grid, GUARANTEEING at least
+    one full increment of backward progress. Mirror of `_bump_load` —
+    uses floor so an off-grid anchor never rounds back up to a weight
+    the user already failed at."""
+    if increment <= 0 or current <= 0:
+        return current
+    target = current - increment
+    if target <= 0:
+        return 0.0
+    import math
+    return round(math.floor(target / increment) * increment, 1)
+
+
 # ── Rep-range parsing ───────────────────────────────────────────────
 
 def parse_rep_range(reps: str) -> Optional[tuple[int, int]]:
@@ -417,14 +448,15 @@ def recommend_next_set(
         # load so the user keeps banking reps at this weight — but the
         # next-session engine will bump load after a top-of-range hit.
         if planned_set.progression_mode == "load_first":
-            new_w = round_to_increment((weight or 0) + inc, inc) if inc > 0 else weight
+            new_w = _bump_load(weight or 0, inc) if inc > 0 else weight
+            actual_delta = int(round((new_w - (weight or 0)) if new_w and weight else inc))
             return NextSetRecommendation(
                 next_set_weight_lbs=new_w if new_w > 0 else None,
                 next_set_rep_target=f"{lo}-{hi}",
                 action="increase_load",
                 explanation=(
                     f"You hit {actual_reps} reps (top of {lo}-{hi}) with "
-                    f"{int(rir)} RIR — adding {int(inc)} lb for the next set."
+                    f"{int(rir)} RIR — adding {actual_delta} lb for the next set."
                 ),
             )
         if planned_set.progression_mode == "reps_first":
@@ -478,26 +510,33 @@ def recommend_next_set(
             drop_pct = min(0.40, 1.0 - miss_ratio)
             drop_lbs = max(inc, round_to_increment(weight * drop_pct, inc))
             new_w = round_to_increment(max(inc, weight - drop_lbs), inc)
+            # Backward-progress guarantee — banker's rounding on an off-
+            # grid anchor can land new_w == weight (no drop). Force a
+            # real step down.
+            if new_w >= weight:
+                new_w = _drop_load(weight, inc)
+            actual_drop = int(round(weight - new_w))
             return NextSetRecommendation(
                 next_set_weight_lbs=new_w,
                 next_set_rep_target=f"{lo}-{hi}",
                 action="reduce_load",
                 explanation=(
                     f"You hit {actual_reps} reps vs target {lo}-{hi} at failure — "
-                    f"dropping to {int(new_w)} lb (−{int(drop_lbs)}) "
+                    f"dropping to {int(new_w)} lb (−{actual_drop}) "
                     f"so you can reach the rep range."
                 ),
             )
         if at_failure and weight > 0 and inc > 0:
             # Minor miss at failure — one increment down.
-            new_w = round_to_increment(max(0.0, weight - inc), inc)
+            new_w = _drop_load(weight, inc)
+            actual_drop = int(round(weight - new_w))
             return NextSetRecommendation(
                 next_set_weight_lbs=new_w if new_w > 0 else None,
                 next_set_rep_target=f"{lo}-{hi}",
                 action="reduce_load",
                 explanation=(
                     f"Hit failure at {int(weight)} lb short of {lo}-{hi} — "
-                    f"dropping {int(inc)} lb so you can hit the range."
+                    f"dropping {actual_drop} lb so you can hit the range."
                 ),
             )
         # Had reps in reserve but missed — hold load and let them
@@ -571,11 +610,12 @@ def recommend_next_session_load(
 
     if all_at_top:
         if planned_set.progression_mode == "load_first" and inc > 0:
-            new_w = round_to_increment(top_weight + inc, inc)
+            new_w = _bump_load(top_weight, inc)
+            actual_delta = int(round(new_w - top_weight))
             return (
                 new_w,
                 "increase_load",
-                f"All sets hit the top of {lo}-{hi} last session — adding {int(inc)} lb.",
+                f"All sets hit the top of {lo}-{hi} last session — adding {actual_delta} lb.",
             )
         # reps_first or fixed_skill: hold load, let reps keep growing.
         return (
@@ -585,11 +625,12 @@ def recommend_next_session_load(
         )
 
     if majority_missed and inc > 0:
-        new_w = round_to_increment(max(0.0, top_weight - inc), inc)
+        new_w = _drop_load(top_weight, inc)
+        actual_drop = int(round(top_weight - new_w))
         return (
             new_w,
             "reduce_load",
-            f"Most sets fell below {lo}-{hi} last session — dropping {int(inc)} lb to reset.",
+            f"Most sets fell below {lo}-{hi} last session — dropping {actual_drop} lb to reset.",
         )
 
     return (top_weight, "hold_load", f"Partial progress on {lo}-{hi} — hold and push for a full top-range session.")

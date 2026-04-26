@@ -57,6 +57,7 @@ _TEST_MODULES = (
     "tests.test_carb_distribution",
     "tests.test_quick_intents",
     "tests.test_rolling_e1rm",
+    "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
     "tests.test_switch_day",
@@ -71,6 +72,10 @@ _TEST_MODULES = (
     # Single-day regen pieces — focus normalization, recent_focus
     # rotation, focus_override matching.
     "tests.test_single_day_regen",
+    # Router-level history-merge behavior + single-day preservation
+    # invariants (pin_focus prepend, prev_focuses prepend + reverse,
+    # split shape preserved across day_index calls).
+    "tests.test_history_aware_generation",
     # End-to-end /workouts/generate-week with current_days (pin-against-
     # current-week single-day swap behavior).
     "tests.test_generate_week_endpoint",

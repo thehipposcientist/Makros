@@ -245,6 +245,7 @@ src/
     RecoveryCard.tsx             # Per-muscle fatigue bars + Overall Load
     NutritionInsightCard.tsx     # Per-nutrient insights (Layer 1+2)
     CoachCheckinModal.tsx        # Daily/weekly check-in input
+    FriendsModal.tsx             # Friends list + weekly digest + add-friends search (no live feed)
     ...
   utils/
     nutritionScore.ts            # Client plan-preview score (server authoritative via /meals/score)
@@ -260,12 +261,13 @@ backend/
     database.py                  # Engine + idempotent migrations (ADD COLUMN IF NOT EXISTS chain)
     models.py                    # SQLModel tables (incl. DailyNutritionMetrics, FoodMetadata with v3 flags, FoodNutrition.added_sugar_g)
     routers/
-      auth.py, meals.py, meta.py, profile.py, workouts.py, coach.py
+      auth.py, meals.py, meta.py, profile.py, workouts.py, coach.py, social.py
       ai/ (plans, chat, scanning, progression)
     services/
       workout/                   # planner, fatigue, recipes, prescriptions, archetypes, slots, goals, cardio, etc.
       nutrition/                 # nutrition_score, gut_health, score_builder, recovery_flags, food_classifier, meal_history, meal_assembler, calorie_calculator, usda_fdc, allergen_filter
       coach/                     # payload, decision_rules, checkin_ai
+      social/                    # digest aggregation (pure-function, no DB writes)
     usda_fdc.py                  # USDA FDC client (incl. nutrient #1235 added sugars)
   tests/                         # 18+ modules via run_all.py
 ```
@@ -350,6 +352,7 @@ SQLModel `create_all` creates tables but doesn't ALTER. Idempotent `ADD COLUMN I
 - `_ensure_food_metadata_classifier_v2_columns` — protein_source + probiotic_flag
 - `_ensure_daily_nutrition_metrics_v2_columns` — plant_protein_g + animal_protein_g + probiotic_servings
 - `_ensure_nutrition_v3_columns` — FoodNutrition.added_sugar_g + FoodMetadata seafood/fruit/vegetable/alcohol/processed_meat/refined_grain flags + DailyNutritionMetrics tag servings + recovery_flags JSONB + energy_availability + max_meal_protein_pct
+- `_ensure_social_tables` — `friendships` (canonical pair uniqueness), `weekly_digest_cache` (per-user-per-week uniqueness). `user_social_profiles` and the tables themselves are built by `create_all`; this helper just guarantees the indexes on legacy DBs.
 - `_backfill_custom_food_micronutrients` — one-shot backfill on startup
 
 ## Apple Watch Integration
@@ -376,6 +379,62 @@ SQLModel `create_all` creates tables but doesn't ALTER. Idempotent `ADD COLUMN I
 ### Siri intent scaffold (#111 — manual Xcode wiring required)
 - `ios-extras/StartWorkoutAppIntent.swift` is a stub `AppIntent` that opens `thallo://start-workout` via deep link.
 - File body is `#if false` until the user adds an Intents extension target in Xcode + matching deep-link handler in `app/_layout.tsx`.
+
+## Social System (friends + weekly digest, no live feed)
+
+Stripped social shape — friend list + once-a-week digest only. **No public feed, no posts, no reactions, no comments.** UGC surface is intentionally minimal so App Store review stays simple and there's no moderation queue beyond username reports.
+
+### Tables
+- `user_social_profiles` — per-user `display_name` + `share_activity_enabled` toggle. Lazy-created on first `/social/me` read. The auth-level `User.username` (already globally unique) is the friend-search handle; `display_name` is optional override for what other users see.
+- `friendships` — canonical pair (`user_a_id < user_b_id`), `status` ∈ {`pending`, `accepted`, `blocked`}, `requested_by` (so we can render incoming vs outgoing), `blocked_by` (so we can show "you blocked them" without leaking which side). Unique index on `(user_a_id, user_b_id)` — exactly one row per pair.
+- `weekly_digest_cache` — per-user-per-week JSON payload. Cache TTL = 1 hour to stay live mid-week, plus eager invalidation on accept/remove/block.
+
+### Privacy model
+| Visible to friends | Never visible |
+|---|---|
+| Sessions completed (count only) | Calories, macros, weight |
+| Streak length | Body fat, measurements |
+| Goal label (Muscle gain / Fat loss / etc.) | Specific lifts/weights, PRs |
+| Active-in-last-48h dot | Meal logs, recovery flags |
+
+`share_activity_enabled` defaults **off**. Friends without it on appear in the list but with `sessions=0 / streak=0 / share_enabled=false` so the digest can render them grey rather than misleading. Opt-in nudge fires on first friend-add or first accept (`FriendsModal` shows a sheet asking "share your training with friends?").
+
+### Aggregation (`backend/app/services/social/digest.py`)
+Pure-function helpers — no DB writes:
+- `week_start_for(today)` — Monday of the containing week.
+- `_streak_days(dates, today)` — consecutive completion days ending at today (or yesterday if today has nothing — tolerates the user not having trained yet today).
+- `_last_active(dates, today)` — most recent completion date ≤ today.
+- `compute_digest(db, user_id, today)` — pulls accepted friend list, runs `_completion_dates` (a single `WorkoutCompletion` query per friend) over a 7-day window, returns `{week_start, you, friends[], summary}`.
+
+Digest payload `summary` carries: `friend_count`, `friends_trained_this_week`, `total_friend_sessions`, `top_user_id`, `top_sessions`, `long_streak_count` (≥14 day streaks). The client uses these to compose the THIS WEEK headline.
+
+### API (`backend/app/routers/social.py`)
+- `GET /social/me` — own profile (lazy-creates `user_social_profiles` row).
+- `PATCH /social/me` — update `display_name` and/or `share_activity_enabled`.
+- `GET /social/friends` — `{friends: FriendRead[], pending: PendingRequestRead[]}`. Both rows include `friendship_id` so the client can act on a row without a username round-trip. Pending requests carry `direction` ∈ {`incoming`, `outgoing`}. Blocked rows hidden from the list.
+- `POST /social/friends/request` — body `{username}`. Auto-accepts if the OTHER user already had a pending request to you (so a race doesn't leave you both with outgoing requests). Returns 409 if already friends, 404 if blocked or user-not-found (don't leak block direction).
+- `POST /social/friends/{id}/{accept,reject,remove,block}` — only the user on either side of the row can call these. `accept` rejects "accepting your own request." `reject`/`remove` delete the row outright. `block` keeps the row but hides it from the list and returns 404 on re-request.
+- `GET /social/search?q=...` — username prefix search, ≥2 char minimum, capped at 10 results, excludes the caller.
+- `GET /social/digest` — cached weekly payload. Cache invalidated eagerly on accept/remove/block via `_invalidate_digest(db, user_a_id, user_b_id)` so a freshly-accepted friend appears in your digest within seconds, not within an hour.
+
+### Client (`src/components/FriendsModal.tsx`)
+Single full-screen modal mounted in `HomeScreen`. Three sections:
+1. **THIS WEEK** card — composed headline lines from `digest.summary` + a "YOU" row with own session count + streak.
+2. **REQUESTS / FRIENDS / SENT** — pending incoming, accepted friends, pending outgoing. Avatar with primary-colored badge initial + green/grey active-48h dot. Long-press accepted friend → remove confirm. Friend row sub-line: goal label · streak (when ≥2 days).
+3. **ADD FRIENDS** — username prefix search with 250ms debounce. Search results show "Friends" / "Pending" tag if the row is already in either bucket.
+
+Sharing-off banner appears only when user has ≥1 friend AND `share_activity_enabled=false` — taps re-open the opt-in sheet. Empty-state copy points the user at the search box when friend list is empty.
+
+### Profile entry point (`src/screens/HomeScreen.tsx`)
+Profile tab gets a "Friends · N" row between the stat tiles and the theme picker. Pending-request count shows as a primary-colored circle badge. Count refresh: lazy poll on Profile-tab activation + on `FriendsModal` close (not push-based — no notification infra yet).
+
+### Key Design Decisions
+- **No live feed in v1** — keeps App Store review simple, no moderation queue beyond username reports, much easier to kill if engagement is weak.
+- **Reuse `User.username`** (already globally unique from auth) instead of adding a separate social handle — one fewer thing for users to claim.
+- **Canonical pair (user_a_id < user_b_id)** prevents duplicate friendships in either direction.
+- **Server-authoritative digest with eager cache invalidation** — friend-state changes flush both users' caches inside the same transaction so a newly-accepted friend appears in the digest immediately.
+- **Goal label visible, weight/calories never** — hard rule. The digest reads `WorkoutCompletion.workout_date` only; nothing in the social path queries `Meal`, `MealItem`, `DailyNutritionMetrics`, or weight rows.
+- **`share_activity_enabled` defaults off** — passive privacy: a user can have friends without exposing anything until they actively flip the toggle.
 
 ## In-App Dev Logs (#128)
 - `src/utils/devLogs.ts` ring-buffers the last 400 `console.log/warn/error/info/debug` entries.
@@ -414,6 +473,7 @@ SQLModel `create_all` creates tables but doesn't ALTER. Idempotent `ADD COLUMN I
 - Hybrid PLUS_CARDIO archetypes emitted by recipe injection AFTER all adjacency repair (PLUS_CARDIO shares focus_family with base lift — adjacency preserved)
 - Stair climber / rowing / assault bike filtered by owned equipment (no more phantom stair climbers)
 - Warmup prescription is always a short dynamic flow — static stretches only on recovery/mobility days
+- Social is friend-list + weekly digest only — no public feed, no posts, no reactions. Reuses `User.username` (already globally unique) as friend handle. Friendships use canonical pair (`user_a_id < user_b_id`) so each pair has exactly one row. `share_activity_enabled` defaults off; opt-in nudge fires on first friend-add. Calorie/macro/weight data NEVER crosses the social boundary — digest only reads `WorkoutCompletion`.
 
 ## Supported Goals
 fat_loss, muscle_gain, body_recomp, strength, endurance, athletic_performance, hyrox, toning, maintain, general_health, longevity (UI label "Healthspan"), flexibility, stress_relief. Longevity/healthy_aging/heart_health route to general_health via `_PROFILE_OVERRIDES`. Flexibility/stress_relief have dedicated mobility + recovery profiles.
@@ -465,6 +525,8 @@ New pure-function tests added to `backend/tests/run_all.py`:
 - `tests.test_carb_distribution` — protein invariant, carb shifts, per-goal caps, ±5 kcal preservation, 40g floor.
 - `tests.test_quick_intents` — all 12 intents match positive cases, no false-positives on generic Q&A, handlers return structured actions.
 - `tests.test_rolling_e1rm` — <3 sample fallback, basic Epley+RIR, recency weighting (3 recent vs stale), warmup filtering, role-aware rep band, RIR fallback to target, confidence tier.
+- `tests.test_live_workout_recommendations` — 66 realistic-data tests for the live-workout recommendation engine: gap coverage on `load_increment_for` (DB compound, machine iso, cable iso, lower-body-iso-via-muscle-inference, unknown bucket), boundary `round_to_increment` (banker's rounding at 2.5/5/10-lb grids, zero-increment bodyweight), `parse_rep_range` edge cases (whitespace, "30s"/"25-40 min"/garbage), `build_set_scheme` branches not covered before (strength heavy_top RIR, muscle_gain 5-set volume tail, body_recomp/athletic_performance routing through hypertrophy branch, endurance straight sets, technique role 75% load, timed plank null loads, isolation under muscle_gain), `recommend_next_set` boundaries (exact-top vs one-above-top, beat-top with low RIR does NOT increase, severe-miss proportional drop, RIR-in-reserve always holds), full multi-set realistic sequences (top set → backoffs → fatigue cascade), `recommend_next_session_load` (no-history baseline, non-numeric reps, reps_first holds even when all at top), `is_suspicious` branch coverage (failure-in-range, easy-at-top, increase+hard, no-history clean signal, pain overrides everything, form_breakdown alias), `reviewed_next_set_recommendation` full path (require_feel block, deterministic source, AI override / confirmed / failure-fallback / invalid-action sanitization — `_call_ai_reviewer` mocked), `compute_rolling_e1rm` gaps (rep-band exclusions for 2-rep singles + 15-rep finishers, isolation 15-rep curls usable, zero-weight bodyweight excluded, RIR>4 excluded, max_samples=10 caps oldest, 3-week linear progression dominates, hot-session outlier resisted by median).
+- `tests.test_social_digest` — `week_start_for` Monday-bucketing, streak math (consecutive / missed-today tolerance / gap break / empty set), `_last_active` (most recent + future-ignored), `_canonical_pair` ordering invariant.
 
 Run via `make test` or `docker exec thallo-backend python -m tests.run_all`.
 

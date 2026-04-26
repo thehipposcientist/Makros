@@ -20,9 +20,9 @@ import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
 import { loadPreparednessInputs } from '../services/preparednessLoader';
-import { isHealthKitAvailable } from '../services/appleHealth';
+import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { getFatigueScore, FatigueScore } from '../services/api';
-import { loadHealthSummary } from '../utils/workoutHistory';
+import { loadHealthSummary, saveHealthSummary } from '../utils/workoutHistory';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -148,7 +148,34 @@ export default function TrainingReadinessCard({
       // happens the score on phone and watch will drift slightly until
       // connectivity returns and the next call lands — the trade we're
       // making for offline support.
-      const summary = parentSummary ?? (await loadHealthSummary().catch(() => null));
+      // Health-summary fetch order:
+      //   1. Use the parent's already-loaded summary if provided.
+      //   2. Otherwise read LIVE from HealthKit on this mount — without this
+      //      the card was reading a stale AsyncStorage blob that only got
+      //      refreshed on ProgressScreen/ActiveWorkout visits, so a user
+      //      who opened the app and looked at readiness from HomeScreen
+      //      saw yesterday's RHR/HRV (or nothing on first launch).
+      //   3. Last-resort fall back to the AsyncStorage cache so the card
+      //      shows *something* if HK throws (permissions revoked, etc.).
+      let summary = parentSummary ?? null;
+      if (!summary && isHealthKitAvailable()) {
+        try {
+          const fresh = await readHealthSummary({ age: age ?? null });
+          if (fresh) {
+            summary = fresh;
+            // Warm the AsyncStorage cache so other screens benefit until
+            // they next call readHealthSummary themselves.
+            saveHealthSummary(fresh).catch(() => null);
+          }
+        } catch (err) {
+          // HK throwing is otherwise silent — surface to dev logs so we
+          // can diagnose "no HR data" reports without a remote session.
+          console.warn('[readiness] HK readHealthSummary failed:', err);
+        }
+      }
+      if (!summary) {
+        summary = await loadHealthSummary().catch(() => null);
+      }
       const ahAvailable = isHealthKitAvailable() && summary != null;
       setHasAppleHealth(ahAvailable);
 
@@ -320,6 +347,19 @@ export default function TrainingReadinessCard({
   if (hasAppleHealth && isPresent('rhr')) pillarRows.push(['Resting HR', prep.pillars.restingHr, 10]);
   pillarRows.push(['Yesterday\'s load', prep.pillars.yesterdayStrain, 5]);
 
+  // Pillars the server said were missing AND are AH-derived. Surfaced
+  // as inline grey rows so the user knows the score excludes them
+  // rather than silently hiding (the previous behavior, which made
+  // "no HR data" reports impossible to debug from the user side).
+  // Only shown when AH is connected — otherwise the "Connect Apple
+  // Health" footer covers the same ground.
+  const missingHkRows: Array<[string, string]> = [];
+  if (hasAppleHealth) {
+    if (!isPresent('sleep')) missingHkRows.push(['Sleep', 'No sleep recorded last night — Apple Watch may not have synced.']);
+    if (!isPresent('hrv')) missingHkRows.push(['HRV', 'No HRV reading yet today — usually arrives after Watch sync.']);
+    if (!isPresent('rhr')) missingHkRows.push(['Resting HR', 'No resting HR reading today — Apple Watch may not have synced.']);
+  }
+
   const focusLabel = todaysFocus
     ? todaysFocus.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
     : null;
@@ -463,6 +503,23 @@ export default function TrainingReadinessCard({
               );
             });
           })()}
+
+          {missingHkRows.length > 0 && (
+            <View style={{ marginTop: 4 }}>
+              {missingHkRows.map(([label, hint]) => (
+                <View key={label} style={{ marginBottom: 6 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textMuted }}>{label}</Text>
+                    <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border, opacity: 0.4 }} />
+                    <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textMuted, textAlign: 'right' }}>—</Text>
+                  </View>
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2, lineHeight: 13, fontStyle: 'italic' }}>
+                    {hint}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
 
           {!hasAppleHealth && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
