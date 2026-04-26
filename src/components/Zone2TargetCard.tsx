@@ -21,6 +21,7 @@ import { getWeeklyReview } from '../services/api';
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
+  appleHealthZone2?: number | null;
 }
 
 // Mirror of backend _CARDIO_TARGETS zone2 column so we can show the
@@ -33,10 +34,10 @@ const GOAL_ZONE2_TARGET: Record<string, number> = {
   stress_relief: 60,
 };
 
-export default function Zone2TargetCard({ authToken, themeName }: Props) {
+export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
-  const [minutes, setMinutes] = useState<number>(0);
+  const [backendMinutes, setBackendMinutes] = useState<number>(0);
   const [target, setTarget] = useState<number>(100);
   const [goal, setGoal] = useState<string>('general_health');
   const [loading, setLoading] = useState(true);
@@ -47,7 +48,7 @@ export default function Zone2TargetCard({ authToken, themeName }: Props) {
       try {
         const r = await getWeeklyReview(authToken, { days: 7 });
         if (cancelled) return;
-        setMinutes(r.zone2_minutes ?? 0);
+        setBackendMinutes(r.zone2_minutes ?? 0);
         setGoal(r.goal);
         setTarget(GOAL_ZONE2_TARGET[r.goal] ?? 100);
       } catch { /* endpoint optional */ }
@@ -57,9 +58,9 @@ export default function Zone2TargetCard({ authToken, themeName }: Props) {
   }, [authToken]);
 
   if (loading) return null;
-  // Skip the card for goals where Z2 isn't the primary cardio story.
   if (target < 60) return null;
 
+  const minutes = Math.max(backendMinutes, appleHealthZone2 ?? 0);
   const pct = Math.max(0, Math.min(100, (minutes / target) * 100));
   const onTrack = pct >= 80;
   const color = onTrack ? tc.success : pct >= 40 ? tc.warning : tc.error;

@@ -191,6 +191,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
   const [weekSummaryExpanded, setWeekSummaryExpanded] = useState(false);
+  const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
+  const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
+  const [proteinBreakdownLoading, setProteinBreakdownLoading] = useState(false);
   const [gutInsights, setGutInsights] = useState<{
     plantCount: number;
     plantTier: 'on_track' | 'building' | 'low';
@@ -215,7 +218,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           .catch(() => null);
       }
       import('../utils/weightHistory').then(({ loadWeightHistory }) =>
-        loadWeightHistory().then(setWeightEntries).catch(() => null)
+        loadWeightHistory().then(async (local) => {
+          setWeightEntries(local);
+          if (authToken) {
+            try {
+              const { getWeightEntries, syncWeightEntries } = await import('../services/api');
+              if (local.length > 0) {
+                await syncWeightEntries(authToken, local.map(e => ({ date: e.date, weight_lbs: e.weightLbs, source: e.source || 'manual' }))).catch(() => null);
+              }
+              const remote = await getWeightEntries(authToken);
+              if (remote.length > 0) {
+                const merged = new Map<string, { date: string; weightLbs: number; source: string }>();
+                for (const e of local) merged.set(e.date, e);
+                for (const e of remote) merged.set(e.date, { date: e.date, weightLbs: e.weight_lbs, source: e.source });
+                const sorted = Array.from(merged.values()).sort((a, b) => a.date.localeCompare(b.date));
+                setWeightEntries(sorted as any);
+              }
+            } catch { /* backend sync non-fatal */ }
+          }
+        }).catch(() => null)
       );
       if (authToken) {
         import('../services/api').then(({ getFatigueScore }) => {
@@ -264,10 +285,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         }).catch(() => null)
       );
     }
-    // Load body scan history
-    AsyncStorage.getItem('bodyScanHistory').then(raw => {
-      if (raw) try { setBodyScanHistory(JSON.parse(raw)); } catch {}
-    });
+    AsyncStorage.getItem('bodyScanHistory').then(async raw => {
+      const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
+      if (local.length > 0) setBodyScanHistory(local);
+      if (authToken) {
+        try {
+          const { getBodyScanHistory } = await import('../services/api');
+          const remote = await getBodyScanHistory(authToken);
+          if (remote.length > 0) {
+            const merged = new Map<string, BodyScanEntry>();
+            for (const e of local) merged.set(e.date, e);
+            for (const e of remote) {
+              const key = (e as any).scan_date ?? (e as any).date ?? '';
+              if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
+            }
+            const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
+            setBodyScanHistory(sorted);
+            await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
+          }
+        } catch { /* non-fatal */ }
+      }
+    }).catch(() => {});
 
     // ── Gut / longevity insights — compute from existing meal data ──
     (async () => {
@@ -525,20 +563,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </TouchableOpacity>
         ))}
       </View>
-
-      {authToken && (
-        <View style={{ paddingHorizontal: 16, marginBottom: 4 }}>
-          <WeeklyCoachingCard
-            authToken={authToken}
-            themeName={userProfile.themePreference}
-            weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
-            avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
-            avgRestingHr={healthSummary?.restingHeartRate ?? null}
-            avgSteps={healthSummary?.avgSteps7d ?? null}
-            readinessScore={null}
-          />
-        </View>
-      )}
 
       {loading ? (
         <View style={styles.center}>
@@ -1756,16 +1780,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Detected Apple Health workouts — only shows when there's
-              at least one HK workout that doesn't already overlap an
-              existing Thallo session. Classifying it here lets
-              activity_impact.py factor the workout into fatigue. */}
-          {/* Zone 2 weekly target — goal-driven, one glance. Hidden
-              when goal target is <60 min/week (muscle gain / strength). */}
+          {authToken && (
+            <WeeklyCoachingCard
+              authToken={authToken}
+              themeName={userProfile.themePreference}
+              weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
+              avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
+              avgRestingHr={healthSummary?.restingHeartRate ?? null}
+              avgSteps={healthSummary?.avgSteps7d ?? null}
+              readinessScore={null}
+            />
+          )}
           {authToken && (
             <Zone2TargetCard
               authToken={authToken}
               themeName={userProfile.themePreference}
+              appleHealthZone2={(() => {
+                const details = healthSummary?.workoutDetails ?? [];
+                let z2 = 0;
+                for (const w of details) {
+                  const mins = Number(w.duration ?? 0);
+                  if (!mins) continue;
+                  const name = String((w as any).activityName ?? (w as any).name ?? '');
+                  if (/run|walk|hike|bik|cycl|row|swim|ellipt|spin/i.test(name) && mins >= 20 && !/hiit|interval|tabata/i.test(name)) z2 += mins;
+                }
+                return z2 > 0 ? Math.round(z2) : null;
+              })()}
             />
           )}
 
@@ -2347,11 +2387,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     const total = gutHealthWindow.plant_protein_g + gutHealthWindow.animal_protein_g;
                     const plantPct = Math.round((gutHealthWindow.plant_protein_g / total) * 100);
                     const plantColor = plantPct >= 30 ? '#22C55E' : plantPct >= 15 ? '#F59E0B' : '#EF4444';
+                    const handleProteinTap = async () => {
+                      configureExpandAnimation(300);
+                      if (proteinBreakdownExpanded) {
+                        setProteinBreakdownExpanded(false);
+                        return;
+                      }
+                      if (!proteinBreakdown && authToken) {
+                        setProteinBreakdownLoading(true);
+                        try {
+                          const { getProteinBreakdown } = await import('../services/api');
+                          const bd = await getProteinBreakdown(authToken);
+                          setProteinBreakdown(bd);
+                        } catch { /* non-fatal */ }
+                        finally { setProteinBreakdownLoading(false); }
+                      }
+                      setProteinBreakdownExpanded(true);
+                    };
                     return (
-                      <View style={{ marginBottom: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 6 }}>
-                          PROTEIN SOURCES · {days}-DAY AVG
-                        </Text>
+                      <TouchableOpacity activeOpacity={0.7} onPress={handleProteinTap} style={{ marginBottom: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                          <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, flex: 1 }}>
+                            PROTEIN SOURCES · {days}-DAY AVG
+                          </Text>
+                          <Ionicons name={proteinBreakdownExpanded ? 'chevron-up' : 'chevron-down'} size={14} color={tc.textMuted} />
+                        </View>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
                           <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                             Daily avg: {Math.round(avgPlant)}g plant · {Math.round(avgAnimal)}g animal
@@ -2366,13 +2426,60 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>Plant</Text>
                           <Text style={{ fontSize: 9, color: tc.primary, fontWeight: '700' }}>Animal</Text>
                         </View>
-                        {/* Framed as a dietary-variety signal, not a
-                            moral judgement — some users thrive on
-                            higher-animal diets. */}
-                        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
-                          Mixing in plant proteins adds fiber and plant diversity. Aim for a mix that works for you.
-                        </Text>
-                      </View>
+                        {proteinBreakdownExpanded && (
+                          <View style={{ marginTop: 8 }}>
+                            {proteinBreakdownLoading ? (
+                              <ActivityIndicator size="small" color={tc.primary} style={{ marginVertical: 8 }} />
+                            ) : proteinBreakdown ? (
+                              <>
+                                {proteinBreakdown.plant.length > 0 && (
+                                  <View style={{ marginBottom: 6 }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '700', color: '#22C55E', marginBottom: 3 }}>Plant sources (today)</Text>
+                                    {proteinBreakdown.plant.map((f, i) => (
+                                      <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
+                                        <Text style={{ fontSize: 11, color: tc.textPrimary }}>{f.name}</Text>
+                                        <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{f.protein_g}g</Text>
+                                      </View>
+                                    ))}
+                                  </View>
+                                )}
+                                {proteinBreakdown.animal.length > 0 && (
+                                  <View style={{ marginBottom: 6 }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '700', color: tc.primary, marginBottom: 3 }}>Animal sources (today)</Text>
+                                    {proteinBreakdown.animal.map((f, i) => (
+                                      <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
+                                        <Text style={{ fontSize: 11, color: tc.textPrimary }}>{f.name}</Text>
+                                        <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{f.protein_g}g</Text>
+                                      </View>
+                                    ))}
+                                  </View>
+                                )}
+                                {proteinBreakdown.unclassified.length > 0 && (
+                                  <View style={{ marginBottom: 6 }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, marginBottom: 3 }}>Unclassified</Text>
+                                    {proteinBreakdown.unclassified.map((f, i) => (
+                                      <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
+                                        <Text style={{ fontSize: 11, color: tc.textPrimary }}>{f.name}</Text>
+                                        <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{f.protein_g}g</Text>
+                                      </View>
+                                    ))}
+                                  </View>
+                                )}
+                                {proteinBreakdown.plant.length === 0 && proteinBreakdown.animal.length === 0 && (
+                                  <Text style={{ fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}>No meals logged today yet.</Text>
+                                )}
+                              </>
+                            ) : (
+                              <Text style={{ fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}>Could not load breakdown.</Text>
+                            )}
+                          </View>
+                        )}
+                        {!proteinBreakdownExpanded && (
+                          <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
+                            Tap to see contributing foods.
+                          </Text>
+                        )}
+                      </TouchableOpacity>
                     );
                   })()}
 
@@ -2867,9 +2974,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   const updated = await saveWeightEntry(val, 'manual');
                   setWeightEntries(updated);
                   setWeightInputVisible(false);
-                  // Sync to profile so macros/goal progress update too
                   if (onUpdateWeight) onUpdateWeight(val);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                  if (authToken) {
+                    import('../services/api').then(({ saveWeightEntryAPI }) =>
+                      saveWeightEntryAPI(authToken, new Date().toISOString().slice(0, 10), val, 'manual').catch(() => null)
+                    );
+                  }
                 }}>
                 <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>Save</Text>
               </TouchableOpacity>

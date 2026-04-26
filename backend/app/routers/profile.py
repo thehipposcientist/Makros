@@ -9,6 +9,7 @@ from app.models import (
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
     UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate,
     CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
+    WeightEntry,
 )
 from app.auth import get_current_user
 
@@ -870,3 +871,84 @@ def adaptive_macros(
         "reason": rec.reason,
         "goal_bucket": rec.goal_bucket,
     }
+
+
+# ─── Weight Entries ───────────────────────────────────────────────────────────
+
+class WeightEntryBody(BaseModel):
+    date: str
+    weight_lbs: float
+    source: str = "manual"
+
+
+@router.get("/weight-entries")
+def list_weight_entries(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    rows = db.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == current_user.id)
+        .order_by(WeightEntry.entry_date)
+    ).all()
+    return [{"date": r.entry_date.isoformat(), "weight_lbs": r.weight_lbs, "source": r.source} for r in rows]
+
+
+@router.post("/weight-entries", status_code=201)
+def save_weight_entry(
+    body: WeightEntryBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    from datetime import date as _d
+    d = _d.fromisoformat(body.date)
+    existing = db.exec(
+        select(WeightEntry).where(
+            WeightEntry.user_id == current_user.id,
+            WeightEntry.entry_date == d,
+        )
+    ).first()
+    if existing:
+        existing.weight_lbs = body.weight_lbs
+        existing.source = body.source
+        db.add(existing)
+    else:
+        db.add(WeightEntry(
+            user_id=current_user.id,
+            entry_date=d,
+            weight_lbs=body.weight_lbs,
+            source=body.source,
+        ))
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.post("/weight-entries/sync", status_code=200)
+def sync_weight_entries(
+    entries: list[WeightEntryBody],
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Bulk upsert from client's local weight history."""
+    from datetime import date as _d
+    for e in entries:
+        d = _d.fromisoformat(e.date)
+        existing = db.exec(
+            select(WeightEntry).where(
+                WeightEntry.user_id == current_user.id,
+                WeightEntry.entry_date == d,
+            )
+        ).first()
+        if existing:
+            existing.weight_lbs = e.weight_lbs
+            existing.source = e.source
+            db.add(existing)
+        else:
+            db.add(WeightEntry(
+                user_id=current_user.id,
+                entry_date=d,
+                weight_lbs=e.weight_lbs,
+                source=e.source,
+            ))
+    db.commit()
+    return {"synced": len(entries)}

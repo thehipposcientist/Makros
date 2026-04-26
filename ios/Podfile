@@ -1,15 +1,3 @@
-# Xcode 26 writes .pbxproj files with objectVersion 70. xcodeproj 1.27.0
-# (which CocoaPods 1.16.x bundles) raises ArgumentError on unknown object
-# versions. Patch the lookup table at load time so `pod install` proceeds.
-# Drop once cocoapods/xcodeproj > 1.27.0 ships native support and is in PATH.
-require 'xcodeproj'
-unless Xcodeproj::Constants::COMPATIBILITY_VERSION_BY_OBJECT_VERSION.key?(70)
-  patched = Xcodeproj::Constants::COMPATIBILITY_VERSION_BY_OBJECT_VERSION.dup
-  patched[70] = 'Xcode 14.0'
-  Xcodeproj::Constants.send(:remove_const, :COMPATIBILITY_VERSION_BY_OBJECT_VERSION)
-  Xcodeproj::Constants.const_set(:COMPATIBILITY_VERSION_BY_OBJECT_VERSION, patched.freeze)
-end
-
 require File.join(File.dirname(`node --print "require.resolve('expo/package.json')"`), "scripts/autolinking")
 require File.join(File.dirname(`node --print "require.resolve('react-native/package.json')"`), "scripts/react_native_pods")
 

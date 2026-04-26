@@ -442,6 +442,17 @@ class BodyScan(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
+class WeightEntry(SQLModel, table=True):
+    __tablename__ = "weight_entries"
+    __table_args__ = (UniqueConstraint("user_id", "entry_date", name="uq_weight_entry_user_date"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    entry_date: date = Field(index=True)
+    weight_lbs: float
+    source: str = Field(default="manual")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class AIDecision(SQLModel, table=True):
     """Structured record of every AI coaching decision. Replaces prose chat history in payloads."""
     __tablename__ = "ai_decisions"

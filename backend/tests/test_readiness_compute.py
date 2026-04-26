@@ -438,6 +438,61 @@ def test_three_health_pillars_clears_gate_with_room():
     assert r.score > 0
 
 
+def test_sleep_hours_fallback_when_no_sleep_score():
+    """When no SleepLog and no sleep score, avg_sleep_hours should
+    derive a sleep score so the sleep pillar isn't missing."""
+    print("\n[test] readiness: avg_sleep_hours fallback derives sleep score")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(
+        s, u.id,
+        avg_sleep_hours=7.5,
+        avg_hrv_ms=55,
+    )
+    assert "sleep" not in r.missing, f"sleep should be present via hours fallback, missing={r.missing}"
+    assert r.label != "—", f"2+ health pillars should clear gate, got {r.label!r}"
+    assert r.score > 0
+
+
+def test_sleep_hours_fallback_various_durations():
+    """Different sleep durations map to expected score ranges."""
+    print("\n[test] readiness: sleep hours fallback tiers")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    # 8h = 90, 7h = 80, 6h = 50, 4h = 15
+    for hours, expected_min in [(8.0, 85), (7.0, 75), (6.0, 45), (4.0, 10)]:
+        r = compute_readiness(s, u.id, avg_sleep_hours=hours, avg_hrv_ms=60)
+        sleep_factor = next((f for f in r.factors if f.label == "Sleep"), None)
+        assert sleep_factor is not None, f"Sleep factor missing for {hours}h"
+        assert sleep_factor.value >= expected_min, \
+            f"{hours}h sleep: expected value >= {expected_min}, got {sleep_factor.value}"
+
+
+def test_sleep_score_takes_priority_over_hours():
+    """When both sleep_score and hours are provided, the explicit
+    score should win — hours are only a fallback."""
+    print("\n[test] readiness: explicit sleep score overrides hours fallback")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r_score = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=40,
+        avg_sleep_hours=9.0,
+        avg_hrv_ms=60,
+    )
+    r_hours = compute_readiness(
+        s, u.id,
+        avg_sleep_hours=9.0,
+        avg_hrv_ms=60,
+    )
+    # With explicit score=40, sleep should be worse than the 9h fallback
+    score_factor = next((f for f in r_score.factors if f.label == "Sleep"), None)
+    hours_factor = next((f for f in r_hours.factors if f.label == "Sleep"), None)
+    assert score_factor is not None and hours_factor is not None
+    assert score_factor.value < hours_factor.value, \
+        f"explicit score=40 ({score_factor.value}) should be lower than 9h hours ({hours_factor.value})"
+
+
 if __name__ == "__main__":
     import sys
     failed = []

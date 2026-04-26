@@ -2503,6 +2503,61 @@ export async function scanBody(
 }
 
 
+// ─── Weight Entries ──────────────────────────────────────────────────────────
+
+export interface WeightEntryAPI {
+  date: string;
+  weight_lbs: number;
+  source: string;
+}
+
+export async function getWeightEntries(token: string): Promise<WeightEntryAPI[]> {
+  return request<WeightEntryAPI[]>('/profile/weight-entries', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function saveWeightEntryAPI(token: string, date: string, weightLbs: number, source = 'manual'): Promise<void> {
+  await request('/profile/weight-entries', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ date, weight_lbs: weightLbs, source }),
+  });
+}
+
+export async function syncWeightEntries(token: string, entries: WeightEntryAPI[]): Promise<void> {
+  await request('/profile/weight-entries/sync', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(entries),
+  });
+}
+
+// ─── Body Scan History ──────────────────────────────────────────────────────
+
+export interface BodyScanHistoryItem {
+  id: number;
+  scan_date: string;
+  body_fat_pct: number | null;
+  body_fat_range: string | null;
+  muscle_mass: string | null;
+  category: string | null;
+  strengths: string[];
+  improvements: string[];
+  assessment: string | null;
+  disclaimer: string | null;
+  weight_lbs: number | null;
+  created_at: string;
+}
+
+export async function getBodyScanHistory(token: string): Promise<BodyScanHistoryItem[]> {
+  return request<BodyScanHistoryItem[]>('/ai/body-scans', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // ─── Saved Meals ─────────────────────────────────────────────────────────────
 
 export type SavedMealItem = {

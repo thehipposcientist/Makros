@@ -81,10 +81,14 @@ export interface ImportCandidate {
   distanceMiles?: number | null;
 }
 
-// Build a stable id from the HKWorkout start time. If the user imports twice,
-// we match by this to avoid duplicates.
+// Build a stable id from the HKWorkout start time, rounded to the nearest
+// minute. AH can return slightly different millisecond offsets between
+// fetches for the same workout, so rounding prevents dismissed workouts
+// from reappearing with a new ID.
 function externalIdFor(w: WorkoutDetail): string {
-  return `hk_${new Date(w.startDate).getTime()}`;
+  const ms = new Date(w.startDate).getTime();
+  const roundedMin = Math.round(ms / 60000) * 60000;
+  return `hk_${roundedMin}`;
 }
 
 // ±5 min buffer on each end of a local session's window. Anything Apple

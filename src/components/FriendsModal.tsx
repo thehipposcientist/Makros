@@ -62,15 +62,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName }:
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, l, d] = await Promise.all([
+      const [m, l, d] = await Promise.allSettled([
         getSocialMe(authToken),
         listFriends(authToken),
         getSocialDigest(authToken),
       ]);
-      setMe(m);
-      setList(l);
-      setDigest(d);
-    } catch (e) {
+      if (m.status === 'fulfilled') setMe(m.value);
+      if (l.status === 'fulfilled') setList(l.value);
+      if (d.status === 'fulfilled') setDigest(d.value);
+    } catch {
       // silent — user sees empty state
     } finally {
       setLoading(false);

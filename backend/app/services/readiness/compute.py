@@ -235,11 +235,6 @@ def compute_readiness(
     # ── Sleep (W_SLEEP) ────────────────────────────────────────────
     sleep_score = last_night_sleep_score
     if sleep_score is None:
-        # Date-scoped to LAST NIGHT specifically. Was the source of the
-        # missed-watch bug: an unscoped order_by(date.desc()).first()
-        # would return a row from 3 nights ago and treat it as today's
-        # sleep. If the watch wasn't worn last night, the row simply
-        # doesn't exist and sleep falls into `missing` where it belongs.
         last_night = date.today() - timedelta(days=1)
         last = db.exec(
             select(SleepLog)
@@ -248,6 +243,22 @@ def compute_readiness(
         ).first()
         if last and last.score is not None:
             sleep_score = int(last.score)
+    if sleep_score is None and avg_sleep_hours is not None and avg_sleep_hours > 0:
+        # Derive a rough score from hours when no SleepLog exists.
+        # 7-9h = good, <6h = poor, >9h = diminishing returns.
+        h = avg_sleep_hours
+        if h >= 8.0:
+            sleep_score = 90
+        elif h >= 7.0:
+            sleep_score = 80
+        elif h >= 6.5:
+            sleep_score = 65
+        elif h >= 6.0:
+            sleep_score = 50
+        elif h >= 5.0:
+            sleep_score = 30
+        else:
+            sleep_score = 15
     pts, detail = _score_sleep(sleep_score)
     if pts is not None:
         pillar_scores["sleep"] = (pts, W_SLEEP)
