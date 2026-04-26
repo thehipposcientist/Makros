@@ -409,6 +409,183 @@ def test_user_scenario_back_to_back_legs_after_swap():
                 f"back-to-back {fams[i]} at days {i}+{i+1}: {new_focuses}"
 
 
+# ── Upper/Lower split pin behavior ─────────────────────────────────
+
+def test_pin_upper_on_upper_lower_plan_is_swap():
+    """Pin day 1 (Lower) → Upper on a U/L plan. Should swap within split."""
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=1, pin_focus="Upper", preferred_split="upper_lower")
+    assert d.action in ("swap", "rotate"), f"expected swap/rotate, got {d.action}"
+
+
+def test_pin_lower_on_upper_lower_plan_is_swap():
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Lower", preferred_split="upper_lower")
+    assert d.action in ("swap", "rotate"), f"expected swap/rotate, got {d.action}"
+
+
+def test_pin_upper_on_upper_is_noop():
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Upper", preferred_split="upper_lower")
+    assert d.action == "noop"
+
+
+def test_pin_lower_on_lower_is_noop():
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=1, pin_focus="Lower", preferred_split="upper_lower")
+    assert d.action == "noop"
+
+
+def test_pin_upper_plus_cardio_on_ul_plan():
+    """Pin Upper + Cardio on a U/L plan day that's currently Lower."""
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=1, pin_focus="Upper + Cardio", preferred_split="upper_lower")
+    assert d.wants_cardio_finisher is True
+    assert d.action in ("swap", "rotate")
+
+
+def test_pin_chest_on_upper_lower_triggers_regen_to_bro():
+    """Pin Chest on U/L plan should regen to bro split."""
+    days = _days("Upper", "Lower", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Chest", preferred_split="upper_lower")
+    assert d.action == "regen"
+    assert d.regen_split == "bro"
+
+
+# ── Full Body split pin behavior ──────────────────────────────────
+
+def test_pin_full_body_on_full_body_is_noop():
+    days = _days("Full Body", "Full Body", "Full Body")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Full Body", preferred_split="full_body")
+    assert d.action == "noop"
+
+
+def test_pin_recovery_on_full_body_plan():
+    days = _days("Full Body", "Full Body", "Full Body")
+    d = decide_pin(days, pin_day_index=1, pin_focus="Recovery", preferred_split="full_body")
+    assert d.action == "replace_day"
+    assert d.day_kind == "recovery"
+
+
+def test_pin_push_on_full_body_triggers_regen_to_ppl():
+    days = _days("Full Body", "Full Body", "Full Body")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Push", preferred_split="full_body")
+    assert d.action == "regen"
+    assert d.regen_split == "ppl"
+
+
+def test_pin_full_body_plus_cardio_on_full_body_plan():
+    days = _days("Full Body", "Full Body", "Full Body")
+    d = decide_pin(days, pin_day_index=1, pin_focus="Full Body + Cardio", preferred_split="full_body")
+    assert d.wants_cardio_finisher is True
+
+
+# ── Bro split: all focuses ────────────────────────────────────────
+
+def test_pin_back_on_bro_plan():
+    from app.services.workout.switch_day import apply_rotate, apply_bro_canonical_swap
+    days = _days("Chest", "Back", "Shoulders", "Arms", "Legs")
+    d = decide_pin(days, pin_day_index=4, pin_focus="Back", preferred_split="bro")
+    assert d.action in ("rotate", "bro_canonical_swap", "noop", "swap")
+    if d.action == "rotate":
+        apply_rotate(days, d)
+    elif d.action == "bro_canonical_swap":
+        apply_bro_canonical_swap(days, d)
+    elif d.action == "swap":
+        apply_swap(days, d)
+    assert _focuses(days)[4] == "Back"
+
+
+def test_pin_shoulders_on_bro_plan():
+    from app.services.workout.switch_day import apply_rotate, apply_bro_canonical_swap
+    days = _days("Chest", "Back", "Shoulders", "Arms", "Legs")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Shoulders", preferred_split="bro")
+    assert d.action in ("rotate", "bro_canonical_swap", "noop", "swap")
+    if d.action == "rotate":
+        apply_rotate(days, d)
+    elif d.action == "bro_canonical_swap":
+        apply_bro_canonical_swap(days, d)
+    elif d.action == "swap":
+        apply_swap(days, d)
+    assert _focuses(days)[0] == "Shoulders"
+
+
+def test_pin_arms_on_bro_plan():
+    from app.services.workout.switch_day import apply_rotate, apply_bro_canonical_swap
+    days = _days("Chest", "Back", "Shoulders", "Arms", "Legs")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Arms", preferred_split="bro")
+    assert d.action in ("rotate", "bro_canonical_swap", "noop", "swap")
+    if d.action == "rotate":
+        apply_rotate(days, d)
+    elif d.action == "bro_canonical_swap":
+        apply_bro_canonical_swap(days, d)
+    elif d.action == "swap":
+        apply_swap(days, d)
+    assert _focuses(days)[0] == "Arms"
+
+
+def test_pin_push_on_bro_triggers_regen_to_ppl():
+    """Pin Push on bro plan → out of split → regen to PPL."""
+    days = _days("Chest", "Back", "Shoulders", "Arms", "Legs")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Push", preferred_split="bro")
+    assert d.action == "regen"
+    assert d.regen_split == "ppl"
+
+
+# ── PPL+UL hybrid split ──────────────────────────────────────────
+
+def test_pin_upper_on_ppl_ul_hybrid_is_in_split():
+    """PPL+UL hybrid contains both Push/Pull/Legs and Upper/Lower."""
+    days = _days("Push", "Pull", "Legs", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Upper", preferred_split="ppl_upper_lower")
+    assert d.action in ("swap", "rotate"), f"Upper should be in-split for ppl_ul, got {d.action}"
+
+
+def test_pin_push_on_ppl_ul_hybrid_is_in_split():
+    days = _days("Push", "Pull", "Legs", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=3, pin_focus="Push", preferred_split="ppl_upper_lower")
+    assert d.action in ("swap", "rotate"), f"Push should be in-split for ppl_ul, got {d.action}"
+
+
+def test_pin_chest_on_ppl_ul_triggers_regen_to_bro():
+    """Bro focus on PPL+UL → out of split → regen."""
+    days = _days("Push", "Pull", "Legs", "Upper", "Lower")
+    d = decide_pin(days, pin_day_index=0, pin_focus="Chest", preferred_split="ppl_upper_lower")
+    assert d.action == "regen"
+    assert d.regen_split == "bro"
+
+
+# ── SPLIT_FOR_FOCUS completeness ──────────────────────────────────
+
+def test_split_for_focus_maps_to_known_splits():
+    """Every value in SPLIT_FOR_FOCUS must be a split the planner knows."""
+    known_splits = {"ppl", "upper_lower", "full_body", "ppl_upper_lower", "bro"}
+    for focus, split in SPLIT_FOR_FOCUS.items():
+        assert split in known_splits, \
+            f"SPLIT_FOR_FOCUS['{focus}'] = '{split}' not in known splits"
+
+
+def test_every_split_has_at_least_one_focus_in_map():
+    """Every known split should have at least one focus that maps to it,
+    so the out-of-split regen path can produce that split."""
+    known_splits = {"ppl", "upper_lower", "full_body", "bro"}
+    mapped_splits = set(SPLIT_FOR_FOCUS.values())
+    for s in known_splits:
+        assert s in mapped_splits, \
+            f"split '{s}' has no focus mapping in SPLIT_FOR_FOCUS"
+
+
+def test_non_lifting_focuses_rejected_by_swap_path():
+    """Non-lifting focuses (Recovery, Cardio, Mobility) always route to
+    replace_day, not swap/rotate, regardless of split."""
+    for split in ["ppl", "upper_lower", "full_body", "bro"]:
+        days = _days("Push", "Pull", "Legs")
+        for focus in ["Recovery", "Mobility", "Cardio"]:
+            d = decide_pin(days, pin_day_index=0, pin_focus=focus, preferred_split=split)
+            assert d.action == "replace_day", \
+                f"{focus} on {split} should be replace_day, got {d.action}"
+
+
 if __name__ == "__main__":
     import sys
     failed = []
