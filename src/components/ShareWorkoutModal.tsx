@@ -10,6 +10,8 @@ import {
   Alert,
   ActivityIndicator,
   StyleSheet,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -85,130 +87,137 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
-      <View style={s.backdrop}>
-        <View style={s.sheet}>
-          {/* Header */}
-          <View style={s.header}>
-            <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <Ionicons name="close" size={22} color={c.textSecondary} />
-            </TouchableOpacity>
-            <Text style={s.title}>Share Workout</Text>
-            <TouchableOpacity
-              style={[s.postBtn, posting && { opacity: 0.5 }]}
-              onPress={handlePost}
-              disabled={posting}
-              activeOpacity={0.85}
-            >
-              {posting ? (
-                <ActivityIndicator size="small" color="#000" />
-              ) : (
-                <Text style={s.postBtnText}>Post</Text>
-              )}
-            </TouchableOpacity>
-          </View>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={s.backdrop}>
+          <View style={s.sheet}>
+            {/* Header */}
+            <View style={s.header}>
+              <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={22} color={c.textSecondary} />
+              </TouchableOpacity>
+              <Text style={s.title}>Share Workout</Text>
+              <TouchableOpacity
+                style={[s.postBtn, posting && { opacity: 0.5 }]}
+                onPress={handlePost}
+                disabled={posting}
+                activeOpacity={0.85}
+              >
+                {posting ? (
+                  <ActivityIndicator size="small" color="#000" />
+                ) : (
+                  <Text style={s.postBtnText}>Post</Text>
+                )}
+              </TouchableOpacity>
+            </View>
 
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
-            {/* Workout summary card */}
-            <View style={s.summaryCard}>
-              <View style={s.summaryHeader}>
-                <Ionicons name="barbell-outline" size={18} color={c.primary} />
-                <Text style={s.summaryFocus}>{workoutSummary.focus} Day</Text>
-                {workoutSummary.training_rating && (
-                  <View style={[s.ratingBadge, { backgroundColor: c.primary + '22' }]}>
-                    <Text style={[s.ratingText, { color: c.primary }]}>{workoutSummary.training_rating}</Text>
+            <ScrollView
+              style={{ flex: 1 }}
+              contentContainerStyle={{ padding: 16, paddingBottom: 60 }}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+            >
+              {/* Caption — first so it's always visible */}
+              <TextInput
+                style={s.captionInput}
+                placeholder="Add a caption..."
+                placeholderTextColor={c.textMuted}
+                multiline
+                maxLength={500}
+                value={caption}
+                onChangeText={setCaption}
+                returnKeyType="default"
+              />
+
+              {/* Photo */}
+              {photoUri ? (
+                <View style={s.photoContainer}>
+                  <Image source={{ uri: photoUri }} style={s.photo} resizeMode="cover" />
+                  <TouchableOpacity
+                    style={s.photoRemove}
+                    onPress={() => { setPhotoBase64(null); setPhotoUri(null); }}
+                  >
+                    <Ionicons name="close-circle" size={24} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={s.photoActions}>
+                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('camera')} activeOpacity={0.85}>
+                    <Ionicons name="camera-outline" size={20} color={c.textSecondary} />
+                    <Text style={s.photoBtnText}>Camera</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('library')} activeOpacity={0.85}>
+                    <Ionicons name="image-outline" size={20} color={c.textSecondary} />
+                    <Text style={s.photoBtnText}>Gallery</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Workout summary card */}
+              <View style={s.summaryCard}>
+                <View style={s.summaryHeader}>
+                  <Ionicons name="barbell-outline" size={18} color={c.primary} />
+                  <Text style={s.summaryFocus}>{workoutSummary.focus} Day</Text>
+                  {workoutSummary.training_rating && (
+                    <View style={[s.ratingBadge, { backgroundColor: c.primary + '22' }]}>
+                      <Text style={[s.ratingText, { color: c.primary }]}>{workoutSummary.training_rating}</Text>
+                    </View>
+                  )}
+                </View>
+                <View style={s.statsRow}>
+                  <View style={s.stat}>
+                    <Text style={s.statValue}>{dur}</Text>
+                    <Text style={s.statLabel}>min</Text>
+                  </View>
+                  <View style={[s.statDivider, { backgroundColor: c.border }]} />
+                  <View style={s.stat}>
+                    <Text style={s.statValue}>{workoutSummary.total_sets}</Text>
+                    <Text style={s.statLabel}>sets</Text>
+                  </View>
+                  <View style={[s.statDivider, { backgroundColor: c.border }]} />
+                  <View style={s.stat}>
+                    <Text style={s.statValue}>{exs.length}</Text>
+                    <Text style={s.statLabel}>exercises</Text>
+                  </View>
+                  {workoutSummary.training_score != null && (
+                    <>
+                      <View style={[s.statDivider, { backgroundColor: c.border }]} />
+                      <View style={s.stat}>
+                        <Text style={s.statValue}>{workoutSummary.training_score}</Text>
+                        <Text style={s.statLabel}>score</Text>
+                      </View>
+                    </>
+                  )}
+                </View>
+
+                {exs.length > 0 && (
+                  <View style={s.exerciseList}>
+                    {exs.map((ex, i) => {
+                      const bestSet = ex.sets.reduce(
+                        (best, set) => (set.weight_lbs > best.weight_lbs ? set : best),
+                        ex.sets[0] ?? { reps: 0, weight_lbs: 0 },
+                      );
+                      return (
+                        <View key={i} style={s.exerciseRow}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={s.exerciseName}>{ex.name}</Text>
+                            {ex.equipment ? (
+                              <Text style={s.exerciseEquip}>{ex.equipment}</Text>
+                            ) : null}
+                          </View>
+                          <Text style={s.exerciseSets}>
+                            {ex.sets.length}x{bestSet.reps}
+                            {bestSet.weight_lbs > 0 ? ` @ ${bestSet.weight_lbs} lbs` : ''}
+                          </Text>
+                        </View>
+                      );
+                    })}
                   </View>
                 )}
               </View>
-              <View style={s.statsRow}>
-                <View style={s.stat}>
-                  <Text style={s.statValue}>{dur}</Text>
-                  <Text style={s.statLabel}>min</Text>
-                </View>
-                <View style={[s.statDivider, { backgroundColor: c.border }]} />
-                <View style={s.stat}>
-                  <Text style={s.statValue}>{workoutSummary.total_sets}</Text>
-                  <Text style={s.statLabel}>sets</Text>
-                </View>
-                <View style={[s.statDivider, { backgroundColor: c.border }]} />
-                <View style={s.stat}>
-                  <Text style={s.statValue}>{exs.length}</Text>
-                  <Text style={s.statLabel}>exercises</Text>
-                </View>
-                {workoutSummary.training_score != null && (
-                  <>
-                    <View style={[s.statDivider, { backgroundColor: c.border }]} />
-                    <View style={s.stat}>
-                      <Text style={s.statValue}>{workoutSummary.training_score}</Text>
-                      <Text style={s.statLabel}>score</Text>
-                    </View>
-                  </>
-                )}
-              </View>
-
-              {/* Exercise list */}
-              {exs.length > 0 && (
-                <View style={s.exerciseList}>
-                  {exs.map((ex, i) => {
-                    const bestSet = ex.sets.reduce(
-                      (best, set) => (set.weight_lbs > best.weight_lbs ? set : best),
-                      ex.sets[0] ?? { reps: 0, weight_lbs: 0 },
-                    );
-                    return (
-                      <View key={i} style={s.exerciseRow}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={s.exerciseName}>{ex.name}</Text>
-                          {ex.equipment ? (
-                            <Text style={s.exerciseEquip}>{ex.equipment}</Text>
-                          ) : null}
-                        </View>
-                        <Text style={s.exerciseSets}>
-                          {ex.sets.length}x{bestSet.reps}
-                          {bestSet.weight_lbs > 0 ? ` @ ${bestSet.weight_lbs} lbs` : ''}
-                        </Text>
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
-            </View>
-
-            {/* Photo */}
-            {photoUri ? (
-              <View style={s.photoContainer}>
-                <Image source={{ uri: photoUri }} style={s.photo} resizeMode="cover" />
-                <TouchableOpacity
-                  style={s.photoRemove}
-                  onPress={() => { setPhotoBase64(null); setPhotoUri(null); }}
-                >
-                  <Ionicons name="close-circle" size={24} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={s.photoActions}>
-                <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('camera')} activeOpacity={0.85}>
-                  <Ionicons name="camera-outline" size={20} color={c.textSecondary} />
-                  <Text style={s.photoBtnText}>Camera</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('library')} activeOpacity={0.85}>
-                  <Ionicons name="image-outline" size={20} color={c.textSecondary} />
-                  <Text style={s.photoBtnText}>Gallery</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {/* Caption */}
-            <TextInput
-              style={s.captionInput}
-              placeholder="Add a caption..."
-              placeholderTextColor={c.textMuted}
-              multiline
-              maxLength={500}
-              value={caption}
-              onChangeText={setCaption}
-            />
-          </ScrollView>
+            </ScrollView>
+          </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -233,10 +242,17 @@ const mk = (c: ReturnType<typeof getTheme>['colors']) =>
       borderRadius: radius.full, minWidth: 64, alignItems: 'center',
     },
     postBtnText: { fontSize: 14, fontWeight: '800', color: '#000' },
+    captionInput: {
+      fontSize: 15, color: c.textPrimary,
+      backgroundColor: c.surface,
+      borderColor: c.border, borderWidth: 1,
+      borderRadius: radius.md, padding: 14,
+      minHeight: 80, marginBottom: 16,
+    },
     summaryCard: {
       backgroundColor: c.surface,
       borderColor: c.border, borderWidth: 1,
-      borderRadius: radius.lg, padding: 16, marginBottom: 16,
+      borderRadius: radius.lg, padding: 16,
     },
     summaryHeader: {
       flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14,
@@ -275,10 +291,4 @@ const mk = (c: ReturnType<typeof getTheme>['colors']) =>
       borderRadius: radius.md,
     },
     photoBtnText: { fontSize: 13, fontWeight: '600', color: c.textSecondary },
-    captionInput: {
-      fontSize: 15, color: c.textPrimary,
-      backgroundColor: c.surface, borderColor: c.border, borderWidth: 1,
-      borderRadius: radius.md, padding: 14,
-      minHeight: 80, textAlignVertical: 'top',
-    },
   });

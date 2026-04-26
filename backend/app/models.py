@@ -1122,6 +1122,15 @@ class ActivityFeedItem(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
+class FeedLike(SQLModel, table=True):
+    __tablename__ = "feed_likes"
+    __table_args__ = (UniqueConstraint("user_id", "feed_item_id", name="uq_feed_like_user_item"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    feed_item_id: int = Field(foreign_key="activity_feed.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 class UserCreate(SQLModel):

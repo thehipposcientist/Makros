@@ -22,7 +22,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getSocialFeed, type FeedItem } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getSocialFeed, deleteSocialPost, toggleFeedLike, type FeedItem } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -1286,6 +1286,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [socialSubTab, setSocialSubTab] = useState<'feed' | 'friends' | 'challenges'>('feed');
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [feedLoading, setFeedLoading] = useState(false);
+  const [feedFilter, setFeedFilter] = useState<'all' | 'mine'>('all');
   const [shareWorkoutData, setShareWorkoutData] = useState<import('../services/api').WorkoutPostSummary | null>(null);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
@@ -1377,7 +1378,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     if (activeTab === 'friends' && authToken) {
       setFeedLoading(true);
-      getSocialFeed(authToken).then(r => setFeedItems(r.items)).catch(() => {}).finally(() => setFeedLoading(false));
+      getSocialFeed(authToken).then(r => { console.log('[social-feed] loaded', r.items.length, 'items'); setFeedItems(r.items); }).catch(e => console.warn('[social-feed] fetch failed', e)).finally(() => setFeedLoading(false));
     }
     // Auto-close the inline exercise library when leaving the workout tab.
     if (activeTab !== 'workout') {
@@ -6851,25 +6852,77 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <ErrorBoundary>
         <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
           {/* Sub-tab bar */}
-          <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4, gap: 8 }}>
-            <SubTabBtn label="Feed"       active={socialSubTab === 'feed'}       tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('feed')} />
-            <SubTabBtn label="Friends"    active={socialSubTab === 'friends'}    tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('friends')} />
-            <SubTabBtn label="Challenges" active={socialSubTab === 'challenges'} tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('challenges')} />
+          <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingTop: 10, paddingBottom: 6, gap: 6 }}>
+            {([
+              { key: 'feed' as const, label: 'Feed', icon: 'newspaper-outline' as const },
+              { key: 'friends' as const, label: 'Friends', icon: 'people-outline' as const },
+              { key: 'challenges' as const, label: 'Challenges', icon: 'trophy-outline' as const },
+            ]).map(tab => {
+              const active = socialSubTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  onPress={() => setSocialSubTab(tab.key)}
+                  style={{
+                    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                    gap: 6, paddingVertical: 10, borderRadius: 12,
+                    backgroundColor: active ? themeColors.primary + '15' : 'transparent',
+                    borderWidth: 1,
+                    borderColor: active ? themeColors.primary + '30' : themeColors.border,
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name={tab.icon} size={16} color={active ? themeColors.primary : themeColors.textMuted} />
+                  <Text style={{ fontSize: 13, fontWeight: active ? '700' : '500', color: active ? themeColors.primary : themeColors.textSecondary }}>
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
-          {socialSubTab === 'feed' && (
+          {socialSubTab === 'feed' && (() => {
+            const filteredFeed = feedFilter === 'mine'
+              ? feedItems.filter(item => item.username === userProfile.username)
+              : feedItems;
+            return (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
+              {/* Filter chips */}
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                {(['all', 'mine'] as const).map(f => {
+                  const active = feedFilter === f;
+                  return (
+                    <TouchableOpacity
+                      key={f}
+                      onPress={() => setFeedFilter(f)}
+                      style={{
+                        paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
+                        backgroundColor: active ? themeColors.primary + '18' : themeColors.surface,
+                        borderWidth: 1,
+                        borderColor: active ? themeColors.primary + '44' : themeColors.border,
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: active ? '700' : '500', color: active ? themeColors.primary : themeColors.textSecondary }}>
+                        {f === 'all' ? 'All Activity' : 'Your Posts'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
               {feedLoading && feedItems.length === 0 ? (
                 <View style={{ padding: 24, alignItems: 'center' }}><ActivityIndicator color={themeColors.primary} /></View>
-              ) : feedItems.length === 0 ? (
+              ) : filteredFeed.length === 0 ? (
                 <View style={{ padding: 32, alignItems: 'center' }}>
-                  <Ionicons name="newspaper-outline" size={40} color={themeColors.textMuted} />
+                  <Ionicons name={feedFilter === 'mine' ? 'create-outline' : 'newspaper-outline'} size={40} color={themeColors.textMuted} />
                   <Text style={{ color: themeColors.textSecondary, marginTop: 12, fontSize: 14, textAlign: 'center' }}>
-                    No activity yet. Complete a workout or add friends to see updates here.
+                    {feedFilter === 'mine'
+                      ? 'No posts yet. Share a workout from your history or after completing one.'
+                      : 'No activity yet. Complete a workout or add friends to see updates here.'}
                   </Text>
                 </View>
               ) : (
-                feedItems.map(item => {
+                filteredFeed.map(item => {
                   const isMe = item.username === userProfile.username;
                   const who = isMe ? 'You' : (item.display_name || item.username);
                   const isPost = item.event_type === 'workout_post';
@@ -6920,7 +6973,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>{who}</Text>
                           <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{dateStr}</Text>
                         </View>
-                        <Ionicons name="barbell-outline" size={16} color={themeColors.textMuted} />
+                        {isMe && isPost ? (
+                          <TouchableOpacity
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            onPress={() => {
+                              Alert.alert('Delete post?', 'This cannot be undone.', [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Delete', style: 'destructive', onPress: async () => {
+                                  try {
+                                    await deleteSocialPost(authToken, item.id);
+                                    setFeedItems(prev => prev.filter(fi => fi.id !== item.id));
+                                  } catch { Alert.alert('Could not delete'); }
+                                }},
+                              ]);
+                            }}
+                          >
+                            <Ionicons name="ellipsis-horizontal" size={16} color={themeColors.textMuted} />
+                          </TouchableOpacity>
+                        ) : (
+                          <Ionicons name="barbell-outline" size={16} color={themeColors.textMuted} />
+                        )}
                       </View>
 
                       {/* Caption */}
@@ -6975,12 +7047,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           </View>
                         ) : null}
                       </View>
+
+                      {/* Like row */}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingBottom: 10, gap: 14 }}>
+                        <TouchableOpacity
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}
+                          activeOpacity={0.7}
+                          onPress={async () => {
+                            try {
+                              const res = await toggleFeedLike(authToken, item.id);
+                              setFeedItems(prev => prev.map(fi =>
+                                fi.id === item.id
+                                  ? { ...fi, liked_by_me: res.liked, like_count: fi.like_count + (res.liked ? 1 : -1) }
+                                  : fi
+                              ));
+                              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                            } catch {}
+                          }}
+                        >
+                          <Ionicons
+                            name={item.liked_by_me ? 'fitness' : 'fitness-outline'}
+                            size={20}
+                            color={item.liked_by_me ? themeColors.primary : themeColors.textMuted}
+                          />
+                          {item.like_count > 0 && (
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: item.liked_by_me ? themeColors.primary : themeColors.textMuted }}>
+                              {item.like_count}
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
                     </View>
                   );
                 })
               )}
             </ScrollView>
-          )}
+            );
+          })()}
 
           {socialSubTab === 'friends' && (
             <FriendsModal
@@ -8906,7 +9009,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       <ShareWorkoutModal
         visible={!!shareWorkoutData}
         authToken={authToken}
-        onClose={() => { setShareWorkoutData(null); if (activeTab === 'friends') getSocialFeed(authToken).then(r => setFeedItems(r.items)).catch(() => {}); }}
+        onClose={() => { setShareWorkoutData(null); getSocialFeed(authToken).then(r => setFeedItems(r.items)).catch(() => {}); }}
         themeName={userProfile.themePreference}
         workoutSummary={shareWorkoutData}
       />

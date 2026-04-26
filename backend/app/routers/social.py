@@ -13,9 +13,10 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
+from sqlalchemy import func as sa_func
 from app.models import (
     User, UserSocialProfile, Friendship, WeeklyDigestCache, UserGoal,
-    ActivityFeedItem,
+    ActivityFeedItem, FeedLike,
 )
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
@@ -472,6 +473,25 @@ def get_feed(
 
     rows = db.exec(q).all()
 
+    item_ids = [r.id for r in rows]
+    like_counts: dict[int, int] = {}
+    liked_by_me: set[int] = set()
+    if item_ids:
+        count_rows = db.exec(
+            select(FeedLike.feed_item_id, sa_func.count())
+            .where(FeedLike.feed_item_id.in_(item_ids))  # type: ignore[union-attr]
+            .group_by(FeedLike.feed_item_id)
+        ).all()
+        for fid, cnt in count_rows:
+            like_counts[fid] = cnt
+        my_likes = db.exec(
+            select(FeedLike.feed_item_id).where(
+                FeedLike.user_id == current_user.id,
+                FeedLike.feed_item_id.in_(item_ids),  # type: ignore[union-attr]
+            )
+        ).all()
+        liked_by_me = set(my_likes)
+
     user_cache: dict[int, tuple[str, str | None]] = {}
     items: list[dict] = []
     for r in rows:
@@ -491,6 +511,8 @@ def get_feed(
             "event_type": r.event_type,
             "payload": r.payload,
             "created_at": r.created_at.isoformat() if r.created_at else "",
+            "like_count": like_counts.get(r.id, 0),
+            "liked_by_me": r.id in liked_by_me,
         })
     return {"items": items}
 
@@ -542,3 +564,46 @@ def create_post(
     db.commit()
     db.refresh(item)
     return {"ok": True, "id": item.id}
+
+
+@router.delete("/posts/{post_id}")
+def delete_post(
+    post_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    item = db.exec(
+        select(ActivityFeedItem).where(ActivityFeedItem.id == post_id)
+    ).first()
+    if not item or item.user_id != current_user.id:
+        raise HTTPException(404, "post not found")
+    likes = db.exec(select(FeedLike).where(FeedLike.feed_item_id == post_id)).all()
+    for lk in likes:
+        db.delete(lk)
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/feed/{item_id}/like")
+def toggle_like(
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    item = db.exec(select(ActivityFeedItem).where(ActivityFeedItem.id == item_id)).first()
+    if not item:
+        raise HTTPException(404, "item not found")
+    existing = db.exec(
+        select(FeedLike).where(
+            FeedLike.user_id == current_user.id,
+            FeedLike.feed_item_id == item_id,
+        )
+    ).first()
+    if existing:
+        db.delete(existing)
+        db.commit()
+        return {"liked": False}
+    db.add(FeedLike(user_id=current_user.id, feed_item_id=item_id))
+    db.commit()
+    return {"liked": True}

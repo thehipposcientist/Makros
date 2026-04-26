@@ -3175,6 +3175,8 @@ export interface FeedItem {
     workout_summary?: WorkoutPostSummary;
   };
   created_at: string;
+  like_count: number;
+  liked_by_me: boolean;
 }
 
 export async function getSocialFeed(token: string, beforeId?: number): Promise<{ items: FeedItem[] }> {
@@ -3207,6 +3209,20 @@ export async function createSocialPost(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+}
+
+export async function deleteSocialPost(token: string, postId: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/social/posts/${postId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function toggleFeedLike(token: string, itemId: number): Promise<{ liked: boolean }> {
+  return request<{ liked: boolean }>(`/social/feed/${itemId}/like`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
   });
 }
 
