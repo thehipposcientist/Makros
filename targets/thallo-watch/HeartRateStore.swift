@@ -57,39 +57,43 @@ final class HeartRateStore: NSObject, ObservableObject {
 
     func start() {
         guard HKHealthStore.isHealthDataAvailable() else {
+            wlog("[watch-hr] HealthKit unavailable")
             errorMessage = "HealthKit unavailable on this device."
             return
         }
-        // startActivity() before auth is resolved hard-crashes watchOS
-        // (not a catchable error). prewarmAuth() runs on onAppear so
-        // auth is normally resolved by the time the user taps Start.
-        // Check synchronously: if resolved, begin immediately (no async
-        // gap for watchOS to suspend). Only fall back to async request
-        // on the very first launch when auth hasn't been shown yet.
+        if session != nil {
+            wlog("[watch-hr] stale session found — tearing down before new start")
+            session?.end()
+            builder?.discardWorkout()
+            session = nil
+            builder = nil
+        }
         let status = store.authorizationStatus(for: HKObjectType.workoutType())
+        wlog("[watch-hr] auth status=\(status.rawValue) (0=notDetermined, 1=denied, 2=authorized)")
         if status != .notDetermined {
             beginSession()
         } else {
+            wlog("[watch-hr] auth not determined — requesting async")
             let read: Set<HKObjectType> = [
                 HKObjectType.quantityType(forIdentifier: .heartRate)!,
                 HKObjectType.workoutType(),
             ]
             let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
-            store.requestAuthorization(toShare: write, read: read) { [weak self] _, _ in
-                self?.beginSession()
+            store.requestAuthorization(toShare: write, read: read) { [weak self] ok, err in
+                wlog("[watch-hr] auth callback ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
+                DispatchQueue.main.async { self?.beginSession() }
             }
         }
     }
 
     private func beginSession() {
+        wlog("[watch-hr] beginSession — creating HKWorkoutSession")
         let config = HKWorkoutConfiguration()
-        // "traditionalStrengthTraining" maps to the activity type the
-        // iPhone app uses for lift sessions. The watch will log the
-        // workout to Health once `end()` runs.
         config.activityType = .traditionalStrengthTraining
         config.locationType = .indoor
         do {
             let sess = try HKWorkoutSession(healthStore: store, configuration: config)
+            wlog("[watch-hr] session created — calling startActivity")
             let bld = sess.associatedWorkoutBuilder()
             bld.dataSource = HKLiveWorkoutDataSource(healthStore: store, workoutConfiguration: config)
             bld.delegate = self
@@ -98,10 +102,13 @@ final class HeartRateStore: NSObject, ObservableObject {
             self.builder = bld
             let start = Date()
             sess.startActivity(with: start)
-            bld.beginCollection(withStart: start) { [weak self] _, _ in
+            wlog("[watch-hr] startActivity done — calling beginCollection")
+            bld.beginCollection(withStart: start) { [weak self] ok, err in
+                wlog("[watch-hr] beginCollection callback ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
                 DispatchQueue.main.async { self?.running = true }
             }
         } catch {
+            wlog("[watch-hr] HK session FAILED: \(error.localizedDescription)")
             DispatchQueue.main.async { self.errorMessage = error.localizedDescription }
         }
     }
