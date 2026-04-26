@@ -553,6 +553,15 @@ Run via `make test` or `docker exec thallo-backend python -m tests.run_all`.
 - **Pre/post-workout time-aware fueling card** — fires when planned workout is in next 2-3h or just finished. Uses meal `consumed_at` + plan time.
 - **Functional-pattern archetypes** — explicit `HYBRID_KB_COMPLEX`, `HYBRID_CARRY_FOCUS` for users with kettlebells / sled. Today they fall back to circuit hybrids.
 
+### Medium-impact workout enhancements (queued for later)
+- **Tempo prescription** — prescribe eccentric/pause/concentric tempos per exercise (e.g. 3-1-2). Display tempo badge on set cards. Store `tempo` field on ExerciseSet.
+- **Dropsets / Rest-pause / Myo-reps** — advanced set types beyond working/warmup. Detect from `set_type`, auto-log multiple mini-sets within one logged set.
+- **Equipment upgrade recommendations** — track which equipment a user doesn't own that would unlock the most exercises. Show as a "gear to consider" card.
+- **Readiness-based auto-deload** — when readiness score drops below threshold for 3+ days, automatically schedule a deload week (reduced volume, maintained intensity).
+- **In-workout 1RM display** — show current estimated 1RM on the active exercise card based on the set just logged, so users see their progress in real time.
+- **Wave loading / periodization** — multi-week loading patterns (3 weeks ramp + 1 deload). Track which week of the mesocycle the user is in. Display on plan view.
+- **Cycle-phase-aware training adjustments** — `CyclePhaseCard` + `getCycleStatus` already read Apple Health menstrual data and display phase/tip. Next step: pass cycle phase to the backend planner to auto-adjust volume (reduce 10–15% in luteal, push intensity in follicular/ovulation). Wire via `healthDataSummary` → `readiness` → `fatigue` multiplier.
+
 ### UI polish
 - Migrate remaining direct `readHealthSummary` consumers (HomeScreen, ActiveWorkoutScreen) to `getHealthDataSummary` so HK is queried once per session.
 - **Weekly review accept-action wiring**: today the WeeklyCoachingCard's "Apply" button shows a "Got it" alert. Wire each `action.type` to a real plan mutation (e.g. `reduce_muscle_volume` → patch the active WorkoutPlan's relevant slots).
