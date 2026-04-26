@@ -65,6 +65,9 @@ _TEST_MODULES = (
     "tests.test_switch_day_rotation",
     # Cross-split preservation: all splits × regen/switch/7th-day with realistic histories.
     "tests.test_split_preservation",
+    # Split-cycle integration: full generate_weekly_recipe pipeline (anchor →
+    # avoid-recent → fatigue → repair → identity guards) × split × goal × history.
+    "tests.test_split_cycle_integration",
     # Switch Day per-split comprehensive — ~20 tests × 5 splits + edge cases.
     "tests.test_switch_day_splits",
     # Switch Day INTEGRATION — pin every position × every focus on

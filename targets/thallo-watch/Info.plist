@@ -26,9 +26,11 @@
   </array>
   <key>WKApplication</key>
   <true/>
-  <!-- Enables WKExtendedRuntimeSession so workouts keep HR reading
-       + the screen awake during lifts. -->
   <key>WKBackgroundModes</key>
+  <array>
+    <string>workout-processing</string>
+  </array>
+  <key>UIBackgroundModes</key>
   <array>
     <string>workout-processing</string>
   </array>

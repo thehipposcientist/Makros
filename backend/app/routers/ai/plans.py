@@ -549,6 +549,32 @@ def _build_deterministic_workout(
     except Exception:
         user_age = None
 
+    # Detect whether the user already completed a workout TODAY.
+    # When they have, the client will overlay day 0 of the new plan with
+    # the completed session. We tell the recipe anchor to place today's
+    # family at day 0 so the overlay doesn't shift the PPL/UL cycle.
+    completed_today_family: str | None = None
+    if db is not None and user_id is not None:
+        try:
+            from datetime import date as _date
+            from sqlmodel import select as _sel
+            from app.models import WorkoutCompletion as _WC
+            from app.services.workout.focus_normalize import normalize_focus_to_family
+            today_row = db.exec(
+                _sel(_WC)
+                .where(_WC.user_id == user_id)
+                .where(_WC.workout_date == _date.today())
+                .order_by(_WC.completed_at.desc())
+                .limit(1)
+            ).first()
+            if today_row:
+                completed_today_family = normalize_focus_to_family(
+                    (today_row.focus_label or "").strip()
+                )
+                print(f"[plan-gen workout] completed today: {today_row.focus_label!r} → family={completed_today_family}")
+        except Exception as e:
+            print(f"[plan-gen workout] today-completion check failed (non-fatal): {e}")
+
     # Muscle fatigue — same source the single-day + switch-day endpoints use.
     # Without this the weekly recipe's fatigue-aware rotation (skip muscles
     # the user is wrecked on) NEVER fires for full-plan regen, so a user with
@@ -592,6 +618,7 @@ def _build_deterministic_workout(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_dict,
         user_age=user_age,
+        completed_today_family=completed_today_family,
     )
 
     history_familiarity: dict[str, int] = {}

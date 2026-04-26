@@ -340,7 +340,19 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
     base = _FOCUS_FATIGUE.get(focus)
     if not base:
         fl = focus_label.lower()
-        if any(k in fl for k in ("push", "chest")):     base = _FOCUS_FATIGUE["push"]
+        # PLUS_CARDIO hybrid: merge lift + cardio fatigue (take max per muscle)
+        if "cardio" in fl and any(k in fl for k in ("push", "pull", "upper", "full", "leg", "lower", "chest", "back")):
+            lift_base: dict[str, float] = {}
+            if any(k in fl for k in ("push", "chest")):    lift_base = _FOCUS_FATIGUE["push"]
+            elif any(k in fl for k in ("pull", "back")):   lift_base = _FOCUS_FATIGUE["pull"]
+            elif any(k in fl for k in ("leg", "lower")):   lift_base = _FOCUS_FATIGUE["legs"]
+            elif any(k in fl for k in ("upper",)):         lift_base = _FOCUS_FATIGUE["upper"]
+            elif any(k in fl for k in ("full",)):          lift_base = _FOCUS_FATIGUE["full_body"]
+            cardio_base = _FOCUS_FATIGUE["cardio"]
+            base = dict(lift_base)
+            for k, v in cardio_base.items():
+                base[k] = max(base.get(k, 0.0), v)
+        elif any(k in fl for k in ("push", "chest")):     base = _FOCUS_FATIGUE["push"]
         elif any(k in fl for k in ("pull", "back")):     base = _FOCUS_FATIGUE["pull"]
         elif any(k in fl for k in ("leg", "lower")):     base = _FOCUS_FATIGUE["legs"]
         elif any(k in fl for k in ("upper",)):           base = _FOCUS_FATIGUE["upper"]

@@ -1,12 +1,8 @@
-// Saved Meals section — reusable food bundles the user has saved.
+// Favorites section — reusable food bundles the user has explicitly saved.
 //
-// Distinct from Routine Meals (pinned/scheduled) and Favorites (meals
-// the user has eaten many times). A Saved Meal is an explicit
-// "I want to be able to log this again with one tap" bundle.
-//
-// Mount this on the Foods sub-tab so it sits next to the grocery
-// list + favorites carousel — that's where users look when they're
-// thinking "add something to my day".
+// Distinct from Routine Meals (pinned/scheduled) and the auto-detected
+// "common meals" carousel (meals eaten 2+ times). A Favorite is an
+// explicit "I want to be able to log this again with one tap" bundle.
 
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -75,8 +71,8 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
 
   const handleDelete = (sm: api.SavedMeal) => {
     Alert.alert(
-      'Delete saved meal?',
-      `"${sm.name}" will be removed from your saved meals. Meals you already logged from it stay on your history.`,
+      'Remove from favorites?',
+      `"${sm.name}" will be removed from your favorites. Meals you already logged from it stay on your history.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -101,7 +97,7 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
       buttons.push({ text: 'Edit items', onPress: () => onEditTemplate(sm) });
     }
     buttons.push({ text: 'Delete', style: 'destructive', onPress: () => handleDelete(sm) });
-    Alert.alert(sm.name, 'What do you want to do with this saved meal?', buttons);
+    Alert.alert(sm.name, 'What do you want to do with this favorite?', buttons);
   };
 
   const promptRename = (sm: api.SavedMeal) => {
@@ -111,7 +107,7 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
     const prompt = (Alert as any).prompt;
     if (typeof prompt === 'function') {
       prompt(
-        'Rename saved meal',
+        'Rename favorite',
         'Editing here updates the template — past days that used it stay unchanged.',
         [
           { text: 'Cancel', style: 'cancel' },
@@ -147,7 +143,7 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
   return (
     <View style={{ marginBottom: 14 }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>SAVED MEALS</Text>
+        <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>FAVORITES</Text>
         {saved.length > 0 && (
           <Text style={{ fontSize: 10, color: tc.textMuted }}>{saved.length}</Text>
         )}
@@ -158,10 +154,10 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
           borderStyle: 'dashed', borderRadius: 12, padding: 14,
         }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, marginBottom: 2 }}>
-            No saved meals yet
+            No favorites yet
           </Text>
           <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 16 }}>
-            Tap "Save as Meal" while editing a meal to save it here. Saved meals are different from routines — they don't get scheduled, they just live here for one-tap logging.
+            Tap "Save" on any meal card or "Add to Favorites" in the meal editor. Favorites live here for one-tap logging anytime.
           </Text>
         </View>
       ) : (

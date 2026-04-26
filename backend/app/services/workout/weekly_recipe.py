@@ -2178,12 +2178,20 @@ def _anchor_recipe_to_split_next(
     recipe: list[DayArchetype],
     recent_focus_families: tuple[str, ...] | list[str],
     lifting_split: str | None,
+    completed_today_family: str | None = None,
 ) -> list[DayArchetype]:
     """Rotate `recipe` so day 0 is the EXPECTED next family in the
     split rotation from the user's last completed lift. If no anchor
     can be determined (non-PPL/UL split, no recent lift family, or the
     recipe offers no matching day 0), return the recipe unchanged so
-    downstream rotation passes still run."""
+    downstream rotation passes still run.
+
+    When ``completed_today_family`` is set, the user has already
+    finished today's workout. Day 0 of the plan maps to today and will
+    be overlaid by the client with the completed session. In this case
+    we anchor day 0 to ``completed_today_family`` (not the *next*
+    family) so the overlay is harmless and day 1+ follows the correct
+    cycle."""
     if not recent_focus_families or len(recipe) < 2:
         return recipe
     lift_families = ("push", "pull", "legs", "upper", "lower", "full_body")
@@ -2193,21 +2201,25 @@ def _anchor_recipe_to_split_next(
     )
     if last_lift_family is None or last_lift_family == "full_body":
         return recipe
-    expected = _next_in_split_rotation(last_lift_family, lifting_split)
-    if expected is None:
+
+    if completed_today_family and completed_today_family in lift_families:
+        target = completed_today_family
+    else:
+        target = _next_in_split_rotation(last_lift_family, lifting_split)
+    if target is None:
         return recipe
-    # Find the first rotation whose day 0 family matches `expected`.
     for shift in range(len(recipe)):
         cand = recipe[shift:] + recipe[:shift]
         try:
             fam = archetype_to_focus_family(cand[0])
         except KeyError:
             continue
-        if fam == expected:
+        if fam == target:
             if shift != 0:
                 logger.info(
                     f"[weekly_recipe] split-anchor: last_lift={last_lift_family} "
-                    f"split={lifting_split} expected_day0={expected} "
+                    f"split={lifting_split} target_day0={target} "
+                    f"completed_today={completed_today_family} "
                     f"shift={shift}"
                 )
             return cand
@@ -2365,6 +2377,7 @@ def generate_weekly_recipe(
     priority_region: str = "balanced",
     muscle_fatigue: dict[str, float] | None = None,
     user_age: int | None = None,
+    completed_today_family: str | None = None,
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -2538,6 +2551,7 @@ def generate_weekly_recipe(
     _pre_anchor = list(recipe)
     recipe = _anchor_recipe_to_split_next(
         recipe, recent_focus_families, lifting_split,
+        completed_today_family=completed_today_family,
     )
     if not _preserves_split_identity(
         recipe, lifting_split, user_chose_split, baseline=_pre_anchor
@@ -2557,8 +2571,18 @@ def generate_weekly_recipe(
     # can make a shift break the cycle — in that case we keep the
     # original layout rather than ship a scrambled split.
     _pre_rotate_recent = list(recipe)
+    # When the user already completed today, today's family is pinned at
+    # day 0 by the anchor. Strip it from the avoidance list so
+    # avoid-recent doesn't try to rotate day 0 away from today's focus.
+    _avoid_recent = rotation_recent
+    if completed_today_family and _avoid_recent:
+        if _avoid_recent[0] == completed_today_family:
+            _avoid_recent = _avoid_recent[1:]
+        elif _avoid_recent[0] in (completed_today_family + "_plus_cardio",
+                                   completed_today_family.replace("_plus_cardio", "")):
+            _avoid_recent = _avoid_recent[1:]
     recipe = _rotate_recipe_to_avoid_recent(
-        recipe, rotation_recent, mode=mode,
+        recipe, _avoid_recent, mode=mode,
     )
     if not _preserves_split_identity(
         recipe, lifting_split, user_chose_split, baseline=_pre_rotate_recent

@@ -254,12 +254,14 @@ def request_friend(
                 existing.status = "accepted"
                 existing.accepted_at = datetime.now(timezone.utc)
                 db.add(existing)
+                _invalidate_digest(db, existing.user_a_id, existing.user_b_id)
                 db.commit()
+            prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == target.id)).first()
             return PendingRequestRead(
                 friendship_id=existing.id,
                 user_id=target.id,
                 username=target.username,
-                display_name=None,
+                display_name=(prof.display_name if prof and prof.display_name else target.username),
                 requested_at=existing.requested_at,
                 direction=("outgoing" if existing.requested_by == current_user.id else "incoming"),
             )
@@ -272,6 +274,7 @@ def request_friend(
         requested_by=current_user.id,
     )
     db.add(fs)
+    _invalidate_digest(db, current_user.id, target.id)
     db.commit()
     db.refresh(fs)
     prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == target.id)).first()

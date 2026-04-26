@@ -6937,6 +6937,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
               </View>
 
+              {/* Streak highlight when friend has a notable streak */}
+              {viewingFriend.share_enabled && viewingFriend.streak >= 3 && (
+                <View style={{
+                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                  borderRadius: 14, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', gap: 12,
+                }}>
+                  <Ionicons name="flame" size={22} color="#F59E0B" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                      {viewingFriend.streak}-day streak
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                      {viewingFriend.streak >= 14 ? 'Incredibly consistent!' : viewingFriend.streak >= 7 ? 'On a roll this week.' : 'Building momentum.'}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
+              {/* Motivational nudge when friend is active */}
+              {viewingFriend.share_enabled && viewingFriend.sessions > 0 && (
+                <View style={{
+                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                  borderRadius: 14, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', gap: 10,
+                }}>
+                  <Ionicons name="fitness-outline" size={20} color={themeColors.success} />
+                  <Text style={{ flex: 1, fontSize: 12, color: themeColors.textSecondary, lineHeight: 17 }}>
+                    {viewingFriend.display_name || viewingFriend.username} has logged {viewingFriend.sessions} session{viewingFriend.sessions === 1 ? '' : 's'} this week.
+                  </Text>
+                </View>
+              )}
+
+              {/* Empty state when sharing is on but no sessions */}
+              {viewingFriend.share_enabled && viewingFriend.sessions === 0 && (
+                <View style={{
+                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                  borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
+                }}>
+                  <Ionicons name="barbell-outline" size={24} color={themeColors.textMuted} />
+                  <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 8, textAlign: 'center' }}>
+                    No sessions logged this week yet.
+                  </Text>
+                </View>
+              )}
+
               {!viewingFriend.share_enabled ? (
                 <View style={{
                   backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,

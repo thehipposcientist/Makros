@@ -37,16 +37,13 @@ interface NutritionCardProps {
    *  Shuffles ingredients within the same nutrient envelope. */
   onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
   goal?: string;
-  /** Lowercase names of the user's Saved Meals. Used to show a
-   *  "✓ Saved" chip on meal rows whose name already lives in the
-   *  saved library (so users don't try to save the same bundle
-   *  twice). */
+  /** Lowercase names of the user's Favorites. Used to show a
+   *  "Saved" state on meal rows whose name already lives in the
+   *  favorites library. */
   savedMealNames?: Set<string>;
-  /** Toggle save/unsave for a meal directly from the card star icon. */
+  /** Toggle save/unsave for a meal directly from the card. */
   onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
-  /** Called when the user picks "Start from saved meal" on the add
-   *  button. When wired, the UI splits the "Add Meal" affordance into
-   *  a two-path menu (Empty meal / From saved meal). */
+  /** Called when the user picks "From Favorites" on the add button. */
   onAddFromSaved?: () => void;
   /** Authoritative daily amounts from /meals/gut-health → today. When
    *  present they override the client-side plan-preview estimate so
@@ -193,6 +190,35 @@ export default function NutritionCard({
     [allVisible, dailyMicros, actual.calories],
   );
 
+  const effectiveProteinBreakdown = useMemo(() => {
+    if (proteinBreakdown) return proteinBreakdown;
+    let plantG = 0, animalG = 0;
+    const plantItems: Array<{ name: string; protein_g: number }> = [];
+    const animalItems: Array<{ name: string; protein_g: number }> = [];
+    const uncItems: Array<{ name: string; protein_g: number }> = [];
+    for (const { meal: m } of allVisible) {
+      const items = m.items ?? [];
+      for (const it of items) {
+        const prot = (it as any).protein_g ?? (it as any).protein ?? 0;
+        if (prot <= 0) continue;
+        const src = (it as any).protein_source;
+        if (src === 'plant') { plantG += prot; plantItems.push({ name: it.name, protein_g: prot }); }
+        else if (src === 'animal') { animalG += prot; animalItems.push({ name: it.name, protein_g: prot }); }
+        else if (src === 'mixed') { plantG += prot * 0.5; animalG += prot * 0.5; plantItems.push({ name: it.name, protein_g: prot * 0.5 }); animalItems.push({ name: it.name, protein_g: prot * 0.5 }); }
+        else if (prot >= 2) { uncItems.push({ name: it.name, protein_g: prot }); }
+      }
+    }
+    if (plantG + animalG <= 0) return null;
+    const total = plantG + animalG;
+    return {
+      plant_total_g: Math.round(plantG),
+      animal_total_g: Math.round(animalG),
+      plant_pct: total > 0 ? Math.round((plantG / total) * 100) : 0,
+      animal_pct: total > 0 ? Math.round((animalG / total) * 100) : 0,
+      plant: plantItems, animal: animalItems, unclassified: uncItems,
+    };
+  }, [proteinBreakdown, allVisible]);
+
   return (
     <View style={styles.card}>
       {/* Header removed — the macro grid below acts as the hero. The
@@ -209,12 +235,11 @@ export default function NutritionCard({
           <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
         </View>
 
-        {/* Plant vs Meat protein tile — hidden until at least one
-            classified-protein meal is logged. Tap to open the drill-
-            down modal showing each contributing food. */}
-        {proteinBreakdown && (proteinBreakdown.plant_total_g + proteinBreakdown.animal_total_g) > 0 && (() => {
-          const plantG = proteinBreakdown.plant_total_g;
-          const animalG = proteinBreakdown.animal_total_g;
+        {/* Plant vs Meat protein ratio — computed from plan items when
+            server-authoritative breakdown isn't available. */}
+        {effectiveProteinBreakdown && (effectiveProteinBreakdown.plant_total_g + effectiveProteinBreakdown.animal_total_g) > 0 && (() => {
+          const plantG = effectiveProteinBreakdown.plant_total_g;
+          const animalG = effectiveProteinBreakdown.animal_total_g;
           const total = plantG + animalG;
           const plantPct = total > 0 ? (plantG / total) * 100 : 0;
           // Plant green / animal warm-orange split bar — keeps the
@@ -251,9 +276,9 @@ export default function NutritionCard({
                 <View style={{ width: `${plantPct}%`, backgroundColor: plantColor }} />
                 <View style={{ flex: 1, backgroundColor: animalColor }} />
               </View>
-              {proteinBreakdown.unclassified.length > 0 && (
+              {effectiveProteinBreakdown.unclassified.length > 0 && (
                 <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
-                  +{proteinBreakdown.unclassified.length} unclassified item{proteinBreakdown.unclassified.length === 1 ? '' : 's'} — tap to see
+                  +{effectiveProteinBreakdown.unclassified.length} unclassified item{effectiveProteinBreakdown.unclassified.length === 1 ? '' : 's'} — tap to see
                 </Text>
               )}
             </TouchableOpacity>
@@ -588,9 +613,9 @@ export default function NutritionCard({
                     Mirrors the tile on the card body so users who
                     open the overview modal also see the comparison
                     + can drill into per-food sources. */}
-                {proteinBreakdown && (proteinBreakdown.plant_total_g + proteinBreakdown.animal_total_g) > 0 && (() => {
-                  const plantG = proteinBreakdown.plant_total_g;
-                  const animalG = proteinBreakdown.animal_total_g;
+                {effectiveProteinBreakdown && (effectiveProteinBreakdown.plant_total_g + effectiveProteinBreakdown.animal_total_g) > 0 && (() => {
+                  const plantG = effectiveProteinBreakdown.plant_total_g;
+                  const animalG = effectiveProteinBreakdown.animal_total_g;
                   const total = plantG + animalG;
                   const plantPct = total > 0 ? (plantG / total) * 100 : 0;
                   return (
@@ -620,7 +645,7 @@ export default function NutritionCard({
                         onPress={() => { setShowDetailModal(false); setTimeout(() => setShowProteinModal(true), 220); }}
                         style={{ alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.background }}>
                         <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }}>
-                          See per-food breakdown ({proteinBreakdown.plant.length + proteinBreakdown.animal.length} sources)
+                          See per-food breakdown ({effectiveProteinBreakdown.plant.length + effectiveProteinBreakdown.animal.length} sources)
                         </Text>
                       </TouchableOpacity>
                     </View>
@@ -704,9 +729,9 @@ export default function NutritionCard({
                   <Ionicons name="close" size={22} color={colors.textMuted} />
                 </TouchableOpacity>
               </View>
-              {proteinBreakdown && (() => {
-                const plantG = proteinBreakdown.plant_total_g;
-                const animalG = proteinBreakdown.animal_total_g;
+              {effectiveProteinBreakdown && (() => {
+                const plantG = effectiveProteinBreakdown.plant_total_g;
+                const animalG = effectiveProteinBreakdown.animal_total_g;
                 const total = plantG + animalG;
                 const plantPct = total > 0 ? (plantG / total) * 100 : 0;
                 return (
@@ -728,12 +753,12 @@ export default function NutritionCard({
                       </View>
                     </View>
 
-                    {proteinBreakdown.plant.length > 0 && (
+                    {effectiveProteinBreakdown.plant.length > 0 && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '800', color: '#16803D', letterSpacing: 0.5, marginTop: 4, marginBottom: 6 }}>
                           PLANT SOURCES
                         </Text>
-                        {proteinBreakdown.plant.map((it, i) => (
+                        {effectiveProteinBreakdown.plant.map((it, i) => (
                           <View key={`p-${i}`} style={{
                             flexDirection: 'row', alignItems: 'center',
                             paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
@@ -747,12 +772,12 @@ export default function NutritionCard({
                       </>
                     )}
 
-                    {proteinBreakdown.animal.length > 0 && (
+                    {effectiveProteinBreakdown.animal.length > 0 && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '800', color: '#9A4810', letterSpacing: 0.5, marginTop: 10, marginBottom: 6 }}>
                           ANIMAL SOURCES
                         </Text>
-                        {proteinBreakdown.animal.map((it, i) => (
+                        {effectiveProteinBreakdown.animal.map((it, i) => (
                           <View key={`a-${i}`} style={{
                             flexDirection: 'row', alignItems: 'center',
                             paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
@@ -766,7 +791,7 @@ export default function NutritionCard({
                       </>
                     )}
 
-                    {proteinBreakdown.unclassified.length > 0 && (
+                    {effectiveProteinBreakdown.unclassified.length > 0 && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textMuted, letterSpacing: 0.5, marginTop: 10, marginBottom: 6 }}>
                           UNCLASSIFIED
@@ -774,7 +799,7 @@ export default function NutritionCard({
                         <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 6, fontStyle: 'italic' }}>
                           We don't know if these are plant or animal yet — re-log with a library food to classify.
                         </Text>
-                        {proteinBreakdown.unclassified.map((it, i) => (
+                        {effectiveProteinBreakdown.unclassified.map((it, i) => (
                           <View key={`u-${i}`} style={{
                             flexDirection: 'row', alignItems: 'center',
                             paddingVertical: 8, paddingHorizontal: 10, marginBottom: 6,
@@ -866,8 +891,8 @@ export default function NutritionCard({
                 onPress={onAddFromSaved}
                 activeOpacity={0.7}
               >
-                <Ionicons name="albums-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
-                <Text style={styles.addMealInlineText}>From saved</Text>
+                <Ionicons name="heart-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
+                <Text style={styles.addMealInlineText}>From Favorites</Text>
               </TouchableOpacity>
             </View>
           ) : onAddSnack ? (
@@ -1085,21 +1110,22 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                 </TouchableOpacity>
               </>
             )}
-            {/* Save/favorite star — tap to save this meal as a
-                reusable bundle, or unsave if already saved. */}
             {onToggleSave && (
               <TouchableOpacity
                 onPress={() => onToggleSave(mealType, meal)}
                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 activeOpacity={0.7}
                 accessibilityRole="button"
-                accessibilityLabel={isSaved ? 'Remove from saved meals' : 'Save meal'}
+                accessibilityLabel={isSaved ? 'Remove from favorites' : 'Add to favorites'}
+                style={{
+                  paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+                  backgroundColor: isSaved ? mealAccent.strong + '18' : 'transparent',
+                  borderWidth: 1, borderColor: isSaved ? mealAccent.strong + '44' : colors.border,
+                }}
               >
-                <Ionicons
-                  name={isSaved ? 'star' : 'star-outline'}
-                  size={16}
-                  color={isSaved ? '#F59E0B' : colors.textMuted}
-                />
+                <Text style={{ fontSize: 10, fontWeight: '700', color: isSaved ? mealAccent.strong : colors.textMuted }}>
+                  {isSaved ? 'Saved' : 'Save'}
+                </Text>
               </TouchableOpacity>
             )}
             {/* Inline routine badge — small, beside the title, taps to

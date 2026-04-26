@@ -100,6 +100,12 @@ class PlannerInputs:
     # recent_focus_buckets by history.most_recent_completed_focus.
     recent_focus_families: tuple[str, ...] = ()
     muscle_fatigue: dict | None = None  # MuscleFatigue.to_dict() for weekly rotation
+    # When the user already completed today's workout, set this to the
+    # family of the completed session (e.g. "push"). The weekly recipe
+    # anchor will place that family at day 0 so the client overlay
+    # (replacing day 0 with the completed workout) doesn't break the
+    # split cycle for the remaining days.
+    completed_today_family: str | None = None
     # User's age — threaded through so the recipe can inject extra rest days
     # for 50+ users (slower recovery) and the warmup can auto-scale.
     user_age: int | None = None
@@ -1230,6 +1236,7 @@ def generate_workout_plan(
         priority_region=inputs.priority_region,
         muscle_fatigue=inputs.muscle_fatigue,
         user_age=inputs.user_age,
+        completed_today_family=inputs.completed_today_family,
     )
     _recipe_families = [
         (archetype_to_focus_family(a) or "?") for a in recipe

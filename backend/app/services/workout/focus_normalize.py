@@ -125,13 +125,9 @@ def _strip_plus_cardio_suffix(text: str) -> str:
     finisher — the primary stimulus is the lift, so the day should
     count as the lift family for split + history purposes.
     """
-    if " + cardio" in text or " and cardio" in text or text.endswith(" cardio"):
-        # Only strip when there's something BEFORE the cardio (otherwise
-        # a pure "Cardio" day would lose its bucket). Requires at least
-        # one of the lift keywords earlier in the string.
+    if re.search(r"(\+|and|with|&)\s*cardio\b", text) or text.endswith(" cardio"):
         lift_seen = bool(re.search(r"\b(push|pull|upper|lower|legs?|full[- ]?body|chest|back|shoulders?|arms?)\b", text))
         if lift_seen:
-            # Cut at the first occurrence of a cardio-separator pattern.
             text = re.sub(r"\s*(\+|and|with|&)\s*cardio\b.*$", "", text)
             text = re.sub(r"\s+cardio\b.*$", "", text)
     return text
@@ -166,6 +162,12 @@ def normalize_focus_to_bucket(raw_focus: Optional[str]) -> FocusBucket:
     if not text:
         return None
 
+    # Normalize underscore-delimited archetype names ("lift_push_plus_cardio"
+    # → "lift push plus cardio") so keyword matching works on both
+    # human labels and raw enum values.
+    text = text.replace("_", " ")
+    # "plus cardio" → "+ cardio" so the strip function catches it.
+    text = text.replace("plus cardio", "+ cardio")
     # Drop numbering like " 1", " 2" at the end of the bare base
     # label — "Legs 1" → "legs". Without this, the word-boundary
     # regex for "legs" still matches, so it's cosmetic, but it keeps
@@ -234,6 +236,9 @@ def normalize_focus_to_family(raw_focus: Optional[str]) -> FocusBucket:
     if not text:
         return None
 
+    # Normalize underscore-delimited archetype names.
+    text = text.replace("_", " ")
+    text = text.replace("plus cardio", "+ cardio")
     # Drop trailing numbering
     text = re.sub(r"\s+\d+\s*$", "", text)
     # PLUS_CARDIO hybrids count as their lift family — see the

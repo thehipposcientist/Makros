@@ -198,7 +198,8 @@
       "Read(//opt/homebrew/Cellar/node/25.9.0_1/bin/**)",
       "Bash(./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
       "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\")",
-      "Bash(./node_modules/.bin/tsc --noEmit)"
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "Bash(/usr/libexec/PlistBuddy *)"
     ]
   }
 }

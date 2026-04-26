@@ -930,47 +930,41 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     <Modal visible={visible} animationType="slide" onRequestClose={() => { handleCancel(); }}>
       <View style={s.container}>
 
-        {/* Header */}
+        {/* Header — action bar only */}
         <View style={s.header}>
           <TouchableOpacity onPress={handleCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
-          <View style={s.headerCenter}>
-            {/* Meal name is editable for every meal (Breakfast slot can
-                be "Oatmeal Bowl" → "My Power Bowl"). For fixed slots we
-                show the slot label as a small subtitle below so the
-                user still knows which meal they're editing. */}
-            <TextInput
-              style={[s.title, { textAlign: 'center', minWidth: 180, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: colors.surfaceRaised }]}
-              value={mealName}
-              onChangeText={setMealName}
-              placeholder="Meal name"
-              placeholderTextColor={colors.textMuted}
-              returnKeyType="done"
-            />
-            {/* No slot subtitle — the meal name above is the only identity. */}
-            {/* Chips hide in template mode (not meaningful when editing
-                a Saved Meal from Foods → Saved Meals; it's already a
-                template, and pinning it as a routine would be a
-                separate action the user should take on the day card). */}
-            <View style={{ flexDirection: 'row', gap: 6, justifyContent: 'center' }}>
-              {mode === 'day' && onToggleRoutine && (
-                <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-                  <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
-                    {meal.isRoutine ? 'Pinned' : 'Pin as Routine'}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              {mode === 'day' && onSaveAsMeal && (
-                <TouchableOpacity onPress={onSaveAsMeal} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-                  <Text style={s.routineBadgeText}>Save as Meal</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
+          <Text style={[s.title, { flex: 0 }]}>Edit Meal</Text>
           <TouchableOpacity onPress={handleSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={s.saveText}>Save</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Meal name + action chips — below the header for breathing room */}
+        <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 6 }}>
+          <TextInput
+            style={[s.title, { textAlign: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceRaised, fontSize: 16 }]}
+            value={mealName}
+            onChangeText={setMealName}
+            placeholder="Meal name"
+            placeholderTextColor={colors.textMuted}
+            returnKeyType="done"
+          />
+          <View style={{ flexDirection: 'row', gap: 6, justifyContent: 'center', marginTop: 8 }}>
+            {mode === 'day' && onToggleRoutine && (
+              <TouchableOpacity onPress={onToggleRoutine} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                <Text style={[s.routineBadgeText, meal.isRoutine && s.routineBadgeTextActive]}>
+                  {meal.isRoutine ? 'Pinned' : 'Pin as Routine'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {mode === 'day' && onSaveAsMeal && (
+              <TouchableOpacity onPress={onSaveAsMeal} style={s.routineBadge} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                <Text style={s.routineBadgeText}>Add to Favorites</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
         {/* Scope banner — tells the user what their save will affect
@@ -1094,6 +1088,29 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             <Text style={[s.totalsVal, s.dayTotalVal, { color: '#F59E0B' }]}>{dayTotal.carbs}g</Text>
             <Text style={[s.totalsVal, s.dayTotalVal, { color: '#A78BFA' }]}>{dayTotal.fat}g</Text>
           </View>
+
+          {/* Remaining / over-under row */}
+          {nutritionPlan.targets && (() => {
+            const t = nutritionPlan.targets;
+            const diffCal = (t.calories ?? 0) - dayTotal.calories;
+            const diffPro = (t.protein ?? 0) - dayTotal.protein;
+            const diffCarb = (t.carbs ?? 0) - dayTotal.carbs;
+            const diffFat = (t.fat ?? 0) - dayTotal.fat;
+            const fmt = (v: number, unit: string) => v > 0 ? `−${v}${unit}` : v < 0 ? `+${Math.abs(v)}${unit}` : `0${unit}`;
+            const clr = (v: number) => v > 0 ? colors.textMuted : v < 0 ? (colors.error ?? '#EF4444') : colors.textMuted;
+            return (
+              <>
+                <View style={s.totalsDivider} />
+                <View style={s.totalsRow}>
+                  <Text style={[s.totalsRowLabel, { fontSize: 10, color: colors.textMuted }]}>Remaining</Text>
+                  <Text style={[s.totalsVal, { fontSize: 11, color: clr(diffCal) }]}>{fmt(diffCal, '')}</Text>
+                  <Text style={[s.totalsVal, { fontSize: 11, color: clr(diffPro) }]}>{fmt(diffPro, 'g')}</Text>
+                  <Text style={[s.totalsVal, { fontSize: 11, color: clr(diffCarb) }]}>{fmt(diffCarb, 'g')}</Text>
+                  <Text style={[s.totalsVal, { fontSize: 11, color: clr(diffFat) }]}>{fmt(diffFat, 'g')}</Text>
+                </View>
+              </>
+            );
+          })()}
         </View>
 
         <KeyboardAvoidingView

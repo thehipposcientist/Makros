@@ -242,7 +242,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               <ActivityIndicator color={colors.primary} />
             </View>
           ) : (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingBottom: 24 }}>
               {/* This week card */}
               <View style={styles.card}>
                 <Text style={styles.cardLabel}>THIS WEEK</Text>
