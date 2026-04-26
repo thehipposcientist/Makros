@@ -53,6 +53,18 @@ W_NUTRITION = 15
 W_RHR = 10
 W_YESTERDAY = 5
 
+# Pillars that represent real "today" health signals. The yesterday-
+# strain pillar is excluded — it's always available (rest day = full
+# credit) and so can't be used to gate a meaningful score.
+_HEALTH_PILLARS: frozenset[str] = frozenset({"sleep", "hrv", "rhr", "nutrition", "fatigue"})
+
+# Minimum health pillars required before we'll publish a numeric
+# readiness score. Below this we return score=0, label="—" and a
+# summary asking the user to connect data sources. Was the bug that
+# triggered this gate: missed-watch nights produced score=100 from the
+# yesterday-strain pillar alone.
+_MIN_HEALTH_PILLARS = 2
+
 
 @dataclass
 class ReadinessFactor:
@@ -223,11 +235,16 @@ def compute_readiness(
     # ── Sleep (W_SLEEP) ────────────────────────────────────────────
     sleep_score = last_night_sleep_score
     if sleep_score is None:
-        # Pull most recent SleepLog row.
+        # Date-scoped to LAST NIGHT specifically. Was the source of the
+        # missed-watch bug: an unscoped order_by(date.desc()).first()
+        # would return a row from 3 nights ago and treat it as today's
+        # sleep. If the watch wasn't worn last night, the row simply
+        # doesn't exist and sleep falls into `missing` where it belongs.
+        last_night = date.today() - timedelta(days=1)
         last = db.exec(
             select(SleepLog)
             .where(SleepLog.user_id == user_id)
-            .order_by(SleepLog.night_date.desc())
+            .where(SleepLog.night_date == last_night)
         ).first()
         if last and last.score is not None:
             sleep_score = int(last.score)
@@ -381,28 +398,53 @@ def compute_readiness(
     else:
         missing.append("yesterday")
 
+    # ── Minimum-signals gate ──────────────────────────────────────
+    # Without enough real "today" health pillars, any number we
+    # publish is misleading. The yesterday-strain pillar is excluded
+    # from this count: it always credits (rest day = full marks) so
+    # it can't be the basis for "she had a great recovery night."
+    # This gate is what fixes the missed-watch-but-shows-100 bug.
+    health_pillars_present = sum(1 for p in pillar_scores if p in _HEALTH_PILLARS)
+
+    if health_pillars_present < _MIN_HEALTH_PILLARS:
+        return ReadinessResult(
+            score=0,
+            label="—",
+            summary=_no_data_summary(missing),
+            factors=factors,
+            missing=missing,
+            signals_present=len(pillar_scores),
+            signals_total=6,
+            computed_at_ms=int(time.time() * 1000),
+        )
+
     # ── Reweight against pillars actually present ──────────────────
-    # If the user has NO HK + NO completions, score = the small bits
-    # we do have, normalized. Without normalization, missing inputs
-    # collapse to ~60% and every fresh user sees a misleading "Moderate".
+    # If the user has 2+ health pillars, score normalizes against
+    # what's there so missing-but-not-empty inputs don't collapse to
+    # a misleading "Moderate" baseline.
     raw = sum(got for got, _max in pillar_scores.values())
     max_possible = sum(_max for _got, _max in pillar_scores.values())
-    if max_possible > 0:
-        score = int(round((raw / max_possible) * 100))
-    else:
-        score = 0
+    score = int(round((raw / max_possible) * 100))
     score = max(0, min(100, score))
-
-    label = _label_for(score) if max_possible > 0 else "—"
-    summary = _summary_for(score) if max_possible > 0 else "Connect Apple Health and log a meal to see today's readiness."
 
     return ReadinessResult(
         score=score,
-        label=label,
-        summary=summary,
+        label=_label_for(score),
+        summary=_summary_for(score),
         factors=factors,
         missing=missing,
         signals_present=len(pillar_scores),
         signals_total=6,
         computed_at_ms=int(time.time() * 1000),
     )
+
+
+def _no_data_summary(missing: list[str]) -> str:
+    """Friendly explanation when readiness can't be computed. Tailored
+    to which pillars are missing so the user knows what to do."""
+    wearable_missing = ("sleep" in missing) and ("hrv" in missing) and ("rhr" in missing)
+    if wearable_missing:
+        return "Not enough data — wear your Apple Watch overnight to get a readiness score."
+    if "sleep" in missing:
+        return "Last night's sleep didn't sync. Check the Health app, then refresh."
+    return "Not enough signals yet — log meals and wear your watch overnight to see today's readiness."
