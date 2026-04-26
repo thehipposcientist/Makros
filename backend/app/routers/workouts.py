@@ -690,23 +690,6 @@ def generate_full_week(
     except Exception:
         logger.exception("[generate-week] most_recent_completed_focus failed")
 
-    # Pin injection: prepend the user's chosen focus so the rotator treats
-    # it as if they just did that focus. The pinned day keeps its chosen
-    # focus below; all other days rotate to avoid it.
-    if body.pin_focus:
-        try:
-            from app.services.workout.focus_normalize import (
-                normalize_focus_to_bucket, normalize_focus_to_family,
-            )
-            pb = normalize_focus_to_bucket(body.pin_focus)
-            pf = normalize_focus_to_family(body.pin_focus)
-            if pb:
-                recent_focus_buckets = (pb,) + recent_focus_buckets
-            if pf:
-                recent_focus_families = (pf,) + recent_focus_families
-        except Exception:
-            logger.exception("[generate-week] pin focus normalize failed")
-
     try:
         history_familiarity = build_history_familiarity(current_user.id, db)
     except Exception:
@@ -819,11 +802,16 @@ def generate_full_week(
         from app.services.workout.switch_day import (
             decide_pin, apply_swap, apply_rotate, apply_bro_canonical_swap,
         )
+        using_current_days = bool(
+            body.current_days
+            and len(body.current_days) >= body.days_per_week
+        )
         decision = decide_pin(
             days,
             pin_day_index=body.pin_day_index,
             pin_focus=body.pin_focus,
             preferred_split=body.preferred_split,
+            prefer_swap=using_current_days,
         )
         target_idx = decision.target_idx
 

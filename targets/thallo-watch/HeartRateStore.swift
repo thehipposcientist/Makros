@@ -27,6 +27,15 @@ final class HeartRateStore: NSObject, ObservableObject {
     private var builder: HKLiveWorkoutBuilder?
     private var userAge: Int = 30
 
+    // When end()/discard() is called explicitly, we set this so the
+    // delegate callback knows not to auto-restart the session.
+    private var intentionalEnd: Bool = false
+    // watchOS sometimes kills the HK session within the first second
+    // (before extended runtime fully establishes). We auto-restart up
+    // to 3 times to keep the runtime claim alive.
+    private var autoRestartCount: Int = 0
+    private static let maxAutoRestarts = 3
+
     private static let kDiagKey = "thallo.hrDiag"
 
     static func saveDiag(_ msg: String) {
@@ -72,6 +81,12 @@ final class HeartRateStore: NSObject, ObservableObject {
             errorMessage = "HealthKit unavailable on this device."
             return
         }
+        if session != nil && running {
+            Self.saveDiag("start: already running")
+            return
+        }
+        intentionalEnd = false
+        autoRestartCount = 0
         if session != nil {
             session?.end()
             builder?.discardWorkout()
@@ -124,6 +139,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     func end() {
+        intentionalEnd = true
         Self.saveDiag("end() called")
         guard let sess = session, let bld = builder else {
             running = false
@@ -146,6 +162,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     /// nothing lands in the Health app. Rolls back HR / session refs
     /// so the next `start()` begins cleanly.
     func discard() {
+        intentionalEnd = true
         Self.saveDiag("discard() called")
         session?.end()
         builder?.discardWorkout()
@@ -168,8 +185,20 @@ final class HeartRateStore: NSObject, ObservableObject {
 
 extension HeartRateStore: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate {
     func workoutSession(_ workoutSession: HKWorkoutSession, didChangeTo toState: HKWorkoutSessionState, from fromState: HKWorkoutSessionState, date: Date) {
-        Self.saveDiag("state \(fromState.rawValue)→\(toState.rawValue)")
+        Self.saveDiag("state \(fromState.rawValue)→\(toState.rawValue) intent=\(intentionalEnd)")
         wlog("[watch-hr] HK state \(fromState.rawValue)→\(toState.rawValue)")
+
+        if toState == .ended && !intentionalEnd && autoRestartCount < Self.maxAutoRestarts {
+            autoRestartCount += 1
+            Self.saveDiag("AUTO-RESTART #\(autoRestartCount)")
+            wlog("[watch-hr] AUTO-RESTART #\(autoRestartCount)")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.session = nil
+                self.builder = nil
+                self.beginSession()
+            }
+        }
     }
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
         Self.saveDiag("FAILED:\(error.localizedDescription)")

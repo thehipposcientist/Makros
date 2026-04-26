@@ -442,6 +442,7 @@ def decide_pin(
     pin_focus: str,
     preferred_split: Optional[str] = None,
     existing_pins: Optional[dict[int, str]] = None,
+    prefer_swap: bool = False,
 ) -> PinDecision:
     """Compute the action needed to honor a Switch Day pin. Pure — no
     side effects. Returns a PinDecision the caller applies.
@@ -455,7 +456,12 @@ def decide_pin(
       - Single-day swap excludes prior-pinned positions from the
         candidate swap-partner pool.
     Without this param, behavior matches pre-fix (cumulative pins lose
-    earlier pins to canonical-cycle rebuilds)."""
+    earlier pins to canonical-cycle rebuilds).
+
+    `prefer_swap`: when True, prefer a minimal single-day swap over a
+    canonical-cycle rebuild. Used when the caller is operating on the
+    user's existing plan (current_days) — the user expects only the
+    pinned day to change, not the entire week to reshuffle."""
     pins = existing_pins or {}
     target_idx = max(0, min(len(days) - 1, int(pin_day_index)))
     full_focus = normalize_focus(pin_focus)
@@ -544,20 +550,29 @@ def decide_pin(
         full_focus=full_focus,
     )
 
-    # Pin model: CANONICAL-CYCLE rebuild for splits with a stable cycle
-    # (PPL, U/L, Bro, lower/upper-focused). Falls back to single-day
-    # swap when the split has no canonical cycle (full_body, ppl_ul) or
-    # when the focus isn't in the cycle.
-    #
-    # Why not pure single-day swap: cumulative pins scramble the
-    # canonical Push→Pull→Legs ordering even though each individual
-    # swap looks fine — the user-reported "plan is broken, not
-    # following split" bug. Canonical-cycle rebuild keeps the split
-    # cycle intact across any number of pins.
-    #
-    # Why not whole-week rotation: only the lift sequence is rebuilt;
-    # non-lifting positions (rest, cardio, mobility) stay where they
-    # were. So the user's rest day on Saturday stays on Saturday.
+    # Minimal swap: when operating on the user's existing plan, prefer
+    # swapping just the pinned day with the closest matching focus.
+    # This preserves the rest of the week exactly as the user had it.
+    if prefer_swap and src_lift_idx is not None and dst_lift_idx is not None:
+        if src_lift_idx == dst_lift_idx:
+            return PinDecision(
+                action="noop",
+                src_lift_idx=src_lift_idx,
+                dst_lift_idx=dst_lift_idx,
+                **common,
+            )
+        return PinDecision(
+            action="swap",
+            src_lift_idx=src_lift_idx,
+            dst_lift_idx=dst_lift_idx,
+            swap_with_idx=lift_positions[src_lift_idx],
+            **common,
+        )
+
+    # Canonical-cycle rebuild for splits with a stable cycle (PPL, U/L,
+    # Bro, lower/upper-focused). Falls back to single-day swap when the
+    # split has no canonical cycle (full_body, ppl_ul) or when the focus
+    # isn't in the cycle.
     cycle = _canonical_cycle_for_split(preferred_split)
     if cycle is not None and base_focus in cycle and dst_lift_idx is not None:
         # If target already matches AND no other change is needed,

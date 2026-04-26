@@ -61,6 +61,10 @@ _TEST_MODULES = (
     "tests.test_social_digest",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
     "tests.test_switch_day",
+    # Switch-day rotation + split-anchor: prefer_swap, pin injection, history scenarios.
+    "tests.test_switch_day_rotation",
+    # Cross-split preservation: all splits × regen/switch/7th-day with realistic histories.
+    "tests.test_split_preservation",
     # Switch Day per-split comprehensive — ~20 tests × 5 splits + edge cases.
     "tests.test_switch_day_splits",
     # Switch Day INTEGRATION — pin every position × every focus on

@@ -128,16 +128,16 @@ struct ContentView: View {
         // we unwind any local active state.
         .onReceive(conn.$workout) { w in
             guard let w = w else { return }
-            HeartRateStore.saveDiag("rcv status=\(w.status.rawValue) active=\(active)")
             switch w.status {
             case .active:
                 if !active {
+                    HeartRateStore.saveDiag("rcv active→start")
                     active = true
                     heartRate.start()
                 }
             case .completed, .skipped:
                 if active {
-                    HeartRateStore.saveDiag("ENDING: rcv \(w.status.rawValue) while active")
+                    HeartRateStore.saveDiag("KILL: rcv \(w.status.rawValue) while active")
                     active = false
                     heartRate.end()
                 }
