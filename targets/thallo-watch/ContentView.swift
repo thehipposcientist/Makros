@@ -67,10 +67,10 @@ struct ContentView: View {
                 )
             } else {
                 TabView {
-                    TodayView(workout: conn.workout, onStart: {
-                        conn.sendCommand("start_workout")
+                    TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
                         heartRate.start()
                         active = true
+                        conn.sendCommand("start_workout")
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
@@ -161,6 +161,7 @@ struct ContentView: View {
 
 private struct TodayView: View {
     let workout: WatchWorkout?
+    let hrDiag: String?
     let onStart: () -> Void
     let onSkip: () -> Void
 
@@ -175,6 +176,14 @@ private struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 logoHeader
+                if let diag = hrDiag {
+                    Text("HK: \(diag)")
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.warning)
+                        .padding(4)
+                        .background(theme.warning.opacity(0.12))
+                        .cornerRadius(4)
+                }
                 if let workout = workout {
                     workoutBody(workout)
                 } else {

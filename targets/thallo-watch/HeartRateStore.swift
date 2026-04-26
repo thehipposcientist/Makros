@@ -27,6 +27,16 @@ final class HeartRateStore: NSObject, ObservableObject {
     private var builder: HKLiveWorkoutBuilder?
     private var userAge: Int = 30
 
+    private static let kDiagKey = "thallo.hrDiag"
+
+    private static func saveDiag(_ msg: String) {
+        UserDefaults.standard.set(msg, forKey: kDiagKey)
+    }
+
+    static func lastDiag() -> String? {
+        UserDefaults.standard.string(forKey: kDiagKey)
+    }
+
     func setAge(_ age: Int?) {
         if let a = age, a > 0 { userAge = a }
     }
@@ -56,7 +66,9 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     func start() {
+        Self.saveDiag("start called")
         guard HKHealthStore.isHealthDataAvailable() else {
+            Self.saveDiag("ERR:HK unavailable")
             errorMessage = "HealthKit unavailable on this device."
             return
         }
@@ -67,26 +79,31 @@ final class HeartRateStore: NSObject, ObservableObject {
             builder = nil
         }
         let status = store.authorizationStatus(for: HKObjectType.workoutType())
+        Self.saveDiag("auth=\(status.rawValue)")
         if status != .notDetermined {
             beginSession()
         } else {
+            Self.saveDiag("requesting auth…")
             let read: Set<HKObjectType> = [
                 HKObjectType.quantityType(forIdentifier: .heartRate)!,
                 HKObjectType.workoutType(),
             ]
             let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
-            store.requestAuthorization(toShare: write, read: read) { [weak self] _, _ in
+            store.requestAuthorization(toShare: write, read: read) { [weak self] ok, err in
+                Self.saveDiag("auth cb ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
                 DispatchQueue.main.async { self?.beginSession() }
             }
         }
     }
 
     private func beginSession() {
+        Self.saveDiag("beginSession")
         let config = HKWorkoutConfiguration()
         config.activityType = .traditionalStrengthTraining
         config.locationType = .indoor
         do {
             let sess = try HKWorkoutSession(healthStore: store, configuration: config)
+            Self.saveDiag("session created")
             let bld = sess.associatedWorkoutBuilder()
             bld.dataSource = HKLiveWorkoutDataSource(healthStore: store, workoutConfiguration: config)
             bld.delegate = self
@@ -95,10 +112,13 @@ final class HeartRateStore: NSObject, ObservableObject {
             self.builder = bld
             let start = Date()
             sess.startActivity(with: start)
-            bld.beginCollection(withStart: start) { [weak self] _, _ in
+            Self.saveDiag("startActivity OK")
+            bld.beginCollection(withStart: start) { [weak self] ok, err in
+                Self.saveDiag("collecting ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
                 DispatchQueue.main.async { self?.running = true }
             }
         } catch {
+            Self.saveDiag("ERR:\(error.localizedDescription)")
             DispatchQueue.main.async { self.errorMessage = error.localizedDescription }
         }
     }
@@ -146,9 +166,11 @@ final class HeartRateStore: NSObject, ObservableObject {
 
 extension HeartRateStore: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate {
     func workoutSession(_ workoutSession: HKWorkoutSession, didChangeTo toState: HKWorkoutSessionState, from fromState: HKWorkoutSessionState, date: Date) {
+        Self.saveDiag("state \(fromState.rawValue)→\(toState.rawValue)")
         wlog("[watch-hr] HK state \(fromState.rawValue)→\(toState.rawValue)")
     }
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
+        Self.saveDiag("FAILED:\(error.localizedDescription)")
         wlog("[watch-hr] HK FAILED: \(error.localizedDescription)")
         DispatchQueue.main.async {
             self.errorMessage = error.localizedDescription
