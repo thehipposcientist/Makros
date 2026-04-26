@@ -969,33 +969,16 @@ export default function Index() {
   };
 
   const handleSignOut = async () => {
-    // Push the current state to the backend BEFORE clearing the token so
-    // the next sign-in (or a sign-in on another device) restores
-    // everything. Best-effort — swallows errors.
+    const raceTimeout = <T,>(p: Promise<T>, ms: number): Promise<T | void> =>
+      Promise.race([p, new Promise<void>(r => setTimeout(r, ms))]);
     if (authToken) {
-      await pushUserStateToBackend(authToken);
+      await raceTimeout(pushUserStateToBackend(authToken).catch(() => {}), 2000);
     }
-    // Wipe the paired Apple Watch — without this, the watch keeps
-    // showing the previous user's workout + meals + supplement stack
-    // until a new push lands. iOS WCSession.applicationContext
-    // persists across app launches, so a different user signing in
-    // would see stale data on the wrist for a stretch.
     try {
       const { clearWatchData } = await import('../src/utils/watchSync');
-      await clearWatchData();
+      await raceTimeout(clearWatchData(), 500);
     } catch { /* watch bridge optional */ }
-    // Clear any in-flight plan-job marker — otherwise the next sign-in sees
-    // a stale pending id, tries to resume it, and the user thinks we're
-    // triggering a fresh plan generation on sign-in. The marker is
-    // session-scoped: the backend job is still in the database if it's
-    // actually running, but this device won't try to reconnect to it.
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
-    // Sign-out is now non-destructive for disk state — we only clear the
-    // auth token and reset in-memory React state so the user lands on the
-    // login screen. The cached profile / plans / routines stay on device
-    // so the same user signing back in restores everything instantly.
-    // A DIFFERENT user signing in is handled in `handleAuthenticated` via
-    // the user-switch detection, which wipes before hydrating.
     await clearAuthToken();
     setAuthToken(null);
     setUserProfile(null);
@@ -1792,10 +1775,11 @@ function AccountInfoModal({
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
       <TouchableOpacity style={am.backdrop} activeOpacity={1} onPress={onClose}>
-        <View style={am.sheet}>
+        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={[am.sheet, { maxHeight: '85%' }]}>
           <View style={am.handle} />
           <Text style={am.title}>Account</Text>
 
+          <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ gap: 16 }} showsVerticalScrollIndicator={false} bounces={false}>
           {loading ? (
             <ActivityIndicator color={tc.primary} style={{ marginVertical: 24 }} />
           ) : (
@@ -2077,7 +2061,8 @@ function AccountInfoModal({
           <TouchableOpacity onPress={onClose} style={am.closeBtn}>
             <Text style={am.closeText}>Close</Text>
           </TouchableOpacity>
-        </View>
+          </ScrollView>
+        </TouchableOpacity>
       </TouchableOpacity>
       <DevLogsViewer
         visible={showDevLogs}

@@ -400,15 +400,17 @@ def protein_breakdown_today(
     so the UI can prompt the user to classify.
     """
     from app.models import Meal, MealItem, FoodMetadata
+    from app.services.nutrition.food_classifier import normalize_name as _norm
     from sqlalchemy import func as _sa_func
     today_d = date.today()
-    # Pull today's meal items joined to their food metadata. Custom
-    # foods (food_id=null) won't have a FoodMetadata row — handled
-    # below as 'unknown'.
     rows = db.exec(
         select(MealItem, FoodMetadata)
         .join(Meal, Meal.id == MealItem.meal_id)
-        .join(FoodMetadata, FoodMetadata.food_id == MealItem.food_id, isouter=True)
+        .join(
+            FoodMetadata,
+            FoodMetadata.normalized_name == _sa_func.lower(MealItem.food_name),
+            isouter=True,
+        )
         .where(Meal.user_id == current_user.id)
         .where(_sa_func.date(Meal.consumed_at) == today_d)
     ).all()

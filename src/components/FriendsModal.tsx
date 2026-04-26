@@ -315,6 +315,21 @@ export default function FriendsModal({ visible, authToken, onClose, themeName }:
                       key={f.user_id}
                       style={styles.friendRow}
                       activeOpacity={0.7}
+                      onPress={() => {
+                        const df = digest?.friends.find((d) => d.user_id === f.user_id);
+                        const sessions = df?.sessions ?? 0;
+                        const lines = [
+                          `@${f.username}`,
+                          goalLabel(f.goal) || 'No goal set',
+                          sessions > 0 ? `${sessions} session${sessions === 1 ? '' : 's'} this week` : 'No sessions this week',
+                          f.streak >= 2 ? `${f.streak}-day streak` : '',
+                          f.last_active_within_48h ? 'Active recently' : '',
+                        ].filter(Boolean);
+                        Alert.alert(f.display_name ?? f.username, lines.join('\n'), [
+                          { text: 'Remove', style: 'destructive', onPress: () => onRemove(f) },
+                          { text: 'Close', style: 'cancel' },
+                        ]);
+                      }}
                       onLongPress={() => onRemove(f)}
                     >
                       <View style={styles.avatar}>

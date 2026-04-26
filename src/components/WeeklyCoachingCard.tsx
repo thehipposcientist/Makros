@@ -124,13 +124,6 @@ export default function WeeklyCoachingCard({
     persistDismissed(next);
   };
 
-  const acceptRec = (rec: PlanRecommendation) => {
-    onAcceptRecommendation?.(rec);
-    // Accepting also dismisses — user doesn't want to see it again
-    // this week even if they haven't yet wired up a plan mutation.
-    dismissRec(rec.key);
-  };
-
   if (loading && !review) {
     return (
       <View style={{
@@ -181,9 +174,18 @@ export default function WeeklyCoachingCard({
           <Ionicons name="sparkles-outline" size={18} color={tc.primary} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 11, fontWeight: '700', letterSpacing: 0.8, color: tc.primary }}>
-            WEEKLY COACHING
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', letterSpacing: 0.8, color: tc.primary }}>
+              WEEKLY COACHING
+            </Text>
+            {review.week_start && review.week_end && (
+              <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '500' }}>
+                {new Date(review.week_start + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                {' – '}
+                {new Date(review.week_end + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+              </Text>
+            )}
+          </View>
           <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginTop: 2 }} numberOfLines={expanded ? 0 : 2}>
             {review.headline || `${review.sessions_completed}/${review.sessions_planned} sessions`}
           </Text>

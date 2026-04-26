@@ -2692,6 +2692,8 @@ export type StackItem = {
 
 export type TodayStackItem = StackItem & {
   logs_today: Array<{ id: number; taken_at: string; skipped: boolean; dose_amount?: number | null }>;
+  ingredient_slug?: string | null;
+  ingredient_name?: string | null;
 };
 
 export type SupplementRecommendation = {

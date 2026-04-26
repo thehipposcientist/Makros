@@ -199,6 +199,12 @@ def today_schedule(
     for log in logs:
         logs_by_item.setdefault(log.stack_item_id, []).append(log.model_dump())
 
+    ing_ids = [s.supplement_ingredient_id for s in stack if s.supplement_ingredient_id]
+    ing_by_id: dict[int, SupplementIngredient] = {}
+    if ing_ids:
+        ings = db.exec(select(SupplementIngredient).where(SupplementIngredient.id.in_(ing_ids))).all()
+        ing_by_id = {i.id: i for i in ings}
+
     out = []
     for item in stack:
         # Simple frequency filter — "daily" always scheduled; weekdays
@@ -208,10 +214,12 @@ def today_schedule(
             continue
         if freq == "as_needed":
             continue
-        out.append({
-            **item.model_dump(),
-            "logs_today": logs_by_item.get(item.id or -1, []),
-        })
+        d = item.model_dump()
+        d["logs_today"] = logs_by_item.get(item.id or -1, [])
+        ing = ing_by_id.get(item.supplement_ingredient_id) if item.supplement_ingredient_id else None
+        d["ingredient_slug"] = ing.slug if ing else None
+        d["ingredient_name"] = ing.name if ing else None
+        out.append(d)
     return out
 
 

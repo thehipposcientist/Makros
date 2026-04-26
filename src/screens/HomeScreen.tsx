@@ -1673,21 +1673,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todayCollagenG, setTodayCollagenG] = useState<number | null>(null);
   const [todayProbioticCfu, setTodayProbioticCfu] = useState<number | null>(null);
   const [proteinBreakdown, setProteinBreakdown] = useState<any | null>(null);
+  const [todaySupplementMicros, setTodaySupplementMicros] = useState<Array<{ ingredient_slug?: string | null; ingredient_name?: string | null; custom_name?: string | null; dose_amount: number; dose_unit: string; taken_count: number }> | null>(null);
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
     (async () => {
       try {
-        const { getGutHealth, getProteinBreakdown } = await import('../services/api');
-        const [gut, breakdown] = await Promise.all([
+        const { getGutHealth, getProteinBreakdown, getTodaySupplements } = await import('../services/api');
+        const [gut, breakdown, supps] = await Promise.all([
           getGutHealth(authToken, 7).catch(() => null),
           getProteinBreakdown(authToken).catch(() => null),
+          getTodaySupplements(authToken).catch(() => null),
         ]);
         if (cancelled) return;
         const t: any = gut?.today;
         setTodayCollagenG(typeof t?.collagen_g === 'number' ? t.collagen_g : 0);
         setTodayProbioticCfu(typeof t?.probiotic_cfu_billions === 'number' ? t.probiotic_cfu_billions : 0);
         setProteinBreakdown(breakdown);
+        if (supps) {
+          setTodaySupplementMicros(supps.map(s => ({
+            ingredient_slug: s.ingredient_slug ?? null,
+            ingredient_name: s.ingredient_name ?? null,
+            custom_name: s.custom_name ?? null,
+            dose_amount: s.dose_amount,
+            dose_unit: s.dose_unit,
+            taken_count: (s.logs_today ?? []).filter(l => !l.skipped).length,
+          })));
+        }
       } catch { /* network / bridge optional */ }
     })();
     return () => { cancelled = true; };
@@ -2172,11 +2184,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // true, (c) messages arrive but malformed, or (d) nothing arrives
   // at all (= watch isn't sending or iOS isn't routing).
   useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log('[wc-diag] effect mounted — about to import watchSync');
     const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
-        const { onWatchSessionDiag } = await import('../utils/watchSync');
-        const unsub = onWatchSessionDiag((entry) => {
+        const watchSyncMod = await import('../utils/watchSync');
+        const { onWatchSessionDiag, WatchBridge } = watchSyncMod as any;
+        // eslint-disable-next-line no-console
+        console.log('[wc-diag] watchSync imported — bridge available?',
+          !!WatchBridge?.isAvailable?.(),
+          'paired=', !!WatchBridge?.isPaired?.(),
+          'reachable=', !!WatchBridge?.isReachable?.(),
+        );
+        const unsub = onWatchSessionDiag((entry: Record<string, any>) => {
           // Map activationState int → human label so logs are scannable.
           // 0=notActivated, 1=inactive, 2=activated.
           const stateLabel =
@@ -2190,9 +2211,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             entry,
           );
         });
+        // eslint-disable-next-line no-console
+        console.log('[wc-diag] listener subscribed — waiting for events');
         if (token.cancelled) { try { unsub(); } catch {} }
         else { token.unsub = unsub; }
-      } catch { /* bridge unavailable on Android — silent */ }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.log('[wc-diag] subscribe failed:', String(err));
+      }
     })();
     return () => {
       token.cancelled = true;
@@ -5604,13 +5630,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            {workoutSubTab === 'plan' && availabilityItems.length > 0 && (() => {
-              // Animate chip additions/removals after plan regens — the
-              // chip set can churn between weeks/plans, so snap-in looks
-              // jarring. Fire once per render branch; cheap and harmless.
-              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-              return null;
-            })()}
             {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
               <View style={{
                 flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -5685,7 +5704,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // on the backend, so we surface Upper+Cardio only.
               const splitPlusCardioOptions: Record<string, string[]> = {
                 ppl: ['Push + Cardio', 'Pull + Cardio'],
-                upper_lower: ['Upper + Cardio'],
+                upper_lower: ['Upper + Cardio', 'Lower + Cardio'],
                 full_body: ['Full Body + Cardio'],
                 ppl_upper_lower: ['Push + Cardio', 'Pull + Cardio', 'Upper + Cardio'],
                 bro: ['Upper + Cardio'],
@@ -6778,6 +6797,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
                       dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
                       proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}
+                      todaySupplements={d.key === todayKey() ? todaySupplementMicros : null}
                     />
                   </AnimatedCollapsible>
                 </View>

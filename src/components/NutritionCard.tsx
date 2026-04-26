@@ -65,6 +65,17 @@ interface NutritionCardProps {
     animal: Array<{ name: string; protein_g: number }>;
     unclassified: Array<{ name: string; protein_g: number }>;
   } | null;
+  /** Today's taken (non-skipped) supplements — used to inject
+   *  supplement contributions into the nutrient drill-down so users
+   *  see "Vitamin D3 (supplement)" alongside food sources. */
+  todaySupplements?: Array<{
+    ingredient_slug?: string | null;
+    ingredient_name?: string | null;
+    custom_name?: string | null;
+    dose_amount: number;
+    dose_unit: string;
+    taken_count: number;
+  }> | null;
 }
 
 export default function NutritionCard({
@@ -89,6 +100,7 @@ export default function NutritionCard({
   dailyCollagenG,
   dailyProbioticCfuBillions,
   proteinBreakdown,
+  todaySupplements,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showProteinModal, setShowProteinModal] = useState(false);
@@ -509,6 +521,23 @@ export default function NutritionCard({
                       let val = 0;
                       for (const k of spec.keys) { if (mn[k] != null) { val = Number(mn[k]) || 0; break; } }
                       if (val > 0) contributions.push({ food: meal.meal, meal: '', amount: val });
+                    }
+                  }
+                  // Inject supplement contributions (vitamin D3, B12, magnesium, iron, omega-3)
+                  const _suppMicroMap: Record<string, { key: string; converter: number }> = {
+                    vitamin_d3: { key: 'vitaminD', converter: 1 / 40 },
+                    vitamin_b12: { key: 'vitaminB12', converter: 1 },
+                    magnesium: { key: 'magnesium', converter: 1 },
+                    iron: { key: 'iron', converter: 1 },
+                    omega_3: { key: 'omega3', converter: 1 },
+                  };
+                  if (todaySupplements) {
+                    for (const sup of todaySupplements) {
+                      if (!sup.ingredient_slug || sup.taken_count <= 0) continue;
+                      const mapping = _suppMicroMap[sup.ingredient_slug];
+                      if (!mapping || mapping.key !== spec.out) continue;
+                      const amount = sup.dose_amount * sup.taken_count * mapping.converter;
+                      if (amount > 0) contributions.push({ food: `${sup.ingredient_name ?? sup.custom_name ?? sup.ingredient_slug} (supplement)`, meal: '', amount });
                     }
                   }
                   contributions.sort((a, b) => b.amount - a.amount);
