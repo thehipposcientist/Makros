@@ -29,7 +29,7 @@ final class HeartRateStore: NSObject, ObservableObject {
 
     private static let kDiagKey = "thallo.hrDiag"
 
-    private static func saveDiag(_ msg: String) {
+    static func saveDiag(_ msg: String) {
         UserDefaults.standard.set(msg, forKey: kDiagKey)
     }
 

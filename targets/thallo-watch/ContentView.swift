@@ -69,8 +69,11 @@ struct ContentView: View {
                 TabView {
                     TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
                         heartRate.start()
+                        HeartRateStore.saveDiag("pre-active")
                         active = true
+                        HeartRateStore.saveDiag("post-active")
                         conn.sendCommand("start_workout")
+                        HeartRateStore.saveDiag("post-send")
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")

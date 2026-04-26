@@ -175,6 +175,7 @@ struct ActiveWorkoutView: View {
             }
         }
         .onAppear {
+            HeartRateStore.saveDiag("ActiveView.onAppear")
             state.startTick()
             if let ex = workout.exercises.first {
                 state.seed(for: ex)
