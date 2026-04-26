@@ -195,7 +195,9 @@
       "Bash(npx --no-install babel-node --presets @babel/preset-typescript,@babel/preset-react -e \"\")",
       "Bash(xargs -I {} git show {}:src/screens/HomeScreen.tsx)",
       "Bash(command -v node)",
-      "Read(//opt/homebrew/Cellar/node/25.9.0_1/bin/**)"
+      "Read(//opt/homebrew/Cellar/node/25.9.0_1/bin/**)",
+      "Bash(./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
+      "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\")"
     ]
   }
 }

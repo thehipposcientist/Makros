@@ -384,7 +384,7 @@ def _recovery_nutrients_flag(
 ) -> FlagState:
     """Read magnesium, zinc, vitamin D, selenium from daily meal items over
     the window. Flag when multiple are chronically low."""
-    from app.services.nutrition.score_builder import _aggregate_micros
+    from app.services.nutrition.score_builder import _aggregate_micros, _add_supplement_micros
 
     # For each day, aggregate micros and check adequacy.
     nutrients = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg"]
@@ -407,6 +407,7 @@ def _recovery_nutrients_flag(
             items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all()
         if items:
             day_micros, _fc, _fwm = _aggregate_micros(db, items)
+            _add_supplement_micros(db, user_id, current, day_micros)
             days_analyzed += 1
             for key in nutrients:
                 rda_val = rda.get(key, 0)

@@ -219,4 +219,21 @@ export const WatchBridge = {
       try { sub?.remove?.(); } catch { /* no-op */ }
     };
   },
+
+  /** Verbose diagnostic firehose. Fires for every WCSession delegate
+   *  callback on the phone bridge — activation, reachability changes,
+   *  every receive path. Carries full session state (activationState,
+   *  paired, installed, reachable). Used by the in-app DevLogsViewer
+   *  to surface "why is reachable always false / why aren't watch taps
+   *  arriving" without needing Mac + Console.app. */
+  addSessionDiagListener(
+    cb: (entry: Record<string, any>) => void,
+  ): () => void {
+    if (!native) return () => {};
+    const handler = (evt: Record<string, any>) => { cb(evt ?? {}); };
+    const sub = native.addListener('watchSessionDiag', handler);
+    return () => {
+      try { sub?.remove?.(); } catch { /* no-op */ }
+    };
+  },
 };

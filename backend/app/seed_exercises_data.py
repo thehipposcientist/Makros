@@ -2496,6 +2496,7 @@ POWER = [
         "equipment_bucket": "dumbbells",
         "movement_pattern": "carry",
         "exercise_type": "strength",
+        "default_tracking_mode": "time",
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,

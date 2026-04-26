@@ -163,7 +163,7 @@ def ask_trainer_question(
     profile_slim = body.profile or {}
     foods_available = (profile_slim.get("foodsAvailable") or []) if isinstance(profile_slim, dict) else []
     if isinstance(profile_slim, dict):
-        for drop_key in ("customFoods", "savedMeals", "foodsAvailable", "supplementsAvailable"):
+        for drop_key in ("customFoods", "savedMeals", "foodsAvailable"):
             profile_slim.pop(drop_key, None)
     context_blob: dict = {"profile": profile_slim, "progress": body.progress}
     # Always include BOTH plans so the unified coach can modify either.
@@ -317,7 +317,8 @@ def ask_trainer_question(
         "WHAT YOU CANNOT DO (redirect the user):\n"
         "• Body stats (weight, height, age) → 'You can update that from the ☰ menu → Account.'\n"
         "• Food preferences or dietary restrictions → 'Head to ☰ menu → Edit Meal Plan to update those.'\n"
-        "• Supplements → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.'\n"
+        "• Supplement CHANGES → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.' "
+        "If profile.supplementsAvailable lists what the user already takes, reference it in advice — never recommend what they already take.\n"
         "• Meal routines → 'You can edit those from ☰ menu → Edit Meal Plan → Meal Routines.'\n"
         "• Theme/appearance → 'You can change that from ☰ menu → Themes.'\n"
         "• Priority region / training emphasis → 'Head to Goals tab to change your priority region (Balanced / Lower Body / Upper Body).'\n"

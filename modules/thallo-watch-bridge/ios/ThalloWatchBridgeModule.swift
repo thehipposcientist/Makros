@@ -18,8 +18,13 @@ public class ThalloWatchBridgeModule: Module {
         // current app state the moment the watch app becomes
         // available, so opening the watch app gets an immediate
         // refresh instead of having to wait for the next state
-        // change on the phone.
-        Events("command", "reachabilityChanged")
+        // change on the phone. `watchSessionDiag` is a verbose
+        // diagnostic firehose — every WCSession delegate callback
+        // (activation / reachability / receive paths) emits one entry
+        // with full session state so we can debug "paired=true but
+        // reachable=false / nothing arrives from watch" failures
+        // straight from the in-app DevLogsViewer.
+        Events("command", "reachabilityChanged", "watchSessionDiag")
 
         OnCreate {
             self.sessionHolder.activate { [weak self] name, body in
@@ -87,11 +92,41 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
 
     func activate(sendEvent: @escaping (String, [String: Any]) -> Void) {
         self.dispatchEvent = sendEvent
-        guard WCSession.isSupported() else { return }
+        guard WCSession.isSupported() else {
+            sendEvent("watchSessionDiag", [
+                "event": "activate.unsupported",
+                "ts": Date().timeIntervalSince1970 * 1000,
+            ])
+            return
+        }
         let s = WCSession.default
         s.delegate = self
+        logDiag("activate.called", [
+            "preState": s.activationState.rawValue,
+        ])
         if s.activationState != .activated {
             s.activate()
+        }
+    }
+
+    /// Emit a verbose diagnostic line. Captures full WCSession state at
+    /// the moment of every delegate callback so the in-app DevLogsViewer
+    /// can show the actual session lifecycle — activationState, paired,
+    /// installed, reachable — without needing Mac + Console.app.
+    private func logDiag(_ event: String, _ extra: [String: Any] = [:]) {
+        guard WCSession.isSupported() else { return }
+        let s = WCSession.default
+        var payload: [String: Any] = [
+            "event": event,
+            "ts": Date().timeIntervalSince1970 * 1000,
+            "activationState": s.activationState.rawValue,
+            "paired": s.isPaired,
+            "installed": s.isWatchAppInstalled,
+            "reachable": s.isReachable,
+        ]
+        for (k, v) in extra { payload[k] = v }
+        DispatchQueue.main.async { [weak self] in
+            self?.dispatchEvent?("watchSessionDiag", payload)
         }
     }
 
@@ -140,6 +175,10 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
 
     // MARK: WCSessionDelegate
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        logDiag("activationDidComplete", [
+            "completedState": activationState.rawValue,
+            "error": error?.localizedDescription ?? "",
+        ])
         // Fire a reachability event on activation too so the JS side
         // can push a fresh snapshot even if reachability was already
         // true by the time the listener wired up.
@@ -152,6 +191,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         }
     }
     func sessionReachabilityDidChange(_ session: WCSession) {
+        logDiag("reachabilityDidChange")
         // The watch app just opened / closed. When reachable, JS
         // re-pushes the current workout + meals + theme so the watch
         // wakes up with the latest state instead of whatever was
@@ -164,21 +204,46 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             ])
         }
     }
-    func sessionDidBecomeInactive(_ session: WCSession) {}
+    func sessionDidBecomeInactive(_ session: WCSession) {
+        logDiag("sessionDidBecomeInactive")
+    }
     func sessionDidDeactivate(_ session: WCSession) {
+        logDiag("sessionDidDeactivate")
         // Rare — iOS calls this after a watch swap. Reactivate.
         WCSession.default.activate()
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        logDiag("didReceiveMessage", [
+            "kind": (message["kind"] as? String) ?? "<missing>",
+            "command": (message["command"] as? String) ?? "<none>",
+            "keyCount": message.count,
+        ])
         dispatchCommand(message)
     }
     func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        logDiag("didReceiveMessage(reply)", [
+            "kind": (message["kind"] as? String) ?? "<missing>",
+            "command": (message["command"] as? String) ?? "<none>",
+            "keyCount": message.count,
+        ])
         dispatchCommand(message)
         replyHandler(["ok": true])
     }
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        logDiag("didReceiveUserInfo", [
+            "kind": (userInfo["kind"] as? String) ?? "<missing>",
+            "command": (userInfo["command"] as? String) ?? "<none>",
+            "keyCount": userInfo.count,
+        ])
         dispatchCommand(userInfo)
+    }
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        // Phone normally writes context, doesn't read it — but log
+        // anyway in case the watch ever sends one.
+        logDiag("didReceiveApplicationContext", [
+            "keyCount": applicationContext.count,
+        ])
     }
 
     private func dispatchCommand(_ msg: [String: Any]) {

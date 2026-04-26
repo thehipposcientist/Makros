@@ -801,6 +801,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           .filter(({ ex }) =>
             (ex.weightRecommendationSource === 'default' || !ex.weightRecommendationSource)
             && (!ex.sets || ex.sets.length === 0)
+            && !shouldHideWeight({ name: ex.name, equipment: ex.equipment, reps: ex.targetReps })
           );
         if (!targets.length) return;
         const results = await Promise.allSettled(
@@ -1034,6 +1035,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [restForExercise, setRestForExercise] = useState<string | null>(null);
   const [restCue, setRestCue] = useState<string | null>(null);
   const [restNextTarget, setRestNextTarget] = useState<string | null>(null);
+  // Mirror cue + nextTarget into refs so startRestTimer can read latest values
+  // synchronously when persisting the snapshot blob to AsyncStorage.
+  const restNextTargetRef = useRef<string | null>(null);
+  const restCueRef = useRef<string | null>(null);
+  useEffect(() => { restNextTargetRef.current = restNextTarget; }, [restNextTarget]);
+  useEffect(() => { restCueRef.current = restCue; }, [restCue]);
 
   // Timed exercise timer: keyed by "exIdx-setSlot".
   //
@@ -1773,6 +1780,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restTotalSecondsRef.current = seconds;
     restExerciseNameRef.current = exerciseName;
 
+    // Persist the snapshot synchronously so an iOS background-kill or app
+    // crash mid-rest can resume the countdown on relaunch. Refs are the
+    // source of truth here (state updates are batched), and we capture the
+    // current next-set tip + cue from their mirror refs.
+    AsyncStorage.setItem('activeWorkoutRest', JSON.stringify({
+      startAtMs: restStartAtRef.current,
+      totalSeconds: seconds,
+      exerciseName,
+      nextTarget: restNextTargetRef.current,
+      cue: restCueRef.current,
+    })).catch(() => {});
+
     // Kick off a Live Activity on the lock screen. End any prior one first
     // (switching exercises mid-rest shouldn't orphan the old card). Wrapped
     // so any failure in the native bridge can't take down the workout.
@@ -1813,6 +1832,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (remaining === 0) {
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
+        AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
         import('../utils/feedback').then(f => {
           // Brief in-app chime (~0.45s) + vibrate + haptic. The
           // pre-scheduled completeId notification (set in
@@ -1842,7 +1862,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }, 500); // 500ms tick for smooth countdown without drift
   }, [theme.colors.primary, workout.focus]);
 
-  // Force-update timers when app returns from background
+  // Force-update timers when app returns from background. Also re-persist
+  // the rest snapshot on background transition: if iOS evicts the app from
+  // memory while it's in the background, AsyncStorage is the only thing
+  // that survives. The blob is already written when startRestTimer runs,
+  // but re-writing here ensures we capture any cue / next-target updates
+  // that landed after the AI rec resolved.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
@@ -1856,11 +1881,75 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (remaining === 0 && restTimerRef.current) {
             clearInterval(restTimerRef.current);
             restTimerRef.current = null;
+            AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
           }
+        }
+      } else if (state === 'background' || state === 'inactive') {
+        if (restStartAtRef.current > 0 && restTotalSecondsRef.current > 0 && restExerciseNameRef.current) {
+          AsyncStorage.setItem('activeWorkoutRest', JSON.stringify({
+            startAtMs: restStartAtRef.current,
+            totalSeconds: restTotalSecondsRef.current,
+            exerciseName: restExerciseNameRef.current,
+            nextTarget: restNextTargetRef.current,
+            cue: restCueRef.current,
+          })).catch(() => {});
         }
       }
     });
     return () => sub.remove();
+  }, []);
+
+  // Re-persist whenever the AI-driven cue / next-set target updates while a
+  // rest timer is active, so a crash after the tip lands keeps the latest
+  // tip on screen at resume.
+  useEffect(() => {
+    if (restStartAtRef.current === 0 || restTotalSecondsRef.current === 0 || !restExerciseNameRef.current) return;
+    AsyncStorage.setItem('activeWorkoutRest', JSON.stringify({
+      startAtMs: restStartAtRef.current,
+      totalSeconds: restTotalSecondsRef.current,
+      exerciseName: restExerciseNameRef.current,
+      nextTarget: restNextTarget,
+      cue: restCue,
+    })).catch(() => {});
+  }, [restNextTarget, restCue, restForExercise]);
+
+  // Restore an in-flight rest timer after a background-kill / crash. Reads
+  // the AsyncStorage blob written by startRestTimer, computes wall-clock
+  // remaining via the original startAtMs, and resumes the countdown if any
+  // time is left. Pre-existing iOS-scheduled rest notifications fire at
+  // their original absolute times regardless of the app's state, so we
+  // intentionally do NOT re-schedule notifications here (would double-fire).
+  useEffect(() => {
+    AsyncStorage.getItem('activeWorkoutRest').then(raw => {
+      if (!raw) return;
+      try {
+        const data = JSON.parse(raw);
+        const startAtMs = Number(data?.startAtMs);
+        const totalSeconds = Number(data?.totalSeconds);
+        const exName = typeof data?.exerciseName === 'string' ? data.exerciseName : null;
+        if (!startAtMs || !totalSeconds || !exName) {
+          AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+          return;
+        }
+        const elapsedSec = Math.floor((Date.now() - startAtMs) / 1000);
+        const remaining = Math.max(0, totalSeconds - elapsedSec);
+        if (remaining <= 0) {
+          AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+          return;
+        }
+        restDurationSeconds.current = totalSeconds;
+        setRestForExercise(exName);
+        if (typeof data.nextTarget === 'string') setRestNextTarget(data.nextTarget);
+        if (typeof data.cue === 'string') setRestCue(data.cue);
+        setRestRemaining(remaining);
+        startRestTimer(remaining, exName);
+        console.log(`[ActiveWorkout] restored rest timer: ${remaining}s remaining for ${exName}`);
+      } catch {
+        AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+      }
+    }).catch(() => {});
+    // Mount-only restoration. startRestTimer is stable per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const clearRestState = useCallback(() => {
@@ -1873,6 +1962,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setRestCue(null);
     setRestNextTarget(null);
     restDurationSeconds.current = 0;
+    restStartAtRef.current = 0;
+    restTotalSecondsRef.current = 0;
+    restExerciseNameRef.current = null;
+    AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = null;
     if (liveActivityIdRef.current) {
@@ -2221,7 +2314,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleFinish = async () => {
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -2687,7 +2780,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
           'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); onCancel(); } }]
+          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); onCancel(); } }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
         </TouchableOpacity>
@@ -3834,7 +3927,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       ) : null}
                     </View>
                     {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
-                      <View style={{ marginTop: 10, paddingHorizontal: 2 }}>
+                      <View style={{ marginTop: 10, marginBottom: 8, paddingHorizontal: 2 }}>
                         <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8, textAlign: 'center' }}>
                           TIME IN ZONES
                         </Text>

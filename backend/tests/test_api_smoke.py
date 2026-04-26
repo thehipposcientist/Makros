@@ -275,6 +275,56 @@ def test_15_dev_reset_password_gated():
         _token = body["access_token"]
 
 
+def test_16_e1rm_returns_null_for_unknown_exercise():
+    if _skip_if_server_down("e1rm"):
+        return
+    print("[smoke] GET /workouts/e1rm — unknown exercise returns null e1rm")
+    r = _http.get(
+        f"{BASE_URL}/workouts/e1rm?exercise_name=NonExistentExercise123",
+        headers=_auth(),
+        timeout=10,
+    )
+    body = _check(r, 200, "GET /workouts/e1rm (unknown)")
+    assert body.get("e1rm") is None, f"expected null e1rm, got {body}"
+    assert body.get("reason") == "not_enough_data"
+    print("  ✓ null e1rm for unknown exercise")
+
+
+def test_17_e1rm_history_returns_empty_for_unknown():
+    if _skip_if_server_down("e1rm history"):
+        return
+    print("[smoke] GET /workouts/e1rm/history — unknown exercise returns empty list")
+    r = _http.get(
+        f"{BASE_URL}/workouts/e1rm/history?exercise_name=NonExistentExercise123",
+        headers=_auth(),
+        timeout=10,
+    )
+    body = _check(r, 200, "GET /workouts/e1rm/history (unknown)")
+    assert body.get("history") == [], f"expected empty history, got {body}"
+    print("  ✓ empty history for unknown exercise")
+
+
+def test_18_e1rm_for_logged_exercise():
+    if _skip_if_server_down("e1rm with data"):
+        return
+    print("[smoke] GET /workouts/e1rm — exercise from logged workout")
+    r = _http.get(
+        f"{BASE_URL}/workouts/e1rm?exercise_name=Bench+Press",
+        headers=_auth(),
+        timeout=10,
+    )
+    body = _check(r, 200, "GET /workouts/e1rm (Bench Press)")
+    # May or may not have enough sets to compute — just verify shape
+    if body.get("e1rm"):
+        assert "e1rm_lbs" in body["e1rm"]
+        assert "confidence" in body["e1rm"]
+        assert "sample_count" in body["e1rm"]
+        print(f"  ✓ got e1rm: {body['e1rm']}")
+    else:
+        assert body.get("reason") == "not_enough_data"
+        print("  ✓ not enough data (expected for single-session smoke test)")
+
+
 def test_99_delete_account_cleans_up():
     """Leave the DB clean so re-running the suite doesn't accumulate
     'smoke_*' junk. Also exercises the soft-delete path."""
@@ -316,6 +366,9 @@ _ALL_CASES = [
     test_13_profile_export_round_trip,
     test_14_security_headers_present,
     test_15_dev_reset_password_gated,
+    test_16_e1rm_returns_null_for_unknown_exercise,
+    test_17_e1rm_history_returns_empty_for_unknown,
+    test_18_e1rm_for_logged_exercise,
     test_99_delete_account_cleans_up,
 ]
 cases = _ALL_CASES if _SERVER_UP else [_noop]

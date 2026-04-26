@@ -1104,7 +1104,8 @@ def _stamp_load_metadata(
         or equipment_bucket in ("treadmill", "stationary_bike", "rowing_machine", "jump_rope", "elliptical")
     )
     is_timed_only = rep_range is None  # "30s", "3-5 min", "25-40 min", etc.
-    skip_load = is_cardio_or_mobility or is_timed_only
+    is_bodyweight = equipment_bucket == "bodyweight"
+    skip_load = is_cardio_or_mobility or is_timed_only or is_bodyweight
 
     if not skip_load and perf_profiles is not None and all_exercises_by_slug is not None:
         try:

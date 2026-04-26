@@ -8,6 +8,7 @@ import {
   Modal, View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, Share,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -21,17 +22,21 @@ interface Props {
   themeName?: AppThemeName;
 }
 
-const LEVEL_COLORS: Record<string, { bg: string; fg: string }> = {
-  log:   { bg: '#00000000', fg: '#E5E7EB' },
-  info:  { bg: '#00000000', fg: '#93C5FD' },
-  warn:  { bg: '#00000000', fg: '#FBBF24' },
-  error: { bg: '#00000000', fg: '#F87171' },
-  debug: { bg: '#00000000', fg: '#9CA3AF' },
-};
-
 export default function DevLogsViewer({ visible, onClose, themeName }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const insets = useSafeAreaInsets();
+  // Theme-aware per-level colors. Hardcoded hex earlier was unreadable
+  // on light themes (light text on light bg). Now log = textPrimary,
+  // info = primary, warn/error = theme tokens, debug = muted — all of
+  // which the theme already calibrates for contrast on each background.
+  const LEVEL_FG: Record<string, string> = {
+    log:   tc.textPrimary,
+    info:  tc.primary,
+    warn:  tc.warning,
+    error: tc.error,
+    debug: tc.textMuted,
+  };
   const [entries, setEntries] = useState<DevLogEntry[]>(() => getDevLogs());
   const [filter, setFilter] = useState<string>('');
   const [level, setLevel] = useState<'all' | 'log' | 'warn' | 'error'>('all');
@@ -62,9 +67,9 @@ export default function DevLogsViewer({ visible, onClose, themeName }: Props) {
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={[styles.root, { backgroundColor: tc.background }]}>
+      <View style={[styles.root, { backgroundColor: tc.background, paddingTop: insets.top }]}>
         <View style={[styles.header, { borderBottomColor: tc.border }]}>
-          <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
+          <TouchableOpacity onPress={onClose} style={styles.headerBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Ionicons name="close" size={22} color={tc.textPrimary} />
           </TouchableOpacity>
           <View style={{ flex: 1 }}>
@@ -123,7 +128,7 @@ export default function DevLogsViewer({ visible, onClose, themeName }: Props) {
             </Text>
           ) : filtered.map((e, i) => {
             const t = new Date(e.ts).toISOString().slice(11, 23);
-            const color = LEVEL_COLORS[e.level] ?? LEVEL_COLORS.log;
+            const fg = LEVEL_FG[e.level] ?? tc.textPrimary;
             return (
               <View key={`${e.ts}-${i}`} style={{
                 paddingVertical: 6,
@@ -132,7 +137,7 @@ export default function DevLogsViewer({ visible, onClose, themeName }: Props) {
                 <Text style={{ fontSize: 10, color: tc.textMuted, fontFamily: 'Menlo' }}>
                   {t} · {e.level.toUpperCase()}
                 </Text>
-                <Text style={{ fontSize: 12, color: color.fg, fontFamily: 'Menlo', marginTop: 2 }} selectable>
+                <Text style={{ fontSize: 12, color: fg, fontFamily: 'Menlo', marginTop: 2 }} selectable>
                   {e.message}
                 </Text>
               </View>

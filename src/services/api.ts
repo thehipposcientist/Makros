@@ -2921,8 +2921,10 @@ export async function applyRecommendationAction(
 /** Wipe every WorkoutCompletion + WorkoutSession row for `dateISO`.
  *  Used by the day-card "Undo done" path when a phantom completion
  *  appears (timezone bug at midnight, partial sync, manual error). */
-export async function deleteWorkoutCompletion(token: string, dateISO: string): Promise<void> {
-  await request(`/workouts/completion?workout_date=${dateISO}`, {
+export async function deleteWorkoutCompletion(token: string, dateISO: string, focusLabel?: string): Promise<void> {
+  let url = `/workouts/completion?workout_date=${dateISO}`;
+  if (focusLabel) url += `&focus_label=${encodeURIComponent(focusLabel)}`;
+  await request(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -2930,6 +2932,35 @@ export async function deleteWorkoutCompletion(token: string, dateISO: string): P
 
 export async function getWeeklyVolume(token: string, days = 7): Promise<WeeklyVolumeSnapshot> {
   return request<WeeklyVolumeSnapshot>(`/workouts/weekly-volume?days=${days}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Estimated 1RM ─────────────���───────────────────────────────────────────
+
+export interface E1RMEstimate {
+  e1rm_lbs: number;
+  sample_count: number;
+  confidence: 'low' | 'med' | 'high';
+}
+
+export interface E1RMHistoryPoint {
+  date: string;
+  e1rm_lbs: number;
+  confidence: string;
+  sample_count: number;
+}
+
+export async function getE1RM(token: string, exerciseName: string, role = 'primary'): Promise<{ e1rm: E1RMEstimate | null; reason?: string }> {
+  return request(`/workouts/e1rm?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getE1RMHistory(token: string, exerciseName: string, role = 'primary'): Promise<{ exercise: string; history: E1RMHistoryPoint[] }> {
+  return request(`/workouts/e1rm/history?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });

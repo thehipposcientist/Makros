@@ -28,6 +28,7 @@ import {
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
   loadPreservedCompletedWorkouts,
   savePreservedCompletedWorkout,
+  deleteWorkoutSession,
 } from '../utils/workoutHistory';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
@@ -2161,6 +2162,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       workoutPlan,
     };
   });
+
+  // WCSession diagnostic firehose. Mirrors every delegate callback
+  // from the phone bridge into DevLogsViewer with a `[wc-diag]`
+  // prefix — activation completion, reachability flips, every
+  // didReceiveMessage / didReceiveUserInfo arrival. Use this when
+  // "watch taps don't reach the phone" to see whether the issue is
+  // (a) phone bridge never activates, (b) reachability never flips
+  // true, (c) messages arrive but malformed, or (d) nothing arrives
+  // at all (= watch isn't sending or iOS isn't routing).
+  useEffect(() => {
+    const token = { cancelled: false, unsub: null as (() => void) | null };
+    (async () => {
+      try {
+        const { onWatchSessionDiag } = await import('../utils/watchSync');
+        const unsub = onWatchSessionDiag((entry) => {
+          // Map activationState int → human label so logs are scannable.
+          // 0=notActivated, 1=inactive, 2=activated.
+          const stateLabel =
+            entry.activationState === 2 ? 'activated' :
+            entry.activationState === 1 ? 'inactive' :
+            entry.activationState === 0 ? 'notActivated' :
+            String(entry.activationState ?? '?');
+          // eslint-disable-next-line no-console
+          console.log(
+            `[wc-diag] ${entry.event} state=${stateLabel} reachable=${!!entry.reachable} paired=${!!entry.paired} installed=${!!entry.installed}`,
+            entry,
+          );
+        });
+        if (token.cancelled) { try { unsub(); } catch {} }
+        else { token.unsub = unsub; }
+      } catch { /* bridge unavailable on Android — silent */ }
+    })();
+    return () => {
+      token.cancelled = true;
+      if (token.unsub) { try { token.unsub(); } catch {} }
+    };
+  }, []);
+
   useEffect(() => {
     // Ref-based teardown: cleanup may run BEFORE the async import below
     // resolves. Using a plain `let unsubscribe` left it null at cleanup
@@ -5197,6 +5236,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             key={session.id ?? i}
                             activeOpacity={0.85}
                             onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedWorkoutHistoryId(isExpanded ? null : (session.id ?? `s${i}`)); }}
+                            onLongPress={() => {
+                              const sid = session.id;
+                              if (!sid) return;
+                              Alert.alert('Delete workout', `Remove this ${focusLabel} session from history?`, [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Delete', style: 'destructive', onPress: async () => {
+                                  try {
+                                    await deleteWorkoutSession(sid);
+                                    const dateStr = session.date?.split('T')[0];
+                                    if (authToken && dateStr) {
+                                      import('../services/api').then(api => api.deleteWorkoutCompletion(authToken, dateStr, session.focus)).catch(() => {});
+                                    }
+                                    const fresh = await loadWorkoutHistory();
+                                    setWorkoutHistoryList(fresh);
+                                  } catch (e: any) { Alert.alert('Delete failed', e?.message ?? 'Could not delete'); }
+                                }},
+                              ]);
+                            }}
                             style={{ backgroundColor: themeColors.surface, borderRadius: 12, borderWidth: 1, borderColor: themeColors.border, padding: 14 }}>
                             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                               <View style={{ flex: 1 }}>
@@ -5602,7 +5659,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return s || 'unknown';
               };
 
-              const split = userProfile.preferredSplit ?? 'ppl';
+              const inferSplitFromPlan = (): string => {
+                const focuses = (workoutPlan?.days ?? []).map(d => (d?.focus || '').toLowerCase()).filter(Boolean);
+                if (focuses.some(f => /chest|back|shoulders|arms/.test(f))) return 'bro';
+                if (focuses.some(f => /upper/.test(f)) && focuses.some(f => /lower/.test(f))
+                    && focuses.some(f => /push|pull/.test(f))) return 'ppl_upper_lower';
+                if (focuses.some(f => /upper/.test(f)) && focuses.some(f => /lower/.test(f))) return 'upper_lower';
+                if (focuses.some(f => /full.?body/.test(f))) return 'full_body';
+                return 'ppl';
+              };
+              const knownSplits = new Set(['ppl', 'upper_lower', 'full_body', 'ppl_upper_lower', 'bro']);
+              const rawSplit = userProfile.preferredSplit ?? '';
+              const split = knownSplits.has(rawSplit) ? rawSplit : inferSplitFromPlan();
               const splitFocusOptions: Record<string, string[]> = {
                 ppl: ['Push', 'Pull', 'Legs'],
                 upper_lower: ['Upper', 'Lower'],

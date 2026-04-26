@@ -76,7 +76,8 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-/** Returns all data points for a specific exercise across history: {date, bestWeightLbs, totalVolume} */
+/** Returns all data points for a specific exercise across history. Includes
+ *  duration metrics alongside weight/volume so cardio exercises get useful charts. */
 function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
   const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
   return sorted
@@ -86,10 +87,13 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
       const ex = s.exercises.find(e => e.name.toLowerCase() === exerciseName.toLowerCase())!;
       const bestWeight = ex.sets.length ? Math.max(...ex.sets.map(set => set.weightLbs)) : 0;
       const volume = ex.sets.reduce((sum, set) => sum + set.weightLbs * set.reps, 0);
+      const totalDuration = ex.sets.reduce((sum, set) => sum + ((set as any).durationSeconds ?? 0), 0);
       const d = new Date(s.date);
-      return { label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume };
+      return { label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume, totalDuration };
     });
 }
+
+const _CARDIO_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle rope|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone.?2|tempo|boxing|kickboxing|bag.?work|shadow.?box|burpee|plank|dead hang|wall sit|hollow.?hold|farmer.?carry|suitcase carry/i;
 
 /**
  * AnimatedChartBar — "draw-in" a chart bar from height 0 → target over
@@ -138,7 +142,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   // Default to 'volume' — most users care about total work done per
   // session more than max load on a single set. Toggleable.
-  const [chartMode, setChartMode] = useState<'weight' | 'volume'>('volume');
+  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm'>('volume');
+  const [e1rmHistory, setE1rmHistory] = useState<Array<{ date: string; e1rm_lbs: number; confidence: string }>>([]);
   // Optional muscle filter for the exercise picker. 'all' = no filter.
   const [chartMuscleFilter, setChartMuscleFilter] = useState<string>('all');
   const [prs, setPrs] = useState<PR[]>([]);
@@ -184,6 +189,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
+  const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
+  const [weekSummaryExpanded, setWeekSummaryExpanded] = useState(false);
   const [gutInsights, setGutInsights] = useState<{
     plantCount: number;
     plantTier: 'on_track' | 'building' | 'low';
@@ -466,6 +473,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     );
   }, [authToken, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
+  useEffect(() => {
+    if (!authToken || !selectedExercise) { setE1rmHistory([]); return; }
+    if (_CARDIO_EXERCISE_RE.test(selectedExercise)) { setE1rmHistory([]); return; }
+    import('../services/api').then(({ getE1RMHistory }) =>
+      getE1RMHistory(authToken, selectedExercise)
+        .then(res => setE1rmHistory(res.history ?? []))
+        .catch(() => setE1rmHistory([]))
+    );
+  }, [authToken, selectedExercise]);
+
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
   const targetWeight = userProfile.goalDetails.targetWeightLbs;
@@ -508,6 +525,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </TouchableOpacity>
         ))}
       </View>
+
+      {authToken && (
+        <View style={{ paddingHorizontal: 16, marginBottom: 4 }}>
+          <WeeklyCoachingCard
+            authToken={authToken}
+            themeName={userProfile.themePreference}
+            weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
+            avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
+            avgRestingHr={healthSummary?.restingHeartRate ?? null}
+            avgSteps={healthSummary?.avgSteps7d ?? null}
+            readinessScore={null}
+          />
+        </View>
+      )}
 
       {loading ? (
         <View style={styles.center}>
@@ -648,31 +679,127 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   );
                 }
-                const values = trend.map(p => chartMode === 'weight' ? p.bestWeight : Math.round(p.volume));
+                const isCardioExercise = _CARDIO_EXERCISE_RE.test(selectedExercise);
+                const hasDuration = trend.some(p => p.totalDuration > 0);
+                const hasWeight = trend.some(p => p.bestWeight > 0);
+                const hasE1rm = e1rmHistory.length >= 2;
+                const effectiveMode = chartMode === 'e1rm' && hasE1rm ? 'e1rm'
+                  : isCardioExercise && !hasWeight && hasDuration ? 'duration' : (chartMode === 'e1rm' ? 'weight' : chartMode);
+
+                if (effectiveMode === 'e1rm') {
+                  const e1rmValues = e1rmHistory.map(p => Math.round(p.e1rm_lbs));
+                  const e1rmMax = Math.max(...e1rmValues, 1);
+                  return (
+                    <View style={styles.graphCard}>
+                      <View style={styles.graphHeader}>
+                        <Text style={styles.graphTitle}>{selectedExercise}</Text>
+                        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                          {hasWeight && (
+                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('weight')}>
+                              <Text style={styles.chartModeBtnText}>Weight</Text>
+                            </TouchableOpacity>
+                          )}
+                          {hasWeight && (
+                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')}>
+                              <Text style={styles.chartModeBtnText}>Volume</Text>
+                            </TouchableOpacity>
+                          )}
+                          <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
+                            <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>Est. 1RM</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                      <Text style={styles.graphSubtitle}>Estimated 1-rep max (lbs) over time</Text>
+                      <View style={styles.graphBars}>
+                        {e1rmHistory.map((point, i) => {
+                          const val = e1rmValues[i];
+                          const h = Math.max(8, Math.round((val / e1rmMax) * 100));
+                          const isLast = i === e1rmHistory.length - 1;
+                          const d = new Date(point.date);
+                          const label = `${d.getMonth() + 1}/${d.getDate()}`;
+                          return (
+                            <View key={i} style={styles.graphBarCol}>
+                              <Text style={[styles.graphBarValue, isLast && { color: colors.primary }]}>{val}</Text>
+                              <AnimatedChartBar
+                                targetHeight={h}
+                                delay={i * 40}
+                                style={[styles.graphBar, isLast && { backgroundColor: colors.accent }]}
+                              />
+                              <Text style={styles.graphBarLabel}>{label}</Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                      <View style={styles.chartSummaryRow}>
+                        <View style={styles.chartStat}>
+                          <Text style={styles.chartStatValue}>{e1rmValues[e1rmValues.length - 1]} lbs</Text>
+                          <Text style={styles.chartStatLabel}>Current e1RM</Text>
+                        </View>
+                        <View style={styles.chartStat}>
+                          <Text style={styles.chartStatValue}>{Math.max(...e1rmValues)} lbs</Text>
+                          <Text style={styles.chartStatLabel}>Peak e1RM</Text>
+                        </View>
+                        <View style={styles.chartStat}>
+                          <Text style={[styles.chartStatValue, { color: e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? colors.primary : colors.error }]}>
+                            {e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? '+' : ''}{e1rmValues[e1rmValues.length - 1] - e1rmValues[0]} lbs
+                          </Text>
+                          <Text style={styles.chartStatLabel}>vs first estimate</Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                }
+
+                const values = trend.map(p =>
+                  effectiveMode === 'weight' ? p.bestWeight
+                    : effectiveMode === 'duration' ? Math.round(p.totalDuration / 60)
+                    : Math.round(p.volume)
+                );
                 const maxVal = Math.max(...values, 1);
+                const unit = effectiveMode === 'weight' ? ' lbs' : effectiveMode === 'duration' ? ' min' : '';
                 return (
                   <View style={styles.graphCard}>
                     <View style={styles.graphHeader}>
                       <Text style={styles.graphTitle}>{selectedExercise}</Text>
-                      <View style={{ flexDirection: 'row', gap: 6 }}>
-                        <TouchableOpacity
-                          style={[styles.chartModeBtn, chartMode === 'weight' && styles.chartModeBtnActive]}
-                          onPress={() => setChartMode('weight')}>
-                          <Text style={[styles.chartModeBtnText, chartMode === 'weight' && styles.chartModeBtnTextActive]}>Weight</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.chartModeBtn, chartMode === 'volume' && styles.chartModeBtnActive]}
-                          onPress={() => setChartMode('volume')}>
-                          <Text style={[styles.chartModeBtnText, chartMode === 'volume' && styles.chartModeBtnTextActive]}>Volume</Text>
-                        </TouchableOpacity>
+                      <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                        {hasWeight && (
+                          <TouchableOpacity
+                            style={[styles.chartModeBtn, effectiveMode === 'weight' && styles.chartModeBtnActive]}
+                            onPress={() => setChartMode('weight')}>
+                            <Text style={[styles.chartModeBtnText, effectiveMode === 'weight' && styles.chartModeBtnTextActive]}>Weight</Text>
+                          </TouchableOpacity>
+                        )}
+                        {hasWeight && (
+                          <TouchableOpacity
+                            style={[styles.chartModeBtn, effectiveMode === 'volume' && styles.chartModeBtnActive]}
+                            onPress={() => setChartMode('volume')}>
+                            <Text style={[styles.chartModeBtnText, effectiveMode === 'volume' && styles.chartModeBtnTextActive]}>Volume</Text>
+                          </TouchableOpacity>
+                        )}
+                        {hasDuration && (
+                          <TouchableOpacity
+                            style={[styles.chartModeBtn, effectiveMode === 'duration' && styles.chartModeBtnActive]}
+                            onPress={() => setChartMode('duration')}>
+                            <Text style={[styles.chartModeBtnText, effectiveMode === 'duration' && styles.chartModeBtnTextActive]}>Duration</Text>
+                          </TouchableOpacity>
+                        )}
+                        {hasE1rm && (
+                          <TouchableOpacity
+                            style={[styles.chartModeBtn]}
+                            onPress={() => setChartMode('e1rm')}>
+                            <Text style={styles.chartModeBtnText}>Est. 1RM</Text>
+                          </TouchableOpacity>
+                        )}
                       </View>
                     </View>
                     <Text style={styles.graphSubtitle}>
-                      {chartMode === 'weight' ? 'Best set weight (lbs) per session' : 'Total volume (lbs × reps) per session'}
+                      {effectiveMode === 'weight' ? 'Best set weight (lbs) per session'
+                        : effectiveMode === 'duration' ? 'Total duration (min) per session'
+                        : 'Total volume (lbs x reps) per session'}
                     </Text>
                     <View style={styles.graphBars}>
                       {trend.map((point, i) => {
-                        const val = chartMode === 'weight' ? point.bestWeight : Math.round(point.volume);
+                        const val = values[i];
                         const h = Math.max(8, Math.round((val / maxVal) * 100));
                         const isLast = i === trend.length - 1;
                         return (
@@ -690,16 +817,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                     <View style={styles.chartSummaryRow}>
                       <View style={styles.chartStat}>
-                        <Text style={styles.chartStatValue}>{values[values.length - 1]}{chartMode === 'weight' ? ' lbs' : ''}</Text>
+                        <Text style={styles.chartStatValue}>{values[values.length - 1]}{unit}</Text>
                         <Text style={styles.chartStatLabel}>Latest</Text>
                       </View>
                       <View style={styles.chartStat}>
-                        <Text style={styles.chartStatValue}>{Math.max(...values)}{chartMode === 'weight' ? ' lbs' : ''}</Text>
+                        <Text style={styles.chartStatValue}>{Math.max(...values)}{unit}</Text>
                         <Text style={styles.chartStatLabel}>All-time best</Text>
                       </View>
                       <View style={styles.chartStat}>
                         <Text style={[styles.chartStatValue, { color: values[values.length - 1] >= values[0] ? colors.primary : colors.error }]}>
-                          {values[values.length - 1] >= values[0] ? '+' : ''}{values[values.length - 1] - values[0]}{chartMode === 'weight' ? ' lbs' : ''}
+                          {values[values.length - 1] >= values[0] ? '+' : ''}{values[values.length - 1] - values[0]}{unit}
                         </Text>
                         <Text style={styles.chartStatLabel}>vs first session</Text>
                       </View>
@@ -1072,16 +1199,52 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   else break;
                 }
 
+                const focuses = thisWeek.map(s => s.focus || '').filter(Boolean);
+                const focusCounts: Record<string, number> = {};
+                focuses.forEach(f => { focusCounts[f] = (focusCounts[f] || 0) + 1; });
+                const focusSummary = Object.entries(focusCounts).sort((a, b) => b[1] - a[1]).map(([f, c]) => `${f} ×${c}`).join(', ');
+
                 return (
                   <FadeInView delay={0}>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => { configureExpandAnimation(300); setWeekSummaryExpanded(prev => !prev); }}
+                  >
                   <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                       <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, flexShrink: 1 }}>
                         This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
                       </Text>
-                      {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
+                        <Ionicons name={weekSummaryExpanded ? 'chevron-up' : 'chevron-down'} size={14} color={tc.primary} />
+                      </View>
                     </View>
+                    {weekSummaryExpanded && (
+                      <View style={{ marginTop: 10, gap: 6 }}>
+                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Total time</Text>
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{totalMin} min</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sessions</Text>
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{thisWeek.length}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Streak</Text>
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{streak} day{streak !== 1 ? 's' : ''}</Text>
+                          </View>
+                        </View>
+                        {focusSummary.length > 0 && (
+                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
+                            {focusSummary}
+                          </Text>
+                        )}
+                      </View>
+                    )}
                   </View>
+                  </TouchableOpacity>
                   </FadeInView>
                 );
               })()}
@@ -1606,21 +1769,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             />
           )}
 
-          {/* Weekly coaching — deterministic trainer-style analysis of
-              the user's actual week. Uses local weight/sleep/readiness
-              signals (all optional) to gate suggestions. */}
-          {authToken && (
-            <WeeklyCoachingCard
-              authToken={authToken}
-              themeName={userProfile.themePreference}
-              weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
-              avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
-              avgRestingHr={healthSummary?.restingHeartRate ?? null}
-              avgSteps={healthSummary?.avgSteps7d ?? null}
-              readinessScore={null /* wire from TrainingReadinessCard when extracted */}
-            />
-          )}
-
           {isHealthKitAvailable() && (
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}
@@ -2056,14 +2204,21 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
           {(gutHealthWindow || mealAverages) && (
             <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-              <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
-                <Ionicons name="leaf-outline" size={16} color={tc.primary} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition & Gut Facts</Text>
-                {gutHealthWindow && (
-                  <Text style={{ fontSize: 10, color: tc.textMuted }}>{gutHealthWindow.days_with_data}d data</Text>
-                )}
-              </View>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => { configureExpandAnimation(300); setNutritionGutExpanded(prev => !prev); }}
+              >
+                <View style={[styles.vitalsHeader, { marginBottom: nutritionGutExpanded ? 10 : 0 }]}>
+                  <Ionicons name="leaf-outline" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition & Gut Facts</Text>
+                  {gutHealthWindow && (
+                    <Text style={{ fontSize: 10, color: tc.textMuted, marginRight: 6 }}>{gutHealthWindow.days_with_data}d data</Text>
+                  )}
+                  <Ionicons name={nutritionGutExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+                </View>
+              </TouchableOpacity>
 
+              {nutritionGutExpanded && <>
               {/* Averages over actual logged days (adaptive, up to 14). */}
               {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
                 <View style={{ marginBottom: 14 }}>
@@ -2305,12 +2460,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </Text>
                 </View>
               )}
+              </>}
             </View>
           )}
 
-          {/* Muscle Balance — volume distribution across muscle groups (14d).
-              Lives under Health because it reads as recovery/balance context,
-              paired with Readiness + Fueling flags. */}
+          {/* Muscle Balance moved to Body tab */}
+        </ScrollView>
+      ) : tab === 'body' ? (
+        /* ── Body Tab ───────────────────────────────────────────────── */
+        <ScrollView contentContainerStyle={styles.content}>
+          {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
+              all 12 muscle groups with the full expanded bars. */}
+          {muscleFatigue && (
+            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
+          )}
+
+          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
           {muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);
             const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
@@ -2361,15 +2526,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             );
           })()}
-        </ScrollView>
-      ) : tab === 'body' ? (
-        /* ── Body Tab ───────────────────────────────────────────────── */
-        <ScrollView contentContainerStyle={styles.content}>
-          {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
-              all 12 muscle groups with the full expanded bars. */}
-          {muscleFatigue && (
-            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
-          )}
 
           {/* Weight Trend */}
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>

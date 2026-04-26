@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
+from sqlalchemy import func
 from datetime import datetime, date, timezone
 from pydantic import BaseModel
 
@@ -1234,7 +1235,13 @@ def mark_workout_complete(
                 top = [m for m, v in top_muscles if m != 'systemic' and v > 0.1]
                 if top:
                     inferred = _infer_focus_from_muscles(top)
-                    if inferred and inferred != completion_row.focus_label:
+                    # Never rename PLUS_CARDIO labels — the client sent
+                    # "Push + Cardio" intentionally and both WorkoutSession
+                    # and local history keep the original. Renaming only
+                    # the completion row breaks the upsert key and causes
+                    # double entries.
+                    is_plus_cardio = "+ cardio" in (completion_row.focus_label or "").lower()
+                    if inferred and inferred != completion_row.focus_label and not is_plus_cardio:
                         logger.info(f"[workouts/complete] focus corrected: {completion_row.focus_label!r} → {inferred!r} (from exercises)")
                         completion_row.focus_label = inferred
                 # Re-derive stimulus from what the user ACTUALLY did, not
@@ -1311,13 +1318,13 @@ def mark_workout_complete(
 @router.delete("/completion", status_code=204)
 def delete_workout_completion(
     workout_date: date = Query(..., description="YYYY-MM-DD"),
+    focus_label: str | None = Query(None, description="Optional focus to delete a specific session instead of all"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Delete every `WorkoutCompletion` row for the given date — used
-    when a session was logged in error or a phantom row appeared
-    (timezone bug at midnight, partial sync, etc). Idempotent: safe
-    to call when nothing exists.
+    """Delete `WorkoutCompletion` rows for the given date. When
+    `focus_label` is provided, only the matching row is removed;
+    otherwise ALL rows for the date are wiped (legacy behaviour).
 
     Also wipes any matching `WorkoutSession` rows so per-set detail
     + downstream PR / volume rollups don't keep referencing the
@@ -1325,19 +1332,25 @@ def delete_workout_completion(
     cascade through the FK, but we don't define cascade on these
     tables — clean them up explicitly.
     """
-    rows = db.exec(
+    q = (
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
         .where(WorkoutCompletion.workout_date == workout_date)
-    ).all()
+    )
+    if focus_label:
+        q = q.where(WorkoutCompletion.focus_label == focus_label)
+    rows = db.exec(q).all()
     for r in rows:
         db.delete(r)
 
-    sessions = db.exec(
+    sq = (
         select(WorkoutSession)
         .where(WorkoutSession.user_id == current_user.id)
         .where(WorkoutSession.workout_date == workout_date)
-    ).all()
+    )
+    if focus_label:
+        sq = sq.where(WorkoutSession.focus == focus_label)
+    sessions = db.exec(sq).all()
     for s in sessions:
         # Cascade: drop child exercise rows + set rows.
         exercises = db.exec(
@@ -1564,6 +1577,99 @@ def get_weekly_volume(
     from app.services.workout.weekly_volume import compute_weekly_volume
     snap = compute_weekly_volume(db, current_user.id, days=max(3, min(28, days)))
     return snap.to_dict()
+
+
+@router.get("/e1rm")
+def get_estimated_1rm(
+    exercise_name: str = Query(..., description="Exercise name to compute e1RM for"),
+    role: str = Query("primary", description="Exercise role (primary/isolation)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Rolling estimated 1RM for a specific exercise based on logged sets."""
+    from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
+
+    rows = db.exec(
+        select(ExerciseSet, WorkoutExercise, WorkoutSession)
+        .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            func.lower(WorkoutExercise.name) == exercise_name.lower(),
+            ExerciseSet.completed == True,
+        )
+    ).all()
+
+    usable_sets = [
+        UsableSet(
+            completed_at=es.completed_at or ws.workout_date,
+            actual_weight_lbs=es.actual_weight_lbs or 0,
+            actual_reps=es.actual_reps or 0,
+            actual_rir=es.actual_rir,
+            target_rir=es.rir_target,
+            set_type=es.set_type,
+        )
+        for es, _we, ws in rows
+    ]
+
+    estimate = compute_rolling_e1rm(usable_sets, role=role)
+    if estimate is None:
+        return {"e1rm": None, "reason": "not_enough_data"}
+    return {"e1rm": estimate.to_dict()}
+
+
+@router.get("/e1rm/history")
+def get_e1rm_history(
+    exercise_name: str = Query(..., description="Exercise name"),
+    role: str = Query("primary", description="Exercise role"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Rolling e1RM over time for chart display. Computes e1RM at each
+    session date using only data available up to that point."""
+    from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
+
+    rows = db.exec(
+        select(ExerciseSet, WorkoutExercise, WorkoutSession)
+        .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            func.lower(WorkoutExercise.name) == exercise_name.lower(),
+            ExerciseSet.completed == True,
+        )
+    ).all()
+
+    all_sets = [
+        (
+            ws.workout_date,
+            UsableSet(
+                completed_at=es.completed_at or ws.workout_date,
+                actual_weight_lbs=es.actual_weight_lbs or 0,
+                actual_reps=es.actual_reps or 0,
+                actual_rir=es.actual_rir,
+                target_rir=es.rir_target,
+                set_type=es.set_type,
+            ),
+        )
+        for es, _we, ws in rows
+    ]
+    all_sets.sort(key=lambda x: x[0])
+
+    session_dates = sorted(set(d for d, _ in all_sets))
+    points = []
+    for target_date in session_dates:
+        subset = [s for d, s in all_sets if d <= target_date]
+        est = compute_rolling_e1rm(subset, role=role, today=target_date)
+        if est:
+            points.append({
+                "date": target_date.isoformat(),
+                "e1rm_lbs": round(est.e1rm_lbs, 1),
+                "confidence": est.confidence,
+                "sample_count": est.sample_count,
+            })
+
+    return {"exercise": exercise_name, "history": points}
 
 
 @router.get("/completions")

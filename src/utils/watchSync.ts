@@ -130,7 +130,11 @@ function canPush(): boolean {
 function wsLog(fn: string, extra?: Record<string, any>): void {
   // Wraps console.log so we can grep Metro logs for every watch
   // push. Kept deliberately chatty during sync debugging — trim
-  // once the flow is stable.
+  // once the flow is stable. `installed` matters because pushes can
+  // succeed when the watch app isn't currently reachable (queued
+  // applicationContext) but only if the app is actually installed
+  // on a paired watch — paired+installed+!reachable means "watch app
+  // backgrounded, will absorb on next launch."
   // eslint-disable-next-line no-console
   console.log(
     `[watchSync] ${fn} reachable=${WatchBridge.isReachable()} paired=${WatchBridge.isPaired()}`,
@@ -410,4 +414,17 @@ export function onWatchReachabilityChange(
  *  whether to show an "Open Thallo on your watch" nudge. */
 export function isWatchReachable(): boolean {
   return WatchBridge.isAvailable() && WatchBridge.isReachable();
+}
+
+/** Subscribe to verbose WCSession diagnostic events from the phone
+ *  bridge. Fires for every delegate callback (activation, reachability,
+ *  every receive path) with a snapshot of session state. Used by the
+ *  HomeScreen logger to dump `[wc-diag] …` lines into the in-app
+ *  DevLogsViewer so we can debug "watch taps never arrive" without
+ *  tethering to Mac + Console.app. */
+export function onWatchSessionDiag(
+  cb: (entry: Record<string, any>) => void,
+): () => void {
+  if (!WatchBridge.isAvailable()) return () => {};
+  return WatchBridge.addSessionDiagListener(cb);
 }
