@@ -12,6 +12,7 @@ import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
 import FriendsModal from '../components/FriendsModal';
+import ShareWorkoutModal from '../components/ShareWorkoutModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
@@ -1285,6 +1286,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [socialSubTab, setSocialSubTab] = useState<'feed' | 'friends' | 'challenges'>('feed');
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [feedLoading, setFeedLoading] = useState(false);
+  const [shareWorkoutData, setShareWorkoutData] = useState<import('../services/api').WorkoutPostSummary | null>(null);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
@@ -5362,6 +5364,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                     )}
                                   </View>
                                 )}
+                                <TouchableOpacity
+                                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10, paddingVertical: 8, backgroundColor: themeColors.primary + '12', borderRadius: 8 }}
+                                  activeOpacity={0.85}
+                                  onPress={() => {
+                                    setShareWorkoutData({
+                                      focus: session.focus,
+                                      duration_seconds: session.durationSeconds,
+                                      date: session.date,
+                                      exercises: (session.exercises ?? []).map(ex => ({
+                                        name: ex.name,
+                                        equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+                                        sets: (ex.sets ?? []).map(ss => ({ reps: ss.reps, weight_lbs: ss.weightLbs })),
+                                      })),
+                                      total_sets: totalSets,
+                                      total_reps: (session.exercises ?? []).reduce((sum, ex) => (ex.sets ?? []).reduce((rs, ss) => rs + ss.reps, sum), 0),
+                                      training_score: (summary as any)?.trainingScore ?? null,
+                                      training_rating: (summary as any)?.trainingRating ?? null,
+                                    });
+                                  }}
+                                >
+                                  <Ionicons name="share-outline" size={14} color={themeColors.primary} />
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.primary }}>Share to Feed</Text>
+                                </TouchableOpacity>
                               </View>
                             )}
                           </TouchableOpacity>
@@ -6847,10 +6872,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 feedItems.map(item => {
                   const isMe = item.username === userProfile.username;
                   const who = isMe ? 'You' : (item.display_name || item.username);
-                  const focus = item.payload?.focus || 'Workout';
-                  const dur = item.payload?.duration_seconds;
+                  const isPost = item.event_type === 'workout_post';
+                  const ws = isPost ? item.payload?.workout_summary : null;
+                  const focus = ws?.focus || item.payload?.focus || 'Workout';
+                  const dur = ws?.duration_seconds || item.payload?.duration_seconds;
                   const durStr = dur ? `${Math.round(dur / 60)} min` : '';
-                  const exCount = item.payload?.exercise_count || 0;
+                  const exCount = ws?.exercises?.length || item.payload?.exercise_count || 0;
                   const dateStr = (() => {
                     try {
                       const d = new Date(item.created_at);
@@ -6873,11 +6900,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         borderColor: themeColors.border,
                         borderWidth: 1,
                         borderRadius: 12,
-                        padding: 14,
+                        overflow: 'hidden',
                         marginBottom: 10,
                       }}
                     >
-                      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 8 }}>
+                      {/* Header row */}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', padding: 14, paddingBottom: isPost ? 10 : 14, gap: 8 }}>
                         <View style={{
                           width: 32, height: 32, borderRadius: 16,
                           backgroundColor: themeColors.primary + '22',
@@ -6894,14 +6922,59 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                         <Ionicons name="barbell-outline" size={16} color={themeColors.textMuted} />
                       </View>
-                      <Text style={{ fontSize: 14, color: themeColors.textPrimary, fontWeight: '600' }}>
-                        Completed {focus} Day
-                      </Text>
-                      {(durStr || exCount > 0) && (
-                        <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 2 }}>
-                          {[durStr, exCount > 0 ? `${exCount} exercises` : ''].filter(Boolean).join(' · ')}
+
+                      {/* Caption */}
+                      {isPost && item.payload?.caption ? (
+                        <Text style={{ fontSize: 14, color: themeColors.textPrimary, paddingHorizontal: 14, marginBottom: 10, lineHeight: 20 }}>
+                          {item.payload.caption}
                         </Text>
-                      )}
+                      ) : null}
+
+                      {/* Photo */}
+                      {isPost && item.payload?.photo_base64 ? (
+                        <Image
+                          source={{ uri: `data:image/jpeg;base64,${item.payload.photo_base64}` }}
+                          style={{ width: '100%', height: 240 }}
+                          resizeMode="cover"
+                        />
+                      ) : null}
+
+                      {/* Workout summary card */}
+                      <View style={{ padding: 14, paddingTop: isPost ? 12 : 0 }}>
+                        <Text style={{ fontSize: 15, color: themeColors.textPrimary, fontWeight: '700' }}>
+                          {focus} Day
+                        </Text>
+                        <View style={{ flexDirection: 'row', gap: 12, marginTop: 6 }}>
+                          {durStr ? <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{durStr}</Text> : null}
+                          {exCount > 0 ? <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{exCount} exercises</Text> : null}
+                          {ws?.total_sets ? <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{ws.total_sets} sets</Text> : null}
+                          {ws?.training_rating ? (
+                            <View style={{ backgroundColor: themeColors.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                              <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.primary }}>{ws.training_rating}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+
+                        {/* Exercise breakdown for posts */}
+                        {ws?.exercises && ws.exercises.length > 0 ? (
+                          <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                            {ws.exercises.slice(0, 6).map((ex, ei) => {
+                              const best = ex.sets.reduce((b, ss) => (ss.weight_lbs > b.weight_lbs ? ss : b), ex.sets[0] ?? { reps: 0, weight_lbs: 0 });
+                              return (
+                                <View key={ei} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
+                                  <Text style={{ fontSize: 12, color: themeColors.textPrimary, flex: 1 }} numberOfLines={1}>{ex.name}</Text>
+                                  <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>
+                                    {ex.sets.length}x{best.reps}{best.weight_lbs > 0 ? ` @ ${best.weight_lbs}` : ''}
+                                  </Text>
+                                </View>
+                              );
+                            })}
+                            {ws.exercises.length > 6 ? (
+                              <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>+{ws.exercises.length - 6} more</Text>
+                            ) : null}
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                   );
                 })
@@ -8828,6 +8901,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           />
         </View>
       </Modal>
+
+      {/* Share workout to social feed */}
+      <ShareWorkoutModal
+        visible={!!shareWorkoutData}
+        authToken={authToken}
+        onClose={() => { setShareWorkoutData(null); if (activeTab === 'friends') getSocialFeed(authToken).then(r => setFeedItems(r.items)).catch(() => {}); }}
+        themeName={userProfile.themePreference}
+        workoutSummary={shareWorkoutData}
+      />
 
       {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>

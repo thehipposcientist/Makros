@@ -501,3 +501,44 @@ def write_activity(db: Session, user_id: int, event_type: str, payload: dict) ->
         event_type=event_type,
         payload=payload,
     ))
+
+
+# ─── Posts (user-created feed items) ────────────────────────────────────────
+
+class CreatePostBody(BaseModel):
+    caption: str | None = None
+    photo_base64: str | None = None
+    workout_summary: dict | None = None
+
+    @field_validator("caption")
+    @classmethod
+    def _trim(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        return v[:500] if v else None
+
+
+@router.post("/posts")
+def create_post(
+    body: CreatePostBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    payload: dict = {}
+    if body.caption:
+        payload["caption"] = body.caption
+    if body.photo_base64:
+        payload["photo_base64"] = body.photo_base64
+    if body.workout_summary:
+        payload["workout_summary"] = body.workout_summary
+
+    item = ActivityFeedItem(
+        user_id=current_user.id,
+        event_type="workout_post",
+        payload=payload,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"ok": True, "id": item.id}

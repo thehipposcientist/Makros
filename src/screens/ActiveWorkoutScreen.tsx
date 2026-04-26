@@ -9,6 +9,7 @@ import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
 import AnimatedNumber from '../components/AnimatedNumber';
 import PRCelebrationModal from '../components/PRCelebrationModal';
+import ShareWorkoutModal from '../components/ShareWorkoutModal';
 import Svg, { Circle } from 'react-native-svg';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -1172,6 +1173,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // PR celebration modal — populated after handleFinish when the backend
   // returns one or more PRs. Null = no modal shown.
   const [prModalData, setPrModalData] = useState<PRAchievement[] | null>(null);
+  const [shareModalVisible, setShareModalVisible] = useState(false);
 
   // Post-workout feedback. The step sequence is:
   //   'summary'      — AI-generated summary (achievements / recommendations)
@@ -4253,18 +4255,49 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </Text>
                   )}
                 </View>
-                <TouchableOpacity
-                  style={styles.summaryFeedbackBtn}
-                  onPress={dismissSummaryModal}
-                  activeOpacity={0.85}>
-                  <Text style={styles.summaryFeedbackBtnText}>Done</Text>
-                </TouchableOpacity>
+                <View style={{ gap: 10 }}>
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }]}
+                    onPress={() => { dismissSummaryModal(); setShareModalVisible(true); }}
+                    activeOpacity={0.85}>
+                    <Ionicons name="share-outline" size={16} color="#000" />
+                    <Text style={styles.summaryFeedbackBtnText}>Share to Feed</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }]}
+                    onPress={dismissSummaryModal}
+                    activeOpacity={0.85}>
+                    <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>Done</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Share workout post modal */}
+      <ShareWorkoutModal
+        visible={shareModalVisible}
+        authToken={authToken}
+        onClose={() => setShareModalVisible(false)}
+        themeName={themeName}
+        workoutSummary={finishedSession ? {
+          focus: finishedSession.focus,
+          duration_seconds: finishedSession.durationSeconds,
+          date: finishedSession.date,
+          exercises: finishedSession.exercises.map(ex => ({
+            name: ex.name,
+            equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+            sets: ex.sets.map(s => ({ reps: s.reps, weight_lbs: s.weightLbs })),
+          })),
+          total_sets: finishedSession.exercises.reduce((sum, ex) => sum + ex.sets.length, 0),
+          total_reps: finishedSession.exercises.reduce((sum, ex) => ex.sets.reduce((rs, s) => rs + s.reps, sum), 0),
+          training_score: (summaryData as any)?.trainingScore ?? null,
+          training_rating: (summaryData as any)?.trainingRating ?? null,
+        } : null}
+      />
 
       <Modal visible={coachModalVisible} transparent animationType="slide" onRequestClose={() => setCoachModalVisible(false)}>
         <KeyboardAvoidingView

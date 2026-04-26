@@ -3170,6 +3170,9 @@ export interface FeedItem {
     date?: string;
     exercise_count?: number;
     streak?: number;
+    caption?: string;
+    photo_base64?: string;
+    workout_summary?: WorkoutPostSummary;
   };
   created_at: string;
 }
@@ -3178,6 +3181,32 @@ export async function getSocialFeed(token: string, beforeId?: number): Promise<{
   const qs = beforeId ? `?before_id=${beforeId}` : '';
   return request<{ items: FeedItem[] }>(`/social/feed${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export interface WorkoutPostSummary {
+  focus: string;
+  duration_seconds: number;
+  date: string;
+  exercises: Array<{
+    name: string;
+    equipment?: string | null;
+    sets: Array<{ reps: number; weight_lbs: number }>;
+  }>;
+  total_sets: number;
+  total_reps: number;
+  training_score?: number | null;
+  training_rating?: string | null;
+}
+
+export async function createSocialPost(
+  token: string,
+  body: { caption?: string; photo_base64?: string; workout_summary?: WorkoutPostSummary },
+): Promise<{ ok: boolean; id: number }> {
+  return request<{ ok: boolean; id: number }>('/social/posts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
 }
 
