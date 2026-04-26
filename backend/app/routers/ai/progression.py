@@ -1133,16 +1133,42 @@ _WARMUP_SCHEMA = {
 }
 
 
-def _deterministic_warmup(focus: str, first: str | None, second: str | None) -> list[str]:
+def _deterministic_warmup(focus: str, first: str | None, second: str | None,
+                            exercise_count: int = 0) -> list[str]:
+    """Vary 1-4 steps based on focus + session size + first lift type.
+    Recovery/mobility days get a single prep line. Short sessions get
+    a tighter warmup. Heavy compounds always get a ramp-up."""
     focus_l = (focus or "").lower()
-    ramp = f"2 light sets of {first}" if first else "2 ramp-up sets at 50%"
+    first_l = (first or "").lower()
+    is_heavy_compound = any(k in first_l for k in (
+        "squat", "deadlift", "bench", "overhead press", "ohp",
+        "barbell press", "clean", "snatch", "hip thrust",
+    ))
+    ramp = (
+        f"2-3 ramp-up sets of {first}" if (first and is_heavy_compound)
+        else (f"1 light set of {first}" if first else "2 ramp-up sets at 50%")
+    )
+
+    if any(k in focus_l for k in ("recovery", "mobility", "stretch")):
+        return ["Move slowly through the first round to warm up."]
+
     if any(k in focus_l for k in ("leg", "lower", "squat", "glute", "hinge")):
-        return ["3 min easy bike or walk", "Hip circles + ankle rocks (10 each)", "Bodyweight squats × 10", ramp]
-    if any(k in focus_l for k in ("pull", "back", "row")):
-        return ["3 min light cardio", "Band pull-aparts × 15", "Scap push-ups × 10", ramp]
-    if any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
-        return ["3 min light cardio", "Arm circles + band dislocates × 10", "Push-ups × 10", ramp]
-    return ["3 min light cardio", "Dynamic stretches for major joints", ramp]
+        pool = ["3 min easy bike or walk", "Hip circles + ankle rocks (10 each)", "Bodyweight squats × 10"]
+    elif any(k in focus_l for k in ("pull", "back", "row")):
+        pool = ["3 min light cardio", "Band pull-aparts × 15", "Scap push-ups × 10"]
+    elif any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
+        pool = ["3 min light cardio", "Arm circles + band dislocates × 10", "Push-ups × 10"]
+    else:
+        pool = ["2 min light cardio", "Dynamic stretches for major joints"]
+
+    if exercise_count <= 3:
+        prep_count = 1
+    elif exercise_count <= 5:
+        prep_count = 2
+    else:
+        prep_count = len(pool)
+
+    return pool[:prep_count] + [ramp]
 
 
 @router.post("/warmup")
@@ -1156,9 +1182,10 @@ def generate_warmup(
     first_ex = body.exercises[0].get("name") if body.exercises else None
     second_ex = body.exercises[1].get("name") if len(body.exercises) > 1 else None
 
+    ex_count = len(body.exercises or [])
     api_key = get_openai_api_key()
     if not api_key:
-        return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex), "source": "fallback"}
+        return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex, ex_count), "source": "fallback"}
 
     try:
         client = OpenAI(api_key=api_key)
@@ -1167,11 +1194,20 @@ def generate_warmup(
             for e in body.exercises[:6]
         ) or "  (no exercises)"
         injuries_line = ", ".join(body.injuries) if body.injuries else "none"
+        # Step count varies by session length so the warmup doesn't
+        # always feel like the same template.
+        if ex_count <= 3:
+            target_steps = "2-3"
+        elif ex_count <= 5:
+            target_steps = "3"
+        else:
+            target_steps = "3-4"
         prompt = (
-            "Write a simple 3-4 step warm-up for today's workout. "
+            f"Write a {target_steps}-step warm-up for today's workout. "
             "Each step must be SHORT — under 8 words, like a gym whiteboard. "
             "No paragraphs, no explanations.\n\n"
             f"Focus: {body.focus}\n"
+            f"Total exercises today: {ex_count}\n"
             f"Injuries to avoid: {injuries_line}\n"
             f"First exercise: {first_ex or 'compound lift'}\n"
             f"Today's exercises:\n{ex_lines}\n\n"
@@ -1180,7 +1216,7 @@ def generate_warmup(
             '  "Hip circles × 10 each"\n'
             '  "Band pull-aparts × 15"\n'
             '  "2 light sets of Bench Press"\n\n'
-            'Return JSON: {"steps": ["...", "...", "...", "..."]}'
+            f'Return JSON: {{"steps": [...]}} with exactly {target_steps} items.'
         )
         messages = [
             {"role": "system", "content": "You are a strength coach writing a tailored warm-up. Be concise, specific, and injury-aware. Return only the required JSON."},
@@ -1197,12 +1233,12 @@ def generate_warmup(
         data = _extract_json(response.choices[0].message.content or "")
         steps = data.get("steps") if isinstance(data, dict) else None
         if not isinstance(steps, list) or not steps:
-            return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex), "source": "fallback"}
+            return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex, ex_count), "source": "fallback"}
         cleaned = [str(s).strip() for s in steps if str(s).strip()]
         return {"steps": cleaned[:6], "source": "ai"}
     except Exception as exc:
         print(f"[ai/warmup] failed (non-fatal): {exc}")
-        return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex), "source": "fallback"}
+        return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex, ex_count), "source": "fallback"}
 
 
 # ── Pre-set recommendation (deterministic, no AI by default) ────────

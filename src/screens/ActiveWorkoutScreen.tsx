@@ -358,37 +358,59 @@ function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string |
 
 function buildWarmupPlan(workout: WorkoutDay): string[] {
   const focus = (workout.focus || '').toLowerCase();
+  const exCount = workout.exercises.length;
   const firstEx = workout.exercises[0]?.name;
+  const firstLo = (firstEx || '').toLowerCase();
+  const isHeavyCompound = /squat|deadlift|bench|overhead press|ohp|barbell press|clean|snatch|hip thrust/.test(firstLo);
 
+  // Recovery / mobility days don't need a warmup at all — the session
+  // IS the warmup. Show one prep line and move on.
+  if (/recovery|mobility|stretch/.test(focus)) {
+    return ['Move slowly through the first round to warm up.'];
+  }
+
+  // Step pool per focus, drawn from in priority order. Total step
+  // count varies 2-4 by session length, with the ramp-up always last
+  // when there's a known first exercise to ramp into.
+  let pool: string[];
   if (/leg|lower|glute|hinge/.test(focus)) {
-    return [
+    pool = [
       '3 min easy bike or walk',
       'Hip circles + ankle rocks (10 each)',
       'Bodyweight squats × 10',
-      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
     ];
-  }
-  if (/pull|back/.test(focus)) {
-    return [
+  } else if (/pull|back/.test(focus)) {
+    pool = [
       '3 min light cardio',
       'Band pull-aparts × 15',
       'Scap push-ups × 10',
-      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
     ];
-  }
-  if (/push|chest|shoulder|upper/.test(focus)) {
-    return [
+  } else if (/push|chest|shoulder|upper/.test(focus)) {
+    pool = [
       '3 min light cardio',
       'Arm circles + band dislocates × 10',
       'Push-ups × 10',
-      firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
+    ];
+  } else {
+    pool = [
+      '2 min light cardio',
+      'Dynamic stretches for major joints',
     ];
   }
-  return [
-    '3 min light cardio',
-    'Dynamic stretches for major joints',
-    firstEx ? `2 light sets of ${firstEx}` : '2 ramp-up sets at 50%',
-  ];
+
+  // Session-length scaling: short sessions get a tighter warmup so we
+  // don't burn 8 of 30 minutes on prep. Heavy compound first lift
+  // always gets the ramp-up appended regardless of length.
+  let prepCount: number;
+  if (exCount <= 3) prepCount = 1;
+  else if (exCount <= 5) prepCount = 2;
+  else prepCount = pool.length;
+
+  const steps = pool.slice(0, prepCount);
+  if (firstEx) {
+    steps.push(isHeavyCompound ? `2-3 ramp-up sets of ${firstEx}` : `1 light set of ${firstEx}`);
+  }
+  return steps;
 }
 
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
@@ -1792,24 +1814,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
         import('../utils/feedback').then(f => {
-          // Audio chime + vibrate + haptic together. Audio plays
-          // through headphones / Bluetooth / silent-switch thanks to
-          // the iOS audio session config in feedback.ts.
+          // Brief in-app chime (~0.45s) + vibrate + haptic. The
+          // pre-scheduled completeId notification (set in
+          // rescheduleRestNotifications) ALSO fires at this exact
+          // instant — both foregrounded (notification handler plays
+          // the system sound) and backgrounded (iOS plays it natively
+          // even with screen off). Don't schedule a SECOND immediate
+          // notification here: layering 3 sounds back-to-back was the
+          // "rest sound takes over too long" complaint.
           f.playRestTimerDone();
           f.vibrateRestDone();
           f.hapticHeavy();
         }).catch(() => Vibration.vibrate([0, 300, 150, 300, 150, 300]));
-        cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
+        // Don't cancel the completeId — it's the one that delivers
+        // the background sound. Only cancel the warning notification
+        // (which fires 10s before complete and is now in the past).
+        if (restNotificationIds.current?.warningId) {
+          Notifications.cancelScheduledNotificationAsync(restNotificationIds.current.warningId).catch(() => undefined);
+        }
         restNotificationIds.current = null;
-        // Fire an immediate notification so the system plays its alert sound
-        Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Rest Complete — Go!',
-            body: `${restExerciseNameRef.current ?? 'Next exercise'} — start your next set`,
-            sound: 'default',
-          },
-          trigger: null,
-        }).catch(() => undefined);
         // End the Live Activity on the lock screen.
         if (liveActivityIdRef.current) {
           endRestActivity(liveActivityIdRef.current).catch(() => undefined);

@@ -14,10 +14,15 @@ export async function configureWorkoutNotifications() {
   if (configured) return;
 
   Notifications.setNotificationHandler({
+    // shouldPlaySound: false avoids doubling up with the in-app chime
+    // (feedback.ts::playRestTimerDone) when the app is foregrounded.
+    // Background notifications still play their sound natively because
+    // iOS handles the system sound outside this handler. Net effect:
+    // one brief sound per rest-end regardless of app state.
     handleNotification: async () => ({
       shouldShowBanner: true,
       shouldShowList: true,
-      shouldPlaySound: true,
+      shouldPlaySound: false,
       shouldSetBadge: false,
     }),
   });

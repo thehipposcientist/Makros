@@ -124,24 +124,27 @@ async function getAudio() {
 
 /** Configure the iOS audio session ONCE per app launch so the rest-
  *  timer chime:
- *    • Plays through headphones / Bluetooth (default category does)
+ *    • Plays through headphones / Bluetooth
  *    • Plays even with the silent switch flipped (playsInSilentModeIOS)
- *    • Ducks (lowers, doesn't pause) other audio like Spotify
- *    • Doesn't take over background music — release on completion
- *  Without this the chime can be silenced by the iOS silent switch
- *  even when the user has headphones on. */
+ *    • MIXES with other audio (Spotify keeps playing at full volume) —
+ *      we do NOT duck. Was the source of "sound takes over too long":
+ *      ducking holds Spotify down for ~1s after our 0.45s chime ends.
+ *    • staysActiveInBackground: true so the chime can fire if the
+ *      screen turns off between rest start and rest end. The bigger
+ *      background-sound path is the scheduled local notification in
+ *      restNotifications.ts (which also works without UIBackgroundModes). */
 async function ensureAudioSession(Audio: typeof import('expo-av').Audio): Promise<void> {
   if (_audioSessionConfigured) return;
   try {
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: false,
       playThroughEarpieceAndroid: false,
-      // InterruptionMode constants: 1 = MixWithOthers (iOS / Android),
-      // 2 = DuckOthers. Numeric to avoid importing the enum.
-      interruptionModeIOS: 2,
-      interruptionModeAndroid: 2,
+      // 1 = MixWithOthers, 2 = DuckOthers. We mix so podcasts / music
+      // keep playing at full volume; our chime layers on top briefly.
+      interruptionModeIOS: 1,
+      interruptionModeAndroid: 1,
       allowsRecordingIOS: false,
     } as any);
     _audioSessionConfigured = true;

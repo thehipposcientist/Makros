@@ -237,6 +237,207 @@ def test_yesterday_strain_credits_rest_day():
     assert "rest day" in (yesterday.detail or "").lower()
 
 
+# ── Missed-watch / minimum-signals gate ──────────────────────────
+# These tests cover the user-reported bug: "wife forgot to wear her
+# Apple Watch last night, but our sleep score says 100." Root cause:
+# the yesterday-strain pillar always credits (rest day = 5/5), and
+# without a minimum-signals gate the reweighting formula produced
+# (5/5)*100 = 100 from one always-on signal.
+
+def test_missed_watch_no_signals_returns_no_score():
+    """Wife forgot her watch + no meals logged + no recent workouts.
+    The only present pillar is yesterday-strain. Score must NOT be a
+    confident number — return score=0 with label='—' and a friendly
+    'wear your watch' summary instead."""
+    print("\n[test] readiness: no health signals → '—' label, not 100")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id)
+    assert r.score == 0, f"expected score=0 with no health signals, got {r.score}"
+    assert r.label == "—", f"expected '—' label, got {r.label!r}"
+    assert "wear" in r.summary.lower() or "not enough" in r.summary.lower(), \
+        f"summary should explain missing data: {r.summary!r}"
+
+
+def test_missed_watch_sleep_alone_below_minimum_returns_no_score():
+    """Only the sleep score is present (1 health pillar). The minimum-
+    signals gate (>=2 health pillars) means we still return score=0."""
+    print("\n[test] readiness: 1 health pillar below gate → '—'")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id, last_night_sleep_score=85)
+    assert r.score == 0, f"1 pillar should be below gate, got {r.score}"
+    assert r.label == "—"
+    # Sleep factor still listed for transparency.
+    sleep_factor = next((f for f in r.factors if f.label == "Sleep"), None)
+    assert sleep_factor is not None
+    assert sleep_factor.value >= 80
+
+
+def test_two_health_pillars_meets_minimum_gate():
+    """Sleep + HRV present = 2 health pillars. Score is computed."""
+    print("\n[test] readiness: 2 health pillars → real score")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id, last_night_sleep_score=85, avg_hrv_ms=60)
+    assert r.score > 0, "2 pillars should produce a real score"
+    assert r.label != "—", f"label should be a real tier, got {r.label!r}"
+
+
+def test_missed_watch_with_nutrition_pct_only_below_gate():
+    """Nutrition adherence alone (1 health pillar) should still return
+    '—' — nutrition without any wearable signals isn't enough basis
+    for a recovery readout."""
+    print("\n[test] readiness: nutrition-only is below gate")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id, nutrition_adherence_pct=90)
+    assert r.score == 0, f"nutrition alone should not produce a score, got {r.score}"
+    assert r.label == "—"
+
+
+def test_old_sleeplog_row_does_not_count_as_last_night():
+    """User wore the watch 3 nights ago (SleepLog row exists), but not
+    last night. The fallback must NOT pull the 3-day-old row and treat
+    it as today's sleep."""
+    print("\n[test] readiness: old SleepLog row ignored — must be last night")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import SleepLog
+    from datetime import date, timedelta
+    _, s, u = _setup()
+    s.add(SleepLog(
+        user_id=u.id,
+        night_date=date.today() - timedelta(days=3),
+        score=88,
+    ))
+    s.commit()
+    r = compute_readiness(s, u.id)
+    # Should NOT have used the 3-day-old row → sleep is missing.
+    assert "sleep" in r.missing, \
+        f"3-day-old SleepLog should not count as last night, missing={r.missing}"
+    assert r.score == 0
+    assert r.label == "—"
+
+
+def test_last_night_sleeplog_row_is_used():
+    """SleepLog row from yesterday's date is the correct source for
+    last night's sleep score."""
+    print("\n[test] readiness: last-night SleepLog row used")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import SleepLog
+    from datetime import date, timedelta
+    _, s, u = _setup()
+    last_night = date.today() - timedelta(days=1)
+    s.add(SleepLog(user_id=u.id, night_date=last_night, score=82))
+    s.commit()
+    # Add another health pillar so we clear the gate.
+    r = compute_readiness(s, u.id, avg_hrv_ms=55)
+    assert "sleep" not in r.missing, \
+        f"last-night row should be picked up, missing={r.missing}"
+    sleep_factor = next((f for f in r.factors if f.label == "Sleep"), None)
+    assert sleep_factor is not None
+    assert sleep_factor.value >= 75, f"score 82/100 should yield a high sub-score, got {sleep_factor.value}"
+
+
+def test_two_nights_ago_sleeplog_is_ignored():
+    """Even a 2-night-old SleepLog row shouldn't masquerade as last night."""
+    print("\n[test] readiness: 2-night-old SleepLog ignored")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import SleepLog
+    from datetime import date, timedelta
+    _, s, u = _setup()
+    s.add(SleepLog(
+        user_id=u.id,
+        night_date=date.today() - timedelta(days=2),
+        score=95,
+    ))
+    s.commit()
+    r = compute_readiness(s, u.id)
+    assert "sleep" in r.missing
+
+
+def test_factors_still_emitted_when_below_gate():
+    """Even when the gate fires (score=0, label='—'), the factors list
+    must still include whatever pillars ARE present so the UI can show
+    'we have your sleep but need more data' transparency."""
+    print("\n[test] readiness: factors visible even below gate")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id, last_night_sleep_score=85)
+    labels = {f.label for f in r.factors}
+    assert "Sleep" in labels, f"Sleep should still be in factors, got {labels}"
+    # Yesterday-strain always present (rest day default).
+    assert "Yesterday" in labels
+
+
+def test_missed_watch_summary_recommends_watch():
+    """When sleep + hrv + rhr are all missing, the summary should
+    explicitly mention wearing the watch — not a generic message."""
+    print("\n[test] readiness: missing wearable → 'wear watch' summary")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(s, u.id)
+    assert "watch" in r.summary.lower(), \
+        f"missing wearable should suggest the watch, got {r.summary!r}"
+
+
+def test_user_scenario_wife_forgot_watch_full_flow():
+    """End-to-end of the user-reported scenario:
+      - Wife wore watch up to 2 nights ago (good sleep score saved).
+      - Last night: forgot the watch. No SleepLog row for last night.
+      - This morning: no fresh HK data passed to compute_readiness.
+      - Pre-fix: score = 100 from yesterday-strain alone (rest day).
+      - Post-fix: score = 0, label = '—', summary asks her to wear it."""
+    print("\n[test] readiness: wife-forgot-watch end-to-end")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import SleepLog
+    from datetime import date, timedelta
+    _, s, u = _setup()
+    # Stale sleep data from 2 nights ago — tempting fallback.
+    s.add(SleepLog(
+        user_id=u.id,
+        night_date=date.today() - timedelta(days=2),
+        score=92,
+    ))
+    s.commit()
+    r = compute_readiness(s, u.id)
+    assert r.score == 0, \
+        f"missed watch with only stale sleep data should NOT show 100, got score={r.score}"
+    assert r.label == "—", f"expected '—' label, got {r.label!r}"
+    assert "sleep" in r.missing
+    assert "watch" in r.summary.lower()
+
+
+def test_two_pillars_with_yesterday_strain_does_NOT_count_yesterday():
+    """yesterday-strain doesn't count toward the 2-pillar minimum.
+    Sleep + yesterday-strain alone should still be below the gate."""
+    print("\n[test] readiness: yesterday-strain does NOT count toward gate")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    # Sleep alone (yesterday strain auto-present).
+    r = compute_readiness(s, u.id, last_night_sleep_score=85)
+    # 2 pillars total (sleep + yesterday) but only 1 health pillar.
+    assert r.signals_present == 2  # sleep + yesterday
+    assert r.score == 0  # gate fires because yesterday doesn't count
+
+
+def test_three_health_pillars_clears_gate_with_room():
+    """Sleep + HRV + RHR is well above the gate; produces a real
+    Primed/Ready/Moderate label, never '—'."""
+    print("\n[test] readiness: 3 health pillars produces a tier label")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=80,
+        avg_hrv_ms=60,
+        avg_resting_hr=58,
+    )
+    assert r.label in ("Primed", "Ready", "Moderate", "Fatigued"), \
+        f"3 health pillars must produce a real tier, got {r.label!r}"
+    assert r.score > 0
+
+
 if __name__ == "__main__":
     import sys
     failed = []
