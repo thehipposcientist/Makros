@@ -428,6 +428,15 @@ def generate_single_day(
     except Exception:
         user_age = None
 
+    # Coaching overlay — accepted weekly recommendations the planner
+    # must respect (per-muscle volume bias, cardio targets, etc.).
+    # Snapshot also runs the decay sweep so stale biases fade.
+    try:
+        from app.services.coach.overlay import snapshot_for_planner as _overlay_snapshot
+        coaching_overlay = _overlay_snapshot(session, current_user.id)
+    except Exception:
+        coaching_overlay = None
+
     # Build planner inputs
     inputs = PlannerInputs(
         goal=body.goal,
@@ -444,6 +453,7 @@ def generate_single_day(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
         user_age=user_age,
+        coaching_overlay=coaching_overlay,
     )
 
     # Generate full plan (fast — deterministic, no AI)
@@ -739,6 +749,13 @@ def generate_full_week(
     except Exception:
         user_age = None
 
+    # Coaching overlay snapshot for the full-week regen path.
+    try:
+        from app.services.coach.overlay import snapshot_for_planner as _overlay_snapshot
+        coaching_overlay = _overlay_snapshot(db, current_user.id)
+    except Exception:
+        coaching_overlay = None
+
     inputs = PlannerInputs(
         goal=body.goal,
         days_per_week=body.days_per_week,
@@ -754,6 +771,7 @@ def generate_full_week(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
         user_age=user_age,
+        coaching_overlay=coaching_overlay,
     )
 
     # Single-day swap mode: caller sent their current week. Skip the

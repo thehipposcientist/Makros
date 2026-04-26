@@ -284,16 +284,30 @@ export default function WeeklyCoachingCard({
                       {rec.detail}
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                      {/* Advice-only recs (no actionable type) get a
+                          single dismiss button — no Apply, no implied
+                          state change. Hard rule: every "Apply" must
+                          map to a real overlay/state mutation. */}
+                      {(!rec.action || !rec.action.type || rec.action.type === 'noop') ? (
+                        <TouchableOpacity
+                          onPress={() => dismissRec(rec.key)}
+                          style={{
+                            paddingHorizontal: 12, paddingVertical: 6,
+                            borderRadius: 8, backgroundColor: tc.surfaceRaised,
+                            borderWidth: 1, borderColor: tc.border,
+                          }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>
+                            Got it
+                          </Text>
+                        </TouchableOpacity>
+                      ) : (
                       <TouchableOpacity
                         onPress={async () => {
-                          if (rec.action.type === 'noop') {
-                            dismissRec(rec.key);
-                            return;
-                          }
                           // Route every accept through the apply path
                           // — backend maps action.type to durable user
                           // state (days/week, calorie adjustment, day
-                          // state). No client-side plan mutation.
+                          // state, coaching overlay biases). No
+                          // client-side plan mutation.
                           try {
                             const result = await applyRecommendationAction(
                               authToken, rec.action, rec.key,
@@ -301,10 +315,15 @@ export default function WeeklyCoachingCard({
                             // Hand back to the parent so HomeScreen
                             // can kick plan regen when needs_regen=true.
                             onAcceptRecommendation?.(rec);
+                            // Show the server's concrete result string.
+                            // The backend always returns either a real
+                            // mutation summary ("cardio raised from 90
+                            // to 120 min/wk") or an explicit "couldn't
+                            // apply" message — no silent acks.
                             Alert.alert(
-                              result.applied ? 'Applied' : 'Acknowledged',
+                              result.applied ? 'Applied' : 'Could not apply',
                               result.summary,
-                              [{ text: 'OK', onPress: () => dismissRec(rec.key) }],
+                              [{ text: 'OK', onPress: () => result.applied && dismissRec(rec.key) }],
                             );
                           } catch (e: any) {
                             Alert.alert(
@@ -318,10 +337,11 @@ export default function WeeklyCoachingCard({
                           borderRadius: 8, backgroundColor: pc,
                         }}>
                         <Text style={{ fontSize: 11, fontWeight: '800', color: '#fff' }}>
-                          {rec.action.type === 'noop' ? 'Got it' : 'Apply'}
+                          Apply
                         </Text>
                       </TouchableOpacity>
-                      {rec.action.type !== 'noop' && (
+                      )}
+                      {rec.action && rec.action.type && rec.action.type !== 'noop' && (
                         <TouchableOpacity
                           onPress={() => dismissRec(rec.key)}
                           style={{

@@ -385,21 +385,29 @@ def program_core_across_week(
     days_per_week: int,
     session_minutes: Optional[int],
     seed: int = 0,
+    core_target_override: int | None = None,
 ) -> list[tuple[str, Optional[list[Slot]], DayArchetype, Optional[dict]]]:
     """Top-level: walk the week and append core slots to whichever
     days qualify. Returns a new templates list with the same shape so
     callers can swap it in without other changes.
 
     Strategy:
-      - Compute weekly budget (default from goal×days table).
+      - Compute weekly budget (default from goal×days table, OR the
+        coaching-overlay override when set).
       - For each day, ask decide_core_for_day.
       - Track categories used so far + whether hip-flexor work
         happened recently (last 2 days).
       - Emit core slots at the END of each chosen day's slot list
         (placement rule: core is ALWAYS terminal, never mid-session).
     """
-    freq = weekly_core_target(goal, days_per_week)
-    remaining_budget = freq.default
+    if core_target_override is not None:
+        # Hard override from accepted coach rec. Clamp to a sane range
+        # so a stale value can't request impossible amounts of core.
+        clamped = max(0, min(5, int(core_target_override)))
+        remaining_budget = clamped
+    else:
+        freq = weekly_core_target(goal, days_per_week)
+        remaining_budget = freq.default
     used_categories: list[str] = []
     hip_flexor_window: list[bool] = []
     rng = random.Random(seed)

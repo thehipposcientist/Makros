@@ -630,9 +630,58 @@ def _ensure_user_profile_birthdate_column() -> None:
         print(f"[migration] user_profiles birthdate add failed (non-fatal): {e}")
 
 
+def _ensure_user_coaching_overlay_table() -> None:
+    """Create `user_coaching_overlay` (per-user planner/nutrition biases the
+    weekly coach mutates) on legacy DBs. SQLModel.create_all handles the
+    fresh-install case. The ALTER lines below are guards in case the
+    schema evolves and we add fields — each is idempotent."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS user_coaching_overlay ("
+                "id SERIAL PRIMARY KEY, "
+                "user_id INTEGER NOT NULL UNIQUE REFERENCES \"user\"(id), "
+                "muscle_volume_bias JSONB DEFAULT '{}'::jsonb, "
+                "cardio_minutes_target INTEGER, "
+                "zone2_minutes_target INTEGER, "
+                "core_sessions_target INTEGER, "
+                "intensity_bias TEXT, "
+                "deload_until_date DATE, "
+                "nutrition_adjustments JSONB DEFAULT '{}'::jsonb, "
+                "last_refreshed_at TIMESTAMPTZ DEFAULT now(), "
+                "expires_at TIMESTAMPTZ DEFAULT now() + interval '4 weeks', "
+                "updated_at TIMESTAMPTZ DEFAULT now()"
+                ")"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_user_coaching_overlay_user "
+                "ON user_coaching_overlay (user_id)"
+            ))
+            # Forward-compat ADD COLUMN guards in case the table existed
+            # but missed a field (e.g. local dev DB created before a
+            # rebase). Each is a no-op when the column already exists.
+            for stmt in (
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS muscle_volume_bias JSONB DEFAULT '{}'::jsonb",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS cardio_minutes_target INTEGER",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS zone2_minutes_target INTEGER",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS core_sessions_target INTEGER",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS intensity_bias TEXT",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS deload_until_date DATE",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS nutrition_adjustments JSONB DEFAULT '{}'::jsonb",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS last_refreshed_at TIMESTAMPTZ DEFAULT now()",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT now() + interval '4 weeks'",
+                "ALTER TABLE user_coaching_overlay ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()",
+            ):
+                conn.execute(text(stmt))
+    except Exception as e:
+        print(f"[migration] user_coaching_overlay ensure failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, UserCoachingOverlay, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -650,6 +699,7 @@ def create_db_and_tables():
     _ensure_food_metadata_amounts_columns()
     _ensure_exercise_set_actual_rir_column()
     _ensure_daily_health_snapshot_table()
+    _ensure_user_coaching_overlay_table()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

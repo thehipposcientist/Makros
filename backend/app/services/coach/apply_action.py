@@ -1,41 +1,33 @@
 """Apply a recommendation action to durable user state.
 
-Architectural principle (per product direction):
-  The AI / weekly review can only do what the user can do via
-  existing app UI. Recommendations don't directly mutate the active
-  WorkoutPlan — they mutate the user-facing settings (UserPreferences,
-  UserCoachingState, UserGoal, UserDayState) that the planner already
-  reacts to on regen. The next regen picks up the changes.
+Architectural rule (per product direction):
+  AI / weekly review can only do what the user can do via existing app
+  UI. Recommendations don't directly mutate the active WorkoutPlan —
+  they mutate user-facing settings the planner re-reads on every regen:
 
-This means: every applyable action maps to ONE of these existing
-user-touchable surfaces. Anything else is descriptive guidance, not
-something we silently apply.
+    1. UserPreferences        — days_per_week
+    2. UserCoachingState      — calorie_adjustment
+    3. UserDayState           — skipped_focus (per-day overrides)
+    4. UserCoachingOverlay    — per-muscle volume bias, cardio targets,
+                                core frequency, intensity bias, deload
+                                window, nutrition deltas (NEW)
 
-Supported action types (matches `plan_review_v2.Recommendation.action.type`
-and `quick_intents.IntentResponse.action.type`):
-  • change_days_per_week           → UserPreferences.days_per_week
-  • raise_calories / lower_calories → UserCoachingState.calorie_adjustment
-  • hold_calorie_adjustment         → no-op + log (signals to next
-                                       adaptive_macros pass: don't move)
-  • shorten_workout                 → UserPreferences.workout_duration_minutes
-                                       (one new column — see migration)
-  • swap_to_recovery                → UserDayState.skipped_focus on tomorrow
-  • schedule_deload                 → UserCoachingState.deload_until_date
-  • set_core_frequency              → UserPreferences.core_frequency_per_week
-  • carb_bump_today                 → UserDayState (one-day macro override
-                                       — read by /meals/daily-macros)
-  • noop                            → ack only
-  • add_cardio_session/add_zone2_session → translated to days_per_week + 1
-                                            ONLY if user is below their
-                                            stated cap. Otherwise descriptive.
+  The next regen picks up the changes. NO recommendation should ever
+  reach `Apply` unless it maps to one of these four surfaces.
 
-For descriptive-only actions (reduce_muscle_volume, raise_protein_target,
-add_muscle_volume, etc.) we record them as `CoachMemory(event_type=
-"recommendation_acked")` so the planner / coach can reference them on
-next pass, but they don't mutate any state directly.
+The split:
+  • `services/coach/overlay.py::apply_overlay_action` handles every
+    overlay-targeted action and returns a structured result.
+  • This module handles the original four (days_per_week, calories,
+    swap_to_recovery, hold/noop) and dispatches everything else to
+    the overlay service.
+  • If neither matches, the request is rejected (no silent
+    "Acknowledged" fallback). Recommendations producing no real
+    state change must omit the `action` field entirely so the UI
+    renders them as advice without an Apply button.
 
 Pure-ish: writes to the DB but never calls AI. Returns a structured
-result the caller can show on the UI ("changed days/week from 4 to 3,
+result the caller shows on the UI ("changed days/week from 4 to 3,
 plan will refresh").
 """
 from __future__ import annotations
@@ -49,6 +41,7 @@ from sqlmodel import select
 from app.models import (
     CoachMemory, UserCoachingState, UserDayState, UserPreferences,
 )
+from app.services.coach.overlay import apply_overlay_action
 
 
 # Hard caps so a single recommendation can never make a destructive
@@ -56,7 +49,6 @@ from app.models import (
 # memory record + a "needs user confirmation" flag.
 _MAX_KCAL_DELTA = 250          # per single apply
 _MAX_DAYS_DELTA = 1            # never jump >1 day at once
-_KCAL_FLOOR_DEFAULT = 1500     # absolute minimum kcal target post-apply
 
 
 @dataclass
@@ -151,7 +143,7 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary=f"Updated to {target} days / week. Plan will refresh.",
+            summary=f"Applied: training days changed from {old} to {target} per week. Plan refreshes on next open.",
             needs_regen=True,
             changed_fields={"days_per_week": target},
         )
@@ -173,10 +165,10 @@ def apply_action(
             f"Calorie adjustment {old:+d} → {state.calorie_adjustment:+d}",
             {"action": action, "delta": delta})
         db.commit()
-        verb = "Raised" if delta > 0 else "Lowered"
+        verb = "raised" if delta > 0 else "lowered"
         return ApplyResult(
             applied=True,
-            summary=f"{verb} daily calorie target by {abs(delta)} kcal. Macros refresh on next plan check.",
+            summary=f"Applied: daily calorie target {verb} by {abs(delta)} kcal (total adjustment now {state.calorie_adjustment:+d}).",
             needs_regen=False,
             changed_fields={"calorie_adjustment": state.calorie_adjustment},
         )
@@ -192,9 +184,9 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary="Holding calories at the current target until recovery signals improve.",
+            summary="Applied: holding calories at the current target until recovery signals improve.",
             needs_regen=False,
-            changed_fields={},
+            changed_fields={"calorie_adjustment_hold": True},
         )
 
     # ── swap_to_recovery (one tomorrow) ─────────────────────────────
@@ -221,7 +213,7 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary="Tomorrow swapped to active recovery (walk / mobility / yoga).",
+            summary=f"Applied: tomorrow ({tomorrow.isoformat()}) swapped to active recovery.",
             needs_regen=False,
             changed_fields={"day_state": str(tomorrow)},
         )
@@ -230,50 +222,37 @@ def apply_action(
     if action_type == "noop":
         return ApplyResult(applied=True, summary="Acknowledged.", needs_regen=False, changed_fields={})
 
-    # ── Descriptive-only actions ────────────────────────────────────
-    # These don't have a direct user-facing settings analogue — the
-    # planner factors them in implicitly on next regen via the
-    # existing volume / focus rotation logic. We log them so the
-    # coach AI can reference them and the user gets a confirmation.
-    descriptive = {
-        "reduce_muscle_volume": "The next plan refresh will dial back that muscle's volume.",
-        "add_muscle_volume": "The next plan refresh will add sets for that muscle.",
-        "hold_muscle_volume": "Holding the current volume — next plan refresh will keep it stable.",
-        "add_cardio_session": "Logged. Add a cardio session today or tomorrow when you can.",
-        "add_zone2_session": "Logged. Add an easy walk or bike ride this week.",
-        "reduce_cardio": "Logged. Next plan refresh will trim cardio days.",
-        "schedule_deload": "Deload flagged for next week. The planner will cut loads + sets.",
-        "set_core_frequency": "Core frequency preference noted. Next plan refresh will adjust.",
-        "shorten_workout": "Today's workout will trim to fit your time. Use 'Switch Day' to apply.",
-        "reduce_intensity": "Today's intensity will dial back. Drop top-set loads ~10-15%.",
-        "carb_bump_today": "Add ~75-100g carbs to today's macros, especially around training.",
-        "raise_protein_target": "Protein target preference noted.",
-        "raise_fiber_target": "Fiber target preference noted.",
-        "rebalance_week": "Acknowledged — the planner will reshuffle remaining days.",
-        "strength_preservation": "Logged. We'll protect strength while you adjust calories + volume.",
-        "swap_to_recovery_or_reduce": "Pick: swap to recovery (use Switch Day → Recovery) or just go lighter.",
-    }
-    if action_type in descriptive:
-        _record_memory(db, user_id, "recommendation_acked",
-            f"User accepted recommendation: {action_type}",
-            {"action": action, "rec_key": rec_key})
-        db.commit()
+    # ── Overlay-targeted actions ─────────────────────────────────────
+    # Everything else routes through the coaching overlay. If the
+    # overlay service handles this action_type it returns an
+    # OverlayApplyResult; we adapt to ApplyResult and return.
+    overlay_result = apply_overlay_action(
+        db, user_id, action_type,
+        action,                       # full action dict carries muscle / minutes / etc.
+        rec_key=rec_key,
+    )
+    if overlay_result is not None:
         return ApplyResult(
-            applied=True,
-            summary=descriptive[action_type],
-            needs_regen=False,
-            changed_fields={},
-            descriptive_only=True,
+            applied=overlay_result.applied,
+            summary=overlay_result.summary,
+            needs_regen=overlay_result.needs_regen,
+            changed_fields=overlay_result.changed_fields,
+            error=overlay_result.error,
         )
 
-    # Unknown — record but don't fail.
+    # ── Unknown action ──────────────────────────────────────────────
+    # No silent "Acknowledged" — the rule is that anything reaching
+    # apply_action MUST mutate state. If we hit this branch, plan_review
+    # / quick_intents emitted an action.type that no apply path knows.
+    # Reject explicitly so we catch the gap in QA instead of silently
+    # logging a placebo CoachMemory.
     _record_memory(db, user_id, "recommendation_unknown",
         f"Unknown action type: {action_type}",
-        {"action": action})
+        {"action": action, "rec_key": rec_key})
     db.commit()
     return ApplyResult(
         applied=False,
-        summary="Recorded — this action type isn't auto-applyable yet.",
+        summary=f"That recommendation can't be auto-applied (action '{action_type}' is unknown). Adjust it manually in Settings.",
         needs_regen=False,
         changed_fields={},
         descriptive_only=True,

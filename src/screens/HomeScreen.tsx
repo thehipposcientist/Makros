@@ -12,6 +12,7 @@ import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
+import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 
@@ -1536,6 +1537,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showLiveTracker, setShowLiveTracker] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+  // V2 weekly check-in — the BIG once-a-week modal with AI-composed
+  // narrative, Apple Health pulse, and bulk-apply CTA. Auto-presented
+  // on the same 7-day cadence as the legacy rating modal but with
+  // separate dismiss state so users can decline V2 without resetting
+  // the rating cadence.
+  const [showWeeklyCheckinV2, setShowWeeklyCheckinV2] = useState(false);
 
   // Next-day unlogged-meals prompt. Populated once per day when yesterday
   // had a plan with unchecked meals and the dismissal flag isn't set.
@@ -1635,7 +1642,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           setCheckinInjuryStatuses(initial);
         }
-        setShowWeeklyCheckin(true);
+        // V2 auto-show: gated on its own AsyncStorage key so the user
+        // can dismiss this week's V2 modal once and not see it again
+        // until the next 7-day window. The legacy rating modal stays
+        // accessible from the explicit button.
+        try {
+          const lastV2Raw = await AsyncStorage.getItem('weeklyCheckinV2_lastShown');
+          const lastV2 = lastV2Raw ? new Date(lastV2Raw).getTime() : 0;
+          const daysSinceV2 = (Date.now() - lastV2) / (1000 * 60 * 60 * 24);
+          if (!lastV2 || daysSinceV2 >= 5) {
+            setShowWeeklyCheckinV2(true);
+            AsyncStorage.setItem('weeklyCheckinV2_lastShown', new Date().toISOString()).catch(() => {});
+          } else {
+            setShowWeeklyCheckin(true);
+          }
+        } catch {
+          setShowWeeklyCheckin(true);
+        }
+        return;
       }
     });
     // NOTE: `meta.allFoods.length` was previously in this dep array but caused
@@ -8382,6 +8406,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           )}
         </View>
       </Modal>
+
+      {/* Weekly check-in V2 — the BIG once-a-week moment. Auto-shown
+          on the 7-day cadence. AI-composed narrative + Apple Health
+          pulse + bulk-apply CTA. After Apply, kicks plan regen on
+          needs_regen=true so the new plan reflects accepted recs. */}
+      <WeeklyCheckinModal
+        visible={showWeeklyCheckinV2}
+        authToken={authToken ?? ''}
+        themeName={userProfile.themePreference}
+        onClose={(result) => {
+          setShowWeeklyCheckinV2(false);
+          if (result?.applied && result.needsRegen && authToken) {
+            // Plan changed — kick a refresh in the background so the
+            // user sees their new plan when they switch tabs. We don't
+            // block the modal close on it.
+            (async () => {
+              try {
+                const { clearWorkoutCache } = await import('../utils/planCacheReset');
+                await clearWorkoutCache();
+                // Trigger the existing reload path. loadPlans is
+                // declared higher up in this component.
+                if (typeof (loadPlans as any) === 'function') {
+                  (loadPlans as any)({ forceRegen: true }).catch(() => {});
+                }
+              } catch { /* non-fatal — next foreground will sync */ }
+            })();
+          }
+        }}
+      />
 
       {/* Grocery list modal */}
       <GroceryListModal

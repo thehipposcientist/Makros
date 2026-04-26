@@ -2868,6 +2868,93 @@ export async function applyRecommendationAction(
   });
 }
 
+export interface ApplyBulkResult {
+  applied_count: number;
+  skipped_count: number;
+  failed_count: number;
+  needs_regen: boolean;
+  results: ApplyActionResult[];
+  summary: string;
+}
+
+/** Apply multiple recommendations in one batch — used by the weekly
+ *  check-in flow so the user makes ONE Apply Plan decision instead
+ *  of tapping per-rec. Backend runs each through apply-action with
+ *  full clamping + audit, aggregates needs_regen, returns a useful
+ *  summary string for the success alert. */
+export async function applyBulkRecommendations(
+  token: string,
+  items: Array<{ action: Record<string, any>; rec_key?: string }>,
+): Promise<ApplyBulkResult> {
+  return request<ApplyBulkResult>('/coach/apply-bulk', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ items: items.map(i => ({
+      action: i.action,
+      rec_key: i.rec_key ?? null,
+    })) }),
+  });
+}
+
+export interface WeeklyNarrativeRec {
+  key: string;
+  area: string;
+  priority: 'warn' | 'suggest' | 'info';
+  title: string;
+  detail: string;
+  action: Record<string, any>;
+  personalized?: boolean;
+}
+
+export interface WeeklyCheckinNarrative {
+  headline: string | null;
+  hero_summary: string;
+  wins: Array<{ title: string; detail: string }>;
+  needs_attention: Array<{ title: string; detail: string }>;
+  closer: string;
+  recommendations: WeeklyNarrativeRec[];
+  metrics: Record<string, any>;
+  volume_by_muscle: Record<string, any>;
+  rationale_key: string;
+  /** "ai" when gpt-5-mini composed the narrative; "fallback" when the
+   *  AI call failed and we returned the deterministic safety net. UI
+   *  can show a subtle indicator if you want to be transparent. */
+  narrative_source: 'ai' | 'fallback';
+}
+
+/** Fetch the rich personalized weekly check-in narrative. Pass any
+ *  Apple Health signals the client already has so the AI can
+ *  reference them by name (sleep avg, RHR, HRV, weight slope). All
+ *  signals are optional — degrade gracefully when AH isn't connected. */
+export async function getWeeklyCheckinNarrative(
+  token: string,
+  signals: {
+    days?: number;
+    weightSlopeLbsPerWeek?: number | null;
+    avgSleepHours?: number | null;
+    avgRestingHr?: number | null;
+    avgSteps?: number | null;
+    readinessScore?: number | null;
+    avgHrvMs?: number | null;
+    vo2Max?: number | null;
+  } = {},
+): Promise<WeeklyCheckinNarrative> {
+  return request<WeeklyCheckinNarrative>('/coach/weekly-checkin-narrative', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      days: signals.days ?? 7,
+      weight_slope_lbs_per_week: signals.weightSlopeLbsPerWeek ?? null,
+      avg_sleep_hours: signals.avgSleepHours ?? null,
+      avg_resting_hr: signals.avgRestingHr ?? null,
+      avg_steps: signals.avgSteps ?? null,
+      readiness_score: signals.readinessScore ?? null,
+      avg_hrv_ms: signals.avgHrvMs ?? null,
+      vo2_max: signals.vo2Max ?? null,
+    }),
+  });
+}
+
 /** Wipe every WorkoutCompletion + WorkoutSession row for `dateISO`.
  *  Used by the day-card "Undo done" path when a phantom completion
  *  appears (timezone bug at midnight, partial sync, manual error). */

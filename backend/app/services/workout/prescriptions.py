@@ -38,6 +38,29 @@ class Prescription:
     rir_target: float
 
 
+def _apply_deload(p: Prescription, *, role: str | None) -> Prescription:
+    """Trim a prescription for an active deload week:
+      • Drop one working set (min 2)
+      • Bump RIR target by 2 (cap at 5 — no failure work)
+      • Keep reps + rest unchanged so the movement still feels normal
+    Warm-ups and core/iso slots get the RIR bump but keep set count
+    so the session still feels structured."""
+    new_sets = p.sets
+    if (role or "") in ("primary", "secondary") and p.sets > 2:
+        new_sets = p.sets - 1
+    return Prescription(
+        sets=new_sets,
+        reps=p.reps,
+        rest_seconds=p.rest_seconds,
+        rir_target=min(5.0, float(p.rir_target) + 2.0),
+    )
+
+
+def _deload_active(inputs) -> bool:
+    overlay = getattr(inputs, "coaching_overlay", None)
+    return bool(isinstance(overlay, dict) and overlay.get("deload_active"))
+
+
 def prescribe_for_slot(
     archetype: DayArchetype,
     slot,            # app.services.workout.planner.Slot — typed loosely to avoid cycle
@@ -49,7 +72,25 @@ def prescribe_for_slot(
     branch that currently depends on the user's goal bucket; the
     non-lifting branches use archetype-driven numbers so a muscle_gain
     user's stretch day looks the same as an endurance user's stretch
-    day — because they're BOTH stretch days."""
+    day — because they're BOTH stretch days.
+
+    When the user has an active deload window (set via the
+    `schedule_deload` weekly recommendation), every returned
+    prescription is run through `_apply_deload` so loads + sets +
+    failure work are trimmed for the duration."""
+    pres = _dispatch(archetype, slot, exercise, inputs)
+    if _deload_active(inputs):
+        role = getattr(slot, "role", None) if hasattr(slot, "role") else None
+        return _apply_deload(pres, role=role)
+    return pres
+
+
+def _dispatch(
+    archetype: DayArchetype,
+    slot,
+    exercise: dict,
+    inputs,
+) -> Prescription:
     meta = ARCHETYPE_META.get(archetype)
     if meta is None:
         # Unknown archetype — fall back to the lifting engine so we
@@ -112,7 +153,20 @@ def prescribe_for_slot(
 def _prescribe_lifting(slot, exercise: dict, inputs) -> Prescription:
     """Thin wrapper that delegates to the existing
     `planner.prescribe_sets_reps`. Kept separate so future callers
-    can swap it out without touching the archetype dispatch."""
+    can swap it out without touching the archetype dispatch.
+
+    When the user has an `intensity_bias` set in their coaching
+    overlay (via the strength_preservation / hypertrophy_focus
+    weekly recommendations), bypass the goal-bucket driver and use
+    the stimulus prescriber directly so a "go heavier" rec actually
+    shifts loads/reps the user feels."""
+    overlay = getattr(inputs, "coaching_overlay", None)
+    bias = overlay.get("intensity_bias") if isinstance(overlay, dict) else None
+    if bias in ("strength", "hypertrophy"):
+        return _prescribe_by_stimulus(bias, slot, exercise)
+    if bias == "endurance":
+        # Endurance bias = high-rep / short-rest on lifting days.
+        return _prescribe_by_stimulus("volume", slot, exercise)
     from .planner import prescribe_sets_reps
     pres = prescribe_sets_reps(exercise, slot, inputs)
     return Prescription(

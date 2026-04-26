@@ -33,6 +33,7 @@ def _make_mem_engine():
         Equipment, ExerciseEquipment, GoalOption, PaceOption,
         WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet,
         UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState,
+        UserCoachingOverlay,
         DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob,
         UserState, WorkoutPlan,
     )
@@ -248,37 +249,181 @@ def test_noop_returns_applied_with_no_changes():
     assert not res.needs_regen
 
 
-# ── descriptive-only actions ───────────────────────────────────────
+# ── Overlay-routed actions (the new contract) ─────────────────────
+#
+# Every action that used to be "descriptive-only" now routes through
+# UserCoachingOverlay and writes durable state. Apply-button on these
+# means "real change, plan refreshes" instead of "logged a placebo."
 
-def test_descriptive_actions_write_memory_no_state_mutation():
-    """Every descriptive action records a CoachMemory row + does NOT
-    touch UserPreferences/UserCoachingState/UserDayState."""
-    print("\n[test] descriptive actions: memory row only, no state mutation")
-    from app.services.coach.apply_action import apply_action
-    from app.models import UserPreferences, UserCoachingState, CoachMemory
+def _overlay_for(s, uid):
+    from app.models import UserCoachingOverlay
     from sqlmodel import select
-    descriptive_types = (
-        "reduce_muscle_volume", "add_muscle_volume", "hold_muscle_volume",
-        "add_cardio_session", "add_zone2_session", "reduce_cardio",
-        "schedule_deload", "set_core_frequency", "shorten_workout",
-        "reduce_intensity", "carb_bump_today", "raise_protein_target",
-        "raise_fiber_target", "rebalance_week", "strength_preservation",
-        "swap_to_recovery_or_reduce",
+    return s.exec(
+        select(UserCoachingOverlay).where(UserCoachingOverlay.user_id == uid)
+    ).first()
+
+
+def test_add_cardio_session_writes_overlay():
+    print("\n[test] add_cardio_session: writes cardio_minutes_target to overlay")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "add_cardio_session"}, rec_key="r1")
+    assert res.applied
+    assert res.needs_regen
+    assert "30" in res.summary, f"summary should mention the +30 min bump: {res.summary}"
+    ov = _overlay_for(s, u.id)
+    assert ov is not None
+    assert ov.cardio_minutes_target == 30
+    _ok("cardio_minutes_target persisted to 30")
+
+
+def test_add_cardio_session_accumulates_with_cap():
+    """Repeated add_cardio_session bumps the target by 30 each time
+    until the 360-min weekly cap kicks in."""
+    print("\n[test] add_cardio_session: accumulates across applies; clamped at 360")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    for _ in range(15):  # 15 × 30 = 450, over the 360 cap
+        apply_action(s, u.id, {"type": "add_cardio_session"})
+    ov = _overlay_for(s, u.id)
+    assert ov.cardio_minutes_target == 360, \
+        f"expected cardio cap at 360, got {ov.cardio_minutes_target}"
+
+
+def test_add_muscle_volume_requires_muscle_payload():
+    """Without a `muscle` field the call must reject — applying a bias
+    to the wrong muscle would silently misshape the plan."""
+    print("\n[test] add_muscle_volume: missing muscle → rejected")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "add_muscle_volume"})
+    assert not res.applied
+    assert res.error == "missing_muscle"
+    ov = _overlay_for(s, u.id)
+    assert (ov is None) or (not ov.muscle_volume_bias), \
+        "no overlay mutation should occur when muscle missing"
+
+
+def test_add_muscle_volume_steps_bias_per_apply():
+    print("\n[test] add_muscle_volume quads: steps bias by 0.1 each apply")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "quads"})
+    apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "quads"})
+    ov = _overlay_for(s, u.id)
+    assert abs(ov.muscle_volume_bias["quads"] - 1.2) < 0.001, \
+        f"expected quads=1.2 after two +10% applies, got {ov.muscle_volume_bias.get('quads')}"
+
+
+def test_add_muscle_volume_caps_at_1_3():
+    print("\n[test] add_muscle_volume: chain of applies caps at 1.3")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    for _ in range(10):
+        apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "back"})
+    ov = _overlay_for(s, u.id)
+    assert abs(ov.muscle_volume_bias["back"] - 1.3) < 0.001, \
+        f"expected back=1.3 cap, got {ov.muscle_volume_bias.get('back')}"
+
+
+def test_reduce_muscle_volume_floors_at_0_7():
+    print("\n[test] reduce_muscle_volume: chain of applies floors at 0.7")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    for _ in range(10):
+        apply_action(s, u.id, {"type": "reduce_muscle_volume", "muscle": "chest"})
+    ov = _overlay_for(s, u.id)
+    assert abs(ov.muscle_volume_bias["chest"] - 0.7) < 0.001, \
+        f"expected chest=0.7 floor, got {ov.muscle_volume_bias.get('chest')}"
+
+
+def test_hold_muscle_volume_resets_to_neutral():
+    """`hold_muscle_volume` clears any prior bias on that muscle —
+    the spike rec should snap things back to baseline, not nudge."""
+    print("\n[test] hold_muscle_volume: resets bias to 1.0 (drops from JSON)")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "quads"})
+    apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "quads"})
+    apply_action(s, u.id, {"type": "hold_muscle_volume", "muscle": "quads"})
+    ov = _overlay_for(s, u.id)
+    # Neutral entries are dropped from the JSON to keep it clean.
+    assert "quads" not in (ov.muscle_volume_bias or {}), \
+        f"quads should be removed after hold, got {ov.muscle_volume_bias}"
+
+
+def test_set_core_frequency_writes_target():
+    print("\n[test] set_core_frequency: writes core_sessions_target=3")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "set_core_frequency", "sessions_per_week": 3})
+    assert res.applied
+    ov = _overlay_for(s, u.id)
+    assert ov.core_sessions_target == 3
+
+
+def test_schedule_deload_sets_until_date():
+    print("\n[test] schedule_deload: sets deload_until_date to today + N days")
+    from datetime import date, timedelta
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "schedule_deload"})
+    assert res.applied
+    ov = _overlay_for(s, u.id)
+    assert ov.deload_until_date is not None
+    # Default 7-day window, with a small tolerance for clock skew.
+    days_out = (ov.deload_until_date - date.today()).days
+    assert 6 <= days_out <= 8, f"expected ~7 days, got {days_out}"
+
+
+def test_strength_preservation_sets_intensity_bias():
+    print("\n[test] strength_preservation: writes intensity_bias='strength'")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "strength_preservation"})
+    assert res.applied
+    ov = _overlay_for(s, u.id)
+    assert ov.intensity_bias == "strength"
+
+
+def test_raise_protein_target_writes_nutrition_delta():
+    print("\n[test] raise_protein_target: writes nutrition_adjustments.protein_delta_g=10")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "raise_protein_target"})
+    assert res.applied
+    ov = _overlay_for(s, u.id)
+    assert ov.nutrition_adjustments.get("protein_delta_g") == 10
+
+
+def test_raise_fiber_target_writes_nutrition_delta():
+    print("\n[test] raise_fiber_target: writes nutrition_adjustments.fiber_delta_g=5")
+    from app.services.coach.apply_action import apply_action
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "raise_fiber_target"})
+    assert res.applied
+    ov = _overlay_for(s, u.id)
+    assert ov.nutrition_adjustments.get("fiber_delta_g") == 5
+
+
+def test_unsupported_quick_intent_actions_rejected():
+    """Quick-intent action types that no longer have a handler must
+    return applied=False with a clear message — NEVER silently log a
+    placebo CoachMemory like the old contract did."""
+    print("\n[test] unsupported actions: rejected with unknown_action_type error")
+    from app.services.coach.apply_action import apply_action
+    unsupported = (
+        "shorten_workout", "reduce_intensity", "carb_bump_today",
+        "rebalance_week", "swap_to_recovery_or_reduce",
     )
-    for atype in descriptive_types:
+    for atype in unsupported:
         _, s, u = _setup()
-        prefs_before = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
-        days_before = prefs_before.days_per_week
-        res = apply_action(s, u.id, {"type": atype}, rec_key=f"rec_{atype}")
-        assert res.applied, f"{atype} should be applied (descriptive ack)"
-        assert res.descriptive_only
-        # Prefs unchanged.
-        prefs_after = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
-        assert prefs_after.days_per_week == days_before, f"{atype} mutated days_per_week"
-        # Memory row recorded.
-        mem = s.exec(select(CoachMemory).where(CoachMemory.user_id == u.id)).all()
-        assert any(atype in (m.summary or "") for m in mem), \
-            f"{atype} did not record a CoachMemory row"
+        res = apply_action(s, u.id, {"type": atype})
+        assert not res.applied, f"{atype} should be rejected, not silently 'applied'"
+        assert res.error == "unknown_action_type", \
+            f"{atype} should error as unknown_action_type, got {res.error}"
+        assert res.descriptive_only, \
+            f"{atype} should mark descriptive_only so the UI hides Apply"
 
 
 # ── Unknown action type ────────────────────────────────────────────

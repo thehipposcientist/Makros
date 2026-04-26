@@ -57,6 +57,13 @@ class PlanSnapshot:
     tdee: int
     coaching_kcal_adjustment: int
     goal_bucket: str
+    # Daily fiber target (g). Default 28 (RDA) plus any
+    # `nutrition_adjustments.fiber_delta_g` accepted via the weekly
+    # coach. Surfaced so callers / UI can render the user's CURRENT
+    # target instead of a hard-coded constant.
+    fiber_g_target: int = 28
+    coaching_protein_delta_g: int = 0
+    coaching_fiber_delta_g: int = 0
 
 
 def _goal_bucket(goal_type: str | None) -> str:
@@ -133,6 +140,28 @@ def get_plan_snapshot(db: Session, user_id: int) -> PlanSnapshot | None:
     kcal = max(_MIN_CALORIES, tdee + pace_adj + coaching_adj)
 
     protein_g = round(profile.weight_lbs * _protein_per_lb(bucket))
+    # Coaching overlay: bump protein target when the user has accepted
+    # the `raise_protein_target` weekly recommendation. Read with a
+    # safe DB lookup — this snapshot runs even when `coaching` is None
+    # (e.g. fresh user) so we don't crash on missing rows. Bounded at
+    # the apply layer (-30g..+60g) so we don't need to re-clamp here.
+    protein_delta_g = 0
+    fiber_delta_g = 0
+    try:
+        from app.models import UserCoachingOverlay
+        from sqlmodel import select as _select
+        overlay = db.exec(
+            _select(UserCoachingOverlay).where(UserCoachingOverlay.user_id == user.id)
+        ).first()
+        if overlay and isinstance(overlay.nutrition_adjustments, dict):
+            protein_delta_g = int(overlay.nutrition_adjustments.get("protein_delta_g") or 0)
+            fiber_delta_g = int(overlay.nutrition_adjustments.get("fiber_delta_g") or 0)
+    except Exception:
+        # Snapshot must never fail the plan call — if the overlay row
+        # is missing or the column hasn't migrated yet, skip silently.
+        pass
+    if protein_delta_g:
+        protein_g = max(0, protein_g + protein_delta_g)
     protein_cals = protein_g * 4
     fat_floor_g = math.ceil(profile.weight_lbs * 0.3)
     fat_target_cal = max(fat_floor_g * 9, round(kcal * 0.30))
@@ -151,4 +180,7 @@ def get_plan_snapshot(db: Session, user_id: int) -> PlanSnapshot | None:
         tdee=int(tdee),
         coaching_kcal_adjustment=int(coaching_adj),
         goal_bucket=bucket,
+        fiber_g_target=max(15, 28 + fiber_delta_g),
+        coaching_protein_delta_g=int(protein_delta_g),
+        coaching_fiber_delta_g=int(fiber_delta_g),
     )

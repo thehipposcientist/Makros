@@ -87,6 +87,215 @@ def apply_recommendation_action(
     return result.to_dict()
 
 
+class WeeklyCheckinNarrativeBody(BaseModel):
+    """Optional Apple Health signals the client already computed.
+    Forwarded to compute_weekly_review AND included in the AI payload
+    so the narrative can reference RHR / HRV / sleep / weight slope
+    by name instead of generic "trends look fine."""
+    days: int = 7
+    weight_slope_lbs_per_week: float | None = None
+    avg_sleep_hours: float | None = None
+    avg_resting_hr: float | None = None
+    avg_steps: int | None = None
+    readiness_score: int | None = None
+    avg_hrv_ms: float | None = None
+    vo2_max: float | None = None
+
+
+@router.post("/weekly-checkin-narrative")
+def get_weekly_checkin_narrative(
+    body: WeeklyCheckinNarrativeBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """The big once-a-week check-in payload. Combines:
+
+      • Deterministic weekly review (sessions, volume, weight, recs)
+      • Apple Health signals (passed by the client to avoid double-fetch)
+      • AI-composed narrative (gpt-5-mini): hero summary, wins, gaps,
+        per-rec personalization, closer
+
+    Hard contract: the AI may rewrite rec titles/details for personal
+    framing but cannot invent recs or change action types. The
+    `recommendations` field returned to the client comes from the
+    deterministic engine — overrides are merged in at the title/detail
+    level only. Falls back to `fallback_weekly_narrative` (deterministic
+    safety net, identical shape) when the AI call fails."""
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.services.coach.checkin_ai import (
+        compose_weekly_narrative, fallback_weekly_narrative, CheckinAIError,
+    )
+
+    review = compute_weekly_review(
+        db, current_user.id,
+        days=max(3, min(28, body.days)),
+        weight_trend_lbs_per_week=body.weight_slope_lbs_per_week,
+        avg_sleep_hours=body.avg_sleep_hours,
+        avg_resting_hr=body.avg_resting_hr,
+        avg_steps=body.avg_steps,
+        readiness_score=body.readiness_score,
+    )
+    review_dict = review.to_dict()
+
+    # Build the AI payload — review numbers + accepted-rec set + AH
+    # signals the client passed. The AI sees ALL of this; the planner
+    # sees a separate snapshot path.
+    ai_payload = {
+        "goal": review_dict.get("goal_bucket"),
+        "metrics": {
+            "sessions_completed": review_dict.get("sessions_completed"),
+            "sessions_planned": review_dict.get("sessions_planned"),
+            "cardio_minutes": review_dict.get("cardio_minutes"),
+            "zone2_minutes": review_dict.get("zone2_minutes"),
+            "total_hard_sets": (review_dict.get("volume") or {}).get("total_hard_sets"),
+            "weight_trend": {
+                "slope_lbs_per_week": body.weight_slope_lbs_per_week,
+                "direction": review_dict.get("weight_trend_direction"),
+            },
+            "avg_protein_g": review_dict.get("avg_protein_g"),
+            "avg_fiber_g": review_dict.get("avg_fiber_g"),
+            "days_logged": review_dict.get("days_logged"),
+            "adherence_pct": review_dict.get("adherence_pct"),
+            # Apple Health signals — optional per-call.
+            "avg_sleep_hours": body.avg_sleep_hours,
+            "avg_resting_hr": body.avg_resting_hr,
+            "avg_hrv_ms": body.avg_hrv_ms,
+            "avg_steps": body.avg_steps,
+            "vo2_max": body.vo2_max,
+            "readiness_score": body.readiness_score,
+        },
+        "volume_by_muscle": (review_dict.get("volume") or {}).get("by_muscle", {}),
+        "recommendations": review_dict.get("recommendations") or [],
+    }
+
+    try:
+        narrative = compose_weekly_narrative(ai_payload)
+        narrative_source = "ai"
+    except CheckinAIError as e:
+        # Network / quota / parse error — fall back to the deterministic
+        # narrative so the modal always renders something useful. Log
+        # the error for telemetry but never bubble it up.
+        import logging
+        logging.getLogger(__name__).warning(
+            "weekly narrative AI fell back to deterministic: %s", e,
+        )
+        narrative = fallback_weekly_narrative(ai_payload)
+        narrative_source = "fallback"
+
+    # Merge AI rec_overrides into the deterministic recommendation list
+    # so the client gets one unified rec array. Keys not in overrides
+    # keep their deterministic title/detail.
+    overrides = narrative.get("rec_overrides") or {}
+    merged_recs: list[dict] = []
+    for r in (review_dict.get("recommendations") or []):
+        rec_copy = dict(r) if isinstance(r, dict) else r
+        if isinstance(rec_copy, dict) and rec_copy.get("key") in overrides:
+            ov = overrides[rec_copy["key"]]
+            if isinstance(ov, dict):
+                if ov.get("title"):
+                    rec_copy["title"] = ov["title"]
+                if ov.get("detail"):
+                    rec_copy["detail"] = ov["detail"]
+                rec_copy["personalized"] = True
+        merged_recs.append(rec_copy)
+
+    return {
+        "headline": review_dict.get("headline"),
+        "hero_summary": narrative.get("hero_summary"),
+        "wins": narrative.get("wins") or [],
+        "needs_attention": narrative.get("needs_attention") or [],
+        "closer": narrative.get("closer"),
+        "recommendations": merged_recs,
+        "metrics": ai_payload["metrics"],
+        "volume_by_muscle": ai_payload["volume_by_muscle"],
+        "rationale_key": narrative.get("rationale_key"),
+        "narrative_source": narrative_source,
+    }
+
+
+class _BulkActionItem(BaseModel):
+    action: dict
+    rec_key: str | None = None
+
+
+class ApplyBulkBody(BaseModel):
+    """Apply N recommendations in one call. Used by the weekly check-in
+    flow so the user makes ONE decision (Apply Plan) instead of tapping
+    Apply per rec. Each item runs through the same `apply_action` path,
+    so all clamping + audit guarantees still hold. The aggregate
+    response carries one `needs_regen` flag (true if ANY item asked for
+    regen) so the caller kicks the planner exactly once."""
+    items: list[_BulkActionItem]
+
+
+@router.post("/apply-bulk")
+def apply_bulk_recommendations(
+    body: ApplyBulkBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Run multiple `apply_action` calls in sequence and aggregate
+    results. Each item is independent — a single failure does not
+    abort the rest, but its summary is included so the UI can surface
+    partial outcomes. The bulk response is shaped for the weekly
+    check-in modal:
+
+      {
+        "applied_count":   N successful applies,
+        "skipped_count":   N rejected (already at cap, missing payload, etc),
+        "failed_count":    N errors,
+        "needs_regen":     bool (true if ANY item asked for regen),
+        "results":         [ ApplyResult.to_dict() per item ],
+        "summary":         "Applied N changes — plan refreshes on next open."
+      }
+    """
+    from app.services.coach.apply_action import apply_action
+    results: list[dict] = []
+    applied = 0
+    skipped = 0
+    failed = 0
+    needs_regen = False
+    for item in body.items:
+        try:
+            r = apply_action(db, current_user.id, item.action, rec_key=item.rec_key)
+            results.append(r.to_dict())
+            if r.applied and r.changed_fields:
+                applied += 1
+                if r.needs_regen:
+                    needs_regen = True
+            elif r.applied:
+                # applied=True but no changed_fields = no-op (already
+                # at cap, snap to neutral, etc). Treat as skipped from
+                # the user's POV — nothing to report as a "change."
+                skipped += 1
+            else:
+                failed += 1
+        except Exception as e:
+            failed += 1
+            results.append({
+                "applied": False, "summary": f"Error: {e}",
+                "needs_regen": False, "changed_fields": {},
+                "descriptive_only": False, "error": "internal_error",
+            })
+
+    if applied == 0 and failed == 0:
+        summary = f"Nothing to change — {skipped} item{'s' if skipped != 1 else ''} already at the planner's deterministic baseline."
+    elif failed == 0:
+        regen_msg = " Plan refreshes on next open." if needs_regen else ""
+        summary = f"Applied {applied} change{'s' if applied != 1 else ''}.{regen_msg}"
+    else:
+        summary = f"Applied {applied}, skipped {skipped}, {failed} failed. See results."
+
+    return {
+        "applied_count": applied,
+        "skipped_count": skipped,
+        "failed_count": failed,
+        "needs_regen": needs_regen,
+        "results": results,
+        "summary": summary,
+    }
+
+
 @router.post("/recompute")
 def recompute(
     as_of: date | None = Query(default=None, description="Defaults to today"),

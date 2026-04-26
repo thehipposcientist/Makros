@@ -575,6 +575,18 @@ def _build_deterministic_workout(
         except Exception as e:
             print(f"[plan-gen workout] fatigue lookup failed (non-fatal): {e}")
 
+    # Coaching overlay snapshot — accepted weekly recommendations the
+    # planner respects (per-muscle volume bias, cardio targets, core
+    # frequency, intensity bias, deload window). Snapshot also runs
+    # the decay sweep so stale biases fade.
+    coaching_overlay = None
+    if db is not None and user_id is not None:
+        try:
+            from app.services.coach.overlay import snapshot_for_planner as _overlay_snapshot
+            coaching_overlay = _overlay_snapshot(db, user_id)
+        except Exception as e:
+            print(f"[plan-gen workout] coaching overlay snapshot failed (non-fatal): {e}")
+
     inputs = PlannerInputs(
         goal=req.goal,
         days_per_week=max(1, min(7, req.daysPerWeek)),
@@ -592,6 +604,7 @@ def _build_deterministic_workout(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_dict,
         user_age=user_age,
+        coaching_overlay=coaching_overlay,
     )
 
     history_familiarity: dict[str, int] = {}

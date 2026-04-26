@@ -103,6 +103,15 @@ class PlannerInputs:
     # User's age — threaded through so the recipe can inject extra rest days
     # for 50+ users (slower recovery) and the warmup can auto-scale.
     user_age: int | None = None
+    # Coaching overlay snapshot — durable per-user biases the weekly
+    # coach has accepted (per-muscle volume bias, cardio targets, core
+    # frequency, intensity bias, deload window). Frozen dict so the
+    # planner stays pure. Empty / None means "no overrides — use
+    # deterministic baselines". Built by routers via
+    # `services/coach/overlay.snapshot_for_planner` after the on-load
+    # decay sweep so accepted recs that have aged out don't keep
+    # reshaping plans. See backend/app/services/coach/overlay.py.
+    coaching_overlay: dict | None = None
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -272,6 +281,35 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
             current = base[muscle]
             boosted = max(current + 2, int(round(current * 1.3)))
             base[muscle] = boosted
+
+    # Coaching overlay: per-muscle volume bias from accepted weekly
+    # recommendations. Multiplier in [0.7, 1.3]; values close to 1.0
+    # are no-ops. Cap result at the advanced-experience ceiling + 5
+    # so a chain of "add quads" accepts can't push into injury risk.
+    overlay = inputs.coaching_overlay or {}
+    bias_map = overlay.get("muscle_volume_bias") if isinstance(overlay, dict) else None
+    if bias_map:
+        cap_source = _WEEKLY_VOLUME.get((bucket, "advanced"), _DEFAULT_VOLUME)
+        for muscle, bias in bias_map.items():
+            if muscle not in base:
+                continue
+            try:
+                b = float(bias)
+            except (TypeError, ValueError):
+                continue
+            # Clamp the bias defensively in case stale rows hold values
+            # outside the apply-time bounds.
+            b = max(0.7, min(1.3, b))
+            adjusted = max(1, int(round(base[muscle] * b)))
+            cap = cap_source.get(muscle, adjusted) + 5
+            base[muscle] = min(adjusted, cap)
+
+    # Deload: cut every target by 30% so the weekly recipe still picks
+    # the right archetypes but the load × set product drops. Loads /
+    # RIR are trimmed separately by the prescription layer.
+    if isinstance(overlay, dict) and overlay.get("deload_active"):
+        for muscle in list(base.keys()):
+            base[muscle] = max(2, int(round(base[muscle] * 0.7)))
 
     return base
 
@@ -1229,6 +1267,7 @@ def generate_workout_plan(
         priority_region=inputs.priority_region,
         muscle_fatigue=inputs.muscle_fatigue,
         user_age=inputs.user_age,
+        coaching_overlay=inputs.coaching_overlay,
     )
     _recipe_families = [
         (archetype_to_focus_family(a) or "?") for a in recipe
@@ -1284,12 +1323,16 @@ def generate_workout_plan(
     #     carry) so users don't do the same plank every session
     #   • core always placed at END of the day's slot list
     from .core_programmer import program_core_across_week
+    _core_override = None
+    if isinstance(inputs.coaching_overlay, dict):
+        _core_override = inputs.coaching_overlay.get("core_sessions_target")
     templates = program_core_across_week(
         templates=templates,
         goal=profile.bucket,
         days_per_week=inputs.days_per_week,
         session_minutes=inputs.session_minutes,
         seed=inputs.rng_seed or 0,
+        core_target_override=_core_override,
     )
     targets = weekly_set_targets(inputs)
     # Injury-aware movement-pattern blocklist. Built once from the

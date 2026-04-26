@@ -1024,6 +1024,7 @@ def _inject_hybrid_cardio(
     *,
     profile: "GoalProfile",
     days_per_week: int,
+    target_override: int | None = None,
 ) -> list[DayArchetype]:
     """Promote N lift days to PLUS_CARDIO hybrids without requiring a
     dedicated cardio day to exist. Used by pure-lifting modes so
@@ -1032,12 +1033,19 @@ def _inject_hybrid_cardio(
 
     Only promotes PUSH/PULL/UPPER/FULL_BODY family lifts — never LEGS.
     Spreads promotions across the week (avoids back-to-back hybrids).
+
+    `target_override` overrides the goal × days table — used when the
+    coaching overlay has a `cardio_minutes_target` set, so accepted
+    weekly-coach recommendations actually reshape the next plan.
     """
-    bucket = getattr(profile, "bucket", None)
-    table = _DIRECT_PROMOTE_COUNT.get(bucket or "", None)
-    if table is None:
-        return recipe
-    target = table.get(days_per_week, 0)
+    if target_override is not None:
+        target = max(0, target_override)
+    else:
+        bucket = getattr(profile, "bucket", None)
+        table = _DIRECT_PROMOTE_COUNT.get(bucket or "", None)
+        if table is None:
+            return recipe
+        target = table.get(days_per_week, 0)
     if target <= 0:
         return recipe
 
@@ -2365,6 +2373,7 @@ def generate_weekly_recipe(
     priority_region: str = "balanced",
     muscle_fatigue: dict[str, float] | None = None,
     user_age: int | None = None,
+    coaching_overlay: dict | None = None,
 ) -> list[DayArchetype]:
     """Produce the week's archetype sequence for one user.
 
@@ -2940,8 +2949,35 @@ def generate_weekly_recipe(
     # strict-split guard so the guard's rebuild path can't strip the
     # promotion. Bro split skipped — _HYBRID_PAIR maps bro archetypes
     # to coarser PLUS_CARDIO families which loses per-muscle labels.
+    #
+    # Coaching-overlay override: when the user has accepted weekly
+    # recommendations that set `cardio_minutes_target`, derive the
+    # promotion count from that (≈20 min cardio finisher per hybrid)
+    # so an "add cardio" rec actually shows up next week.
+    cardio_target_override: int | None = None
+    if isinstance(coaching_overlay, dict):
+        target_min = coaching_overlay.get("cardio_minutes_target")
+        if isinstance(target_min, int) and target_min > 0:
+            # Cap at one promotion per non-leg lift day. ~20 min per
+            # finisher is a reasonable estimate.
+            cardio_target_override = max(1, min(days, round(target_min / 20)))
     if mode in ("lifting", "strength", "maintain") and lifting_split != _SPLIT_BRO:
-        final = _inject_hybrid_cardio(final, profile=profile, days_per_week=days)
+        final = _inject_hybrid_cardio(
+            final, profile=profile, days_per_week=days,
+            target_override=cardio_target_override,
+        )
+    elif cardio_target_override is not None and lifting_split == _SPLIT_BRO:
+        # Bro split skips hybrid promotion (the per-muscle archetypes
+        # don't have PLUS_CARDIO variants). The user accepted a cardio
+        # rec but we structurally can't honor it on this split. Log
+        # loudly so it shows up in dev logs / weekly review telemetry —
+        # downstream we should surface this to the user as "switch to
+        # PPL/UL to enable cardio recommendations" or add standalone
+        # cardio days. Not a regression vs pre-overlay behavior.
+        logger.warning(
+            f"[weekly_recipe] cardio_minutes_target={coaching_overlay.get('cardio_minutes_target') if coaching_overlay else None} "
+            f"set but bro split skips hybrid injection — overlay not honored this regen"
+        )
 
     return final
 

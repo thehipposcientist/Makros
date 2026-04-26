@@ -76,6 +76,18 @@ _TEST_MODULES = (
     # Coach apply-action: every action type, every safety cap, every
     # mutation path on UserPreferences/UserCoachingState/UserDayState.
     "tests.test_apply_action",
+    # UserCoachingOverlay service: clamps, decay-on-expiry, snapshot
+    # shape, audit trail. Covers every overlay-targeted action type.
+    "tests.test_coach_overlay",
+    # Overlay → planner integration: the WHOLE point of the overlay.
+    # Verifies that an accepted rec actually changes the next plan
+    # (volume bias, deload, cardio target, core override, intensity
+    # bias all reach planner output as expected).
+    "tests.test_overlay_planner_integration",
+    # Weekly check-in: /coach/apply-bulk (batch apply with aggregate
+    # results) + compose_weekly_narrative (gpt-5-mini personalization
+    # of the deterministic review) + the fallback path.
+    "tests.test_weekly_checkin_apply_bulk",
     # Decision-rules gate: data sufficiency, cooldowns, kcal clamping,
     # flag-severity gating for AI suggestions.
     "tests.test_decision_rules",

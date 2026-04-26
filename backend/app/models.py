@@ -1,6 +1,6 @@
 from sqlmodel import SQLModel, Field, Column
 from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text, Date
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 
 from app.enums import (
     GoalType, GoalPace, Gender, MealType,
@@ -81,6 +81,41 @@ class UserCoachingState(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     calorie_adjustment: int = Field(default=0)    # daily calories delta from baseline
     volume_adjustment_pct: int = Field(default=0) # training volume delta percentage
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class UserCoachingOverlay(SQLModel, table=True):
+    """Durable per-user planner/nutrition biases the weekly coach can
+    write to. Read on every plan regen so accepted recommendations
+    actually change the next plan instead of just logging a CoachMemory.
+
+    Conventions:
+      • muscle_volume_bias: per-muscle multiplier on weekly hard-set
+        target. 1.0 = neutral, range [0.7, 1.3]. Missing keys = 1.0.
+      • cardio/zone2/core targets: integers in their natural unit.
+        nullable means "no override — use goal × days defaults".
+      • intensity_bias: nudges H/M/V archetype variant selection.
+      • deload_until_date: while today() <= this date, planner trims
+        sets + loads + RIR.
+      • nutrition_adjustments: keyed deltas applied AFTER the calorie/
+        macro pipeline. Currently {"protein_delta_g": int,
+        "fiber_delta_g": int} with bounded magnitudes.
+      • last_refreshed_at / expires_at: drive the decay-toward-neutral
+        sweep so a single accepted rec doesn't lock a user into a bias
+        forever. Every apply bumps both forward by 4 weeks.
+    """
+    __tablename__ = "user_coaching_overlay"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    muscle_volume_bias: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    cardio_minutes_target: int | None = Field(default=None)
+    zone2_minutes_target: int | None = Field(default=None)
+    core_sessions_target: int | None = Field(default=None)
+    intensity_bias: str | None = Field(default=None)        # strength|hypertrophy|endurance|balanced
+    deload_until_date: date | None = Field(default=None)
+    nutrition_adjustments: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    last_refreshed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(weeks=4))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
