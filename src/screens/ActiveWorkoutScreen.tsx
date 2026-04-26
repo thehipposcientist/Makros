@@ -504,7 +504,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // iOS only delivers the latest applicationContext once, when the
   // watch app next opens — and even that delivery can race the UI.
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    // Ref-token cleanup: the async import below can resolve AFTER
+    // React has already torn this effect down (e.g. workout swap mid-
+    // mount). A plain `let unsubscribe` was null at cleanup time, so
+    // any listener attached afterward leaked.
+    const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
         const { pushWorkoutToWatch, onWatchReachabilityChange } = await import('../utils/watchSync');
@@ -528,7 +532,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
         } catch { /* bridge optional */ }
         // Re-push whenever the watch becomes reachable. Idempotent.
-        unsubscribe = onWatchReachabilityChange((info) => {
+        const unsub = onWatchReachabilityChange((info) => {
           if (info.reachable) {
             console.log('[watch] reachable — re-pushing active workout');
             pushActive();
@@ -536,9 +540,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             setShowOpenWatchPrompt(false);
           }
         });
+        if (token.cancelled) { try { unsub(); } catch {} }
+        else { token.unsub = unsub; }
       } catch { /* watch bridge optional */ }
     })();
-    return () => { if (unsubscribe) unsubscribe(); };
+    return () => {
+      token.cancelled = true;
+      if (token.unsub) { try { token.unsub(); } catch {} }
+    };
   }, [workout]);
 
   // Watch→phone command handler. The watch is a remote control for the
@@ -564,11 +573,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // below the handleFinish definition).
 
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    // Ref-token cleanup so a teardown that fires before the async
+    // import resolves still removes the listener once it attaches.
+    const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
-        unsubscribe = onWatchCommand((command, payload) => {
+        const unsub = onWatchCommand((command, payload) => {
           if (command === 'pull_state') {
             // Watch asked for a refresh while we're mid-workout —
             // push `status: 'active'` + current warmup steps so the
@@ -608,9 +619,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             watchHandlersRef.current.cancel();
           }
         });
+        if (token.cancelled) { try { unsub(); } catch {} }
+        else { token.unsub = unsub; }
       } catch { /* watch bridge optional */ }
     })();
-    return () => { if (unsubscribe) unsubscribe(); };
+    return () => {
+      token.cancelled = true;
+      if (token.unsub) { try { token.unsub(); } catch {} }
+    };
   }, []);
 
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);

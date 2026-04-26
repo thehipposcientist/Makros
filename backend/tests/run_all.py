@@ -57,6 +57,7 @@ _TEST_MODULES = (
     "tests.test_carb_distribution",
     "tests.test_quick_intents",
     "tests.test_rolling_e1rm",
+    "tests.test_social_digest",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
     "tests.test_switch_day",
     # Switch Day INTEGRATION — pin every position × every focus on

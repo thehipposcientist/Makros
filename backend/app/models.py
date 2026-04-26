@@ -1061,6 +1061,47 @@ class DailyNutritionMetrics(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ─── Social ──────────────────────────────────────────────────────────────────
+
+class UserSocialProfile(SQLModel, table=True):
+    __tablename__ = "user_social_profiles"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    display_name: str | None = Field(default=None)
+    # Off until the user explicitly opts in. Gates whether friends see any
+    # of this user's training activity in the weekly digest.
+    share_activity_enabled: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Friendship(SQLModel, table=True):
+    __tablename__ = "friendships"
+    # Canonical pair: user_a_id < user_b_id so each pair has exactly one row.
+    # Direction lives in `requested_by` so we can render "X sent you a request".
+    __table_args__ = (UniqueConstraint("user_a_id", "user_b_id", name="uq_friendship_pair"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_a_id: int = Field(foreign_key="user.id", index=True)
+    user_b_id: int = Field(foreign_key="user.id", index=True)
+    # pending / accepted / blocked
+    status: str = Field(default="pending", index=True)
+    requested_by: int = Field(foreign_key="user.id")
+    # When status=blocked, this is the user who issued the block.
+    blocked_by: int | None = Field(default=None, foreign_key="user.id")
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    accepted_at: datetime | None = Field(default=None)
+
+
+class WeeklyDigestCache(SQLModel, table=True):
+    __tablename__ = "weekly_digest_cache"
+    __table_args__ = (UniqueConstraint("user_id", "week_start", name="uq_weekly_digest_user_week"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    week_start: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 class UserCreate(SQLModel):

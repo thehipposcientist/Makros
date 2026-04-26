@@ -12,7 +12,7 @@
 // renders a hero icon, title, body, and optional list of bullet
 // items. Bullets are theme-tinted by category (workout/meals/AI/etc).
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -83,6 +83,23 @@ export default function TutorialOverlay({
   const [index, setIndex] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const fade = useRef(new Animated.Value(1)).current;
+
+  // Reset to step 0 every time the overlay re-opens. The component
+  // stays mounted across opens (Modal hides it instead of unmounting),
+  // so without this reset the user lands on whatever step they were
+  // on when the modal last closed — which for the "Get started" path
+  // means the LAST step. Replaying then shows the final screen and
+  // the next tap immediately closes ("first screen then ending"
+  // symptom the user reported).
+  useEffect(() => {
+    if (!visible) return;
+    setIndex(0);
+    // requestAnimationFrame so the ScrollView has rendered before we
+    // tell it to scroll — scrolling before layout silently no-ops.
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ x: 0, animated: false });
+    });
+  }, [visible]);
 
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const x = e.nativeEvent.contentOffset.x;

@@ -379,6 +379,18 @@ export default function Index() {
       AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
     }
   }, []);
+  // Stable handler for HomeScreen's onStartWorkout prop. Inline arrow
+  // here would mint a new function reference on every render of this
+  // root, which thrashed HomeScreen's watch-command useEffect (deps
+  // include onStartWorkout) — leaking listeners and opening race
+  // windows where a watch tap could land between cleanup and the new
+  // async listener registration.
+  const handleStartWorkout = useCallback((workout: WorkoutDay) => {
+    setActiveWorkout(workout);
+  }, [setActiveWorkout]);
+  const handleCancelActiveWorkout = useCallback(() => {
+    setActiveWorkout(null);
+  }, [setActiveWorkout]);
   const [trainerNote, setTrainerNote]     = useState<string | null>(null);
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
@@ -1279,7 +1291,7 @@ export default function Index() {
         themeName={userProfile.themePreference}
         weightLbs={userProfile.physicalStats.weightLbs}
         onFinish={handleWorkoutFinish}
-        onCancel={() => setActiveWorkout(null)}
+        onCancel={handleCancelActiveWorkout}
         onDislikeExercise={(name) => {
           const existing = userProfile.dislikedExercises ?? [];
           if (existing.some(d => d.toLowerCase() === name.toLowerCase())) return;
@@ -1315,7 +1327,7 @@ export default function Index() {
         }}
         onEditThemes={() => { setEditMode('theme'); setIsEditing(true); }}
         onEditBody={() => { setEditMode('body'); setIsEditing(true); }}
-        onStartWorkout={(workout) => setActiveWorkout(workout)}
+        onStartWorkout={handleStartWorkout}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
@@ -1974,7 +1986,7 @@ function AccountInfoModal({
               only) and pro (full AI features). Writes back to the profile
               immediately so gates take effect without navigating away. */}
           <View style={{
-            marginHorizontal: 20, marginTop: 16, padding: 14, borderRadius: 12,
+            padding: 14, borderRadius: 12,
             backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
           }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>

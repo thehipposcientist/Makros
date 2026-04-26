@@ -11,6 +11,7 @@ import PulseView from '../components/PulseView';
 import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
+import FriendsModal from '../components/FriendsModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
@@ -1353,12 +1354,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     if (activeTab === 'profile') {
       loadHealthScore().then(setProfileHealthScore).catch(() => setProfileHealthScore(null));
+      // Lightweight friend-count poll for the Profile entry row.
+      if (authToken) {
+        (async () => {
+          try {
+            const { listFriends } = await import('../services/api');
+            const list = await listFriends(authToken);
+            setFriendCount(list.friends.length);
+            setPendingFriendCount(list.pending.filter(p => p.direction === 'incoming').length);
+          } catch {
+            // silent — entry row falls back to "Friends"
+          }
+        })();
+      }
     }
     // Auto-close the inline exercise library when leaving the workout tab.
     if (activeTab !== 'workout') {
       setShowExerciseLibrary(false);
     }
-  }, [activeTab]);
+  }, [activeTab, authToken]);
   const [showCheckin, setShowCheckin]     = useState(false);
   /** True while `loadPlans` is mid-flight. Prevents concurrent plan reads
       from clobbering each other if an effect re-fires rapidly. */
@@ -1621,6 +1635,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showLiveTracker, setShowLiveTracker] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+  const [showFriends, setShowFriends] = useState(false);
+  const [pendingFriendCount, setPendingFriendCount] = useState(0);
+  const [friendCount, setFriendCount] = useState(0);
 
   // Next-day unlogged-meals prompt. Populated once per day when yesterday
   // had a plan with unchecked meals and the dismissal flag isn't set.
@@ -2129,6 +2146,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     checkedMealsByDate: {} as any,
     readinessScore: null as any,
     nutritionScoreData: null as any,
+    workoutPlan: null as any,
   });
   useEffect(() => {
     rePushStateRef.current = {
@@ -2140,55 +2158,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       checkedMealsByDate,
       readinessScore,
       nutritionScoreData,
+      workoutPlan,
     };
   });
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    // Ref-based teardown: cleanup may run BEFORE the async import below
+    // resolves. Using a plain `let unsubscribe` left it null at cleanup
+    // time, so the listener attached after cleanup leaked. The token
+    // pattern guarantees that whoever resolves first (cleanup or
+    // attach) wins — late-attach sees `cancelled` and immediately
+    // unsubscribes.
+    const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
         const watchSync = await import('../utils/watchSync');
         const {
           onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
-          pushSleepToWatch, pushReadinessToWatch, pushSupplementsToWatch, pushWeightToWatch,
+          pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
         } = watchSync;
-        unsubscribe = onWatchReachabilityChange((info) => {
+        const unsub = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
           const s = rePushStateRef.current;
           const todayISO = new Date().toISOString().slice(0, 10);
           const todayItem = (s.schedule as any[])?.[0] ?? null;
           const todayWorkout = todayItem?.workout ?? null;
 
-          // Kick off prep computation in parallel so we don't add latency
-          // by serialising it behind the AsyncStorage read below.
-          const prepPromise: Promise<{ score: number | null; label: string | null }> = (async () => {
-            try {
-              if (!authToken) {
-                return { score: s.readinessScore?.score ?? null, label: s.readinessScore?.label ?? null };
-              }
-              const { scorePreparedness } = await import('../services/preparedness');
-              const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-              const inputs = await loadPreparednessInputs({
-                authToken,
-                age: userProfile?.age ?? null,
-                proteinTarget: userProfile?.proteinGoal ?? null,
-                calorieTarget: userProfile?.calorieGoal ?? null,
-                todaysFocus: todayItem?.workout?.focus ?? null,
-              });
-              const prep = scorePreparedness(inputs);
-              return { score: prep.score, label: prep.label };
-            } catch {
-              return { score: s.readinessScore?.score ?? null, label: s.readinessScore?.label ?? null };
-            }
-          })();
-
-          // Workout payload waits on BOTH the AsyncStorage check AND the
-          // prep result so `status` is computed with the correct
-          // in-progress signal — earlier this read was kicked off inside
-          // a `.then()` and `status` was computed synchronously above
-          // it, so the first push went out as 'scheduled' (or
-          // 'completed' if todayDone) and only a corrective second push
-          // arrived later. The race force-ended the watch's active view
-          // when the watch fired pull_state right after tapping Start.
+          // Workout payload waits on the AsyncStorage in-progress check
+          // so `status` reflects the correct lifecycle bucket — earlier
+          // this read was kicked off inside a `.then()` and `status`
+          // was computed synchronously above it, so the first push went
+          // out as 'scheduled' (or 'completed' if todayDone) and only a
+          // corrective second push arrived later. The race force-ended
+          // the watch's active view when the watch fired pull_state
+          // right after tapping Start.
+          //
+          // Readiness embedded here uses the LAST known phone-displayed
+          // value (set by TrainingReadinessCard's onScoreComputed). The
+          // dedicated readiness payload below carries the authoritative
+          // server score with the server's syncedAtMs.
           (async () => {
             let isWorkoutInProgress = false;
             try {
@@ -2207,12 +2214,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : todayItem?.isRest ? 'rest'
               : 'scheduled';
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
-            const prep = await prepPromise;
             pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
               status,
-              readiness: prep.score,
-              readinessLabel: prep.label,
+              readiness: s.readinessScore?.score ?? null,
+              readinessLabel: s.readinessScore?.label ?? null,
             }).catch(() => {});
           })();
           pushThemeToWatch(s.themePreference).catch(() => {});
@@ -2250,41 +2256,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               });
             } catch { /* non-fatal */ }
           })();
+          // Readiness push: always go through the server's
+          // /readiness/today endpoint and stamp the watch payload with
+          // the server's `computed_at_ms`. A locally-computed score
+          // pushed with `Date.now()` would beat the server's older
+          // timestamp in the watch's ordering check, silently rejecting
+          // the authoritative value (the phone↔watch drift bug).
+          // TrainingReadinessCard pushes the same way — both surfaces
+          // share one source of truth. No fallback: when the server
+          // call fails, leave the watch's last-known reading in place
+          // rather than overwriting it with a drifting local value.
           (async () => {
             try {
-              const cached = await (await import('../services/healthDataSummary')).getCachedHealthDataSummary();
-              const factors: any[] = [];
-              if (cached?.sleepMinutes != null) {
-                const h = cached.sleepMinutes / 60;
-                const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
-                factors.push({ label: 'Sleep', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${h.toFixed(1)}h last night` });
-              }
-              if (cached?.restingHeartRate != null) {
-                const rhr = cached.restingHeartRate;
-                const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
-                factors.push({ label: 'RHR', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${rhr} bpm` });
-              }
-              if (cached?.hrv != null) {
-                const hrv = cached.hrv;
-                const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
-                factors.push({ label: 'HRV', value: v, status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low', detail: `${hrv} ms` });
-              }
-              // Reuse the SAME prep promise the workout-payload push
-              // is awaiting. Single source of truth for this reachability
-              // event — Today icon and Readiness tab on the watch will
-              // ALWAYS show the same number since they read from one
-              // computation.
-              const prep = await prepPromise;
+              if (!authToken) return;
+              const { pushReadinessToWatch } = watchSync;
+              const { getReadinessToday } = await import('../services/api');
+              const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+              const cached = await getCachedHealthDataSummary().catch(() => null);
+              const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+              const serverResp = await getReadinessToday(authToken, {
+                avgSleepHours: sleepHours,
+                avgRestingHr: cached?.restingHeartRate ?? null,
+                avgHrvMs: cached?.hrv ?? null,
+              }).catch(() => null);
+              if (!serverResp) return;
               await pushReadinessToWatch({
-                score: prep.score,
-                label: prep.label,
-                summary: prep.score != null
-                  ? (prep.score >= 75 ? "Solid recovery — train as planned."
-                     : prep.score >= 50 ? "Moderate. Standard intensity is fine."
-                     : "Low. Consider lighter loads today.")
-                  : null,
-                factors,
-              });
+                score: serverResp.score,
+                label: serverResp.label,
+                summary: serverResp.summary,
+                factors: serverResp.factors as any,
+                syncedAtMs: serverResp.computed_at_ms,
+              } as any);
             } catch { /* non-fatal */ }
           })();
           (async () => {
@@ -2335,9 +2337,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             } catch { /* non-fatal */ }
           })();
         });
+        // Hand the unsub to the token. If cleanup already ran while
+        // we were awaiting the import, drop the listener immediately.
+        if (token.cancelled) { try { unsub(); } catch {} }
+        else { token.unsub = unsub; }
       } catch { /* bridge optional */ }
     })();
-    return () => { if (unsubscribe) unsubscribe(); };
+    return () => {
+      token.cancelled = true;
+      if (token.unsub) { try { token.unsub(); } catch {} }
+    };
   }, [authToken]);
 
   // Listen for commands the user taps on the watch. Routes each to
@@ -2362,11 +2371,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     };
   });
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    // Same ref-token pattern as the reachability listener: cleanup
+    // can fire before the async import resolves, so we have to be
+    // able to drop a listener that hasn't been attached yet.
+    const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
-        unsubscribe = onWatchCommand((command, payload) => {
+        const unsub = onWatchCommand((command, payload) => {
           if (command === 'log_weight') {
             // Watch sent a Digital-Crown-picked weight value. Save
             // to the phone's weight history → triggers the same
@@ -2465,20 +2477,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             return;
           }
           if (command === 'start_workout') {
-            // Read from rePushStateRef (always current) instead of the
-            // closure-captured schedule, which froze on the value at
-            // listener-registration time. Watch starts now use the
-            // freshest plan, so "Start Workout" works even after
-            // schedule re-derivations that didn't re-register the
-            // listener.
-            const liveSchedule = rePushStateRef.current.schedule as any[];
-            const today = liveSchedule?.[0]?.workout ?? workoutPlan?.days?.[0];
+            // Read from rePushStateRef (always current) instead of any
+            // closure-captured value — the listener is registered once
+            // and the ref carries the freshest schedule + plan.
+            const refState = rePushStateRef.current;
+            const liveSchedule = refState.schedule as any[];
+            const today = liveSchedule?.[0]?.workout ?? refState.workoutPlan?.days?.[0];
             console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) watchCmdHandlersRef.current.start(today);
             else console.warn('[watch cmd] start_workout: no today workout available');
           } else if (command === 'skip_workout') {
-            const liveSchedule = rePushStateRef.current.schedule as any[];
-            const today = liveSchedule?.[0]?.workout ?? workoutPlan?.days?.[0];
+            const refState = rePushStateRef.current;
+            const liveSchedule = refState.schedule as any[];
+            const today = liveSchedule?.[0]?.workout ?? refState.workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'watch_log') {
             // Watch-side `wlog(...)` forwards Swift print lines so they
@@ -2577,14 +2588,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // Rest / set / end commands only fire inside an active
           // workout; ActiveWorkoutScreen owns those handlers.
         });
+        if (token.cancelled) { try { unsub(); } catch {} }
+        else { token.unsub = unsub; }
       } catch { /* optional */ }
     })();
-    return () => { if (unsubscribe) unsubscribe(); };
-  // handleSkipToday / handleToggleMeal are declared later in this
-  // component via useCallback — stable refs across re-renders so
-  // it's safe to omit them from deps.
+    return () => {
+      token.cancelled = true;
+      if (token.unsub) { try { token.unsub(); } catch {} }
+    };
+  // Register the listener ONCE on mount and rely on
+  // `watchCmdHandlersRef` + `rePushStateRef` for fresh state.
+  // workoutPlan / onStartWorkout used to be deps but that thrashed the
+  // listener on every parent re-render and leaked native listeners
+  // through the async-import gap — both reads now go through the
+  // refs (live schedule + start handler), which always carry the
+  // latest values without re-registering.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workoutPlan, onStartWorkout]);
+  }, []);
 
   // Reload the preserved-completed-workouts overlay whenever the plan
   // changes or today's completion flag flips. Without this, trainer-chat
@@ -6834,6 +6854,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           </View>
 
+          {/* Friends entry — opens FriendsModal. Pending-request count
+              shows as a primary-colored badge so incoming requests
+              get attention. */}
+          <TouchableOpacity
+            style={[styles.profileRow, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}
+            onPress={() => setShowFriends(true)}
+            activeOpacity={0.85}
+          >
+            <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+              <Ionicons name="people-outline" size={18} color={themeColors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.profileRowTitle, { color: themeColors.textPrimary }]}>Friends</Text>
+              <Text style={[styles.profileRowSub, { color: themeColors.textSecondary }]}>
+                {friendCount === 0
+                  ? 'Add friends and see their weekly training'
+                  : `${friendCount} friend${friendCount === 1 ? '' : 's'}`}
+              </Text>
+            </View>
+            {pendingFriendCount > 0 ? (
+              <View style={{
+                backgroundColor: themeColors.primary,
+                borderRadius: 999,
+                paddingHorizontal: 8,
+                paddingVertical: 3,
+                marginRight: 6,
+              }}>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: '#000' }}>
+                  {pendingFriendCount}
+                </Text>
+              </View>
+            ) : null}
+            <Ionicons name="chevron-forward" size={18} color={themeColors.textMuted} />
+          </TouchableOpacity>
+
           {/* Theme picker — 2-column grid of swatches. Showing the most
               popular 8; the rest live in the full themes screen via
               the "More themes" link below. */}
@@ -8556,6 +8611,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         themeName={userProfile.themePreference}
       />
 
+      {/* Friends — friend list, requests, weekly digest. */}
+      <FriendsModal
+        visible={showFriends}
+        authToken={authToken}
+        onClose={() => {
+          setShowFriends(false);
+          if (authToken) {
+            (async () => {
+              try {
+                const { listFriends } = await import('../services/api');
+                const list = await listFriends(authToken);
+                setFriendCount(list.friends.length);
+                setPendingFriendCount(list.pending.filter(p => p.direction === 'incoming').length);
+              } catch { /* silent */ }
+            })();
+          }
+        }}
+        themeName={userProfile.themePreference}
+      />
+
       {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
@@ -10027,6 +10102,26 @@ const styles = StyleSheet.create({
   profileStatLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.6 },
   profileStatValue: { fontSize: 22, fontWeight: '800', textTransform: 'capitalize' },
   profileStatSub:   { fontSize: 10, fontWeight: '600' },
+
+  profileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginBottom: 18,
+  },
+  profileRowIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileRowTitle: { fontSize: 14, fontWeight: '700' },
+  profileRowSub:   { fontSize: 11, marginTop: 2 },
 
   profileSectionLabel: {
     fontSize: 10,

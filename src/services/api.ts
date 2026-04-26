@@ -2935,3 +2935,138 @@ export async function getWeeklyVolume(token: string, days = 7): Promise<WeeklyVo
   });
 }
 
+// ─── Social ────────────────────────────────────────────────────────────────
+
+export interface SocialMe {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  share_activity_enabled: boolean;
+}
+
+export interface SocialFriend {
+  friendship_id: number;
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  goal: string | null;
+  last_active_within_48h: boolean;
+  streak: number;
+}
+
+export interface SocialPendingRequest {
+  friendship_id: number;
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  requested_at: string;
+  direction: 'incoming' | 'outgoing';
+}
+
+export interface SocialFriendsList {
+  friends: SocialFriend[];
+  pending: SocialPendingRequest[];
+}
+
+export interface SocialDigestFriend {
+  user_id: number;
+  username: string;
+  display_name: string;
+  goal: string | null;
+  share_enabled: boolean;
+  sessions: number;
+  streak: number;
+  last_active_within_48h: boolean;
+}
+
+export interface SocialDigest {
+  week_start: string;
+  you: { sessions: number; streak: number };
+  friends: SocialDigestFriend[];
+  summary: {
+    friend_count: number;
+    friends_trained_this_week: number;
+    total_friend_sessions: number;
+    top_user_id: number | null;
+    top_sessions: number;
+    long_streak_count: number;
+  };
+}
+
+export interface SocialSearchHit {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+}
+
+export async function getSocialMe(token: string): Promise<SocialMe> {
+  return request<SocialMe>('/social/me', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateSocialMe(
+  token: string,
+  body: { display_name?: string | null; share_activity_enabled?: boolean },
+): Promise<SocialMe> {
+  return request<SocialMe>('/social/me', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listFriends(token: string): Promise<SocialFriendsList> {
+  return request<SocialFriendsList>('/social/friends', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function requestFriend(token: string, username: string): Promise<SocialPendingRequest> {
+  return request<SocialPendingRequest>('/social/friends/request', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ username }),
+  });
+}
+
+export async function acceptFriend(token: string, friendshipId: number): Promise<void> {
+  await request(`/social/friends/${friendshipId}/accept`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function rejectFriend(token: string, friendshipId: number): Promise<void> {
+  await request(`/social/friends/${friendshipId}/reject`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function removeFriend(token: string, friendshipId: number): Promise<void> {
+  await request(`/social/friends/${friendshipId}/remove`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function blockFriend(token: string, friendshipId: number): Promise<void> {
+  await request(`/social/friends/${friendshipId}/block`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function searchUsers(token: string, q: string): Promise<SocialSearchHit[]> {
+  return request<SocialSearchHit[]>(`/social/search?q=${encodeURIComponent(q)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getSocialDigest(token: string): Promise<SocialDigest> {
+  return request<SocialDigest>('/social/digest', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+

@@ -192,7 +192,10 @@
       "Bash(ipconfig getifaddr *)",
       "Bash(sort -t: -k2 -n -r)",
       "Bash(xargs -I{} basename {} .py)",
-      "Bash(npx --no-install babel-node --presets @babel/preset-typescript,@babel/preset-react -e \"\")"
+      "Bash(npx --no-install babel-node --presets @babel/preset-typescript,@babel/preset-react -e \"\")",
+      "Bash(xargs -I {} git show {}:src/screens/HomeScreen.tsx)",
+      "Bash(command -v node)",
+      "Read(//opt/homebrew/Cellar/node/25.9.0_1/bin/**)"
     ]
   }
 }

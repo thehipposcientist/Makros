@@ -1148,6 +1148,41 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={styles.sessionBadge}>
                         <Text style={styles.sessionBadgeText}>{formatDuration(session.durationSeconds)}</Text>
                       </View>
+                      {session.id && (
+                        <TouchableOpacity
+                          onPress={(e) => {
+                            // Stop the row's expand toggle from firing
+                            // when the user taps the delete glyph.
+                            e.stopPropagation?.();
+                            Alert.alert(
+                              'Delete this workout?',
+                              'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Delete', style: 'destructive', onPress: async () => {
+                                  try {
+                                    await deleteWorkoutSession(session.id!);
+                                    await deleteWorkoutSummary(session.id!).catch(() => null);
+                                    if (authToken && session.date) {
+                                      const dateISO = session.date.slice(0, 10);
+                                      const { deleteWorkoutCompletion } = await import('../services/api');
+                                      await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                                    }
+                                    setHistory(prev => prev.filter(x => x.id !== session.id));
+                                    setSummaries(prev => prev.filter(x => x.id !== session.id));
+                                    import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                                  } catch (err: any) {
+                                    Alert.alert('Could not delete', String(err?.message ?? err));
+                                  }
+                                }},
+                              ],
+                            );
+                          }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
+                          <Text style={{ fontSize: 16, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
+                        </TouchableOpacity>
+                      )}
                       <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={tc.textMuted} style={{ marginLeft: 6 }} />
                     </View>
                     <View style={styles.sessionStats}>

@@ -630,9 +630,32 @@ def _ensure_user_profile_birthdate_column() -> None:
         print(f"[migration] user_profiles birthdate add failed (non-fatal): {e}")
 
 
+def _ensure_social_tables() -> None:
+    """Create indexes for the social tables on legacy DBs. SQLModel
+    create_all builds the tables themselves; this just guarantees the
+    pair-uniqueness + week-uniqueness constraints exist.
+
+    Idempotent — safe on every startup.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_friendship_pair "
+                "ON friendships (user_a_id, user_b_id)"
+            ))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_digest_user_week "
+                "ON weekly_digest_cache (user_id, week_start)"
+            ))
+    except Exception as e:
+        print(f"[migration] social indexes ensure failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -650,6 +673,7 @@ def create_db_and_tables():
     _ensure_food_metadata_amounts_columns()
     _ensure_exercise_set_actual_rir_column()
     _ensure_daily_health_snapshot_table()
+    _ensure_social_tables()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()
