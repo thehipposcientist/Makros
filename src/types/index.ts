@@ -610,6 +610,10 @@ export interface CompletedSet {
   durationSeconds?: number; // for timed exercises (cardio, jump rope, etc.)
   rir?: number;
   feedback?: 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
+  actualDistance?: number;
+  actualPace?: string;
+  heartRateAvg?: number;
+  cardioMetrics?: Record<string, string>;
 }
 
 export interface SessionExercise {

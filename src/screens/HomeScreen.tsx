@@ -4760,6 +4760,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken]);
   useEffect(() => { reloadSavedMeals(); }, [reloadSavedMeals]);
 
+  const handleToggleSaveMeal = useCallback(async (_mealType: string, meal: MealSuggestion) => {
+    const name = (meal.meal || '').trim();
+    if (!name) return;
+    const normalizedName = name.toLowerCase();
+    const existing = savedMealLibrary.find(m => (m.name || '').toLowerCase().trim() === normalizedName);
+    if (existing) {
+      try {
+        const { deleteSavedMeal } = await import('../services/api');
+        await deleteSavedMeal(authToken, existing.id);
+        reloadSavedMeals();
+      } catch {}
+    } else {
+      const items = (meal.items || meal.foods?.map((f, i) => ({
+        name: f, quantity: 1, unit: 'serving',
+        calories: 0, protein: 0, carbs: 0, fat: 0,
+      })) || []).map((it: any) => ({
+        food_name: String(it.name || it.food_name || 'Item'),
+        quantity: Number(it.quantity || 1),
+        unit: String(it.unit || 'serving'),
+        calories: Number(it.calories || 0),
+        protein_g: Number(it.protein_g ?? it.protein ?? 0),
+        carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
+        fat_g: Number(it.fat_g ?? it.fat ?? 0),
+      }));
+      if (items.length === 0) return;
+      try {
+        const { createSavedMeal } = await import('../services/api');
+        await createSavedMeal(authToken, { name, items: items as any });
+        reloadSavedMeals();
+      } catch {}
+    }
+  }, [authToken, savedMealLibrary, reloadSavedMeals]);
+
   // When the add-from-saved picker fires on a day card we stash the
   // target date so the quick-log modal knows where to paste.
   const [addFromSavedFor, setAddFromSavedFor] = useState<string | null>(null);
@@ -6803,6 +6836,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       goal={userProfile.goal}
                       savedMealNames={savedMealNames}
                       onAddFromSaved={() => setAddFromSavedFor(d.key)}
+                      onToggleSave={handleToggleSaveMeal}
                       dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
                       dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
                       proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}

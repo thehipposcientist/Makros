@@ -351,8 +351,10 @@ def _gather_raw_signals(
             pb_per_serving = getattr(meta, "probiotic_servings_per_serving", None)
             if pb_per_serving is not None and pb_per_serving > 0:
                 probiotic_servings += float(pb_per_serving) * servings_consumed
+                probiotic_cfu_billions += 1.0 * servings_consumed
             elif getattr(meta, "probiotic_flag", False):
                 probiotic_servings += 1.0
+                probiotic_cfu_billions += 1.0
         # Collagen — purely AI-estimated, no legacy fallback because
         # the column didn't exist before v4.
         col_per_serving = getattr(meta, "collagen_g_per_serving", None)

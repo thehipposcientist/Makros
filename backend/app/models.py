@@ -769,6 +769,10 @@ class ExerciseSet(SQLModel, table=True):
     completed_at: datetime | None = Field(default=None)
     duration_seconds: int | None = Field(default=None)
     comfort_rating: int | None = Field(default=None)
+    actual_distance: float | None = Field(default=None)
+    actual_pace: str | None = Field(default=None)
+    heart_rate_avg: int | None = Field(default=None)
+    cardio_metrics: dict | None = Field(default=None, sa_column=Column(JSON))
 
 
 # ─── Meals ────────────────────────────────────────────────────────────────────
@@ -1219,6 +1223,10 @@ class SetCreate(SQLModel):
     rir_target: float | None = None
     duration_seconds: int | None = None  # for timed sets (plank, stretch)
     comfort_rating: int | None = None    # 1-5 comfort for stretch/mobility
+    actual_distance: float | None = None
+    actual_pace: str | None = None
+    heart_rate_avg: int | None = None
+    cardio_metrics: dict | None = None
 
 class ExerciseCreate(SQLModel):
     exercise_id: int | None = None

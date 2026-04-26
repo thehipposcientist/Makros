@@ -251,7 +251,8 @@ def compute_flags(
         ))
 
     # ── 3. Recovery nutrients ────────────────────────────────────────
-    nutrient_state = _recovery_nutrients_flag(db, user_id=user_id, start=start, end_date=end_date, sex=sex)
+    user_allergens = getattr(profile, "allergies", None) or []
+    nutrient_state = _recovery_nutrients_flag(db, user_id=user_id, start=start, end_date=end_date, sex=sex, allergens=user_allergens)
     flags.append(nutrient_state)
 
     # ── 4. Metabolic support (cardiometabolic dietary pattern) ──────
@@ -381,6 +382,7 @@ def _metabolic_support_flag(*, rows: list) -> "FlagState":
 
 def _recovery_nutrients_flag(
     db: Any, *, user_id: int, start: date, end_date: date, sex: str | None,
+    allergens: list[str] | None = None,
 ) -> FlagState:
     """Read magnesium, zinc, vitamin D, selenium from daily meal items over
     the window. Flag when multiple are chronically low."""
@@ -440,13 +442,13 @@ def _recovery_nutrients_flag(
         state = "red"
         names = ", ".join(pretty[k] for k in chronic_low)
         detail = f"Recovery nutrients trending low — {names} below 50% RDA most days."
-        action = "Top gaps: " + _action_for(chronic_low)
+        action = "Top gaps: " + _action_for(chronic_low, allergens)
     elif len(chronic_low) == 1 or len(persistent_low) >= 2:
         state = "amber"
         loose = chronic_low or persistent_low
         names = ", ".join(pretty[k] for k in loose)
         detail = f"Recovery nutrients mixed — {names} below target most days."
-        action = "Top gaps: " + _action_for(loose)
+        action = "Top gaps: " + _action_for(loose, allergens)
     else:
         state = "green"
         detail = "Recovery nutrients at adequate levels."
@@ -464,15 +466,35 @@ def _recovery_nutrients_flag(
     )
 
 
-def _action_for(keys: list[str]) -> str:
-    """Short food-source suggestions for missing nutrients."""
-    suggestions = {
-        "magnesium_mg": "pumpkin seeds, dark leafy greens, almonds",
-        "zinc_mg": "beef, shellfish, lentils, pumpkin seeds",
-        "vitamin_d_mcg": "fatty fish, egg yolks, fortified dairy or sun exposure",
-        "selenium_mcg": "brazil nuts (1–2/day), tuna, sardines, eggs",
+def _action_for(keys: list[str], allergens: list[str] | None = None) -> str:
+    """Short food-source suggestions for missing nutrients.
+
+    Filters suggestions through the user's allergen list so we never
+    recommend a food they're allergic to.
+    """
+    suggestions: dict[str, list[str]] = {
+        "magnesium_mg": ["pumpkin seeds", "dark leafy greens", "almonds", "black beans", "avocado"],
+        "zinc_mg": ["beef", "shellfish", "lentils", "pumpkin seeds", "chickpeas"],
+        "vitamin_d_mcg": ["fatty fish", "egg yolks", "fortified dairy", "sun exposure", "mushrooms"],
+        "selenium_mcg": ["brazil nuts (1-2/day)", "tuna", "sardines", "eggs", "sunflower seeds"],
     }
-    parts = [suggestions.get(k, "") for k in keys if suggestions.get(k)]
+    if allergens:
+        from app.services.nutrition.allergen_filter import ALLERGEN_KEYWORDS
+        blocked: set[str] = set()
+        for a in allergens:
+            key = a.strip().lower().replace(" ", "_")
+            for kw in ALLERGEN_KEYWORDS.get(key, [key]):
+                blocked.add(kw)
+        def _safe(food: str) -> bool:
+            fl = food.lower()
+            return not any(b in fl for b in blocked)
+        filtered_suggestions = {
+            k: [f for f in foods if _safe(f)]
+            for k, foods in suggestions.items()
+        }
+    else:
+        filtered_suggestions = suggestions
+    parts = [", ".join(filtered_suggestions.get(k, [])[:3]) for k in keys if filtered_suggestions.get(k)]
     return "; ".join(p for p in parts if p)
 
 

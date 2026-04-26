@@ -670,6 +670,21 @@ def _ensure_exercise_set_duration_columns() -> None:
         print(f"[migration] exercise_sets duration columns failed (non-fatal): {e}")
 
 
+def _ensure_exercise_set_cardio_hr_columns() -> None:
+    """Add actual_distance, actual_pace, heart_rate_avg, cardio_metrics
+    to exercise_sets for cardio tracking + per-set HR capture."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS actual_distance DOUBLE PRECISION"))
+            conn.execute(text("ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS actual_pace VARCHAR"))
+            conn.execute(text("ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS heart_rate_avg INTEGER"))
+            conn.execute(text("ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS cardio_metrics JSONB"))
+    except Exception as e:
+        print(f"[migration] exercise_sets cardio/HR columns failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike
@@ -692,6 +707,7 @@ def create_db_and_tables():
     _ensure_daily_health_snapshot_table()
     _ensure_social_tables()
     _ensure_exercise_set_duration_columns()
+    _ensure_exercise_set_cardio_hr_columns()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

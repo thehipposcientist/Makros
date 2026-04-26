@@ -35,6 +35,7 @@ import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
+import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { isWatchReachable } from '../utils/watchSync';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
@@ -64,6 +65,14 @@ function formatEquipmentLabel(raw: string | null | undefined): string {
     .map(part => humanizeToken(part.trim()))
     .filter(Boolean)
     .join(', ');
+}
+
+function detectTimerMode(targetReps: string | undefined, setType: string | undefined): 'amrap' | 'emom' | 'tabata' | null {
+  const text = `${targetReps ?? ''} ${setType ?? ''}`.toLowerCase();
+  if (/tabata/.test(text)) return 'tabata';
+  if (/emom/.test(text)) return 'emom';
+  if (/amrap/.test(text) || /as\s*many/.test(text)) return 'amrap';
+  return null;
 }
 
 interface WorkoutCoachMessage {
@@ -730,6 +739,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             duration_seconds: s.durationSeconds ?? null,
             feedback: s.feedback ?? null,
             rir: s.rir ?? null,
+            heart_rate_avg: s.heartRateAvg ?? null,
           })),
         }));
       syncInProgressWorkout(authToken, dateKey(new Date()), workout.focus, payload)
@@ -1165,6 +1175,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Last-session data for comparison display
   const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
 
+  // AMRAP / EMOM / Tabata timer modal
+  const [timerModalVisible, setTimerModalVisible] = useState(false);
+  const [timerMode, setTimerMode] = useState<'amrap' | 'emom' | 'tabata'>('amrap');
+  const [timerExerciseIdx, setTimerExerciseIdx] = useState(0);
+
   // Workout summary after finish
   const [timedMetrics, setTimedMetrics] = useState<Record<string, string>>({});
   const [summaryVisible, setSummaryVisible] = useState(false);
@@ -1465,6 +1480,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     // Haptic feedback on set log
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+
+    // Capture current HR from Apple Watch and stamp it on the set (non-blocking)
+    getLatestHeartRate().then(hr => {
+      if (hr && hr > 0) {
+        setExercises(prev => prev.map((e, eIdx) => {
+          if (eIdx !== exIdx) return e;
+          const updated = [...e.sets];
+          const target = updated[setSlot];
+          if (target) updated[setSlot] = { ...target, heartRateAvg: hr };
+          return { ...e, sets: updated };
+        }));
+      }
+    }).catch(() => {});
 
     const targetSetCount = getTargetSetCount(ex.targetSets);
     // Effective total includes user-added extras minus removed sets, so
@@ -2007,6 +2035,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     ]);
   }, [clearRestState, exercises, restForExercise]);
 
+  const handleReorderExercise = useCallback((fromIdx: number, direction: 'up' | 'down') => {
+    const toIdx = direction === 'up' ? fromIdx - 1 : fromIdx + 1;
+    if (toIdx < 0 || toIdx >= exercises.length) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+    setExercises(prev => {
+      const next = [...prev];
+      [next[fromIdx], next[toIdx]] = [next[toIdx], next[fromIdx]];
+      return next;
+    });
+    setActiveExIdx(toIdx);
+  }, [exercises.length]);
+
   const handleLogSet = async () => {
     console.log('[LOG_SET] handleLogSet called with weight:', logWeight, 'reps:', logReps, 'exercise index:', logExIdx);
     const weightNum = parseFloat(logWeight);
@@ -2385,21 +2426,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } catch { /* non-fatal */ }
     try {
       if (authToken) {
-        const exercisesPayload = session.exercises.map((ex, idx) => ({
-          name: ex.name,
-          target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
-          target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
-          equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
-          order_index: idx,
-          sets: ex.sets.map((s, si) => ({
-            set_number: s.setNumber ?? si + 1,
-            reps: s.reps ?? 0,
-            weight_lbs: s.weightLbs ?? 0,
-            duration_seconds: s.durationSeconds ?? null,
-            feedback: s.feedback ?? null,
-            rir: null,
-          })),
-        }));
+        const exercisesPayload = session.exercises.map((ex, idx) => {
+          const exMetrics: Record<string, string> = {};
+          for (const [k, v] of Object.entries(timedMetrics)) {
+            const m = k.match(/^(\d+)-(.+)$/);
+            if (m && parseInt(m[1], 10) === idx && v) exMetrics[m[2]] = v;
+          }
+          const distVal = exMetrics.distance ? parseFloat(exMetrics.distance) : null;
+          const paceVal = exMetrics.pace || exMetrics.split || null;
+          const extras = { ...exMetrics };
+          delete extras.distance; delete extras.pace; delete extras.split;
+          const hasExtras = Object.keys(extras).length > 0;
+          return {
+            name: ex.name,
+            target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
+            target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
+            equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+            order_index: idx,
+            sets: ex.sets.map((s, si) => {
+              const isLast = si === ex.sets.length - 1;
+              return {
+                set_number: s.setNumber ?? si + 1,
+                reps: s.reps ?? 0,
+                weight_lbs: s.weightLbs ?? 0,
+                duration_seconds: s.durationSeconds ?? null,
+                feedback: s.feedback ?? null,
+                rir: null,
+                heart_rate_avg: s.heartRateAvg ?? null,
+                ...(isLast && distVal != null ? { actual_distance: distVal } : {}),
+                ...(isLast && paceVal ? { actual_pace: paceVal } : {}),
+                ...(isLast && hasExtras ? { cardio_metrics: extras } : {}),
+              };
+            }),
+          };
+        });
         const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
           category: 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
@@ -3072,6 +3132,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     <Ionicons name="swap-horizontal" size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
                 )}
+                {/* Timer — AMRAP/EMOM/Tabata */}
+                {(() => {
+                  const tMode = detectTimerMode(ex.targetReps, (ex as any).set_type);
+                  if (!tMode || isDone) return null;
+                  return (
+                    <TouchableOpacity
+                      style={{ padding: 6, marginLeft: 2 }}
+                      onPress={() => {
+                        setTimerMode(tMode);
+                        setTimerExerciseIdx(i);
+                        setTimerModalVisible(true);
+                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                      }}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Start ${tMode.toUpperCase()} timer`}>
+                      <Ionicons name="timer-outline" size={16} color={themeColors.primary} />
+                    </TouchableOpacity>
+                  );
+                })()}
                 {/* Dislike — exclude from future plans */}
                 {onDislikeExercise && !isDone && (
                   <TouchableOpacity
@@ -3091,6 +3171,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     }}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                     <Ionicons name="thumbs-down-outline" size={16} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                )}
+                {/* Reorder — move exercise up/down */}
+                {isActive && i > 0 && (
+                  <TouchableOpacity
+                    style={{ padding: 5, marginLeft: 2 }}
+                    onPress={() => handleReorderExercise(i, 'up')}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Move exercise up">
+                    <Ionicons name="arrow-up" size={14} color={themeColors.textMuted} />
+                  </TouchableOpacity>
+                )}
+                {isActive && i < exercises.length - 1 && (
+                  <TouchableOpacity
+                    style={{ padding: 5, marginLeft: 0 }}
+                    onPress={() => handleReorderExercise(i, 'down')}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Move exercise down">
+                    <Ionicons name="arrow-down" size={14} color={themeColors.textMuted} />
                   </TouchableOpacity>
                 )}
                 {/* Small red remove button — only when more than one exercise */}
@@ -4536,6 +4637,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           onComplete={() => setShowStartCountdown(false)}
         />
       )}
+
+      <WorkoutTimerModal
+        visible={timerModalVisible}
+        mode={timerMode}
+        themeName={themeName}
+        exerciseName={exercises[timerExerciseIdx]?.name}
+        onClose={() => setTimerModalVisible(false)}
+        onComplete={(result: TimerResult) => {
+          setTimerModalVisible(false);
+          const ex = exercises[timerExerciseIdx];
+          if (!ex) return;
+          const newSet: CompletedSet = {
+            setNumber: ex.sets.length + 1,
+            reps: result.reps ?? result.roundsCompleted,
+            weightLbs: 0,
+            durationSeconds: result.totalSeconds,
+          };
+          setExercises(prev => prev.map((e, idx) =>
+            idx === timerExerciseIdx ? { ...e, sets: [...e.sets, newSet] } : e
+          ));
+        }}
+      />
 
       {/* Open-on-watch nudge. iOS can't auto-launch the watch app from
           the phone, so when a user starts a workout on the phone and

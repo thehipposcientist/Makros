@@ -48,6 +48,7 @@ class FoodClassification:
     alcohol_flag: bool = False
     processed_meat_flag: bool = False
     refined_grain_flag: bool = False
+    omega3_source: Literal["marine_epa_dha", "plant_ala", "supplement", "none"] = "none"
 
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -240,12 +241,15 @@ _LOW_PROTEIN_CARBS_OR_FATS = {
 # Whole foods + supplements we can confidently flag. Plant-based omega-3 (ALA)
 # sources count but are noted as notes in the classification.
 
-_OMEGA3_WHOLE = [
+_OMEGA3_MARINE = [
     "salmon", "sardine", "anchovy", "mackerel", "herring", "trout",
-    "tuna",  # modest — we still flag it
+    "tuna",
+]
+_OMEGA3_PLANT_ALA = [
     "flax", "flaxseed", "chia", "walnut",
     "hemp seed", "hemp heart",
 ]
+_OMEGA3_WHOLE = _OMEGA3_MARINE + _OMEGA3_PLANT_ALA
 _OMEGA3_SUPPLEMENT = ["fish oil", "omega 3", "omega-3", "cod liver oil", "krill oil", "algae oil"]
 
 
@@ -359,6 +363,7 @@ def classify_food(raw_name: str) -> FoodClassification:
     plants = _detect_plants(normalized)
     fermented = _detect_fermented(normalized)
     omega3 = _detect_omega3(normalized)
+    omega3_source = _detect_omega3_source(normalized)
     bucket = _detect_processing(normalized, plants=plants, fermented=fermented)
     protein_source = _detect_protein_source(normalized)
     probiotic = _detect_probiotic(normalized)
@@ -392,6 +397,7 @@ def classify_food(raw_name: str) -> FoodClassification:
         alcohol_flag=alcohol,
         processed_meat_flag=processed_meat,
         refined_grain_flag=refined_grain,
+        omega3_source=omega3_source,
     )
 
 
@@ -427,6 +433,19 @@ def _detect_protein_source(n: str) -> ProteinSource:
     return "unknown"
 
 
+_MULTI_PLANT_COMPOSITES: dict[str, int] = {
+    "salad": 3, "mixed salad": 4, "garden salad": 4, "side salad": 3,
+    "stir fry": 4, "stir-fry": 4, "veggie stir fry": 5,
+    "smoothie": 3, "green smoothie": 4,
+    "mixed vegetable": 4, "mixed veggie": 4, "mixed veg": 4,
+    "ratatouille": 4, "minestrone": 4, "vegetable soup": 3,
+    "buddha bowl": 4, "grain bowl": 3, "poke bowl": 3,
+    "trail mix": 3, "mixed nuts": 3,
+    "fruit salad": 4, "mixed berries": 3, "mixed fruit": 3,
+    "succotash": 3, "coleslaw": 2,
+}
+
+
 def _detect_plants(n: str) -> list[str]:
     """Return plant slugs present in the normalized name.
 
@@ -434,6 +453,9 @@ def _detect_plants(n: str) -> list[str]:
     detected plant (blueberry) — this is conservative because the plant is
     named explicitly. For items with only a category word ("smoothie", "salad")
     and no named ingredients, we return [].
+
+    Multi-plant composites ("mixed salad", "stir fry") get a heuristic
+    plant count when no individual plants are named explicitly.
     """
     for neg in _PLANT_NEGATIVES:
         if neg in n:
@@ -444,6 +466,10 @@ def _detect_plants(n: str) -> list[str]:
             if frag in n:
                 found.add(slug)
                 break
+    if not found:
+        for composite, count in _MULTI_PLANT_COMPOSITES.items():
+            if composite in n:
+                return [f"_composite_{i}" for i in range(count)]
     return sorted(found)
 
 
@@ -456,6 +482,16 @@ def _detect_fermented(n: str) -> bool:
 
 def _detect_omega3(n: str) -> bool:
     return any(frag in n for frag in _OMEGA3_WHOLE + _OMEGA3_SUPPLEMENT)
+
+
+def _detect_omega3_source(n: str) -> Literal["marine_epa_dha", "plant_ala", "supplement", "none"]:
+    if any(frag in n for frag in _OMEGA3_SUPPLEMENT):
+        return "supplement"
+    if any(frag in n for frag in _OMEGA3_MARINE):
+        return "marine_epa_dha"
+    if any(frag in n for frag in _OMEGA3_PLANT_ALA):
+        return "plant_ala"
+    return "none"
 
 
 def _detect_processing(n: str, *, plants: list[str], fermented: bool) -> ProcessingBucket:

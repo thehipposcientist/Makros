@@ -41,6 +41,10 @@ class CompletedSetPayload(BaseModel):
     comfort_rating: int | None = None    # 1-5 comfort for stretch/mobility
     feedback: str | None = None          # easy / good / hard / failure / pain
     rir: float | None = None
+    actual_distance: float | None = None
+    actual_pace: str | None = None
+    heart_rate_avg: int | None = None
+    cardio_metrics: dict | None = None
 
 
 class CompletedExercisePayload(BaseModel):
@@ -1155,6 +1159,10 @@ def mark_workout_complete(
                         rir_target=set_payload.rir,
                         duration_seconds=set_payload.duration_seconds,
                         comfort_rating=set_payload.comfort_rating,
+                        actual_distance=set_payload.actual_distance,
+                        actual_pace=set_payload.actual_pace,
+                        heart_rate_avg=set_payload.heart_rate_avg,
+                        cardio_metrics=set_payload.cardio_metrics,
                         completed=True,
                         completed_at=datetime.now(timezone.utc),
                     ))
@@ -1513,6 +1521,10 @@ def sync_in_progress_workout(
                     rir_target=set_payload.rir,
                     duration_seconds=set_payload.duration_seconds,
                     comfort_rating=set_payload.comfort_rating,
+                    actual_distance=set_payload.actual_distance,
+                    actual_pace=set_payload.actual_pace,
+                    heart_rate_avg=set_payload.heart_rate_avg,
+                    cardio_metrics=set_payload.cardio_metrics,
                     completed=True,
                     completed_at=datetime.now(timezone.utc),
                 ))
@@ -1743,6 +1755,51 @@ def list_completions(
     ]
 
 
+@router.get("/pace-history")
+def get_pace_history(
+    exercise: str | None = Query(default=None, description="Filter by exercise name (case-insensitive)"),
+    days: int = Query(default=90, ge=7, le=365),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return pace/distance data points for cardio exercises over time.
+    Used by the frontend Charts tab for pace progression tracking."""
+    from datetime import timedelta
+    cutoff = date.today() - timedelta(days=days)
+    query = (
+        select(
+            WorkoutExercise.name,
+            ExerciseSet.actual_distance,
+            ExerciseSet.actual_pace,
+            ExerciseSet.duration_seconds,
+            ExerciseSet.cardio_metrics,
+            WorkoutSession.workout_date,
+        )
+        .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            WorkoutSession.workout_date >= cutoff,
+            ExerciseSet.actual_distance.isnot(None),
+        )
+    )
+    if exercise:
+        query = query.where(WorkoutExercise.name.ilike(f"%{exercise}%"))
+    query = query.order_by(WorkoutSession.workout_date.asc())
+    rows = db.exec(query).all()
+    points = []
+    for name, dist, pace, dur, metrics, wdate in rows:
+        points.append({
+            "exercise": name,
+            "date": wdate.isoformat(),
+            "distance": dist,
+            "pace": pace,
+            "duration_seconds": dur,
+            "metrics": metrics,
+        })
+    return {"points": points}
+
+
 @router.get("/fatigue", response_model=FatigueScoreResponse)
 def get_fatigue_score(
     current_user: User = Depends(get_current_user),
@@ -1887,6 +1944,10 @@ def create_workout(
                 rir_target=set_body.rir_target,
                 duration_seconds=set_body.duration_seconds,
                 comfort_rating=set_body.comfort_rating,
+                actual_distance=set_body.actual_distance,
+                actual_pace=set_body.actual_pace,
+                heart_rate_avg=set_body.heart_rate_avg,
+                cardio_metrics=set_body.cardio_metrics,
             ))
 
     db.commit()

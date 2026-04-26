@@ -2197,12 +2197,34 @@ async def run_full_plan_generation(
 
     # Deterministic target macros (source of truth for the assembler).
     targets_for_check = compute_tdee_and_targets(req)
-    nutrition_target_macros = (
+    base_macros_tuple = (
         int(targets_for_check["calories"]),
         int(targets_for_check["protein"]),
         int(targets_for_check["carbs"]),
         int(targets_for_check["fat"]),
     )
+
+    # Workout-responsive carb redistribution: shift carbs up on heavy/leg
+    # days and down on rest days so the meal skeleton matches today's demand.
+    try:
+        from app.services.nutrition.carb_distribution import MacroSet, redistribute_for_day
+        today_days = workout_data.get("workout_plan", {}).get("days", [])
+        day_archetype = today_days[0].get("archetype", "") if today_days else ""
+        day_focus = today_days[0].get("focus", "") if today_days else ""
+        base_ms = MacroSet(
+            calories=base_macros_tuple[0], protein_g=base_macros_tuple[1],
+            carbs_g=base_macros_tuple[2], fat_g=base_macros_tuple[3],
+        )
+        adjusted_ms, _day_type = redistribute_for_day(
+            base_ms, archetype=day_archetype, focus=day_focus,
+            goal_bucket=req.goal,
+        )
+        nutrition_target_macros = (
+            adjusted_ms.calories, adjusted_ms.protein_g,
+            adjusted_ms.carbs_g, adjusted_ms.fat_g,
+        )
+    except Exception:
+        nutrition_target_macros = base_macros_tuple
 
     variety_n = max(1, min(7, int(getattr(req, "mealVariety", 5) or 5)))
 

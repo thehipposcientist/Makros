@@ -338,6 +338,18 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
 
 # ─── Common meals ────────────────────────────────────────────────────────────
 
+def _normalize_meal_name(name: str) -> str:
+    """Normalize a meal name for grouping: lowercase, strip parentheticals,
+    collapse whitespace, handle common plural/singular equivalences."""
+    import re
+    n = (name or "").lower().strip()
+    n = re.sub(r"\([^)]*\)", " ", n)
+    n = re.sub(r"[^a-z0-9\s]+", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    n = re.sub(r"\b(\w+?)s\b", r"\1", n) if len(n) > 4 else n
+    return n
+
+
 def get_common_meals(
     user_id: int,
     min_count: int = 2,
@@ -357,10 +369,10 @@ def get_common_meals(
         .where(col(Meal.meal_date) >= cutoff)
     ).all()
 
-    # Group by lowercased meal name
+    # Group by normalized meal name for better deduplication
     name_groups: dict[str, list[int]] = defaultdict(list)
     for m in meals:
-        key = m.name.strip().lower()
+        key = _normalize_meal_name(m.name)
         name_groups[key].append(m.id)
 
     # Batch-load all items for all meals to avoid N+1

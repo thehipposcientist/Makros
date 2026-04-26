@@ -98,6 +98,59 @@ def is_easy_cardio(exercise: dict) -> bool:
     return classify_cardio(exercise) == "easy"
 
 
+def compute_hr_zones(
+    age: int,
+    resting_hr: int | None = None,
+    vo2_max: float | None = None,
+) -> dict:
+    """Compute 5 HR training zones using Karvonen formula when resting HR
+    is available, or simple %MHR fallback. Returns zone boundaries + labels.
+
+    Zone model:
+      Z1  50-60% HRR  Recovery / Warm-up
+      Z2  60-70% HRR  Aerobic base / Fat burn
+      Z3  70-80% HRR  Tempo / Threshold
+      Z4  80-90% HRR  Lactate threshold
+      Z5  90-100% HRR Max effort / VO2 Max intervals
+    """
+    max_hr = 220 - age
+    rhr = resting_hr or 60
+
+    def hrr_pct(pct: float) -> int:
+        return round(rhr + (max_hr - rhr) * pct)
+
+    zones = [
+        {"zone": 1, "label": "Recovery",  "low": hrr_pct(0.50), "high": hrr_pct(0.60)},
+        {"zone": 2, "label": "Aerobic",   "low": hrr_pct(0.60), "high": hrr_pct(0.70)},
+        {"zone": 3, "label": "Tempo",     "low": hrr_pct(0.70), "high": hrr_pct(0.80)},
+        {"zone": 4, "label": "Threshold", "low": hrr_pct(0.80), "high": hrr_pct(0.90)},
+        {"zone": 5, "label": "VO2 Max",   "low": hrr_pct(0.90), "high": max_hr},
+    ]
+    return {
+        "max_hr": max_hr,
+        "resting_hr": rhr,
+        "vo2_max": vo2_max,
+        "zones": zones,
+    }
+
+
+def prescribe_cardio_zone(
+    cardio_intensity: CardioIntensity,
+    zones: list[dict],
+) -> dict | None:
+    """Given the classified intensity and computed zones, return the
+    target zone dict the user should train in."""
+    if not zones:
+        return None
+    if cardio_intensity == "easy":
+        return zones[0]  # Z1
+    if cardio_intensity == "steady":
+        return zones[1]  # Z2
+    if cardio_intensity == "intervals":
+        return zones[3]  # Z4
+    return None
+
+
 def _is_cardio_row(exercise: dict) -> bool:
     """A row is cardio if it declares cardio movement pattern OR
     exercise type. The planner uses this same check in a couple

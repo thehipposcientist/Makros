@@ -42,6 +42,8 @@ interface NutritionCardProps {
    *  saved library (so users don't try to save the same bundle
    *  twice). */
   savedMealNames?: Set<string>;
+  /** Toggle save/unsave for a meal directly from the card star icon. */
+  onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
   /** Called when the user picks "Start from saved meal" on the add
    *  button. When wired, the UI splits the "Add Meal" affordance into
    *  a two-path menu (Empty meal / From saved meal). */
@@ -94,6 +96,7 @@ export default function NutritionCard({
   onRenameMeal,
   onMoveMeal,
   onShuffleMeal,
+  onToggleSave,
   goal,
   savedMealNames,
   onAddFromSaved,
@@ -825,6 +828,7 @@ export default function NutritionCard({
               onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
               onRenameMeal={onRenameMeal}
               onShuffle={onShuffleMeal ? () => onShuffleMeal(key, meal) : undefined}
+              onToggleSave={onToggleSave}
               colors={colors}
               styles={styles}
               mealAccent={section}
@@ -914,7 +918,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, colors, styles, mealAccent, isSaved }: {
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, onToggleSave, colors, styles, mealAccent, isSaved }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -929,12 +933,12 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   onMoveUp?: () => void;
   onMoveDown?: () => void;
   onShuffle?: () => void;
+  onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
   /** True when this meal's name matches one of the user's Saved Meals.
-   *  Surfaces a small "Saved" chip in the header so users know they
-   *  already have this bundled for one-tap logging later. */
+   *  Surfaces a star icon in the header so users can save/unsave. */
   isSaved?: boolean;
 }) {
   const [itemsExpanded, setItemsExpanded] = useState(true);
@@ -1081,19 +1085,22 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                 </TouchableOpacity>
               </>
             )}
-            {/* Saved-meal indicator — informational only. Tells the
-                user this bundle already lives in their Saved Meals
-                library (Foods tab) so they don't accidentally save it
-                twice. Not tappable — it's a status, not an action. */}
-            {isSaved && (
-              <View style={[
-                styles.routineBadge,
-                { backgroundColor: '#22C55E22', borderColor: '#22C55E55' },
-              ]}>
-                <Text style={[styles.routineBadgeText, { color: '#22C55E' }]}>
-                  ✓ Saved
-                </Text>
-              </View>
+            {/* Save/favorite star — tap to save this meal as a
+                reusable bundle, or unsave if already saved. */}
+            {onToggleSave && (
+              <TouchableOpacity
+                onPress={() => onToggleSave(mealType, meal)}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={isSaved ? 'Remove from saved meals' : 'Save meal'}
+              >
+                <Ionicons
+                  name={isSaved ? 'star' : 'star-outline'}
+                  size={16}
+                  color={isSaved ? '#F59E0B' : colors.textMuted}
+                />
+              </TouchableOpacity>
             )}
             {/* Inline routine badge — small, beside the title, taps to
                 toggle. No more dedicated row. */}

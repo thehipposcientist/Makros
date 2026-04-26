@@ -37,7 +37,7 @@ import { getGoalEstimate } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult } from '../services/api';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint } from '../services/api';
 import { colors, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 
@@ -203,6 +203,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     proteinFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
   } | null>(null);
   const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
+  const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
+  const paceLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (tab === 'charts' && authToken && !paceLoadedRef.current) {
+      paceLoadedRef.current = true;
+      getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
+    }
+  }, [tab, authToken]);
 
   useEffect(() => {
     Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
@@ -902,6 +911,48 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <Text style={styles.emptyBody}>Tap an exercise above to see its progress chart.</Text>
                 </View>
               )}
+
+              {/* ── Cardio Pace Progression ── */}
+              {paceHistory.length >= 2 && (() => {
+                const exerciseNames = [...new Set(paceHistory.map(p => p.exercise))];
+                return (
+                  <View style={{ marginTop: 20 }}>
+                    <Text style={styles.sectionLabel}>Cardio Pace Progression</Text>
+                    {exerciseNames.map(exName => {
+                      const pts = paceHistory.filter(p => p.exercise === exName && p.distance != null);
+                      if (pts.length < 2) return null;
+                      const distances = pts.map(p => p.distance!);
+                      const maxDist = Math.max(...distances, 0.1);
+                      return (
+                        <View key={exName} style={[styles.graphCard, { marginBottom: 10 }]}>
+                          <Text style={[styles.graphTitle, { marginBottom: 8 }]}>{exName}</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 4, height: 80 }}>
+                            {pts.map((p, pi) => {
+                              const h = Math.max(8, Math.round((p.distance! / maxDist) * 70));
+                              const isLast = pi === pts.length - 1;
+                              const d = new Date(p.date);
+                              return (
+                                <View key={pi} style={{ flex: 1, alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 9, color: isLast ? tc.primary : tc.textSecondary, fontWeight: '600' }}>
+                                    {p.distance!.toFixed(1)}
+                                  </Text>
+                                  <View style={{ width: '80%', height: h, backgroundColor: isLast ? tc.primary : tc.accent, borderRadius: 4, marginVertical: 2 }} />
+                                  <Text style={{ fontSize: 8, color: tc.textMuted }}>{d.getMonth() + 1}/{d.getDate()}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                          {pts[pts.length - 1]?.pace && (
+                            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 6 }}>
+                              Latest pace: {pts[pts.length - 1].pace}
+                            </Text>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                );
+              })()}
             </>
           )}
         </ScrollView>

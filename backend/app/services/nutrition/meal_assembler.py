@@ -1376,12 +1376,26 @@ def assemble_nutrition_response(
         # generator reads `req.mealsPerDay` to size each template, and
         # we want it sized to the generated (non-routine) slot count.
         from .deterministic_skeleton import generate_deterministic_skeleton
+        _recent_names: list[str] = []
+        if db and user_id:
+            try:
+                from datetime import date as _date, timedelta
+                from sqlmodel import select, col
+                from app.models import Meal
+                _cutoff = _date.today() - timedelta(days=7)
+                _recent_meals = db.exec(
+                    select(Meal.name).where(Meal.user_id == user_id).where(col(Meal.meal_date) >= _cutoff)
+                ).all()
+                _recent_names = [n for n in _recent_meals if n]
+            except Exception:
+                pass
         original_mpd = req.mealsPerDay
         try:
             req.mealsPerDay = generate_count
             templates, note, supps = generate_deterministic_skeleton(
                 req, variety_n, allowed_foods, db=db, user_id=user_id,
                 preferred_foods=getattr(req, "customFoodNames", None) or [],
+                recent_meal_names=_recent_names,
             )
         finally:
             req.mealsPerDay = original_mpd

@@ -43,6 +43,24 @@ ALLERGEN_KEYWORDS: dict[str, list[str]] = {
         "mackerel", "trout", "bass", "anchovy", "swordfish",
         "mahi", "snapper", "catfish", "haddock", "pollock",
     ],
+    "sesame": [
+        "sesame", "tahini", "halva", "hummus",
+    ],
+    "mustard": [
+        "mustard", "dijon",
+    ],
+    "celery": [
+        "celery", "celeriac",
+    ],
+    "lupin": [
+        "lupin", "lupini",
+    ],
+    "sulfites": [
+        "sulfite", "sulphite", "dried fruit", "wine",
+    ],
+    "mollusks": [
+        "snail", "escargot", "squid", "calamari", "octopus",
+    ],
 }
 
 

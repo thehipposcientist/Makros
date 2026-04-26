@@ -125,10 +125,21 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
 # 40 IU = 1 mcg for D3, so the converter divides by 40.
 _SUPPLEMENT_MICRO_MAP: dict[str, tuple[str, float]] = {
     "vitamin_d3":      ("vitamin_d_mcg", 1.0 / 40.0),   # IU → mcg
+    "vitamin_d":       ("vitamin_d_mcg", 1.0 / 40.0),   # alias
     "vitamin_b12":     ("vitamin_b12_mcg", 1.0),
     "magnesium":       ("magnesium_mg", 1.0),
+    "magnesium_glycinate": ("magnesium_mg", 1.0),
+    "magnesium_citrate": ("magnesium_mg", 1.0),
     "iron":            ("iron_mg", 1.0),
     "omega_3":         ("omega_3_mg", 1.0),
+    "fish_oil":        ("omega_3_mg", 1.0),
+    "calcium":         ("calcium_mg", 1.0),
+    "zinc":            ("zinc_mg", 1.0),
+    "selenium":        ("selenium_mcg", 1.0),
+    "vitamin_c":       ("vitamin_c_mg", 1.0),
+    "potassium":       ("potassium_mg", 1.0),
+    "folate":          ("folate_mcg", 1.0),
+    "folic_acid":      ("folate_mcg", 1.0),
 }
 
 

@@ -237,11 +237,36 @@ def log_checked_meal(
 ):
     """Persist a meal the user checked off from their nutrition plan."""
     from app.services.nutrition.meal_history import log_meal_from_plan
+    from app.services.nutrition.allergen_filter import _item_matches_allergen, ALLERGEN_KEYWORDS
+    from app.models import UserProfile
 
     try:
         meal_date = date.fromisoformat(body.meal_date)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid meal_date format. Use YYYY-MM-DD.")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    user_allergens = (profile.allergies if profile and hasattr(profile, "allergies") else None) or []
+    if user_allergens:
+        blocked_keywords: list[str] = []
+        for allergen in user_allergens:
+            key = allergen.strip().lower().replace(" ", "_")
+            kws = ALLERGEN_KEYWORDS.get(key, [])
+            blocked_keywords.extend(kws) if kws else blocked_keywords.append(key)
+        if blocked_keywords:
+            items = body.meal.get("items") or []
+            flagged = [
+                it.get("name", "Unknown") for it in items
+                if isinstance(it, dict) and _item_matches_allergen(it.get("name", ""), blocked_keywords)
+            ]
+            if flagged:
+                return {
+                    "allergen_warning": True,
+                    "flagged_items": flagged,
+                    "message": f"Contains potential allergen(s): {', '.join(flagged[:3])}",
+                }
 
     result = log_meal_from_plan(
         user_id=current_user.id,

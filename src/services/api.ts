@@ -1007,6 +1007,10 @@ export type LoggedSetPayload = {
   duration_seconds?: number | null;
   feedback?: string | null;
   rir?: number | null;
+  actual_distance?: number | null;
+  actual_pace?: string | null;
+  heart_rate_avg?: number | null;
+  cardio_metrics?: Record<string, string> | null;
 };
 
 export type LoggedExercisePayload = {
@@ -3018,6 +3022,24 @@ export async function getE1RM(token: string, exerciseName: string, role = 'prima
 
 export async function getE1RMHistory(token: string, exerciseName: string, role = 'primary'): Promise<{ exercise: string; history: E1RMHistoryPoint[] }> {
   return request(`/workouts/e1rm/history?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export interface PaceHistoryPoint {
+  exercise: string;
+  date: string;
+  distance: number | null;
+  pace: string | null;
+  duration_seconds: number | null;
+  metrics: Record<string, string> | null;
+}
+
+export async function getPaceHistory(token: string, exercise?: string, days = 90): Promise<{ points: PaceHistoryPoint[] }> {
+  const params = new URLSearchParams({ days: String(days) });
+  if (exercise) params.set('exercise', exercise);
+  return request(`/workouts/pace-history?${params}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });

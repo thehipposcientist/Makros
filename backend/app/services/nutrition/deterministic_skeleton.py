@@ -451,6 +451,7 @@ def generate_deterministic_skeleton(
     db: Any = None,
     user_id: int | None = None,
     preferred_foods: list[str] | None = None,
+    recent_meal_names: list[str] | None = None,
 ) -> tuple[list[TemplateSkeleton], str, list[dict]]:
     """Deterministic drop-in for `call_skeleton_ai`.
 
@@ -476,6 +477,10 @@ def generate_deterministic_skeleton(
         Unused today — accepted for parity with `call_skeleton_ai`'s
         signature so the caller can swap implementations without changing
         its call site.
+    recent_meal_names
+        Food names from the last 3-5 days of plans. These are seeded into
+        the per-template `used_in_template` set so the resolver biases away
+        from them, improving day-to-day variety.
     """
     # Unused kwargs — declared for signature parity with call_skeleton_ai.
     _ = (db, user_id)
@@ -511,9 +516,13 @@ def generate_deterministic_skeleton(
 
     slot_types = _slot_types_for(meals_per_day)
 
+    _recent_set: set[str] = {
+        n.lower().strip() for n in (recent_meal_names or []) if n
+    }
+
     templates: list[TemplateSkeleton] = []
     for day_idx in range(variety_n):
-        used_in_template: set[str] = set()
+        used_in_template: set[str] = set(_recent_set)
         meals: list[MealSkeleton] = []
         for slot_idx, slot_type in enumerate(slot_types):
             archetypes = _ARCHETYPES_BY_SLOT.get(slot_type) or _DINNER_ARCHETYPES

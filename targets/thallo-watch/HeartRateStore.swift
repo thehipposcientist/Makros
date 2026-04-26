@@ -60,13 +60,25 @@ final class HeartRateStore: NSObject, ObservableObject {
             errorMessage = "HealthKit unavailable on this device."
             return
         }
-        // prewarmAuth() resolves HealthKit authorization at app launch.
-        // By the time the user taps Start, auth is already granted so
-        // we can create the HKWorkoutSession synchronously. This is
-        // critical: startActivity() is what gives watchOS the extended
-        // runtime claim that keeps the app alive. Any async gap between
-        // the user tap and startActivity lets watchOS suspend the app.
-        beginSession()
+        // startActivity() before auth is resolved hard-crashes watchOS
+        // (not a catchable error). prewarmAuth() runs on onAppear so
+        // auth is normally resolved by the time the user taps Start.
+        // Check synchronously: if resolved, begin immediately (no async
+        // gap for watchOS to suspend). Only fall back to async request
+        // on the very first launch when auth hasn't been shown yet.
+        let status = store.authorizationStatus(for: HKObjectType.workoutType())
+        if status != .notDetermined {
+            beginSession()
+        } else {
+            let read: Set<HKObjectType> = [
+                HKObjectType.quantityType(forIdentifier: .heartRate)!,
+                HKObjectType.workoutType(),
+            ]
+            let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
+            store.requestAuthorization(toShare: write, read: read) { [weak self] _, _ in
+                self?.beginSession()
+            }
+        }
     }
 
     private func beginSession() {
