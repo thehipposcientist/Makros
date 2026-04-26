@@ -68,6 +68,9 @@ _TEST_MODULES = (
     # Split-cycle integration: full generate_weekly_recipe pipeline (anchor →
     # avoid-recent → fatigue → repair → identity guards) × split × goal × history.
     "tests.test_split_cycle_integration",
+    # Completed-today overlay: full-regen day-0 pinning, +Cardio normalization,
+    # client overlay simulation across all splits × goals × day counts.
+    "tests.test_completed_today_overlay",
     # Switch Day per-split comprehensive — ~20 tests × 5 splits + edge cases.
     "tests.test_switch_day_splits",
     # Switch Day INTEGRATION — pin every position × every focus on
@@ -125,6 +128,9 @@ _TEST_MODULES = (
     # Plan generation integration — full pipeline, equipment/injury/dislike
     # filtering, fatigue overlay, session trimming, determinism.
     "tests.test_plan_generation_integration",
+    # Exercise fatigue: resolve_exercise_fatigue + resolve_focus_fatigue
+    # — skipped sets, load factor, stimulus multipliers, PLUS_CARDIO merge.
+    "tests.test_exercise_fatigue",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

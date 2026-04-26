@@ -2445,7 +2445,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } catch { /* non-fatal */ }
     try {
       if (authToken) {
-        const exercisesPayload = session.exercises.map((ex, idx) => {
+        const exercisesPayload = session.exercises
+          .filter(ex => ex.sets.length > 0)
+          .map((ex, idx) => {
           const exMetrics: Record<string, string> = {};
           for (const [k, v] of Object.entries(timedMetrics)) {
             const m = k.match(/^(\d+)-(.+)$/);

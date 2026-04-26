@@ -13,6 +13,7 @@ Architecture:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -250,17 +251,31 @@ def resolve_exercise_fatigue(
 
         # Prefer structured per-set data when present so we can read
         # actual reps + RIR. Fall back to set count with assumed 10 reps.
-        structured_sets: list[dict] = ex.get("sets") or []
-        if structured_sets and any(isinstance(s, dict) and s.get("reps") for s in structured_sets):
-            set_reps = [max(1, int(s.get("reps") or 0)) for s in structured_sets if isinstance(s, dict)]
+        raw_sets = ex.get("sets")
+        structured_sets: list[dict] = raw_sets if isinstance(raw_sets, list) else []
+        has_structured = structured_sets and any(isinstance(s, dict) for s in structured_sets)
+        if has_structured:
+            # Only count sets with actual reps > 0 (skip failed/abandoned)
+            set_reps = [int(s.get("reps") or 0) for s in structured_sets if isinstance(s, dict) and int(s.get("reps") or 0) > 0]
+            if not set_reps:
+                continue
             set_rirs = [float(s["rir"]) for s in structured_sets if isinstance(s, dict) and s.get("rir") is not None]
             total_reps = sum(set_reps)
             avg_reps = total_reps / max(1, len(set_reps))
             avg_rir = (sum(set_rirs) / len(set_rirs)) if set_rirs else None
         else:
-            sets_count = ex.get("sets_logged") or ex.get("target_sets") or ex.get("sets") or 3
+            # If the exercise was sent with an explicit empty sets list or
+            # sets_logged=0, the user skipped it entirely — no fatigue.
+            if isinstance(raw_sets, list) and len(raw_sets) == 0:
+                continue
+            sets_logged = ex.get("sets_logged")
+            if isinstance(sets_logged, int) and sets_logged == 0:
+                continue
+            sets_count = sets_logged or ex.get("target_sets") or 3
             if isinstance(sets_count, list):
                 sets_count = len(sets_count) or 3
+            if int(sets_count) <= 0:
+                continue
             total_reps = int(sets_count) * 10   # assume 10 reps/set when we don't know
             avg_reps = 10.0
             avg_rir = None
@@ -268,15 +283,25 @@ def resolve_exercise_fatigue(
         sys_mult, mus_mult = _set_stimulus_multipliers(avg_reps, avg_rir)
         per_rep = base_per_rep
 
+        # Load factor: heavier weight = more mechanical tension per rep.
+        # Bodyweight (0 lbs) → 1.0×; loaded work scales gently via log so
+        # that 315 lbs produces ~1.4× vs 135 lbs ~1.2×. Prevents squats at
+        # 315×5 from having identical fatigue to goblet squats at 35×5.
+        avg_weight = 0.0
+        if has_structured:
+            weights = [float(s.get("weight_lbs") or 0) for s in structured_sets if isinstance(s, dict) and int(s.get("reps") or 0) > 0]
+            avg_weight = sum(weights) / max(1, len(weights)) if weights else 0.0
+        load_factor = 1.0 + 0.12 * math.log2(max(1.0, avg_weight / 50.0)) if avg_weight > 0 else 1.0
+
         if primary:
-            fatigue[primary] = fatigue.get(primary, 0.0) + per_rep * total_reps * mus_mult
+            fatigue[primary] = fatigue.get(primary, 0.0) + per_rep * total_reps * mus_mult * load_factor
         for sec in secondaries:
-            fatigue[sec] = fatigue.get(sec, 0.0) + per_rep * total_reps * 0.3 * mus_mult
+            fatigue[sec] = fatigue.get(sec, 0.0) + per_rep * total_reps * 0.3 * mus_mult * load_factor
 
         # Systemic: compound lifts cost more CNS than isolation, but also
         # scale by the heavy/volume stimulus multiplier.
         sys_base = 0.4 if is_compound else 0.15
-        fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult
+        fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult * load_factor
 
     # Apply age multiplier to ALL accumulated fatigue (muscular + systemic).
     # Older athletes recover slower, so a 10-set session fatigues them more

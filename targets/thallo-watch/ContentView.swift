@@ -27,30 +27,57 @@ struct ContentView: View {
     // "I didn't know there were pages" discoverability gap.
     @State private var showSwipeHint: Bool = !UserDefaults.standard.bool(forKey: "watchSwipeHintShown")
 
+    private var displayedWorkout: WatchWorkout {
+        conn.workout ?? WatchWorkout(
+            focus: "Workout",
+            durationMinutes: 60,
+            dateISO: String(ISO8601DateFormatter().string(from: Date()).prefix(10)),
+            status: .active,
+            readiness: nil,
+            readinessLabel: nil,
+            exercises: [],
+            warmupSteps: nil,
+            syncedAtMs: Date().timeIntervalSince1970 * 1000
+        )
+    }
+
     var body: some View {
-        ZStack {
-            theme.background.ignoresSafeArea()
-            if active {
-                // Active mode: ALWAYS show the active workout view, even
-                // if conn.workout is nil. Previously `if active, let
-                // workout = conn.workout` short-circuited to TabView
-                // when workout was nil, which is exactly when the watch
-                // app would visually "close" right after tapping Start.
-                // We synthesize a placeholder workout so the user always
-                // lands on the active screen with HR + timer; the real
-                // workout payload lands seconds later when the phone
-                // pushes status:.active.
-                let displayedWorkout = conn.workout ?? WatchWorkout(
-                    focus: "Workout",
-                    durationMinutes: 60,
-                    dateISO: String(ISO8601DateFormatter().string(from: Date()).prefix(10)),
-                    status: .active,
-                    readiness: nil,
-                    readinessLabel: nil,
-                    exercises: [],
-                    warmupSteps: nil,
-                    syncedAtMs: Date().timeIntervalSince1970 * 1000
-                )
+        NavigationStack {
+            ZStack {
+                theme.background.ignoresSafeArea()
+                TabView {
+                    TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
+                        heartRate.start()
+                        active = true
+                        conn.sendCommand("start_workout")
+                    }, onSkip: {
+                        wlog("[watch] Skip tapped")
+                        conn.sendCommand("skip_workout")
+                    })
+                    MealsView(meals: conn.meals)
+                    SupplementsView()
+                    SleepView()
+                    ReadinessView()
+                    QuickStartView()
+                    WeightView()
+                }
+                .tabViewStyle(.page)
+                .overlay(alignment: .top) {
+                    if showSwipeHint {
+                        SwipeHintPill()
+                            .transition(.opacity)
+                            .onAppear {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                    withAnimation(.easeOut(duration: 0.3)) {
+                                        showSwipeHint = false
+                                    }
+                                    UserDefaults.standard.set(true, forKey: "watchSwipeHintShown")
+                                }
+                            }
+                    }
+                }
+            }
+            .navigationDestination(isPresented: $active) {
                 ActiveWorkoutView(
                     workout: displayedWorkout,
                     hr: heartRate,
@@ -65,67 +92,13 @@ struct ContentView: View {
                         conn.sendCommand("cancel_workout")
                     }
                 )
-            } else {
-                TabView {
-                    TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        heartRate.start()
-                        HeartRateStore.saveDiag("pre-active")
-                        active = true
-                        HeartRateStore.saveDiag("post-active")
-                        conn.sendCommand("start_workout")
-                        HeartRateStore.saveDiag("post-send")
-                    }, onSkip: {
-                        wlog("[watch] Skip tapped")
-                        conn.sendCommand("skip_workout")
-                    })
-                    MealsView(meals: conn.meals)
-                    SupplementsView()
-                    SleepView()
-                    ReadinessView()
-                    QuickStartView()
-                    WeightView()
-                }
-                .tabViewStyle(.page)
-                // watchOS doesn't expose `.indexViewStyle(.page(backgroundDisplayMode:))`
-                // (that API is iOS-only). The default page-style
-                // TabView already shows page indicators on watchOS.
-                // The swipe-hint pill below covers first-run
-                // discoverability, which is the whole reason that
-                // modifier was here in the first place.
-                .overlay(alignment: .top) {
-                    if showSwipeHint {
-                        SwipeHintPill()
-                            .transition(.opacity)
-                            .onAppear {
-                                // Auto-dismiss after 2.5 s so it doesn't
-                                // linger on subsequent launches.
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                                    withAnimation(.easeOut(duration: 0.3)) {
-                                        showSwipeHint = false
-                                    }
-                                    UserDefaults.standard.set(true, forKey: "watchSwipeHintShown")
-                                }
-                            }
-                    }
-                }
+                .navigationBarBackButtonHidden(true)
             }
         }
         .onAppear {
-            // Pre-warm HealthKit authorization the moment the watch app
-            // mounts so the auth dialog is resolved well before the user
-            // taps Start. Without this, the dialog could pop on first
-            // tap and watchOS would suspend the app during the
-            // auth → session-start window (no HK session = no foreground
-            // claim), which the user perceived as "tap Start → app
-            // closes." Cheap + idempotent — watchOS only shows the
-            // dialog once per install.
             heartRate.prewarmAuth()
         }
         .onReceive(conn.$theme) { palette in theme.palette = palette }
-        // React to phone-pushed status changes so the watch mirrors
-        // whatever the phone is doing. If phone starts the workout,
-        // we flip into the active UI; if phone skips or completes,
-        // we unwind any local active state.
         .onReceive(conn.$workout) { w in
             guard let w = w else { return }
             switch w.status {
@@ -137,7 +110,6 @@ struct ContentView: View {
                 }
             case .completed, .skipped:
                 if active {
-                    HeartRateStore.saveDiag("KILL: rcv \(w.status.rawValue) while active")
                     active = false
                     heartRate.end()
                 }
