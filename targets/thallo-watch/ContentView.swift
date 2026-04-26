@@ -68,19 +68,10 @@ struct ContentView: View {
             } else {
                 TabView {
                     TodayView(workout: conn.workout, onStart: {
-                        // CRITICAL: order matters. Flip `active` FIRST so
-                        // SwiftUI immediately renders ActiveWorkoutView's
-                        // foreground content. Then kick off HK session
-                        // (async path — won't crash if permissions are
-                        // mid-prompt). Finally tell the phone. If any
-                        // single step throws, the prior steps still
-                        // succeeded and the watch stays foregrounded.
                         wlog("[watch] Start tapped — flipping active=true, sending start_workout")
+                        heartRate.start()
                         active = true
-                        DispatchQueue.main.async {
-                            heartRate.start()
-                            conn.sendCommand("start_workout")
-                        }
+                        conn.sendCommand("start_workout")
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")

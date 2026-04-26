@@ -38,7 +38,7 @@ interface Props {
   /** When true, renders inline (no Modal/backdrop/close button).
    *  Used by the Friends tab so the content fills the tab area. */
   inline?: boolean;
-  onViewFriend?: (userId: number, displayName: string) => void;
+  onViewFriend?: (userId: number, displayName: string, digestFriend?: import('../services/api').SocialDigestFriend) => void;
 }
 
 const goalLabel = (g: string | null | undefined): string => {
@@ -321,7 +321,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                       activeOpacity={0.7}
                       onPress={() => {
                         if (onViewFriend) {
-                          onViewFriend(f.user_id, f.display_name ?? f.username);
+                          const df = digest?.friends.find((d) => d.user_id === f.user_id);
+                          const digestFriend = df ?? {
+                            user_id: f.user_id, username: f.username,
+                            display_name: f.display_name ?? f.username,
+                            goal: f.goal, share_enabled: true,
+                            sessions: 0, streak: f.streak,
+                            last_active_within_48h: f.last_active_within_48h,
+                          };
+                          onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
                         }
                       }}
                       onLongPress={() => onRemove(f)}

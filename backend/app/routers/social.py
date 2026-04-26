@@ -414,7 +414,8 @@ def get_digest(
     # mid-week activity feels live without re-aggregating on every poll.
     fresh = False
     if cached:
-        age = (datetime.now(timezone.utc) - cached.generated_at).total_seconds()
+        gen = cached.generated_at.replace(tzinfo=timezone.utc) if cached.generated_at.tzinfo is None else cached.generated_at
+        age = (datetime.now(timezone.utc) - gen).total_seconds()
         fresh = age < 3600
     if cached and fresh:
         return cached.payload
