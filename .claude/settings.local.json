@@ -191,7 +191,8 @@
       "Bash(sed -n '1,90p' src/components/FormVideoModal.tsx)",
       "Bash(ipconfig getifaddr *)",
       "Bash(sort -t: -k2 -n -r)",
-      "Bash(xargs -I{} basename {} .py)"
+      "Bash(xargs -I{} basename {} .py)",
+      "Bash(npx --no-install babel-node --presets @babel/preset-typescript,@babel/preset-react -e \"\")"
     ]
   }
 }

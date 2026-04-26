@@ -95,6 +95,11 @@ _TEST_MODULES = (
     "tests.test_plateau_detection",
     # Streak + compliance coaching.
     "tests.test_streak",
+    # Server-side readiness compute — pillar isolation, reweighting,
+    # determinism, computed_at_ms versioning. The whole reason this
+    # exists: phone+watch readiness can't drift when only the server
+    # computes the score.
+    "tests.test_readiness_compute",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

@@ -282,6 +282,7 @@ import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
 import DevLogsViewer from '../src/components/DevLogsViewer';
+import TutorialOverlay from '../src/components/TutorialOverlay';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
@@ -341,6 +342,33 @@ export default function Index() {
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
+  // Post-onboarding tutorial — owned at the app root so the
+  // AccountInfoModal "Show tutorial again" button can flip it on
+  // directly. Earlier this lived on HomeScreen and replay required
+  // navigating back to a "home tab" that doesn't really exist as
+  // its own destination, so the replay flow felt broken.
+  const [showTutorial, setShowTutorial] = useState(false);
+
+  // First-mount auto-show: open the tutorial once after onboarding
+  // completes (or whenever the user lands here without the
+  // `tutorial_v1_completed` flag). Marked completed on Skip OR Done
+  // — once seen, never re-prompted unless the user taps "Show
+  // tutorial again" in Account.
+  useEffect(() => {
+    if (!userProfile) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const seen = await AsyncStorage.getItem('tutorial_v1_completed');
+        if (cancelled || seen) return;
+        // Brief delay so the home view paints first.
+        setTimeout(() => { if (!cancelled) setShowTutorial(true); }, 600);
+      } catch { /* AsyncStorage flake — user can replay from Account */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!userProfile]);
+
   const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
   const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
   const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
@@ -1416,6 +1444,31 @@ export default function Index() {
           onUpgradeToPro={handleUpgradeToPro}
           onClose={() => setShowAccount(false)}
           onSignOut={handleSignOut}
+          onShowTutorial={() => {
+            // Close Account first so the tutorial paints over a clean
+            // canvas. 200ms is enough for the modal close animation
+            // to settle without a perceptible delay.
+            setShowAccount(false);
+            setTimeout(() => setShowTutorial(true), 200);
+          }}
+        />
+      )}
+
+      {/* Post-onboarding tutorial. Lives at the app root so the
+          Account modal's "Show tutorial again" button can flip it
+          on directly — no flag-clear-and-redirect dance. */}
+      {userProfile && (
+        <TutorialOverlay
+          visible={showTutorial}
+          tier={userProfile.subscriptionTier === 'free' ? 'free' : 'pro'}
+          themeName={userProfile.themePreference}
+          onUpgrade={handleUpgradeToPro ? () => handleUpgradeToPro(userProfile) : undefined}
+          onClose={async ({ completed }) => {
+            setShowTutorial(false);
+            if (completed) {
+              try { await AsyncStorage.setItem('tutorial_v1_completed', String(Date.now())); } catch {}
+            }
+          }}
         />
       )}
 
@@ -1680,7 +1733,7 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial,
 }: {
   token: string;
   profile: UserProfile;
@@ -1688,6 +1741,11 @@ function AccountInfoModal({
   onUpgradeToPro: (p: UserProfile) => void;
   onClose: () => void;
   onSignOut: () => void;
+  /** When set, the "Show tutorial again" button calls this directly
+   *  (instead of clearing the AsyncStorage flag and asking the user
+   *  to navigate). Owner is the app root, which renders the
+   *  TutorialOverlay. */
+  onShowTutorial?: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
@@ -1978,13 +2036,27 @@ function AccountInfoModal({
             <Text style={am.signOutText}>Sign Out</Text>
           </TouchableOpacity>
 
+          {/* Replay the post-onboarding tutorial. Fires the app-root
+              TutorialOverlay directly via `onShowTutorial` — no flag
+              clear, no navigation step, no "go back to the home tab"
+              prompt. The overlay opens right where the user is. */}
+          {onShowTutorial && (
+            <TouchableOpacity
+              onPress={() => onShowTutorial()}
+              style={{ marginTop: 8, alignItems: 'center', paddingVertical: 8 }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
+                Show tutorial again
+              </Text>
+            </TouchableOpacity>
+          )}
+
           {/* Developer logs — visible always so you can hand a
               TestFlight tester a single instruction: open Account →
               tap "Developer logs" → copy. No hidden gesture so it
               stays reachable mid-bug-report. */}
           <TouchableOpacity
             onPress={() => setShowDevLogs(true)}
-            style={{ marginTop: 8, alignItems: 'center', paddingVertical: 8 }}>
+            style={{ marginTop: 4, alignItems: 'center', paddingVertical: 8 }}>
             <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
               Developer logs
             </Text>

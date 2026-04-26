@@ -136,79 +136,112 @@ export default function TrainingReadinessCard({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // Both this card AND the watch push now go through
-      // `loadPreparednessInputs` so they compute against IDENTICAL
-      // inputs and produce IDENTICAL scores. Earlier they had separate
-      // ad-hoc paths and the user saw "phone says 94, watch says 79".
+      // PERMANENT FIX for phone↔watch readiness drift: fetch from
+      // the server, render the response directly, push it unchanged
+      // to the watch. No more dual client-compute. The server is the
+      // ONLY computer of readiness — phone + watch are pure consumers.
+      // `computed_at_ms` lets the watch reject stale pushes that
+      // arrive out-of-order via WCSession.
+      //
+      // Falls back to the legacy client compute ONLY when the server
+      // call errors (offline, auth lapse, brief outage). When that
+      // happens the score on phone and watch will drift slightly until
+      // connectivity returns and the next call lands — the trade we're
+      // making for offline support.
       const summary = parentSummary ?? (await loadHealthSummary().catch(() => null));
       const ahAvailable = isHealthKitAvailable() && summary != null;
       setHasAppleHealth(ahAvailable);
 
-      const [inputs, f] = await Promise.all([
-        loadPreparednessInputs({
+      let serverResp: import('../services/api').ReadinessTodayResponse | null = null;
+      try {
+        const { getReadinessToday } = await import('../services/api');
+        serverResp = await getReadinessToday(authToken, {
+          avgSleepHours: summary?.lastNightSleepHours ?? null,
+          avgRestingHr: summary?.restingHeartRate ?? null,
+          avgHrvMs: summary?.hrvAvg ?? null,
+        });
+      } catch { /* offline / auth lapse — fall through to client compute */ }
+
+      // Fatigue is still surfaced separately for the muscle bars in
+      // the expanded view, regardless of which path produced the score.
+      getFatigueScore(authToken).then(f => setFatigue(f)).catch(() => null);
+
+      let displayScore: number;
+      let displayLabel: PreparednessResult['label'];
+      let displayResult: PreparednessResult;
+
+      if (serverResp && serverResp.signals_present > 0) {
+        displayScore = serverResp.score;
+        // Map the server label onto the local enum for downstream UI.
+        displayLabel = (
+          serverResp.label === 'Primed' ? 'Primed'
+          : serverResp.label === 'Ready' ? 'Ready'
+          : serverResp.label === 'Moderate' ? 'Moderate'
+          : 'Fatigued'
+        );
+        displayResult = {
+          score: displayScore,
+          label: displayLabel,
+          // Pillars are no longer locally computed — leave a thin
+          // shape so existing render paths keep working.
+          pillars: { sleep: 0, hrv: 0, fatigue: 0, nutrition: 0, restingHr: 0, yesterdayStrain: 0 },
+          insights: [],
+          missing: serverResp.missing,
+          signalsPresent: serverResp.signals_present,
+          signalsTotal: serverResp.signals_total,
+          raw: 0,
+          maxPossible: 0,
+        } as PreparednessResult;
+        setPrep(displayResult);
+      } else {
+        // Offline / no server signal — fall back to local compute so
+        // the card still shows something useful. We accept that this
+        // path can drift from the watch (which has the LAST server-
+        // pushed value cached). When the next network call lands, both
+        // surfaces realign.
+        const inputs = await loadPreparednessInputs({
           authToken,
           age: age ?? null,
           proteinTarget: proteinTarget ?? null,
           calorieTarget: calorieTarget ?? null,
           todaysFocus: todaysFocus ?? null,
           cachedHealthSummary: summary ?? null,
-        }),
-        getFatigueScore(authToken).catch(() => null),
-      ]);
-      setFatigue(f);
-      const res = scorePreparedness(inputs);
-      setPrep(res);
-      // Hand the computed score back to the parent so the watch push
-      // can use the SAME value the user sees on this card. Without
-      // this, phone Progress tab and watch readiness could drift even
-      // with the shared loader (different fetch timestamps).
-      try { onScoreComputed?.(res.score, res.label); } catch {}
+        });
+        displayResult = scorePreparedness(inputs);
+        displayScore = displayResult.score;
+        displayLabel = displayResult.label;
+        setPrep(displayResult);
+      }
 
-      // Push the EXACT score the user is looking at on this card to
-      // the watch as the authoritative reading. This card is the SOLE
-      // writer of `pushReadinessToWatch` — HomeScreen's regular sync
-      // used to also push and the two could race, occasionally landing
-      // a stale score on the watch a beat after this one. Factors are
-      // built here too so the Readiness tab on the watch never gets
-      // overwritten with an empty list.
+      try { onScoreComputed?.(displayScore, displayLabel); } catch {}
+
+      // Push the SERVER response (or our local fallback) verbatim to
+      // the watch. The existing watchSync.pushReadinessToWatch maps
+      // computed_at_ms onto syncedAtMs, and ConnectivityStore on the
+      // watch already orders by syncedAtMs — so stale pushes can't
+      // overwrite a fresher value.
       try {
         const { pushReadinessToWatch } = await import('../utils/watchSync');
-        const factors: Array<{ label: string; value: number; status: 'good' | 'ok' | 'low'; detail: string | null }> = [];
-        if (summary?.lastNightSleepHours != null) {
-          const h = summary.lastNightSleepHours;
-          const v = h >= 8 ? 95 : h >= 7 ? 80 : h >= 6 ? 55 : 30;
-          factors.push({
-            label: 'Sleep', value: v,
-            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-            detail: `${h.toFixed(1)}h last night`,
-          });
+        if (serverResp) {
+          await pushReadinessToWatch({
+            score: serverResp.score,
+            label: serverResp.label,
+            summary: serverResp.summary,
+            factors: serverResp.factors as any,
+            // Pass the server's stamp so the watch's ordering check
+            // ignores any older push that lands after this one.
+            syncedAtMs: serverResp.computed_at_ms,
+          } as any).catch(() => {});
+        } else {
+          await pushReadinessToWatch({
+            score: displayResult.score,
+            label: displayResult.label,
+            summary: displayResult.score >= 75 ? 'Solid recovery — train as planned.'
+              : displayResult.score >= 50 ? 'Moderate. Standard intensity is fine.'
+              : 'Low. Consider lighter loads today.',
+            factors: [],
+          }).catch(() => {});
         }
-        if (summary?.restingHeartRate != null) {
-          const rhr = summary.restingHeartRate;
-          const v = rhr <= 60 ? 90 : rhr <= 70 ? 70 : rhr <= 80 ? 45 : 25;
-          factors.push({
-            label: 'RHR', value: v,
-            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-            detail: `${rhr} bpm`,
-          });
-        }
-        if (summary?.hrvAvg != null) {
-          const hrv = summary.hrvAvg;
-          const v = hrv >= 60 ? 90 : hrv >= 40 ? 65 : hrv >= 25 ? 40 : 20;
-          factors.push({
-            label: 'HRV', value: v,
-            status: v >= 75 ? 'good' : v >= 50 ? 'ok' : 'low',
-            detail: `${Math.round(hrv)} ms`,
-          });
-        }
-        await pushReadinessToWatch({
-          score: res.score,
-          label: res.label,
-          summary: res.score >= 75 ? 'Solid recovery — train as planned.'
-            : res.score >= 50 ? 'Moderate. Standard intensity is fine.'
-            : 'Low. Consider lighter loads today.',
-          factors,
-        }).catch(() => {});
       } catch { /* watch bridge optional */ }
     } catch {
       setPrep(null);

@@ -261,12 +261,20 @@ export async function pushSleepToWatch(opts: {
 
 /** Push readiness drill-down data — score + label + per-factor
  *  breakdown so the watch's Readiness tab can render the same story
- *  the phone's TrainingReadinessCard tells. */
+ *  the phone's TrainingReadinessCard tells.
+ *
+ *  When `syncedAtMs` is supplied (e.g. the server's `computed_at_ms`
+ *  stamp from /readiness/today), pass that through so the watch's
+ *  ConnectivityStore ordering check uses the SERVER timestamp instead
+ *  of `Date.now()`. This is what makes phone+watch readiness drift-
+ *  free: both sides agree on the version because they read the same
+ *  number from the same authoritative source. */
 export async function pushReadinessToWatch(opts: {
   score?: number | null;
   label?: string | null;
   summary?: string | null;
   factors?: WatchReadinessFactor[];
+  syncedAtMs?: number;
 }): Promise<boolean> {
   if (!canPush()) return false;
   const payload: WatchReadinessPayload = {
@@ -274,7 +282,7 @@ export async function pushReadinessToWatch(opts: {
     label: opts.label ?? null,
     summary: opts.summary ?? null,
     factors: opts.factors ?? [],
-    syncedAtMs: Date.now(),
+    syncedAtMs: opts.syncedAtMs ?? Date.now(),
   };
   wsLog('pushReadinessToWatch', { score: payload.score });
   return WatchBridge.syncReadiness(payload);

@@ -489,6 +489,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setShowStartCountdown(true);
       }
     });
+    // Pre-load the rest-timer chime so the first set's countdown
+    // end fires the audio without a few-hundred-ms decode delay.
+    // Idempotent across remounts.
+    import('../utils/feedback').then(f => f.preloadRestTimerSound()).catch(() => {});
   }, []);
   // Phone↔watch active-state sync. On mount we push `status: 'active'`
   // AND subscribe to WCSession reachability changes — when the user
@@ -1772,6 +1776,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
         import('../utils/feedback').then(f => {
+          // Audio chime + vibrate + haptic together. Audio plays
+          // through headphones / Bluetooth / silent-switch thanks to
+          // the iOS audio session config in feedback.ts.
+          f.playRestTimerDone();
           f.vibrateRestDone();
           f.hapticHeavy();
         }).catch(() => Vibration.vibrate([0, 300, 150, 300, 150, 300]));

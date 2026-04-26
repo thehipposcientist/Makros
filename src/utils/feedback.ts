@@ -108,6 +108,8 @@ export async function hapticSelection() {
 // ── Sound playback ──────────────────────────────────────────────
 
 let _Audio: typeof import('expo-av').Audio | null = null;
+let _restTimerSound: import('expo-av').Audio.Sound | null = null;
+let _audioSessionConfigured = false;
 
 async function getAudio() {
   if (_Audio) return _Audio;
@@ -120,22 +122,78 @@ async function getAudio() {
   }
 }
 
+/** Configure the iOS audio session ONCE per app launch so the rest-
+ *  timer chime:
+ *    • Plays through headphones / Bluetooth (default category does)
+ *    • Plays even with the silent switch flipped (playsInSilentModeIOS)
+ *    • Ducks (lowers, doesn't pause) other audio like Spotify
+ *    • Doesn't take over background music — release on completion
+ *  Without this the chime can be silenced by the iOS silent switch
+ *  even when the user has headphones on. */
+async function ensureAudioSession(Audio: typeof import('expo-av').Audio): Promise<void> {
+  if (_audioSessionConfigured) return;
+  try {
+    await Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+      // InterruptionMode constants: 1 = MixWithOthers (iOS / Android),
+      // 2 = DuckOthers. Numeric to avoid importing the enum.
+      interruptionModeIOS: 2,
+      interruptionModeAndroid: 2,
+      allowsRecordingIOS: false,
+    } as any);
+    _audioSessionConfigured = true;
+  } catch {
+    // Session config can fail on devices without audio hardware (rare)
+    // — playback then either works at default settings or fails too.
+  }
+}
+
+/** Pre-load the rest timer chime once. Called by ActiveWorkoutScreen
+ *  on mount so the first set's rest end doesn't pay the load cost
+ *  (a few hundred ms on a cold start). Idempotent. */
+export async function preloadRestTimerSound(): Promise<void> {
+  if (_restTimerSound) return;
+  try {
+    const Audio = await getAudio();
+    if (!Audio) return;
+    await ensureAudioSession(Audio);
+    const { sound } = await Audio.Sound.createAsync(
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('../../assets/sounds/rest-timer-end.wav'),
+      { shouldPlay: false, volume: 1.0 },
+    );
+    _restTimerSound = sound;
+  } catch { /* preload best-effort — playRestTimerDone re-tries the load */ }
+}
+
 export async function playRestTimerDone() {
   const s = await loadSettings();
+  // Vibration runs unconditionally when enabled — it's the user's
+  // backup if their phone is on silent + headphones disconnected.
+  if (s.vibrationEnabled) {
+    Vibration.vibrate([0, 200, 100, 200, 100, 400]);
+  }
   if (!s.soundsEnabled) return;
   try {
     const Audio = await getAudio();
     if (!Audio) return;
-    // Use a system-style ding. expo-av can play from a URI or require().
-    // We'll use a short built-in tone approach: create a very short beep
-    // by playing a data URI or use the notification sound.
-    // For now, trigger a vibration pattern as the "sound" since we don't
-    // have a bundled audio file. The notification already plays a sound
-    // via expo-notifications — this is the in-app fallback.
-    if (s.vibrationEnabled) {
-      Vibration.vibrate([0, 200, 100, 200, 100, 400]);
+    await ensureAudioSession(Audio);
+    if (!_restTimerSound) {
+      const { sound } = await Audio.Sound.createAsync(
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('../../assets/sounds/rest-timer-end.wav'),
+        { shouldPlay: false, volume: 1.0 },
+      );
+      _restTimerSound = sound;
     }
-  } catch {}
+    // Rewind + play. replayAsync handles both (faster than stop+play).
+    await _restTimerSound.replayAsync();
+  } catch {
+    // Any failure — silent. Vibration above already ran.
+  }
 }
 
 // ── Vibration ───────────────────────────────────────────────────

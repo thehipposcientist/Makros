@@ -153,6 +153,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [editingWeight, setEditingWeight] = useState(false);
   const [weightInput, setWeightInput] = useState('');
   const [summaries, setSummaries] = useState<StoredWorkoutSummary[]>([]);
+  // Render cap for the workout summaries list. Starts at 30 (the
+  // historical cap) and grows by 30 when the user taps "Load more".
+  // Local state — the data is already in memory, so pagination is
+  // pure render-time slicing.
+  const [visibleSummaryCount, setVisibleSummaryCount] = useState(30);
   const [goalHistory, setGoalHistory] = useState<GoalHistoryEntry[]>([]);
   const [planChanges, setPlanChanges] = useState<PlanChangeEntry[]>([]);
   const [bodyScanLoading, setBodyScanLoading] = useState(false);
@@ -1305,20 +1310,47 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })}
 
-          {/* Workout Summaries — display cap 30 so the list stays
-              scannable. Older summaries remain in storage, they just
-              aren't rendered. */}
-          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
-            Workout Summaries
-            {summaries.length > 30 ? ` · showing most recent 30 of ${summaries.length}` : ''}
-          </Text>
-          {summaries.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Ionicons name="trophy-outline" size={40} color={tc.textMuted} />
-              <Text style={styles.emptyTitle}>No summaries yet</Text>
-              <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
-            </View>
-          ) : summaries.slice(0, 30).map((s, i) => (
+          {/* Workout Summaries — paginated. We dedupe by (date,
+              focus) at render time because `saveWorkoutSummary` only
+              dedupes by id, so re-saves with new IDs (timing race on
+              finish, two-device sync) used to surface as visible
+              duplicates. The most-recent entry (first in the array
+              since unshift) wins.
+
+              `visibleSummaryCount` drives a "Load more" button so
+              users with long histories can dig back without paying
+              the render cost on the initial mount. */}
+          {(() => {
+            const seen = new Set<string>();
+            const dedupedSummaries = summaries.filter(s => {
+              const dateKey = (s.date || '').slice(0, 10);
+              const focusKey = (s.focus || '').toLowerCase().trim();
+              const key = `${dateKey}::${focusKey}`;
+              if (!dateKey || !focusKey) return true;  // can't dedupe → keep
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+            const dropped = summaries.length - dedupedSummaries.length;
+            const visible = dedupedSummaries.slice(0, visibleSummaryCount);
+            const remaining = dedupedSummaries.length - visible.length;
+            return (
+              <>
+                <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
+                  Workout Summaries
+                  {dedupedSummaries.length > 0
+                    ? ` · ${visible.length} of ${dedupedSummaries.length}`
+                    : ''}
+                  {dropped > 0 ? ` (${dropped} duplicate${dropped === 1 ? '' : 's'} hidden)` : ''}
+                </Text>
+                {dedupedSummaries.length === 0 ? (
+                  <View style={styles.emptyBox}>
+                    <Ionicons name="trophy-outline" size={40} color={tc.textMuted} />
+                    <Text style={styles.emptyTitle}>No summaries yet</Text>
+                    <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
+                  </View>
+                ) : (<>
+                {visible.map((s, i) => (
             <View key={`${s.id ?? 'sum'}-${i}`} style={[styles.sessionCard, { gap: 8 }]}>
               <View style={styles.sessionHeader}>
                 <View style={{ flex: 1 }}>
@@ -1454,6 +1486,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               )}
             </View>
           ))}
+                {remaining > 0 && (
+                  <TouchableOpacity
+                    onPress={() => setVisibleSummaryCount(c => c + 30)}
+                    activeOpacity={0.85}
+                    style={{
+                      backgroundColor: tc.surface,
+                      borderRadius: 12, paddingVertical: 12,
+                      borderWidth: 1, borderColor: tc.border,
+                      alignItems: 'center', marginTop: 4,
+                    }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                      Load {Math.min(30, remaining)} more
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                </>)}
+              </>
+            );
+          })()}
 
           {/* Plan Change History — display cap 20. The full log still
               lives in storage for audit / debug purposes. */}

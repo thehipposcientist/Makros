@@ -2851,6 +2851,56 @@ export interface ApplyActionResult {
   error: string | null;
 }
 
+// ── Readiness (server-side canonical compute) ─────────────────────
+//
+// The phone calls this and renders the response directly — no
+// client-side scoring. The phone ALSO pushes the exact response to
+// the watch via WCSession so both surfaces show the same number.
+// `computed_at_ms` lets the watch reject stale pushes.
+
+export interface ReadinessFactor {
+  label: string;
+  value: number;        // 0-100 sub-score
+  status: 'good' | 'ok' | 'low';
+  detail: string | null;
+}
+
+export interface ReadinessTodayResponse {
+  score: number;        // 0-100 canonical readiness
+  label: string;        // "Primed" | "Ready" | "Moderate" | "Fatigued" | "—"
+  summary: string;
+  factors: ReadinessFactor[];
+  missing: string[];
+  signals_present: number;
+  signals_total: number;
+  /** Server-stamped version. Watch ignores any push older than its
+   *  current value. Client should treat as opaque. */
+  computed_at_ms: number;
+}
+
+export async function getReadinessToday(
+  token: string,
+  signals?: {
+    avgSleepHours?: number | null;
+    avgRestingHr?: number | null;
+    avgHrvMs?: number | null;
+    lastNightSleepScore?: number | null;
+    nutritionAdherencePct?: number | null;
+  },
+): Promise<ReadinessTodayResponse> {
+  return request<ReadinessTodayResponse>('/readiness/today', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      avg_sleep_hours: signals?.avgSleepHours ?? null,
+      avg_resting_hr: signals?.avgRestingHr ?? null,
+      avg_hrv_ms: signals?.avgHrvMs ?? null,
+      last_night_sleep_score: signals?.lastNightSleepScore ?? null,
+      nutrition_adherence_pct: signals?.nutritionAdherencePct ?? null,
+    }),
+  });
+}
+
 /** Apply a recommendation action to durable user state. The backend
  *  maps action types to existing user-facing settings (days/week,
  *  calorie adjustment, day-state) — same path the user would take

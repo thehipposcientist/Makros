@@ -2415,6 +2415,46 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mode === 'theme' && (
         <View style={styles.section}>
+          {/* "Show tutorial again" — clears the AsyncStorage gate so
+              the tutorial overlay re-fires the next time the user
+              lands on HomeScreen. Useful for users who skipped the
+              first run and want the tour after exploring. */}
+          <TouchableOpacity
+            onPress={async () => {
+              try {
+                await AsyncStorage.removeItem('tutorial_v1_completed');
+                Alert.alert(
+                  'Tutorial reset',
+                  'Open the home tab to see the walkthrough again.',
+                );
+              } catch (e: any) {
+                Alert.alert('Could not reset', e?.message ?? 'Try again.');
+              }
+            }}
+            activeOpacity={0.8}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 12,
+              backgroundColor: tc.surface, padding: 14, borderRadius: radius.lg,
+              borderWidth: 1, borderColor: tc.border, marginBottom: 14,
+            }}>
+            <View style={{
+              width: 36, height: 36, borderRadius: 18,
+              backgroundColor: tc.primary + '22',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Ionicons name="play-circle-outline" size={20} color={tc.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+                Show tutorial again
+              </Text>
+              <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                Re-runs the post-onboarding walkthrough on the next home tab visit.
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
+          </TouchableOpacity>
+
           {/* DEV: Subscription tier toggle. Flips between free (manual tracking
               only) and pro (full AI features). Remove / hide behind a debug
               flag once the billing flow ships. */}

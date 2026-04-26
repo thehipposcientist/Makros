@@ -656,6 +656,85 @@ function bgIsDark(hex: string): boolean {
  * Lives in this file (not a shared component) because it's only used by
  * HomeScreen. Uses native driver — both transform and opacity qualify.
  */
+/** Apple Health connect/disconnect row — lives in the FEEDBACK &
+ *  DEVICE settings group on the profile menu. Toggling ON triggers
+ *  the HealthKit auth prompt and persists the enabled flag; OFF
+ *  flips the persisted flag so polling stops on next open.
+ *
+ *  Disconnect is soft — iOS doesn't let an app revoke its own
+ *  permissions. We just stop reading. Users who actually want to
+ *  pull permission go through iPhone Settings → Health → Thallo,
+ *  the alert nudges them there. */
+function AppleHealthToggleRow({
+  themeColors,
+}: { themeColors: any; userAge?: number | null }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { isAppleHealthEnabled } = await import('../utils/workoutHistory');
+        setEnabled(await isAppleHealthEnabled());
+      } catch { setEnabled(false); }
+    })();
+  }, []);
+  const onToggle = async (next: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const ah = await import('../services/appleHealth');
+      if (!ah.isHealthKitAvailable()) {
+        Alert.alert('Not available', 'Apple Health is iPhone-only and requires HealthKit support.');
+        setBusy(false);
+        return;
+      }
+      const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
+      if (next) {
+        await setAppleHealthEnabled(true);
+        const granted = await ah.requestHealthPermissions();
+        setEnabled(true);
+        if (!granted) {
+          const err = ah.getLastHealthKitError();
+          Alert.alert(
+            'Permission needed',
+            `Open iPhone Settings → Privacy & Security → Health → Thallo to enable categories.\n\n${err ?? ''}`.trim(),
+          );
+        }
+      } else {
+        await setAppleHealthEnabled(false);
+        setEnabled(false);
+      }
+    } catch (e: any) {
+      Alert.alert('Apple Health error', String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  // Show a neutral disabled placeholder while we read the persisted
+  // flag so the row doesn't flash the wrong state on mount.
+  return (
+    <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health</Text>
+        <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+          {enabled === null
+            ? 'Checking…'
+            : enabled
+              ? 'Sleep, RHR, HRV, weight, and workouts feed your plan'
+              : 'Connect to enrich readiness, recovery, and macros'}
+        </Text>
+      </View>
+      <Switch
+        value={enabled === true}
+        disabled={busy || enabled === null}
+        onValueChange={onToggle}
+        trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+        thumbColor={enabled ? themeColors.primary : themeColors.textMuted}
+      />
+    </View>
+  );
+}
+
 function FatigueNoticeBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   const translateY = useRef(new Animated.Value(-20)).current;
   const opacity = useRef(new Animated.Value(0)).current;
@@ -1233,6 +1312,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setShowEmailBanner(false);
     try { await AsyncStorage.setItem(EMAIL_BANNER_DISMISS_KEY, String(Date.now())); } catch {}
   }, []);
+
+  // First-mount tutorial gate. Runs once when the user lands on
+  // Tutorial auto-show was lifted to app/index.tsx so the Account
+  // modal's "Show tutorial again" button can flip it directly. This
+  // screen is no longer responsible for the tutorial — see the app
+  // root for the state + render.
   const handleSaveEmail = useCallback(async () => {
     const trimmed = newEmail.trim();
     if (!EMAIL_RE.test(trimmed)) { setEmailError('Enter a valid email address'); return; }
@@ -2754,14 +2839,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         try {
           const { generateWorkoutDay } = await import('../services/api');
           const todayIdx = completedDates.size % baseWorkout.days.length;
-          // Don't pass focus_override here — that would lock the backend
-          // to the stale cached plan's focus for this day_index, bypassing
-          // rotation. The split is already locked via `preferred_split`
-          // (the planner treats that as an explicit user choice, so PPL
-          // won't silently flip to Upper/Lower). Letting the backend
-          // rotate freely means the fresh day honors recent completions
-          // — e.g. if the user just did Push yesterday, today's fresh
-          // day comes back Pull even if the stale plan said Push.
+          // Pass focus_override = today's cached focus to STABILIZE
+          // the daily auto-refresh against recipe drift (the day-7
+          // PPL bug: forced-multiple-of-3 rule rebuilt the recipe and
+          // changed day 7 from Lift to Cardio on every regen).
+          //
+          // BUT skip the pin when the cached focus would repeat what
+          // the user just completed in the last 2 days. Pinning Pull
+          // for today after a Pull yesterday would override the
+          // planner's history-aware rotation and silently re-suggest
+          // a recently-done focus. Without override → planner rotates
+          // away naturally.
+          const cachedFocus = baseWorkout.days[todayIdx]?.focus
+            ? String(baseWorkout.days[todayIdx].focus)
+            : undefined;
+          // Family-key comparison so 'Pull' / 'Back & Biceps' / 'Pull
+          // Day' all collapse to the same bucket.
+          const _normFam = (f?: string | null): string => {
+            const s = String(f ?? '').toLowerCase();
+            if (/legs?|quad|glute|hamstring|lower|squat|hinge|calves/.test(s)) return 'lower';
+            if (/push|chest|tricep|press/.test(s)) return 'push';
+            if (/pull|back|bicep|lat/.test(s)) return 'pull';
+            if (/upper|shoulder|arm/.test(s)) return 'upper';
+            if (/full.?body|total/.test(s)) return 'full';
+            if (/cardio|zone.?2|interval/.test(s)) return 'cardio';
+            return s || 'unknown';
+          };
+          const recentDoneFams: string[] = [];
+          try {
+            const { loadWorkoutHistory } = await import('../utils/workoutHistory');
+            const recent = (await loadWorkoutHistory()).slice(0, 3);
+            for (const r of recent) {
+              if (r?.focus && !r.skipped) recentDoneFams.push(_normFam(r.focus));
+            }
+          } catch { /* history read flake — fall through to normal pin */ }
+          const cachedConflictsRecent = !!cachedFocus
+            && recentDoneFams.includes(_normFam(cachedFocus));
+          const safePin = cachedConflictsRecent ? undefined : cachedFocus;
           // Pass preceding plan-day focuses so the backend's split
           // rotation respects what the user has already queued up
           // (Switch Day picks, manual edits) even before those days
@@ -2783,6 +2897,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
             disliked_exercises: profile.dislikedExercises ?? [],
             prev_focuses: prevFocuses,
+            focus_override: safePin,
           });
           if (freshDay?.day) {
             const updatedDays = [...baseWorkout.days];
@@ -5639,16 +5754,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // Without this, picker presented Push/Pull/Legs in a fixed
               // order — a user who did Pull yesterday saw Pull as a
               // first-row option even though it was the wrong choice.
+              // Recently-completed focuses (last 3 days) get a heavier
+              // penalty than the immediate-neighbor adjacency check —
+              // the user explicitly told us "do less of this muscle
+              // group" by training it. Without this, a Pull yesterday
+              // could still surface as a top option if today's
+              // adjacency check happened to miss it (e.g., date-key
+              // mismatch, sync race, off-by-one).
+              const recentFams: string[] = [];
+              for (const s of workoutHistoryList.slice(0, 5)) {
+                if (!s?.date || s.skipped) continue;
+                const k = (s.date || '').slice(0, 10);
+                const ageDays = (Date.now() - new Date(k).getTime()) / 86400000;
+                if (ageDays >= 0 && ageDays <= 3) {
+                  const fam = normFamily(s.focus);
+                  if (fam && fam !== 'unknown') recentFams.push(fam);
+                }
+              }
+              const recentSet = new Set(recentFams);
               const optionRank = (opt: string): number => {
                 if (opt === 'Empty') return 1000;
                 const w = optionWarnings[opt];
                 const conflictPenalty = w?.conflict ? 200 : 0;
                 const readinessPenalty = 100 - (w?.readiness ?? 50);
+                // History penalty — heavy. A focus the user just did
+                // shouldn't appear above one they haven't, even if the
+                // muscle fatigue is similar. Stacks with adjacency, so
+                // "did Pull yesterday" gets +200 (adjacency) + +250
+                // (recent) = +450, way beyond a fresh focus's ~50.
+                const recentPenalty = recentSet.has(normFamily(opt)) ? 250 : 0;
                 // Mobility/Recovery sit slightly below pure lifts when
                 // readiness is similar so users don't accidentally pick
                 // them as a first-instinct.
                 const easyTie = /recover|mobil/i.test(opt) ? 5 : 0;
-                return conflictPenalty + readinessPenalty + easyTie;
+                return conflictPenalty + readinessPenalty + recentPenalty + easyTie;
               };
               const sortedOptions = [...allOptions].sort((a, b) => optionRank(a) - optionRank(b));
 
@@ -5686,12 +5825,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
                     return idx >= 0 && regeneratingDayIdxs.has(idx);
                   })()}
-                  onSwapExercise={(workout, exIdx, exName) => {
-                    // Warm the exercise library if it hasn't been loaded
-                    // yet — the library fuels the overlap-ranked picker
-                    // in PlanSwapExerciseModal. Without this, users who
-                    // go straight to Plan → Swap get an empty library.
-                    ensureExerciseLibrary().catch(() => {});
+                  onSwapExercise={async (workout, exIdx, exName) => {
+                    // The picker reads from `exerciseLibrary` state.
+                    // If we open the modal BEFORE the library is
+                    // fetched, the user sees an empty list and thinks
+                    // Swap is broken (the actual bug a pilot user hit).
+                    // Await the fetch first — `ensureExerciseLibrary`
+                    // is no-op-fast when the library is already loaded.
+                    try {
+                      const lib = await ensureExerciseLibrary();
+                      if (!lib || lib.length === 0) {
+                        Alert.alert(
+                          'Exercise library not loaded',
+                          'Try again in a moment — we\'re still fetching the library.',
+                        );
+                        return;
+                      }
+                    } catch {
+                      Alert.alert(
+                        'Could not load library',
+                        'Check your connection and try again.',
+                      );
+                      return;
+                    }
                     setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName });
                   }}
                   onOpenExerciseVideo={(exName) => {
@@ -6752,8 +6908,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           </View>
 
-          {/* Feedback Settings */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK</Text>
+          {/* Feedback Settings — haptics + sounds + vibration + the
+              Apple Health connect toggle. Apple Health is in this
+              group (not a separate Progress-tab card) so users find
+              it alongside the other device-level toggles. Toggling
+              ON triggers the HealthKit auth prompt; OFF persists the
+              disabled flag and stops polling. */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK & DEVICE</Text>
           <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             {([
               { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
@@ -6777,6 +6938,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             ))}
+            <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
           </View>
 
           {/* Account + Sign out */}
@@ -6856,6 +7018,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           setSwapExerciseState(null);
         }}
       />
+
+      {/* Tutorial moved to app/index.tsx so the Account modal can
+          fire it directly. See the app root for the render. */}
 
       {/* Log Activity modal */}
       <LogActivityModal
