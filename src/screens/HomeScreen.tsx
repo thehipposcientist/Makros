@@ -21,7 +21,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getSocialFeed, type FeedItem } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -1282,6 +1282,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
   const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
+  const [socialSubTab, setSocialSubTab] = useState<'feed' | 'friends' | 'challenges'>('feed');
+  const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  const [feedLoading, setFeedLoading] = useState(false);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
@@ -1369,6 +1372,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
         })();
       }
+    }
+    if (activeTab === 'friends' && authToken) {
+      setFeedLoading(true);
+      getSocialFeed(authToken).then(r => setFeedItems(r.items)).catch(() => {}).finally(() => setFeedLoading(false));
     }
     // Auto-close the inline exercise library when leaving the workout tab.
     if (activeTab !== 'workout') {
@@ -6814,17 +6821,115 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       </ErrorBoundary>
       )}
 
-      {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
+      {/* ── Social tab — Feed / Friends / Challenges ──────── */}
       {activeTab === 'friends' && (
         <ErrorBoundary>
         <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
-          <FriendsModal
-            visible={false}
-            authToken={authToken}
-            onClose={() => {}}
-            themeName={userProfile.themePreference}
-            inline
-          />
+          {/* Sub-tab bar */}
+          <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4, gap: 8 }}>
+            <SubTabBtn label="Feed"       active={socialSubTab === 'feed'}       tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('feed')} />
+            <SubTabBtn label="Friends"    active={socialSubTab === 'friends'}    tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('friends')} />
+            <SubTabBtn label="Challenges" active={socialSubTab === 'challenges'} tint={themeColors.primary} mutedColor={themeColors.textSecondary} onPress={() => setSocialSubTab('challenges')} />
+          </View>
+
+          {socialSubTab === 'feed' && (
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
+              {feedLoading && feedItems.length === 0 ? (
+                <View style={{ padding: 24, alignItems: 'center' }}><ActivityIndicator color={themeColors.primary} /></View>
+              ) : feedItems.length === 0 ? (
+                <View style={{ padding: 32, alignItems: 'center' }}>
+                  <Ionicons name="newspaper-outline" size={40} color={themeColors.textMuted} />
+                  <Text style={{ color: themeColors.textSecondary, marginTop: 12, fontSize: 14, textAlign: 'center' }}>
+                    No activity yet. Complete a workout or add friends to see updates here.
+                  </Text>
+                </View>
+              ) : (
+                feedItems.map(item => {
+                  const isMe = item.username === userProfile.username;
+                  const who = isMe ? 'You' : (item.display_name || item.username);
+                  const focus = item.payload?.focus || 'Workout';
+                  const dur = item.payload?.duration_seconds;
+                  const durStr = dur ? `${Math.round(dur / 60)} min` : '';
+                  const exCount = item.payload?.exercise_count || 0;
+                  const dateStr = (() => {
+                    try {
+                      const d = new Date(item.created_at);
+                      const now = new Date();
+                      const diffMs = now.getTime() - d.getTime();
+                      const diffH = Math.floor(diffMs / 3600000);
+                      if (diffH < 1) return 'Just now';
+                      if (diffH < 24) return `${diffH}h ago`;
+                      const diffD = Math.floor(diffH / 24);
+                      if (diffD === 1) return 'Yesterday';
+                      if (diffD < 7) return `${diffD}d ago`;
+                      return d.toLocaleDateString();
+                    } catch { return ''; }
+                  })();
+                  return (
+                    <View
+                      key={item.id}
+                      style={{
+                        backgroundColor: themeColors.surface,
+                        borderColor: themeColors.border,
+                        borderWidth: 1,
+                        borderRadius: 12,
+                        padding: 14,
+                        marginBottom: 10,
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 8 }}>
+                        <View style={{
+                          width: 32, height: 32, borderRadius: 16,
+                          backgroundColor: themeColors.primary + '22',
+                          borderColor: themeColors.primary + '55', borderWidth: 1,
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.primary }}>
+                            {(item.display_name?.[0] ?? item.username[0] ?? '?').toUpperCase()}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>{who}</Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{dateStr}</Text>
+                        </View>
+                        <Ionicons name="barbell-outline" size={16} color={themeColors.textMuted} />
+                      </View>
+                      <Text style={{ fontSize: 14, color: themeColors.textPrimary, fontWeight: '600' }}>
+                        Completed {focus} Day
+                      </Text>
+                      {(durStr || exCount > 0) && (
+                        <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 2 }}>
+                          {[durStr, exCount > 0 ? `${exCount} exercises` : ''].filter(Boolean).join(' · ')}
+                        </Text>
+                      )}
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
+          )}
+
+          {socialSubTab === 'friends' && (
+            <FriendsModal
+              visible={false}
+              authToken={authToken}
+              onClose={() => {}}
+              themeName={userProfile.themePreference}
+              inline
+            />
+          )}
+
+          {socialSubTab === 'challenges' && (
+            <View style={{ flex: 1, padding: 32, alignItems: 'center', justifyContent: 'center' }}>
+              <Ionicons name="trophy-outline" size={48} color={themeColors.textMuted} />
+              <Text style={{ color: themeColors.textPrimary, fontSize: 18, fontWeight: '700', marginTop: 16 }}>
+                Challenges
+              </Text>
+              <Text style={{ color: themeColors.textSecondary, fontSize: 14, textAlign: 'center', marginTop: 8, lineHeight: 20 }}>
+                Challenge your friends to weekly goals — sessions, streaks, and more. Coming soon.
+              </Text>
+            </View>
+          )}
         </View>
         </ErrorBoundary>
       )}

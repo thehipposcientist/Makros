@@ -15,8 +15,9 @@ from app.auth import get_current_user
 from app.database import get_session
 from app.models import (
     User, UserSocialProfile, Friendship, WeeklyDigestCache, UserGoal,
+    ActivityFeedItem,
 )
-from app.services.social.digest import compute_digest, week_start_for
+from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
 router = APIRouter(prefix="/social", tags=["social"])
 
@@ -430,3 +431,73 @@ def get_digest(
         ))
     db.commit()
     return payload
+
+
+# ─── Activity Feed ──────────────────────────────────────────────────────────
+
+class FeedItemRead(BaseModel):
+    id: int
+    user_id: int
+    username: str
+    display_name: str | None
+    event_type: str
+    payload: dict
+    created_at: str
+
+
+@router.get("/feed")
+def get_feed(
+    limit: int = 30,
+    before_id: int | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    friend_ids = _accepted_friend_ids(db, current_user.id)
+    visible_ids = [current_user.id]
+    for fid in friend_ids:
+        prof = db.exec(
+            select(UserSocialProfile).where(UserSocialProfile.user_id == fid)
+        ).first()
+        if prof and prof.share_activity_enabled:
+            visible_ids.append(fid)
+
+    q = (
+        select(ActivityFeedItem)
+        .where(ActivityFeedItem.user_id.in_(visible_ids))  # type: ignore[union-attr]
+        .order_by(ActivityFeedItem.created_at.desc())  # type: ignore[union-attr]
+        .limit(min(limit, 50))
+    )
+    if before_id is not None:
+        q = q.where(ActivityFeedItem.id < before_id)
+
+    rows = db.exec(q).all()
+
+    user_cache: dict[int, tuple[str, str | None]] = {}
+    items: list[dict] = []
+    for r in rows:
+        if r.user_id not in user_cache:
+            u = db.exec(select(User).where(User.id == r.user_id)).first()
+            p = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == r.user_id)).first()
+            user_cache[r.user_id] = (
+                u.username if u else "unknown",
+                p.display_name if p and p.display_name else None,
+            )
+        uname, dname = user_cache[r.user_id]
+        items.append({
+            "id": r.id,
+            "user_id": r.user_id,
+            "username": uname,
+            "display_name": dname or uname,
+            "event_type": r.event_type,
+            "payload": r.payload,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+        })
+    return {"items": items}
+
+
+def write_activity(db: Session, user_id: int, event_type: str, payload: dict) -> None:
+    db.add(ActivityFeedItem(
+        user_id=user_id,
+        event_type=event_type,
+        payload=payload,
+    ))

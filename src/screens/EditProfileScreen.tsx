@@ -325,7 +325,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [goalQuery, setGoalQuery] = useState('');
   const [goalMatchLoading, setGoalMatchLoading] = useState(false);
   const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
-  const [selectedRegion, setSelectedRegion] = useState<string>(profile.priorityRegion ?? 'balanced');
+  const selectedRegion = 'balanced';
   // Advanced-goal UI removed — only the 8 launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
@@ -1599,39 +1599,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             stored `selectedModifiers` array is kept on the saved profile
             shape (always empty going forward) for back-compat. */}
 
-        {/* ── Priority Region — only for lifting-focused goals ── */}
-        {['build_muscle', 'build_strength', 'body_recomp', 'lose_fat', 'muscle_gain', 'strength', 'fat_loss'].includes(selectedGoal) && (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Training Emphasis</Text>
-          <View style={{ gap: 8 }}>
-            {([
-              { id: 'balanced', label: 'Balanced', desc: 'Equal upper & lower volume' },
-              { id: 'upper_body', label: 'Upper Body', desc: 'More chest, back & shoulder work' },
-              { id: 'lower_body', label: 'Lower Body', desc: 'More glute, quad & hamstring work' },
-            ] as const).map(opt => {
-              const active = selectedRegion === opt.id;
-              return (
-                <TouchableOpacity
-                  key={opt.id}
-                  onPress={() => setSelectedRegion(opt.id)}
-                  style={{
-                    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-                    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 10,
-                    backgroundColor: active ? tc.primary + '15' : tc.surface,
-                    borderWidth: active ? 1.5 : 1,
-                    borderColor: active ? tc.primary : tc.border,
-                  }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 15, fontWeight: active ? '700' : '500', color: active ? tc.primary : tc.textPrimary }}>{opt.label}</Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>{opt.desc}</Text>
-                  </View>
-                  {active && <Ionicons name="checkmark" size={16} color={tc.primary} />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-        )}
+        {/* Priority Region picker removed — splits now control focus distribution.
+           selectedRegion stays hard-defaulted to 'balanced' so save paths work. */}
 
         {/* ── Pace / Timeline ── */}
         {paceOptions.length > 0 && (

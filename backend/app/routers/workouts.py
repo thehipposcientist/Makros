@@ -1272,6 +1272,17 @@ def mark_workout_complete(
     except Exception as e:
         logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
 
+    try:
+        from app.routers.social import write_activity
+        write_activity(db, current_user.id, "workout_completed", {
+            "focus": body.focus_label,
+            "duration_seconds": body.duration_seconds,
+            "date": str(body.workout_date),
+            "exercise_count": len(body.exercises) if body.exercises else 0,
+        })
+    except Exception:
+        pass
+
     db.commit()
     logger.info(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
     # Verify the row exists

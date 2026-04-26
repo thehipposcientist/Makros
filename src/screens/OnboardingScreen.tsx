@@ -937,30 +937,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         {/* Modifiers section removed — goals are now defined by the
             primary goal + an optional muscle/target focus only. */}
 
-        {/* Training Emphasis — only for lifting-focused goals */}
-        {['build_muscle', 'build_strength', 'body_recomp', 'lose_fat', 'muscle_gain', 'strength', 'fat_loss'].includes(selectedGoal) && (
-        <View style={styles.fieldGroup}>
-          <Text style={styles.fieldLabel}>Training emphasis</Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            {([
-              { id: 'balanced', label: 'Balanced' },
-              { id: 'lower_body', label: 'Lower Body' },
-              { id: 'upper_body', label: 'Upper Body' },
-            ] as const).map(opt => {
-              const active = selectedRegion === opt.id;
-              return (
-                <TouchableOpacity
-                  key={opt.id}
-                  style={[styles.foodChip, { flex: 1, alignItems: 'center' as const }, active && styles.foodChipActive]}
-                  onPress={() => setSelectedRegion(opt.id)}>
-                  <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>{opt.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-          <Text style={styles.hint}>Biases your split and exercise selection toward the chosen region.</Text>
-        </View>
-        )}
+        {/* Training Emphasis picker removed — splits now control focus distribution.
+           selectedRegion stays hard-defaulted to 'balanced' so save paths work. */}
 
         {showTargetWeight && (
           <View style={styles.fieldGroup}>

@@ -3158,3 +3158,26 @@ export async function getSocialDigest(token: string): Promise<SocialDigest> {
   });
 }
 
+export interface FeedItem {
+  id: number;
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  event_type: string;
+  payload: {
+    focus?: string;
+    duration_seconds?: number;
+    date?: string;
+    exercise_count?: number;
+    streak?: number;
+  };
+  created_at: string;
+}
+
+export async function getSocialFeed(token: string, beforeId?: number): Promise<{ items: FeedItem[] }> {
+  const qs = beforeId ? `?before_id=${beforeId}` : '';
+  return request<{ items: FeedItem[] }>(`/social/feed${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+

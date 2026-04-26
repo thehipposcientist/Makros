@@ -1113,6 +1113,15 @@ class WeeklyDigestCache(SQLModel, table=True):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ActivityFeedItem(SQLModel, table=True):
+    __tablename__ = "activity_feed"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    event_type: str = Field(default="workout_completed")
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 class UserCreate(SQLModel):
