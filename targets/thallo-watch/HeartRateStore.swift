@@ -60,31 +60,13 @@ final class HeartRateStore: NSObject, ObservableObject {
             errorMessage = "HealthKit unavailable on this device."
             return
         }
-        // Auth FIRST — calling HKWorkoutSession.startActivity before
-        // authorization is resolved can hard-crash the app on watchOS
-        // (rather than throw a catchable error). The earlier
-        // "synchronous start before auth" optimization for snappier
-        // UI was the cause of the "tap Start → app instantly closes"
-        // crash. Keep the placeholder live-HR view in ActiveWorkoutView
-        // (added separately) to prevent watchOS backgrounding during
-        // the brief auth → session-start window.
-        let read: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .heartRate)!,
-            HKObjectType.workoutType(),
-        ]
-        let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
-        store.requestAuthorization(toShare: write, read: read) { [weak self] ok, err in
-            guard let self else { return }
-            if let err {
-                DispatchQueue.main.async { self.errorMessage = err.localizedDescription }
-                return
-            }
-            // Even when the user denies, ok=true (auth completed).
-            // Session can still start; HR samples just won't flow.
-            // Failures inside beginSession's try/catch set
-            // errorMessage instead of crashing.
-            self.beginSession()
-        }
+        // prewarmAuth() resolves HealthKit authorization at app launch.
+        // By the time the user taps Start, auth is already granted so
+        // we can create the HKWorkoutSession synchronously. This is
+        // critical: startActivity() is what gives watchOS the extended
+        // runtime claim that keeps the app alive. Any async gap between
+        // the user tap and startActivity lets watchOS suspend the app.
+        beginSession()
     }
 
     private func beginSession() {
