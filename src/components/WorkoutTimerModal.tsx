@@ -206,7 +206,7 @@ export default function WorkoutTimerModal({
       <View style={[s.overlay, { backgroundColor: colors.background + 'F5' }]}>
         <View style={s.header}>
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <Ionicons name="close" size={26} color={colors.text} />
+            <Ionicons name="close" size={26} color={colors.textPrimary} />
           </TouchableOpacity>
           <Text style={[s.modeLabel, { color: colors.primary }]}>{modeLabel}</Text>
           <View style={{ width: 26 }} />
@@ -225,7 +225,7 @@ export default function WorkoutTimerModal({
               strokeLinecap="round" rotation="-90" origin={`${ringSize / 2}, ${ringSize / 2}`} />
           </Svg>
           <View style={s.ringCenter}>
-            <Text style={[s.bigTime, { color: colors.text }]}>{formatTime(phaseRemaining)}</Text>
+            <Text style={[s.bigTime, { color: colors.textPrimary }]}>{formatTime(phaseRemaining)}</Text>
             {mode !== 'amrap' && (
               <Text style={[s.phaseText, { color: phaseColor }]}>
                 {phase === 'rest' ? 'REST' : 'WORK'}
@@ -237,18 +237,18 @@ export default function WorkoutTimerModal({
         {/* Stats row */}
         <View style={s.statsRow}>
           <View style={s.stat}>
-            <Text style={[s.statValue, { color: colors.text }]}>{formatTime(elapsed)}</Text>
+            <Text style={[s.statValue, { color: colors.textPrimary }]}>{formatTime(elapsed)}</Text>
             <Text style={[s.statLabel, { color: colors.textMuted }]}>Total</Text>
           </View>
           {mode !== 'amrap' && (
             <View style={s.stat}>
-              <Text style={[s.statValue, { color: colors.text }]}>{currentRound}/{totalRounds}</Text>
+              <Text style={[s.statValue, { color: colors.textPrimary }]}>{currentRound}/{totalRounds}</Text>
               <Text style={[s.statLabel, { color: colors.textMuted }]}>Round</Text>
             </View>
           )}
           {mode === 'amrap' && (
             <View style={s.stat}>
-              <Text style={[s.statValue, { color: colors.text }]}>{amrapReps}</Text>
+              <Text style={[s.statValue, { color: colors.textPrimary }]}>{amrapReps}</Text>
               <Text style={[s.statLabel, { color: colors.textMuted }]}>Reps</Text>
             </View>
           )}
@@ -259,7 +259,7 @@ export default function WorkoutTimerModal({
           <View style={s.repRow}>
             <TouchableOpacity style={[s.repBtn, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}
               onPress={() => setAmrapReps(r => Math.max(0, r - 1))}>
-              <Ionicons name="remove" size={24} color={colors.text} />
+              <Ionicons name="remove" size={24} color={colors.textPrimary} />
             </TouchableOpacity>
             <TouchableOpacity style={[s.repBtnBig, { backgroundColor: colors.primary }]}
               onPress={() => { setAmrapReps(r => r + 1); Vibration.vibrate(50); }}>
@@ -289,8 +289,8 @@ export default function WorkoutTimerModal({
                 <Text style={[s.mainBtnText, { color: colors.background }]}>Done</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[s.mainBtn, { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border }]} onPress={reset}>
-                <Ionicons name="refresh" size={20} color={colors.text} />
-                <Text style={[s.mainBtnText, { color: colors.text }]}>Restart</Text>
+                <Ionicons name="refresh" size={20} color={colors.textPrimary} />
+                <Text style={[s.mainBtnText, { color: colors.textPrimary }]}>Restart</Text>
               </TouchableOpacity>
             </View>
           )}

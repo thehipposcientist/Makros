@@ -3736,23 +3736,6 @@ _NEW_2026_04_26 = [
         ],
     },
     {
-        "slug": "goblet_squat",
-        "name": "Goblet Squat",
-        "primary_muscle": "quads",
-        "secondary_muscles": ["glutes", "core"],
-        "equipment_bucket": "other",
-        "movement_pattern": "squat",
-        "exercise_type": "strength",
-        "is_compound": True, "is_machine": False, "is_unilateral": False,
-        "laterality": "bilateral",
-        "difficulty": "beginner",
-        "substitution_group": "squat_kettlebell",
-        "description": "Front-loaded squat holding a kettlebell at chest height",
-        "equipment": [
-            {"slug": "kettlebell", "role": "primary", "required": True},
-        ],
-    },
-    {
         "slug": "kettlebell_snatch",
         "name": "Kettlebell Snatch",
         "primary_muscle": "full_body",

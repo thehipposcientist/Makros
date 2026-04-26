@@ -3031,6 +3031,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           // never go below the number of already-logged sets.
           const rawTotal        = targetSetCount + (extraSetCounts[i] ?? 0) - (removedSetCounts[i] ?? 0);
           const totalSetCount   = Math.max(ex.sets.length, rawTotal);
+          const timed           = isTimedExercise(ex.name, ex.targetReps);
           const isDone          = ex.sets.length >= totalSetCount;
           // Fire the big check-stamp once on the false→true transition.
           // Ref flag per-index prevents replays on every re-render.
