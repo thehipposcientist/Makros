@@ -387,7 +387,7 @@ def compute_nutrition_score(
         meaningful_gaps += 1
     if plants < 2 and has_calories:
         meaningful_gaps += 1
-    if flags.get("high_upf"):
+    if indicators.ultra_processed_pct >= 35:
         meaningful_gaps += 1
     if omega_pts < 5 and has_calories:
         meaningful_gaps += 1

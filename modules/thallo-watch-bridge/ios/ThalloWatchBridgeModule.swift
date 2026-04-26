@@ -5,6 +5,9 @@
 
 import ExpoModulesCore
 import WatchConnectivity
+import os.log
+
+private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
 
 public class ThalloWatchBridgeModule: Module {
     private let sessionHolder = _SessionHolder()
@@ -93,6 +96,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     func activate(sendEvent: @escaping (String, [String: Any]) -> Void) {
         self.dispatchEvent = sendEvent
         guard WCSession.isSupported() else {
+            os_log("[wc-bridge] WCSession not supported on this device", log: wcLog, type: .error)
             sendEvent("watchSessionDiag", [
                 "event": "activate.unsupported",
                 "ts": Date().timeIntervalSince1970 * 1000,
@@ -101,12 +105,32 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         }
         let s = WCSession.default
         s.delegate = self
+        os_log("[wc-bridge] activate called, preState=%d, paired=%d, reachable=%d", log: wcLog, type: .default, s.activationState.rawValue, s.isPaired ? 1 : 0, s.isReachable ? 1 : 0)
         logDiag("activate.called", [
             "preState": s.activationState.rawValue,
         ])
         if s.activationState != .activated {
             s.activate()
         }
+    }
+
+    static func stripNulls(_ dict: [String: Any]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (key, value) in dict {
+            if value is NSNull { continue }
+            if let nested = value as? [String: Any] {
+                result[key] = stripNulls(nested)
+            } else if let arr = value as? [Any] {
+                result[key] = arr.compactMap { item -> Any? in
+                    if item is NSNull { return nil }
+                    if let d = item as? [String: Any] { return stripNulls(d) }
+                    return item
+                }
+            } else {
+                result[key] = value
+            }
+        }
+        return result
     }
 
     /// Emit a verbose diagnostic line. Captures full WCSession state at
@@ -135,25 +159,19 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
         guard s.activationState == .activated else { return false }
+        let cleaned = Self.stripNulls(dict)
         do {
             var merged = s.applicationContext
-            for (k, v) in dict { merged[k] = v }
+            for (k, v) in cleaned { merged[k] = v }
             try s.updateApplicationContext(merged)
             return true
         } catch {
-            // Fall back to message delivery if updateContext rejects
-            // (duplicate payload, backoff, etc.).
+            os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
             if s.isReachable {
-                s.sendMessage(dict, replyHandler: nil, errorHandler: nil)
+                s.sendMessage(cleaned, replyHandler: nil, errorHandler: nil)
                 return true
             }
-            // Last resort: queue via transferUserInfo for guaranteed
-            // eventual delivery when the watch app next activates.
-            // Without this fallback, the push was silently lost any
-            // time updateApplicationContext threw AND the watch app
-            // wasn't reachable — exactly the "start workout while watch
-            // is closed" case the user was hitting.
-            s.transferUserInfo(dict)
+            s.transferUserInfo(cleaned)
             return true
         }
     }
@@ -163,13 +181,14 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
         guard s.activationState == .activated else { return false }
+        let cleaned = Self.stripNulls(dict)
         if s.isReachable {
-            s.sendMessage(dict, replyHandler: nil, errorHandler: nil)
+            s.sendMessage(cleaned, replyHandler: nil) { err in
+                os_log("[wc-bridge] sendMessage failed: %{public}@", log: wcLog, type: .error, err.localizedDescription)
+            }
             return true
         }
-        // Queue for later — transferUserInfo is guaranteed delivery
-        // to the watch once it's awake + reachable.
-        s.transferUserInfo(dict)
+        s.transferUserInfo(cleaned)
         return true
     }
 
@@ -214,26 +233,35 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        let kind = (message["kind"] as? String) ?? "<missing>"
+        let cmd = (message["command"] as? String) ?? "<none>"
+        os_log("[wc-bridge] didReceiveMessage kind=%{public}@ command=%{public}@", log: wcLog, type: .default, kind, cmd)
         logDiag("didReceiveMessage", [
-            "kind": (message["kind"] as? String) ?? "<missing>",
-            "command": (message["command"] as? String) ?? "<none>",
+            "kind": kind,
+            "command": cmd,
             "keyCount": message.count,
         ])
         dispatchCommand(message)
     }
     func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        let kind = (message["kind"] as? String) ?? "<missing>"
+        let cmd = (message["command"] as? String) ?? "<none>"
+        os_log("[wc-bridge] didReceiveMessage(reply) kind=%{public}@ command=%{public}@", log: wcLog, type: .default, kind, cmd)
         logDiag("didReceiveMessage(reply)", [
-            "kind": (message["kind"] as? String) ?? "<missing>",
-            "command": (message["command"] as? String) ?? "<none>",
+            "kind": kind,
+            "command": cmd,
             "keyCount": message.count,
         ])
         dispatchCommand(message)
         replyHandler(["ok": true])
     }
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        let kind = (userInfo["kind"] as? String) ?? "<missing>"
+        let cmd = (userInfo["command"] as? String) ?? "<none>"
+        os_log("[wc-bridge] didReceiveUserInfo kind=%{public}@ command=%{public}@", log: wcLog, type: .default, kind, cmd)
         logDiag("didReceiveUserInfo", [
-            "kind": (userInfo["kind"] as? String) ?? "<missing>",
-            "command": (userInfo["command"] as? String) ?? "<none>",
+            "kind": kind,
+            "command": cmd,
             "keyCount": userInfo.count,
         ])
         dispatchCommand(userInfo)
@@ -248,10 +276,16 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
 
     private func dispatchCommand(_ msg: [String: Any]) {
         guard (msg["kind"] as? String) == "command",
-              let cmd = msg["command"] as? String else { return }
+              let cmd = msg["command"] as? String else {
+            os_log("[wc-bridge] dispatchCommand: not a command (kind=%{public}@)", log: wcLog, type: .default, (msg["kind"] as? String) ?? "<nil>")
+            return
+        }
         var payload = msg
         payload.removeValue(forKey: "kind")
         payload.removeValue(forKey: "command")
-        dispatchEvent?("command", ["command": cmd, "payload": payload])
+        os_log("[wc-bridge] dispatching command=%{public}@ to JS", log: wcLog, type: .default, cmd)
+        DispatchQueue.main.async { [weak self] in
+            self?.dispatchEvent?("command", ["command": cmd, "payload": payload])
+        }
     }
 }

@@ -234,7 +234,7 @@ def compute_weekly_volume(
             continue
         # Skip warmup rows — they're not stimulus for volume budgeting.
         st = (s.set_type or "working").lower()
-        if st in ("warmup", "warm_up"):
+        if st in ("warmup", "warm_up", "mobility", "recovery"):
             continue
         muscles = we_muscle.get(s.workout_exercise_id)
         if muscles is None:
@@ -344,7 +344,7 @@ def _compute_prior_weeks_avg(
         if not s.completed:
             continue
         st = (s.set_type or "working").lower()
-        if st in ("warmup", "warm_up"):
+        if st in ("warmup", "warm_up", "mobility", "recovery"):
             continue
         m = we_muscle.get(s.workout_exercise_id)
         if m is None:

@@ -108,6 +108,16 @@ _TEST_MODULES = (
     # exists: phone+watch readiness can't drift when only the server
     # computes the score.
     "tests.test_readiness_compute",
+    # Weekly recipe unit tests — pure-function coverage of lifting_recipe,
+    # inject_hybrid_cardio, repair_adjacent_duplicates, predicates.
+    "tests.test_weekly_recipe_unit",
+    # Density trimming + prescription dispatch + core programmer.
+    "tests.test_density_and_prescriptions",
+    # Nutrition score pipeline + allergen filter edge cases + solver.
+    "tests.test_nutrition_score_unit",
+    # Plan generation integration — full pipeline, equipment/injury/dislike
+    # filtering, fatigue overlay, session trimming, determinism.
+    "tests.test_plan_generation_integration",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

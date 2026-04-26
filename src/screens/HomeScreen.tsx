@@ -22,7 +22,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getSocialFeed, deleteSocialPost, toggleFeedLike, type FeedItem } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getSocialFeed, getUserFeed, deleteSocialPost, toggleFeedLike, type FeedItem } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -1286,7 +1286,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [socialSubTab, setSocialSubTab] = useState<'feed' | 'friends' | 'challenges'>('feed');
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [feedLoading, setFeedLoading] = useState(false);
-  const [feedFilter, setFeedFilter] = useState<'all' | 'mine'>('all');
+  const [viewingFriendId, setViewingFriendId] = useState<number | null>(null);
+  const [viewingFriendName, setViewingFriendName] = useState<string>('');
+  const [friendFeedItems, setFriendFeedItems] = useState<FeedItem[]>([]);
+  const [friendFeedLoading, setFriendFeedLoading] = useState(false);
   const [shareWorkoutData, setShareWorkoutData] = useState<import('../services/api').WorkoutPostSummary | null>(null);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
@@ -1378,7 +1381,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     if (activeTab === 'friends' && authToken) {
       setFeedLoading(true);
-      getSocialFeed(authToken).then(r => { console.log('[social-feed] loaded', r.items.length, 'items'); setFeedItems(r.items); }).catch(e => console.warn('[social-feed] fetch failed', e)).finally(() => setFeedLoading(false));
+      getSocialFeed(authToken).then(r => { setFeedItems(r.items); }).catch(() => {}).finally(() => setFeedLoading(false));
     }
     // Auto-close the inline exercise library when leaving the workout tab.
     if (activeTab !== 'workout') {
@@ -6862,7 +6865,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               return (
                 <TouchableOpacity
                   key={tab.key}
-                  onPress={() => setSocialSubTab(tab.key)}
+                  onPress={() => { setSocialSubTab(tab.key); setViewingFriendId(null); setViewingFriendName(''); }}
                   style={{
                     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
                     gap: 6, paddingVertical: 10, borderRadius: 12,
@@ -6882,140 +6885,137 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           </View>
 
           {socialSubTab === 'feed' && (() => {
-            const filteredFeed = feedFilter === 'mine'
-              ? feedItems.filter(item => item.username === userProfile.username)
-              : feedItems;
-            return (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
-              {/* Filter chips */}
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
-                {(['all', 'mine'] as const).map(f => {
-                  const active = feedFilter === f;
-                  return (
-                    <TouchableOpacity
-                      key={f}
-                      onPress={() => setFeedFilter(f)}
-                      style={{
-                        paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
-                        backgroundColor: active ? themeColors.primary + '18' : themeColors.surface,
-                        borderWidth: 1,
-                        borderColor: active ? themeColors.primary + '44' : themeColors.border,
-                      }}
-                    >
-                      <Text style={{ fontSize: 12, fontWeight: active ? '700' : '500', color: active ? themeColors.primary : themeColors.textSecondary }}>
-                        {f === 'all' ? 'All Activity' : 'Your Posts'}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+            const displayItems = viewingFriendId ? friendFeedItems : feedItems;
+            const isLoading = viewingFriendId ? friendFeedLoading : feedLoading;
 
-              {feedLoading && feedItems.length === 0 ? (
-                <View style={{ padding: 24, alignItems: 'center' }}><ActivityIndicator color={themeColors.primary} /></View>
-              ) : filteredFeed.length === 0 ? (
-                <View style={{ padding: 32, alignItems: 'center' }}>
-                  <Ionicons name={feedFilter === 'mine' ? 'create-outline' : 'newspaper-outline'} size={40} color={themeColors.textMuted} />
-                  <Text style={{ color: themeColors.textSecondary, marginTop: 12, fontSize: 14, textAlign: 'center' }}>
-                    {feedFilter === 'mine'
-                      ? 'No posts yet. Share a workout from your history or after completing one.'
-                      : 'No activity yet. Complete a workout or add friends to see updates here.'}
-                  </Text>
-                </View>
-              ) : (
-                filteredFeed.map(item => {
-                  const isMe = item.username === userProfile.username;
-                  const who = isMe ? 'You' : (item.display_name || item.username);
-                  const isPost = item.event_type === 'workout_post';
-                  const ws = isPost ? item.payload?.workout_summary : null;
-                  const focus = ws?.focus || item.payload?.focus || 'Workout';
-                  const dur = ws?.duration_seconds || item.payload?.duration_seconds;
-                  const durStr = dur ? `${Math.round(dur / 60)} min` : '';
-                  const exCount = ws?.exercises?.length || item.payload?.exercise_count || 0;
-                  const dateStr = (() => {
-                    try {
-                      const d = new Date(item.created_at);
-                      const now = new Date();
-                      const diffMs = now.getTime() - d.getTime();
-                      const diffH = Math.floor(diffMs / 3600000);
-                      if (diffH < 1) return 'Just now';
-                      if (diffH < 24) return `${diffH}h ago`;
-                      const diffD = Math.floor(diffH / 24);
-                      if (diffD === 1) return 'Yesterday';
-                      if (diffD < 7) return `${diffD}d ago`;
-                      return d.toLocaleDateString();
-                    } catch { return ''; }
-                  })();
-                  return (
-                    <View
-                      key={item.id}
-                      style={{
-                        backgroundColor: themeColors.surface,
-                        borderColor: themeColors.border,
-                        borderWidth: 1,
-                        borderRadius: 12,
-                        overflow: 'hidden',
-                        marginBottom: 10,
+            const renderFeedItem = (item: FeedItem) => {
+              const isMe = item.username === userProfile.username;
+              const who = isMe ? 'You' : (item.display_name || item.username);
+              const isPost = item.event_type === 'workout_post';
+              const isPR = item.event_type === 'pr_achieved';
+              const ws = isPost ? item.payload?.workout_summary : null;
+              const focus = ws?.focus || item.payload?.focus || 'Workout';
+              const dur = ws?.duration_seconds || item.payload?.duration_seconds;
+              const durStr = dur ? `${Math.round(dur / 60)} min` : '';
+              const exCount = ws?.exercises?.length || item.payload?.exercise_count || 0;
+              const dateStr = (() => {
+                try {
+                  const d = new Date(item.created_at);
+                  const now = new Date();
+                  const diffMs = now.getTime() - d.getTime();
+                  const diffH = Math.floor(diffMs / 3600000);
+                  if (diffH < 1) return 'Just now';
+                  if (diffH < 24) return `${diffH}h ago`;
+                  const diffD = Math.floor(diffH / 24);
+                  if (diffD === 1) return 'Yesterday';
+                  if (diffD < 7) return `${diffD}d ago`;
+                  return d.toLocaleDateString();
+                } catch { return ''; }
+              })();
+
+              const headline = isPR
+                ? `New PR: ${item.payload?.exercise || 'Exercise'}`
+                : isPost
+                  ? `${focus} Day`
+                  : `Completed ${focus} Day`;
+
+              return (
+                <View
+                  key={item.id}
+                  style={{
+                    backgroundColor: themeColors.surface,
+                    borderColor: themeColors.border,
+                    borderWidth: 1,
+                    borderRadius: 12,
+                    overflow: 'hidden',
+                    marginBottom: 10,
+                  }}
+                >
+                  {/* Header */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', padding: 14, paddingBottom: 10, gap: 8 }}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (!isMe && item.user_id) {
+                          setViewingFriendId(item.user_id);
+                          setViewingFriendName(item.display_name || item.username);
+                          setFriendFeedLoading(true);
+                          getUserFeed(authToken, item.user_id).then(r => setFriendFeedItems(r.items)).catch(() => {}).finally(() => setFriendFeedLoading(false));
+                        }
                       }}
+                      disabled={isMe}
+                      activeOpacity={0.7}
                     >
-                      {/* Header row */}
-                      <View style={{ flexDirection: 'row', alignItems: 'center', padding: 14, paddingBottom: isPost ? 10 : 14, gap: 8 }}>
-                        <View style={{
-                          width: 32, height: 32, borderRadius: 16,
-                          backgroundColor: themeColors.primary + '22',
-                          borderColor: themeColors.primary + '55', borderWidth: 1,
-                          alignItems: 'center', justifyContent: 'center',
-                        }}>
+                      <View style={{
+                        width: 32, height: 32, borderRadius: 16,
+                        backgroundColor: isPR ? themeColors.warning + '22' : themeColors.primary + '22',
+                        borderColor: isPR ? themeColors.warning + '55' : themeColors.primary + '55', borderWidth: 1,
+                        alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        {isPR ? (
+                          <Ionicons name="trophy" size={14} color={themeColors.warning} />
+                        ) : (
                           <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.primary }}>
                             {(item.display_name?.[0] ?? item.username[0] ?? '?').toUpperCase()}
                           </Text>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>{who}</Text>
-                          <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{dateStr}</Text>
-                        </View>
-                        {isMe && isPost ? (
-                          <TouchableOpacity
-                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                            onPress={() => {
-                              Alert.alert('Delete post?', 'This cannot be undone.', [
-                                { text: 'Cancel', style: 'cancel' },
-                                { text: 'Delete', style: 'destructive', onPress: async () => {
-                                  try {
-                                    await deleteSocialPost(authToken, item.id);
-                                    setFeedItems(prev => prev.filter(fi => fi.id !== item.id));
-                                  } catch { Alert.alert('Could not delete'); }
-                                }},
-                              ]);
-                            }}
-                          >
-                            <Ionicons name="ellipsis-horizontal" size={16} color={themeColors.textMuted} />
-                          </TouchableOpacity>
-                        ) : (
-                          <Ionicons name="barbell-outline" size={16} color={themeColors.textMuted} />
                         )}
                       </View>
+                    </TouchableOpacity>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>{who}</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{dateStr}</Text>
+                    </View>
+                    {isMe && isPost ? (
+                      <TouchableOpacity
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        onPress={() => {
+                          Alert.alert('Delete post?', 'This cannot be undone.', [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Delete', style: 'destructive', onPress: async () => {
+                              try {
+                                await deleteSocialPost(authToken, item.id);
+                                setFeedItems(prev => prev.filter(fi => fi.id !== item.id));
+                              } catch { Alert.alert('Could not delete'); }
+                            }},
+                          ]);
+                        }}
+                      >
+                        <Ionicons name="ellipsis-horizontal" size={16} color={themeColors.textMuted} />
+                      </TouchableOpacity>
+                    ) : (
+                      <Ionicons name={isPR ? 'trophy-outline' : 'barbell-outline'} size={16} color={themeColors.textMuted} />
+                    )}
+                  </View>
 
-                      {/* Caption */}
-                      {isPost && item.payload?.caption ? (
-                        <Text style={{ fontSize: 14, color: themeColors.textPrimary, paddingHorizontal: 14, marginBottom: 10, lineHeight: 20 }}>
-                          {item.payload.caption}
+                  {/* Caption (posts only) */}
+                  {isPost && item.payload?.caption ? (
+                    <Text style={{ fontSize: 14, color: themeColors.textPrimary, paddingHorizontal: 14, marginBottom: 10, lineHeight: 20 }}>
+                      {item.payload.caption}
+                    </Text>
+                  ) : null}
+
+                  {/* Photo (posts only) */}
+                  {isPost && item.payload?.photo_base64 ? (
+                    <Image
+                      source={{ uri: `data:image/jpeg;base64,${item.payload.photo_base64}` }}
+                      style={{ width: '100%', height: 240 }}
+                      resizeMode="cover"
+                    />
+                  ) : null}
+
+                  {/* Content */}
+                  <View style={{ padding: 14, paddingTop: isPR ? 4 : 0 }}>
+                    <Text style={{ fontSize: 15, color: themeColors.textPrimary, fontWeight: '700' }}>
+                      {headline}
+                    </Text>
+
+                    {isPR ? (
+                      <View style={{ flexDirection: 'row', gap: 12, marginTop: 6 }}>
+                        <Text style={{ fontSize: 13, color: themeColors.warning, fontWeight: '700' }}>
+                          {item.payload?.value}{item.payload?.unit === 'lbs' ? ' lbs' : ''} — {(item.payload?.pr_type || '').replace(/_/g, ' ')}
                         </Text>
-                      ) : null}
-
-                      {/* Photo */}
-                      {isPost && item.payload?.photo_base64 ? (
-                        <Image
-                          source={{ uri: `data:image/jpeg;base64,${item.payload.photo_base64}` }}
-                          style={{ width: '100%', height: 240 }}
-                          resizeMode="cover"
-                        />
-                      ) : null}
-
-                      {/* Workout summary card */}
-                      <View style={{ padding: 14, paddingTop: isPost ? 12 : 0 }}>
-                        <Text style={{ fontSize: 15, color: themeColors.textPrimary, fontWeight: '700' }}>
-                          {focus} Day
-                        </Text>
+                      </View>
+                    ) : (
+                      <>
                         <View style={{ flexDirection: 'row', gap: 12, marginTop: 6 }}>
                           {durStr ? <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{durStr}</Text> : null}
                           {exCount > 0 ? <Text style={{ fontSize: 12, color: themeColors.textSecondary }}>{exCount} exercises</Text> : null}
@@ -7026,12 +7026,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </View>
                           ) : null}
                         </View>
-
-                        {/* Exercise breakdown for posts */}
                         {ws?.exercises && ws.exercises.length > 0 ? (
                           <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: themeColors.border }}>
-                            {ws.exercises.slice(0, 6).map((ex, ei) => {
-                              const best = ex.sets.reduce((b, ss) => (ss.weight_lbs > b.weight_lbs ? ss : b), ex.sets[0] ?? { reps: 0, weight_lbs: 0 });
+                            {ws.exercises.slice(0, 6).map((ex: any, ei: number) => {
+                              const best = ex.sets.reduce((b: any, ss: any) => (ss.weight_lbs > b.weight_lbs ? ss : b), ex.sets[0] ?? { reps: 0, weight_lbs: 0 });
                               return (
                                 <View key={ei} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
                                   <Text style={{ fontSize: 12, color: themeColors.textPrimary, flex: 1 }} numberOfLines={1}>{ex.name}</Text>
@@ -7046,42 +7044,78 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             ) : null}
                           </View>
                         ) : null}
-                      </View>
+                      </>
+                    )}
+                  </View>
 
-                      {/* Like row */}
-                      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingBottom: 10, gap: 14 }}>
-                        <TouchableOpacity
-                          style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}
-                          activeOpacity={0.7}
-                          onPress={async () => {
-                            try {
-                              const res = await toggleFeedLike(authToken, item.id);
-                              setFeedItems(prev => prev.map(fi =>
-                                fi.id === item.id
-                                  ? { ...fi, liked_by_me: res.liked, like_count: fi.like_count + (res.liked ? 1 : -1) }
-                                  : fi
-                              ));
-                              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                            } catch {}
-                          }}
-                        >
-                          <Ionicons
-                            name={item.liked_by_me ? 'fitness' : 'fitness-outline'}
-                            size={20}
-                            color={item.liked_by_me ? themeColors.primary : themeColors.textMuted}
-                          />
-                          {item.like_count > 0 && (
-                            <Text style={{ fontSize: 12, fontWeight: '700', color: item.liked_by_me ? themeColors.primary : themeColors.textMuted }}>
-                              {item.like_count}
-                            </Text>
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </ScrollView>
+                  {/* Like row */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingBottom: 10, gap: 14 }}>
+                    <TouchableOpacity
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}
+                      activeOpacity={0.7}
+                      onPress={async () => {
+                        try {
+                          const res = await toggleFeedLike(authToken, item.id);
+                          const updater = (prev: FeedItem[]) => prev.map(fi =>
+                            fi.id === item.id
+                              ? { ...fi, liked_by_me: res.liked, like_count: fi.like_count + (res.liked ? 1 : -1) }
+                              : fi
+                          );
+                          if (viewingFriendId) setFriendFeedItems(updater);
+                          else setFeedItems(updater);
+                          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        } catch {}
+                      }}
+                    >
+                      <Ionicons
+                        name={item.liked_by_me ? 'fitness' : 'fitness-outline'}
+                        size={20}
+                        color={item.liked_by_me ? themeColors.primary : themeColors.textMuted}
+                      />
+                      {item.like_count > 0 && (
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: item.liked_by_me ? themeColors.primary : themeColors.textMuted }}>
+                          {item.like_count}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            };
+
+            return (
+              <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
+                {/* Friend profile header when viewing a friend */}
+                {viewingFriendId ? (
+                  <View style={{ marginBottom: 12 }}>
+                    <TouchableOpacity
+                      onPress={() => { setViewingFriendId(null); setViewingFriendName(''); setFriendFeedItems([]); }}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 }}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="arrow-back" size={20} color={themeColors.primary} />
+                      <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.primary }}>Back to Feed</Text>
+                    </TouchableOpacity>
+                    <Text style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary }}>{viewingFriendName}</Text>
+                    <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginTop: 2 }}>Activity</Text>
+                  </View>
+                ) : null}
+
+                {isLoading && displayItems.length === 0 ? (
+                  <View style={{ padding: 24, alignItems: 'center' }}><ActivityIndicator color={themeColors.primary} /></View>
+                ) : displayItems.length === 0 ? (
+                  <View style={{ padding: 32, alignItems: 'center' }}>
+                    <Ionicons name={viewingFriendId ? 'person-outline' : 'people-outline'} size={40} color={themeColors.textMuted} />
+                    <Text style={{ color: themeColors.textSecondary, marginTop: 12, fontSize: 14, textAlign: 'center' }}>
+                      {viewingFriendId
+                        ? 'No activity from this friend yet.'
+                        : 'No activity yet. Add friends and complete workouts to see updates here.'}
+                    </Text>
+                  </View>
+                ) : (
+                  displayItems.map(renderFeedItem)
+                )}
+              </ScrollView>
             );
           })()}
 
@@ -7092,6 +7126,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onClose={() => {}}
               themeName={userProfile.themePreference}
               inline
+              onViewFriend={(userId, name) => {
+                setViewingFriendId(userId);
+                setViewingFriendName(name);
+                setFriendFeedLoading(true);
+                getUserFeed(authToken, userId).then(r => setFriendFeedItems(r.items)).catch(() => {}).finally(() => setFriendFeedLoading(false));
+                setSocialSubTab('feed');
+              }}
             />
           )}
 

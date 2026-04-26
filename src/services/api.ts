@@ -3173,6 +3173,10 @@ export interface FeedItem {
     caption?: string;
     photo_base64?: string;
     workout_summary?: WorkoutPostSummary;
+    exercise?: string;
+    value?: number;
+    unit?: string;
+    pr_type?: string;
   };
   created_at: string;
   like_count: number;
@@ -3182,6 +3186,15 @@ export interface FeedItem {
 export async function getSocialFeed(token: string, beforeId?: number): Promise<{ items: FeedItem[] }> {
   const qs = beforeId ? `?before_id=${beforeId}` : '';
   return request<{ items: FeedItem[] }>(`/social/feed${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getUserFeed(token: string, userId: number, beforeId?: number): Promise<{ items: FeedItem[] }> {
+  const params = new URLSearchParams();
+  if (beforeId) params.set('before_id', String(beforeId));
+  const qs = params.toString();
+  return request<{ items: FeedItem[] }>(`/social/feed/${userId}${qs ? '?' + qs : ''}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

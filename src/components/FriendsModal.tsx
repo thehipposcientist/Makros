@@ -38,6 +38,7 @@ interface Props {
   /** When true, renders inline (no Modal/backdrop/close button).
    *  Used by the Friends tab so the content fills the tab area. */
   inline?: boolean;
+  onViewFriend?: (userId: number, displayName: string) => void;
 }
 
 const goalLabel = (g: string | null | undefined): string => {
@@ -47,7 +48,7 @@ const goalLabel = (g: string | null | undefined): string => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-export default function FriendsModal({ visible, authToken, onClose, themeName, inline }: Props) {
+export default function FriendsModal({ visible, authToken, onClose, themeName, inline, onViewFriend }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -319,19 +320,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                       style={styles.friendRow}
                       activeOpacity={0.7}
                       onPress={() => {
-                        const df = digest?.friends.find((d) => d.user_id === f.user_id);
-                        const sessions = df?.sessions ?? 0;
-                        const lines = [
-                          `@${f.username}`,
-                          goalLabel(f.goal) || 'No goal set',
-                          sessions > 0 ? `${sessions} session${sessions === 1 ? '' : 's'} this week` : 'No sessions this week',
-                          f.streak >= 2 ? `${f.streak}-day streak` : '',
-                          f.last_active_within_48h ? 'Active recently' : '',
-                        ].filter(Boolean);
-                        Alert.alert(f.display_name ?? f.username, lines.join('\n'), [
-                          { text: 'Remove', style: 'destructive', onPress: () => onRemove(f) },
-                          { text: 'Close', style: 'cancel' },
-                        ]);
+                        if (onViewFriend) {
+                          onViewFriend(f.user_id, f.display_name ?? f.username);
+                        }
                       }}
                       onLongPress={() => onRemove(f)}
                     >

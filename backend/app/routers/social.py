@@ -517,6 +517,74 @@ def get_feed(
     return {"items": items}
 
 
+@router.get("/feed/{user_id}")
+def get_user_feed(
+    user_id: int,
+    limit: int = 30,
+    before_id: int | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Get a specific user's feed items. Only visible if they're a friend with sharing enabled, or it's yourself."""
+    if user_id != current_user.id:
+        friend_ids = _accepted_friend_ids(db, current_user.id)
+        if user_id not in friend_ids:
+            raise HTTPException(403, "not friends")
+        prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == user_id)).first()
+        if not prof or not prof.share_activity_enabled:
+            raise HTTPException(403, "user has sharing disabled")
+
+    q = (
+        select(ActivityFeedItem)
+        .where(ActivityFeedItem.user_id == user_id)
+        .order_by(ActivityFeedItem.created_at.desc())
+        .limit(min(limit, 50))
+    )
+    if before_id is not None:
+        q = q.where(ActivityFeedItem.id < before_id)
+
+    rows = db.exec(q).all()
+
+    item_ids = [r.id for r in rows]
+    like_counts: dict[int, int] = {}
+    liked_by_me: set[int] = set()
+    if item_ids:
+        count_rows = db.exec(
+            select(FeedLike.feed_item_id, sa_func.count())
+            .where(FeedLike.feed_item_id.in_(item_ids))
+            .group_by(FeedLike.feed_item_id)
+        ).all()
+        for fid, cnt in count_rows:
+            like_counts[fid] = cnt
+        my_likes = db.exec(
+            select(FeedLike.feed_item_id).where(
+                FeedLike.user_id == current_user.id,
+                FeedLike.feed_item_id.in_(item_ids),
+            )
+        ).all()
+        liked_by_me = set(my_likes)
+
+    u = db.exec(select(User).where(User.id == user_id)).first()
+    p = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == user_id)).first()
+    uname = u.username if u else "unknown"
+    dname = p.display_name if p and p.display_name else None
+
+    items: list[dict] = []
+    for r in rows:
+        items.append({
+            "id": r.id,
+            "user_id": r.user_id,
+            "username": uname,
+            "display_name": dname or uname,
+            "event_type": r.event_type,
+            "payload": r.payload,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "like_count": like_counts.get(r.id, 0),
+            "liked_by_me": r.id in liked_by_me,
+        })
+    return {"items": items}
+
+
 def write_activity(db: Session, user_id: int, event_type: str, payload: dict) -> None:
     db.add(ActivityFeedItem(
         user_id=user_id,

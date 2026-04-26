@@ -653,6 +653,23 @@ def _ensure_social_tables() -> None:
         print(f"[migration] social indexes ensure failed (non-fatal): {e}")
 
 
+def _ensure_exercise_set_duration_columns() -> None:
+    """Add duration_seconds + comfort_rating to exercise_sets for
+    stretch/mobility logging. Idempotent."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS duration_seconds INTEGER",
+            ))
+            conn.execute(text(
+                "ALTER TABLE exercise_sets ADD COLUMN IF NOT EXISTS comfort_rating INTEGER",
+            ))
+    except Exception as e:
+        print(f"[migration] exercise_sets duration columns failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike
@@ -674,6 +691,7 @@ def create_db_and_tables():
     _ensure_exercise_set_actual_rir_column()
     _ensure_daily_health_snapshot_table()
     _ensure_social_tables()
+    _ensure_exercise_set_duration_columns()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

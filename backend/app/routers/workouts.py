@@ -38,6 +38,7 @@ class CompletedSetPayload(BaseModel):
     reps: int = 0
     weight_lbs: float = 0.0
     duration_seconds: int | None = None  # for timed sets (plank, treadmill)
+    comfort_rating: int | None = None    # 1-5 comfort for stretch/mobility
     feedback: str | None = None          # easy / good / hard / failure / pain
     rir: float | None = None
 
@@ -1152,6 +1153,8 @@ def mark_workout_complete(
                         actual_reps=set_payload.reps,
                         actual_weight_lbs=set_payload.weight_lbs,
                         rir_target=set_payload.rir,
+                        duration_seconds=set_payload.duration_seconds,
+                        comfort_rating=set_payload.comfort_rating,
                         completed=True,
                         completed_at=datetime.now(timezone.utc),
                     ))
@@ -1315,6 +1318,19 @@ def mark_workout_complete(
                         f"[workouts/complete] PRs detected user={current_user.id} "
                         f"session={session_row.id} count={len(prs)}"
                     )
+                    try:
+                        from app.routers.social import write_activity
+                        for pr in prs:
+                            write_activity(db, current_user.id, "pr_achieved", {
+                                "exercise": pr.get("exercise_name", ""),
+                                "pr_type": pr.get("pr_type", ""),
+                                "value": pr.get("value"),
+                                "unit": pr.get("unit", "lbs"),
+                                "date": str(body.workout_date),
+                            })
+                        db.commit()
+                    except Exception:
+                        pass
         except Exception as e:
             logger.info(f"[workouts/complete] PR detection failed (non-fatal): {e}")
             prs = []
@@ -1495,6 +1511,8 @@ def sync_in_progress_workout(
                     actual_reps=set_payload.reps,
                     actual_weight_lbs=set_payload.weight_lbs,
                     rir_target=set_payload.rir,
+                    duration_seconds=set_payload.duration_seconds,
+                    comfort_rating=set_payload.comfort_rating,
                     completed=True,
                     completed_at=datetime.now(timezone.utc),
                 ))
@@ -1867,6 +1885,8 @@ def create_workout(
                 set_type=set_body.set_type,
                 rpe_target=set_body.rpe_target,
                 rir_target=set_body.rir_target,
+                duration_seconds=set_body.duration_seconds,
+                comfort_rating=set_body.comfort_rating,
             ))
 
     db.commit()

@@ -767,6 +767,8 @@ class ExerciseSet(SQLModel, table=True):
     actual_rir: float | None = Field(default=None)
     completed: bool = Field(default=False)
     completed_at: datetime | None = Field(default=None)
+    duration_seconds: int | None = Field(default=None)
+    comfort_rating: int | None = Field(default=None)
 
 
 # ─── Meals ────────────────────────────────────────────────────────────────────
@@ -1215,6 +1217,8 @@ class SetCreate(SQLModel):
     set_type: str | None = None          # e.g. "working", "warmup", "dropset", "amrap"
     rpe_target: int | None = None
     rir_target: float | None = None
+    duration_seconds: int | None = None  # for timed sets (plank, stretch)
+    comfort_rating: int | None = None    # 1-5 comfort for stretch/mobility
 
 class ExerciseCreate(SQLModel):
     exercise_id: int | None = None
