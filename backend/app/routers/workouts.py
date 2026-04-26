@@ -1755,6 +1755,34 @@ def list_completions(
     ]
 
 
+@router.get("/hr-zones")
+def get_hr_zones(
+    resting_hr: int | None = Query(default=None),
+    vo2_max: float | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Compute personalized HR training zones from age + optional Apple Health data."""
+    from app.models import UserProfile
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    age = None
+    if profile and profile.birthdate:
+        from datetime import date as _date
+        today = _date.today()
+        age = today.year - profile.birthdate.year - (
+            (today.month, today.day) < (profile.birthdate.month, profile.birthdate.day)
+        )
+    if not age and profile and profile.age:
+        age = profile.age
+    if not age:
+        age = 30
+
+    from app.services.workout.cardio import compute_hr_zones
+    return compute_hr_zones(age, resting_hr, vo2_max)
+
+
 @router.get("/pace-history")
 def get_pace_history(
     exercise: str | None = Query(default=None, description="Filter by exercise name (case-insensitive)"),

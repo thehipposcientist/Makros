@@ -224,6 +224,7 @@ export interface UserProfile {
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
+  allergies?: string[];           // allergen categories the user avoids
   dislikedExercises?: string[];  // exercise names excluded from plan generation
   /** Subscription tier. `free` = manual tracking only (no AI, no generators).
    *  `pro` = full feature set. Persisted locally for MVP; server-of-record

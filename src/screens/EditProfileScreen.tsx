@@ -396,6 +396,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [splitModalVisible, setSplitModalVisible] = useState(false);
   const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 5);
   const [mealsPerDay, setMealsPerDay] = useState<number>(profile.mealsPerDay ?? 3);
+  const [allergies, setAllergies] = useState<string[]>(profile.allergies ?? []);
   // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
   // macros tab is opened so the macros section isn't waiting on an extra
   // roundtrip every time EditProfileScreen mounts.
@@ -1136,6 +1137,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     // Nutrition shape
     if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
     if ((profile.mealVariety ?? 5) !== mealVariety) return true;
+    if (!sameArr(profile.allergies ?? [], allergies)) return true;
     if (!sameArr(profile.foodsAvailable, foods.filter(f => !f.startsWith('__supp__')))) return true;
     if ((profile.mealRoutine ?? '') !== (mealRoutine ?? '').trim()) return true;
     // Bodyweight (affects macro targets)
@@ -1287,6 +1289,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       preferredSplit: preferredSplit === 'auto' ? undefined : preferredSplit,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
       mealsPerDay: Math.min(10, Math.max(1, mealsPerDay)),
+      allergies,
       equipment,
       foodsAvailable: actualFoods,
       customFoods,
@@ -2683,6 +2686,34 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 15 }}>
               Example at 3: Mon/Thu/Sun use Plan A, Tue/Fri use Plan B, Wed/Sat use Plan C.
             </Text>
+          </View>
+
+          {/* ── Allergens ──────────────────────────────────────────── */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>Allergens / Intolerances</Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
+              Flagged foods will be blocked from meal plans and warned on log.
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {(['dairy', 'gluten', 'tree_nut', 'peanut', 'egg', 'soy', 'shellfish', 'fish', 'sesame', 'mustard', 'celery', 'lupin', 'sulfites', 'mollusks'] as const).map(a => {
+                const selected = allergies.includes(a);
+                const label = a.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+                return (
+                  <TouchableOpacity
+                    key={a}
+                    onPress={() => setAllergies(prev => selected ? prev.filter(x => x !== a) : [...prev, a])}
+                    style={{
+                      paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8,
+                      backgroundColor: selected ? tc.error + '20' : tc.surfaceRaised,
+                      borderWidth: 1, borderColor: selected ? tc.error : tc.border,
+                    }}>
+                    <Text style={{ fontSize: 12, fontWeight: selected ? '700' : '500', color: selected ? tc.error : tc.textSecondary }}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
 
           <View style={{ marginBottom: 8 }}>

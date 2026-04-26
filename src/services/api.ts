@@ -689,7 +689,7 @@ export async function getAINutritionPlan(
     foodsAvailable:       profile.foodsAvailable,
     supplementsAvailable: profile.supplementsAvailable ?? [],
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
-    allergies:            (profile as any).allergies ?? [],
+    allergies:            profile.allergies ?? [],
     mealRoutine:          mealRoutineText,
     routineMacros:        routinePayload?.routineMacros,
     routineSlots:         routinePayload?.routineSlots ?? [],
@@ -3022,6 +3022,31 @@ export async function getE1RM(token: string, exerciseName: string, role = 'prima
 
 export async function getE1RMHistory(token: string, exerciseName: string, role = 'primary'): Promise<{ exercise: string; history: E1RMHistoryPoint[] }> {
   return request(`/workouts/e1rm/history?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export interface HRZone {
+  zone: number;
+  label: string;
+  low: number;
+  high: number;
+}
+
+export interface HRZonesResponse {
+  max_hr: number;
+  resting_hr: number;
+  vo2_max: number | null;
+  zones: HRZone[];
+}
+
+export async function getHRZones(token: string, restingHr?: number, vo2Max?: number): Promise<HRZonesResponse> {
+  const params = new URLSearchParams();
+  if (restingHr != null) params.set('resting_hr', String(restingHr));
+  if (vo2Max != null) params.set('vo2_max', String(vo2Max));
+  const qs = params.toString();
+  return request(`/workouts/hr-zones${qs ? `?${qs}` : ''}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });

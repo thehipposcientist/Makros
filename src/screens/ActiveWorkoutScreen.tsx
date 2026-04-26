@@ -26,7 +26,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -527,6 +527,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Idempotent across remounts.
     import('../utils/feedback').then(f => f.preloadRestTimerSound()).catch(() => {});
   }, []);
+  // Fetch HR zones for cardio prescription display
+  useEffect(() => {
+    if (!authToken) return;
+    const hasCardio = workout.exercises?.some((e: any) =>
+      /treadmill|bike|run|row|elliptical|stair|swim|cardio/i.test(e.name ?? '')
+    );
+    if (hasCardio) {
+      readHealthSummary?.().then?.((hs: any) => {
+        getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max)
+          .then(r => setHrZones(r.zones))
+          .catch(() => {});
+      }).catch(() => {
+        getHRZones(authToken).then(r => setHrZones(r.zones)).catch(() => {});
+      });
+    }
+  }, [authToken]);
   // Phone↔watch active-state sync. On mount we push `status: 'active'`
   // AND subscribe to WCSession reachability changes — when the user
   // opens Thallo on their watch, reachability flips to true and we
@@ -1174,6 +1190,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Last-session data for comparison display
   const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
+
+  // HR zones for cardio exercises
+  const [hrZones, setHrZones] = useState<HRZone[]>([]);
 
   // AMRAP / EMOM / Tabata timer modal
   const [timerModalVisible, setTimerModalVisible] = useState(false);
@@ -3085,6 +3104,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {targetSetCount} × {ex.targetReps}  ·  {restLabel}
                     {formatEquipmentLabel(ex.equipment) ? `  ·  ${formatEquipmentLabel(ex.equipment)}` : ''}
                   </Text>
+                  {timed && hrZones.length > 0 && (() => {
+                    const n = (ex.name || '').toLowerCase();
+                    const isInterval = /interval|hiit|sprint|tabata/.test(n);
+                    const isEasy = /walk|jog|easy|zone.?2|recovery/.test(n);
+                    const zone = isEasy ? hrZones[0] : isInterval ? hrZones[3] : hrZones[1];
+                    if (!zone) return null;
+                    return (
+                      <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '700', marginTop: 1 }}>
+                        Target: Z{zone.zone} {zone.label} ({zone.low}–{zone.high} bpm)
+                      </Text>
+                    );
+                  })()}
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
                     <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '600', marginTop: 1 }}>
                       Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
