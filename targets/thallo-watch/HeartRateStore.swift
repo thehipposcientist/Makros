@@ -145,8 +145,11 @@ final class HeartRateStore: NSObject, ObservableObject {
 }
 
 extension HeartRateStore: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate {
-    func workoutSession(_ workoutSession: HKWorkoutSession, didChangeTo toState: HKWorkoutSessionState, from fromState: HKWorkoutSessionState, date: Date) {}
+    func workoutSession(_ workoutSession: HKWorkoutSession, didChangeTo toState: HKWorkoutSessionState, from fromState: HKWorkoutSessionState, date: Date) {
+        wlog("[watch-hr] HK state \(fromState.rawValue)→\(toState.rawValue)")
+    }
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
+        wlog("[watch-hr] HK FAILED: \(error.localizedDescription)")
         DispatchQueue.main.async {
             self.errorMessage = error.localizedDescription
             self.running = false

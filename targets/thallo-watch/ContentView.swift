@@ -68,10 +68,9 @@ struct ContentView: View {
             } else {
                 TabView {
                     TodayView(workout: conn.workout, onStart: {
-                        wlog("[watch] Start tapped — flipping active=true, sending start_workout")
+                        conn.sendCommand("start_workout")
                         heartRate.start()
                         active = true
-                        conn.sendCommand("start_workout")
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
