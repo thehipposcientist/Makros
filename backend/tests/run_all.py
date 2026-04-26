@@ -61,6 +61,8 @@ _TEST_MODULES = (
     "tests.test_social_digest",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
     "tests.test_switch_day",
+    # Switch Day per-split comprehensive — ~20 tests × 5 splits + edge cases.
+    "tests.test_switch_day_splits",
     # Switch Day INTEGRATION — pin every position × every focus on
     # real recipes from the planner. Asserts the result week still
     # satisfies the split contract.

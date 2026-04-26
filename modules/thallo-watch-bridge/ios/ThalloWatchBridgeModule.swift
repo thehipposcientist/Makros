@@ -21,9 +21,9 @@ public class ThalloWatchBridgeModule: Module {
         // change on the phone. `watchSessionDiag` is a verbose
         // diagnostic firehose — every WCSession delegate callback
         // (activation / reachability / receive paths) emits one entry
-        // with full session state so we can debug "paired=true but
-        // reachable=false / nothing arrives from watch" failures
-        // straight from the in-app DevLogsViewer.
+        // with full session state. JS turns each event into a
+        // `[wc-diag]` console.log line, visible in Console.app with
+        // the iPhone tethered (filter "ThalloWatch" or "wc-diag").
         Events("command", "reachabilityChanged", "watchSessionDiag")
 
         OnCreate {
@@ -110,9 +110,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     /// Emit a verbose diagnostic line. Captures full WCSession state at
-    /// the moment of every delegate callback so the in-app DevLogsViewer
-    /// can show the actual session lifecycle — activationState, paired,
-    /// installed, reachable — without needing Mac + Console.app.
+    /// the moment of every delegate callback (activationState, paired,
+    /// installed, reachable). JS forwards each entry to console.log
+    /// with a `[wc-diag]` prefix — visible via Console.app on Mac.
     private func logDiag(_ event: String, _ extra: [String: Any] = [:]) {
         guard WCSession.isSupported() else { return }
         let s = WCSession.default

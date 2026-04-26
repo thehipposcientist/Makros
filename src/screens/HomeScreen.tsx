@@ -1255,7 +1255,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
-  const [activeTab, setActiveTabRaw]      = useState<'goals' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
   const progressFade = useRef(new Animated.Value(0)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
     setActiveTabRaw(tab);
@@ -1267,9 +1267,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, []);
   useEffect(() => {
     AsyncStorage.getItem('lastActiveTab').then(saved => {
-      if (saved && ['goals', 'workout', 'meals', 'progress', 'profile'].includes(saved)) {
-        setActiveTabRaw(saved as typeof activeTab);
-        if (saved === 'progress') progressFade.setValue(1);
+      const tab = saved === 'goals' ? 'friends' : saved;
+      if (tab && ['friends', 'workout', 'meals', 'progress', 'profile'].includes(tab)) {
+        setActiveTabRaw(tab as typeof activeTab);
+        if (tab === 'progress') progressFade.setValue(1);
       }
     }).catch(() => {});
   }, []);
@@ -1637,6 +1638,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showLiveTracker, setShowLiveTracker] = useState(false);
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
   const [showFriends, setShowFriends] = useState(false);
+  const [showGoalEditor, setShowGoalEditor] = useState(false);
   const [pendingFriendCount, setPendingFriendCount] = useState(0);
   const [friendCount, setFriendCount] = useState(0);
 
@@ -2176,13 +2178,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   });
 
   // WCSession diagnostic firehose. Mirrors every delegate callback
-  // from the phone bridge into DevLogsViewer with a `[wc-diag]`
-  // prefix — activation completion, reachability flips, every
-  // didReceiveMessage / didReceiveUserInfo arrival. Use this when
-  // "watch taps don't reach the phone" to see whether the issue is
-  // (a) phone bridge never activates, (b) reachability never flips
-  // true, (c) messages arrive but malformed, or (d) nothing arrives
-  // at all (= watch isn't sending or iOS isn't routing).
+  // from the phone bridge into console.log with a `[wc-diag]` prefix
+  // — activation completion, reachability flips, every didReceiveMessage
+  // / didReceiveUserInfo arrival. Visible via Console.app (Mac) with
+  // the iPhone tethered, filter by "ThalloWatch" or "wc-diag".
+  // Tells us whether (a) phone bridge never activates, (b) reachability
+  // never flips true, (c) messages arrive but malformed, or (d)
+  // nothing arrives at all (= watch isn't sending or iOS isn't routing).
   useEffect(() => {
     // eslint-disable-next-line no-console
     console.log('[wc-diag] effect mounted — about to import watchSync');
@@ -2558,9 +2560,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'watch_log') {
             // Watch-side `wlog(...)` forwards Swift print lines so they
-            // land in the in-app DevLogsViewer (Account → Developer
-            // logs) alongside the phone's own console output. Lets you
-            // debug TestFlight watch builds without tethering to a Mac.
+            // land in the phone's console output, visible via Console.app
+            // on Mac (filter by ThalloWatch). Watch-side `print()` also
+            // hits Console directly when the watch is tethered, so this
+            // is mostly useful when the watch isn't physically reachable.
             const msg = String(payload?.msg ?? '');
             if (msg) console.log(msg);
           } else if (command === 'toggle_meal') {
@@ -6812,20 +6815,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* ── Goals tab — inline EditProfileScreen in goal mode ──────── */}
-      {activeTab === 'goals' && (
+      {activeTab === 'friends' && (
         <ErrorBoundary>
         <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
-          <EditProfileScreen
+          <FriendsModal
+            visible={false}
             authToken={authToken}
-            profile={userProfile}
-            mode="goal"
-            noHeader
-            onSave={(updated) => {
-              onSaveProfile?.(updated, 'goal');
-              setActiveTab('workout');
-            }}
-            onCancel={() => setActiveTab('workout')}
-            onRoutinesChanged={() => { /* no-op in inline mode */ }}
+            onClose={() => {}}
+            themeName={userProfile.themePreference}
+            inline
           />
         </View>
         </ErrorBoundary>
@@ -6942,38 +6940,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           </View>
 
-          {/* Friends entry — opens FriendsModal. Pending-request count
-              shows as a primary-colored badge so incoming requests
-              get attention. */}
+          {/* Goal entry — opens inline EditProfileScreen in goal mode */}
           <TouchableOpacity
             style={[styles.profileRow, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}
-            onPress={() => setShowFriends(true)}
+            onPress={() => setShowGoalEditor(true)}
             activeOpacity={0.85}
           >
             <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
-              <Ionicons name="people-outline" size={18} color={themeColors.primary} />
+              <Ionicons name="flag-outline" size={18} color={themeColors.primary} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.profileRowTitle, { color: themeColors.textPrimary }]}>Friends</Text>
+              <Text style={[styles.profileRowTitle, { color: themeColors.textPrimary }]}>Goal</Text>
               <Text style={[styles.profileRowSub, { color: themeColors.textSecondary }]}>
-                {friendCount === 0
-                  ? 'Add friends and see their weekly training'
-                  : `${friendCount} friend${friendCount === 1 ? '' : 's'}`}
+                {goalLabel || 'Set your training goal'}
               </Text>
             </View>
-            {pendingFriendCount > 0 ? (
-              <View style={{
-                backgroundColor: themeColors.primary,
-                borderRadius: 999,
-                paddingHorizontal: 8,
-                paddingVertical: 3,
-                marginRight: 6,
-              }}>
-                <Text style={{ fontSize: 11, fontWeight: '800', color: '#000' }}>
-                  {pendingFriendCount}
-                </Text>
-              </View>
-            ) : null}
             <Ionicons name="chevron-forward" size={18} color={themeColors.textMuted} />
           </TouchableOpacity>
 
@@ -8719,6 +8700,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         themeName={userProfile.themePreference}
       />
 
+      {/* Goal editor — opened from Profile tab row */}
+      <Modal visible={showGoalEditor} animationType="slide" onRequestClose={() => setShowGoalEditor(false)}>
+        <View style={{ flex: 1, backgroundColor: themeColors.background, paddingTop: insets.top }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', padding: 16, gap: 12 }}>
+            <TouchableOpacity onPress={() => setShowGoalEditor(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name="close" size={24} color={themeColors.textPrimary} />
+            </TouchableOpacity>
+            <Text style={{ fontSize: 18, fontWeight: '700', color: themeColors.textPrimary }}>Edit Goal</Text>
+          </View>
+          <EditProfileScreen
+            authToken={authToken}
+            profile={userProfile}
+            mode="goal"
+            noHeader
+            onSave={(updated) => {
+              onSaveProfile?.(updated, 'goal');
+              setShowGoalEditor(false);
+            }}
+            onCancel={() => setShowGoalEditor(false)}
+            onRoutinesChanged={() => {}}
+          />
+        </View>
+      </Modal>
+
       {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
@@ -9249,12 +9254,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           and the screen body re-renders the matching content block. */}
       <View style={[styles.bottomBar, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
         <BottomTabButton
-          label="Goals"
-          iconName="flag-outline"
-          active={activeTab === 'goals'}
+          label="Social"
+          iconName="people-outline"
+          active={activeTab === 'friends'}
           tint={themeColors.primary}
           mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('goals')}
+          onPress={() => setActiveTab('friends')}
+          badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
         />
         <BottomTabButton
           label="Workouts"
@@ -9332,7 +9338,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
 
 // ── BottomTabButton ───────────────────────────────────────────────────────────
 function BottomTabButton({
-  label, iconName, active, tint, mutedColor, onPress,
+  label, iconName, active, tint, mutedColor, onPress, badge,
 }: {
   label: string;
   iconName: string;
@@ -9340,6 +9346,7 @@ function BottomTabButton({
   tint: string;
   mutedColor: string;
   onPress: () => void;
+  badge?: number;
 }) {
   return (
     <TouchableOpacity
@@ -9350,12 +9357,19 @@ function BottomTabButton({
       accessibilityRole="tab"
       accessibilityLabel={`${label} tab`}
       accessibilityState={{ selected: active }}>
-      <Ionicons
-        name={(active ? iconName.replace('-outline', '') : iconName) as any}
-        size={20}
-        color={active ? tint : mutedColor}
-        style={{ marginBottom: 2, opacity: active ? 1 : 0.7 }}
-      />
+      <View style={{ position: 'relative' }}>
+        <Ionicons
+          name={(active ? iconName.replace('-outline', '') : iconName) as any}
+          size={20}
+          color={active ? tint : mutedColor}
+          style={{ marginBottom: 2, opacity: active ? 1 : 0.7 }}
+        />
+        {badge != null && badge > 0 && (
+          <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 14, height: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
+            <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
+          </View>
+        )}
+      </View>
       <Text style={[btStyles.label, { color: active ? tint : mutedColor }]} numberOfLines={1}>
         {label}
       </Text>

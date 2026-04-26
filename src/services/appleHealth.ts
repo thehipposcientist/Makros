@@ -111,9 +111,9 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     lastNightSleep, lastNightHRV, lastNightResp, lastNightSpo2,
     historySleep, historyHRV,
   ] = await Promise.all([
-    // Log HK failures so they show up in DevLogsViewer — silent .catch()
+    // Log HK failures so they show up in Console.app — silent .catch()
     // made "no HR data on readiness" near-impossible to diagnose without
-    // a remote debug session.
+    // tethering to Mac.
     mod.getRestingHeartRate(startMs, endMs, 7).catch((e: any) => { console.warn('[hk] getRestingHeartRate failed:', e?.message ?? e); return []; }),
     mod.getDailySteps(startMs, endMs).catch(() => []),
     mod.getSleepSamples(startMs, endMs).catch(() => []),

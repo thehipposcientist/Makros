@@ -418,10 +418,9 @@ export function isWatchReachable(): boolean {
 
 /** Subscribe to verbose WCSession diagnostic events from the phone
  *  bridge. Fires for every delegate callback (activation, reachability,
- *  every receive path) with a snapshot of session state. Used by the
- *  HomeScreen logger to dump `[wc-diag] …` lines into the in-app
- *  DevLogsViewer so we can debug "watch taps never arrive" without
- *  tethering to Mac + Console.app. */
+ *  every receive path) with a snapshot of session state. The HomeScreen
+ *  logger turns these into `[wc-diag] …` console lines visible in
+ *  Console.app on Mac (filter by ThalloWatch / connectivityd). */
 export function onWatchSessionDiag(
   cb: (entry: Record<string, any>) => void,
 ): () => void {

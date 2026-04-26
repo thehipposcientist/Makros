@@ -298,8 +298,9 @@ extension Notification.Name {
 
 /// Watch-side logger. Prints to the unified log (visible in Mac
 /// Console.app) AND forwards the line to the paired iPhone via
-/// WCSession, where the phone's command listener routes it into the
-/// in-app DevLogsViewer. Use this instead of plain `print()` for
+/// WCSession, where the phone re-emits it via console.log so it
+/// shows up in the same Console.app stream. Use this instead of
+/// plain `print()` for
 /// anything you want to inspect from a TestFlight install without
 /// tethering the watch to a Mac.
 func wlog(_ msg: String) {

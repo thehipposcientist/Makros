@@ -35,6 +35,9 @@ interface Props {
   authToken: string;
   onClose: () => void;
   themeName?: AppThemeName;
+  /** When true, renders inline (no Modal/backdrop/close button).
+   *  Used by the Friends tab so the content fills the tab area. */
+  inline?: boolean;
 }
 
 const goalLabel = (g: string | null | undefined): string => {
@@ -44,7 +47,7 @@ const goalLabel = (g: string | null | undefined): string => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-export default function FriendsModal({ visible, authToken, onClose, themeName }: Props) {
+export default function FriendsModal({ visible, authToken, onClose, themeName, inline }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -78,9 +81,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName }:
   }, [authToken]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible && !inline) return;
     refresh();
-  }, [visible, refresh]);
+  }, [visible, inline, refresh]);
 
   // Search debounce
   useEffect(() => {
@@ -222,18 +225,18 @@ export default function FriendsModal({ visible, authToken, onClose, themeName }:
     }
   }
 
-  return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.backdrop}>
-        <View style={styles.sheet}>
-          <View style={styles.header}>
-            <Text style={styles.title}>Friends</Text>
-            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <Ionicons name="close" size={22} color={colors.textSecondary} />
-            </TouchableOpacity>
-          </View>
+  const content = (
+    <>
+      {!inline && (
+        <View style={styles.header}>
+          <Text style={styles.title}>Friends</Text>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="close" size={22} color={colors.textSecondary} />
+          </TouchableOpacity>
+        </View>
+      )}
 
-          {loading && !list ? (
+      {loading && !list ? (
             <View style={{ padding: 24, alignItems: 'center' }}>
               <ActivityIndicator color={colors.primary} />
             </View>
@@ -433,33 +436,45 @@ export default function FriendsModal({ visible, authToken, onClose, themeName }:
               </View>
             </ScrollView>
           )}
-        </View>
 
-        {/* Opt-in nudge */}
-        <Modal
-          visible={showOptIn}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowOptIn(false)}
-        >
-          <View style={styles.backdrop}>
-            <View style={styles.optInCard}>
-              <Text style={styles.optInTitle}>Share your training with friends?</Text>
-              <Text style={styles.optInBody}>
-                Friends will see your weekly session count and streak — never your weight, calories, or
-                meals. You can turn this off any time.
-              </Text>
-              <View style={styles.optInButtons}>
-                <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowOptIn(false)}>
-                  <Text style={styles.btnSecondaryText}>Not now</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPrimary} onPress={onTurnOnSharing}>
-                  <Text style={styles.btnPrimaryText}>Turn on</Text>
-                </TouchableOpacity>
-              </View>
+      {/* Opt-in nudge */}
+      <Modal
+        visible={showOptIn}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowOptIn(false)}
+      >
+        <View style={styles.backdrop}>
+          <View style={styles.optInCard}>
+            <Text style={styles.optInTitle}>Share your training with friends?</Text>
+            <Text style={styles.optInBody}>
+              Friends will see your weekly session count and streak — never your weight, calories, or
+              meals. You can turn this off any time.
+            </Text>
+            <View style={styles.optInButtons}>
+              <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowOptIn(false)}>
+                <Text style={styles.btnSecondaryText}>Not now</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.btnPrimary} onPress={onTurnOnSharing}>
+                <Text style={styles.btnPrimaryText}>Turn on</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        </Modal>
+        </View>
+      </Modal>
+    </>
+  );
+
+  if (inline) {
+    return <View style={{ flex: 1, backgroundColor: colors.background }}>{content}</View>;
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.backdrop}>
+        <View style={styles.sheet}>
+          {content}
+        </View>
       </View>
     </Modal>
   );
