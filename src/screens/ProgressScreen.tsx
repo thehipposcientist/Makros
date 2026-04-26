@@ -713,7 +713,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
                 if (effectiveMode === 'e1rm') {
                   const e1rmValues = e1rmHistory.map(p => Math.round(p.e1rm_lbs));
+                  const e1rmMin = Math.min(...e1rmValues);
                   const e1rmMax = Math.max(...e1rmValues, 1);
+                  const chartW = 320;
+                  const chartH = 140;
+                  const padL = 40;
+                  const padR = 16;
+                  const padT = 16;
+                  const padB = 28;
+                  const plotW = chartW - padL - padR;
+                  const plotH = chartH - padT - padB;
+                  const rangeMin = Math.max(0, e1rmMin - 10);
+                  const rangeMax = e1rmMax + 10;
+                  const rangeDelta = rangeMax - rangeMin || 1;
+                  const pts = e1rmValues.map((v, i) => ({
+                    x: padL + (e1rmValues.length > 1 ? (i / (e1rmValues.length - 1)) * plotW : plotW / 2),
+                    y: padT + plotH - ((v - rangeMin) / rangeDelta) * plotH,
+                    val: v,
+                    label: (() => { const d = new Date(e1rmHistory[i].date); return `${d.getMonth() + 1}/${d.getDate()}`; })(),
+                    conf: e1rmHistory[i].confidence,
+                  }));
+                  const polyPoints = pts.map(p => `${p.x},${p.y}`).join(' ');
+                  const gridLines = 4;
+                  const gridVals = Array.from({ length: gridLines }, (_, i) =>
+                    Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
+                  );
                   return (
                     <View style={styles.graphCard}>
                       <View style={styles.graphHeader}>
@@ -735,25 +759,40 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         </View>
                       </View>
                       <Text style={styles.graphSubtitle}>Estimated 1-rep max (lbs) over time</Text>
-                      <View style={styles.graphBars}>
-                        {e1rmHistory.map((point, i) => {
-                          const val = e1rmValues[i];
-                          const h = Math.max(8, Math.round((val / e1rmMax) * 100));
-                          const isLast = i === e1rmHistory.length - 1;
-                          const d = new Date(point.date);
-                          const label = `${d.getMonth() + 1}/${d.getDate()}`;
-                          return (
-                            <View key={i} style={styles.graphBarCol}>
-                              <Text style={[styles.graphBarValue, isLast && { color: colors.primary }]}>{val}</Text>
-                              <AnimatedChartBar
-                                targetHeight={h}
-                                delay={i * 40}
-                                style={[styles.graphBar, isLast && { backgroundColor: colors.accent }]}
-                              />
-                              <Text style={styles.graphBarLabel}>{label}</Text>
-                            </View>
-                          );
-                        })}
+                      <View style={{ alignItems: 'center', marginVertical: 8 }}>
+                        <Svg width={chartW} height={chartH}>
+                          {gridVals.map((gv, gi) => {
+                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                            return (
+                              <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
+                                stroke={colors.border} strokeWidth={1} strokeDasharray="4,4" />
+                            );
+                          })}
+                          {gridVals.map((gv, gi) => {
+                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                            return (
+                              <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
+                                fontSize={10} fill={colors.textMuted} textAnchor="end">
+                                {gv}
+                              </SvgText>
+                            );
+                          })}
+                          <Polyline points={polyPoints}
+                            fill="none" stroke={colors.primary} strokeWidth={2.5}
+                            strokeLinejoin="round" strokeLinecap="round" />
+                          {pts.map((p, i) => (
+                            <Circle key={i} cx={p.x} cy={p.y}
+                              r={i === pts.length - 1 ? 5 : 3.5}
+                              fill={i === pts.length - 1 ? colors.accent : colors.primary}
+                              stroke={colors.surface} strokeWidth={1.5} />
+                          ))}
+                          {pts.length <= 12 && pts.map((p, i) => (
+                            <SvgText key={`d${i}`} x={p.x} y={chartH - 4}
+                              fontSize={9} fill={colors.textMuted} textAnchor="middle">
+                              {p.label}
+                            </SvgText>
+                          ))}
+                        </Svg>
                       </View>
                       <View style={styles.chartSummaryRow}>
                         <View style={styles.chartStat}>
