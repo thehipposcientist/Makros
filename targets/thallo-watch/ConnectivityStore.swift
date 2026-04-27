@@ -37,18 +37,34 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         session?.activate()
     }
 
+    /// The stored userId for the current watch session.
+    var currentUserId: String? {
+        UserDefaults.standard.string(forKey: Self.userIdKey)
+    }
+
+    /// Handle userId changes. Three cases:
+    ///   - nil: key wasn't in the payload → do nothing (don't wipe on normal messages)
+    ///   - empty string: explicit logout → wipe + clear stored userId
+    ///   - non-empty string: new or same user → wipe if different, store new
     private func handleUserSwitch(_ incomingUserId: String?) {
+        guard let incoming = incomingUserId else {
+            // Key not present in payload — no user signal, do nothing.
+            return
+        }
         let stored = UserDefaults.standard.string(forKey: Self.userIdKey)
-        if let incoming = incomingUserId, !incoming.isEmpty {
+        if incoming.isEmpty {
+            // Explicit sign-out / clear.
+            if stored != nil {
+                print("[watch] userId cleared — wiping state")
+                wipeUserState()
+                UserDefaults.standard.removeObject(forKey: Self.userIdKey)
+            }
+        } else {
             if let prev = stored, prev != incoming {
                 print("[watch] userId changed \(prev) → \(incoming) — wiping state")
                 wipeUserState()
             }
             UserDefaults.standard.set(incoming, forKey: Self.userIdKey)
-        } else if stored != nil {
-            print("[watch] userId cleared — wiping state")
-            wipeUserState()
-            UserDefaults.standard.removeObject(forKey: Self.userIdKey)
         }
     }
 
@@ -122,8 +138,13 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     // ─── Message routing ────────────────────────────────────────────
 
     private func absorbContext(_ ctx: [String: Any]) {
-        let incomingUserId = ctx["userId"] as? String
-        handleUserSwitch(incomingUserId)
+        // Only process userId when the key is explicitly present in
+        // the payload. Missing key = "no user signal" (e.g. a plain
+        // workout/meals message that predates userId stamping).
+        if ctx.keys.contains("userId") {
+            let incomingUserId = ctx["userId"] as? String ?? ""
+            handleUserSwitch(incomingUserId)
+        }
 
         if let w = ctx["workout"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: w),
@@ -183,22 +204,32 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private func absorbMessage(_ msg: [String: Any]) {
         guard let kind = msg["kind"] as? String else { return }
+        // Forward userId from the message into the context dict so
+        // absorbContext can process user switches on individual messages
+        // (not just full applicationContext pushes).
+        let userId = msg["userId"]
+        func ctxWith(_ key: String, _ payload: Any) -> [String: Any] {
+            var ctx: [String: Any] = [key: payload]
+            if let uid = userId { ctx["userId"] = uid }
+            return ctx
+        }
         switch kind {
         case "workout":
             if let payload = msg["payload"] as? [String: Any] {
-                absorbContext(["workout": payload])
+                absorbContext(ctxWith("workout", payload))
             }
         case "meals":
             if let payload = msg["payload"] as? [String: Any] {
-                absorbContext(["meals": payload])
+                absorbContext(ctxWith("meals", payload))
             }
         case "theme":
             if let payload = msg["payload"] as? [String: Any] {
-                absorbContext(["theme": payload])
+                absorbContext(ctxWith("theme", payload))
             }
         case "progress":
             // Live updates (current set, rest remaining, HR) handled by
             // ActiveWorkoutStore — nothing to persist on ConnectivityStore.
+            if let uid = userId { handleUserSwitch(uid as? String) }
             NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
         default:
             break

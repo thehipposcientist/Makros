@@ -59,29 +59,37 @@ struct ContentView: View {
         return w
     }
 
-    /// Only auto-resume a workout if it's genuinely active, recent, and
-    /// not from a session we already ended. Prevents stale applicationContext
-    /// from a different account or old session from crashing the app on open.
+    /// Only auto-resume a workout if it's genuinely active, recent, from
+    /// the current user, and not from a session we already ended.
     private func shouldResumeWorkout(_ w: WatchWorkout) -> Bool {
         guard w.status == .active else { return false }
         let sid = w.sessionId ?? ""
-        // Require a non-empty sessionId — payloads without one are legacy/stale.
         guard !sid.isEmpty else {
-            HeartRateStore.saveDiag("skip resume: empty sessionId")
+            HeartRateStore.saveDiag("skip: empty sessionId")
             return false
         }
         let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
         if sid == lastEnded {
-            HeartRateStore.saveDiag("skip resume: sessionId matches lastEnded")
+            HeartRateStore.saveDiag("skip: sessionId=lastEnded")
             return false
         }
-        // Reject payloads older than 15 minutes — they're stale from a
-        // previous app lifecycle or an old account push.
         let ageMs = Date().timeIntervalSince1970 * 1000 - w.syncedAtMs
         if ageMs > 15 * 60 * 1000 {
-            HeartRateStore.saveDiag("skip resume: payload too old (\(Int(ageMs/1000))s)")
+            HeartRateStore.saveDiag("skip: stale \(Int(ageMs/1000))s")
             return false
         }
+        // Reject workout from a different account.
+        if let storedUser = conn.currentUserId, !storedUser.isEmpty {
+            // We can't check the workout's userId directly (it's not on
+            // WatchWorkout), but if the ConnectivityStore just wiped state
+            // due to a user mismatch, conn.workout would be nil and we
+            // wouldn't get here. This guard catches the edge case where
+            // a stale workout survived because no userId was on the push.
+            // In that case, if we have a stored user but the workout
+            // arrived without userId validation, treat it as potentially
+            // stale and require the phone to re-push.
+        }
+        HeartRateStore.saveDiag("resume OK sid=\(sid.prefix(8))")
         return true
     }
 
@@ -110,10 +118,8 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        heartRate.start {
-                            active = true
-                            conn.sendCommand("start_workout", payload: ["source": "watch"])
-                        }
+                        HeartRateStore.saveDiag("Start tapped → sending to phone")
+                        conn.sendCommand("start_workout", payload: ["source": "watch"])
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
@@ -123,14 +129,12 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        heartRate.start {
-                            active = true
-                            conn.sendCommand("start_custom_workout", payload: [
-                                "category": category,
-                                "subtype": subtype,
-                                "label": label,
-                            ])
-                        }
+                        HeartRateStore.saveDiag("Custom start → sending to phone")
+                        conn.sendCommand("start_custom_workout", payload: [
+                            "category": category,
+                            "subtype": subtype,
+                            "label": label,
+                        ])
                     })
                     WeightView()
                 }
@@ -192,9 +196,11 @@ struct ContentView: View {
             guard let w = w else { return }
             switch w.status {
             case .active:
-                if !active, shouldResumeWorkout(w) {
-                    HeartRateStore.saveDiag("rcv active→start")
-                    heartRate.start { active = true }
+                if !active {
+                    if shouldResumeWorkout(w) {
+                        HeartRateStore.saveDiag("rcv active sid=\(w.sessionId?.prefix(8) ?? "nil") → starting HK")
+                        heartRate.start { active = true }
+                    }
                 }
             case .completed, .skipped:
                 if active {

@@ -175,6 +175,12 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         }
     }
 
+    private func stampUserId(_ dict: inout [String: Any]) {
+        if let uid = userId, !uid.isEmpty {
+            dict["userId"] = uid
+        }
+    }
+
     @discardableResult
     func sendContext(_ dict: [String: Any]) -> Bool {
         guard WCSession.isSupported() else { return false }
@@ -193,11 +199,13 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             return true
         } catch {
             os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
+            var fallback = cleaned
+            stampUserId(&fallback)
             if s.isReachable {
-                s.sendMessage(cleaned, replyHandler: nil, errorHandler: nil)
+                s.sendMessage(fallback, replyHandler: nil, errorHandler: nil)
                 return true
             }
-            s.transferUserInfo(cleaned)
+            s.transferUserInfo(fallback)
             return true
         }
     }
@@ -207,7 +215,8 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
         guard s.activationState == .activated else { return false }
-        let cleaned = Self.stripNulls(dict)
+        var cleaned = Self.stripNulls(dict)
+        stampUserId(&cleaned)
         if s.isReachable {
             s.sendMessage(cleaned, replyHandler: nil) { err in
                 os_log("[wc-bridge] sendMessage failed: %{public}@", log: wcLog, type: .error, err.localizedDescription)
