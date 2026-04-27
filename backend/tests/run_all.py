@@ -59,6 +59,10 @@ _TEST_MODULES = (
     "tests.test_rolling_e1rm",
     "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
+    # Cardio prescription — modality detection, capability hierarchy, prescription_type tagging.
+    "tests.test_cardio_prescription",
+    # Weekly calorie budget smoothing — formula, caps, macro redistribution.
+    "tests.test_weekly_calorie_budget",
     "tests.test_plan_week",
     # Change Day Type — conflict detection + smart adjust reconciliation.
     "tests.test_change_day_type",

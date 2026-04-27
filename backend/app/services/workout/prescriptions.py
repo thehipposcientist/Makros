@@ -27,7 +27,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .archetypes import DayArchetype, ARCHETYPE_META, TrainingType
-from .cardio import classify_cardio
+from .cardio import (
+    classify_cardio, build_cardio_guidance, render_cardio_prescription_text,
+)
 
 
 @dataclass
@@ -36,6 +38,13 @@ class Prescription:
     reps: str            # free-text — "6-8", "25-40 min", "30-45s"
     rest_seconds: int
     rir_target: float
+    # Categorical type used by the client to render the right logging UI.
+    # "strength" | "cardio_steady" | "cardio_intervals" | "mobility" |
+    # "yoga_flow" | "core_circuit" | "stretch_hold" | "recovery" | "warmup"
+    prescription_type: str = "strength"
+    # Structured cardio targets keyed by the modality's capability tier.
+    # None for non-cardio prescriptions.
+    cardio_guidance: dict | None = None
 
 
 def prescribe_for_slot(
@@ -60,6 +69,12 @@ def prescribe_for_slot(
     # the archetype's training_type.
     if hasattr(slot, "role") and slot.role == "warmup":
         return _prescribe_warmup(slot, exercise)
+
+    # Core-role slots always get a circuit-style prescription regardless
+    # of the archetype's training_type (core slots on a push day should
+    # not be prescribed with hypertrophy-style sets/reps).
+    if hasattr(slot, "role") and slot.role == "core":
+        return _prescribe_core(slot, exercise, inputs)
 
     training_type = meta.training_type
     if training_type == "volume":
@@ -118,6 +133,7 @@ def _prescribe_lifting(slot, exercise: dict, inputs) -> Prescription:
     return Prescription(
         sets=pres.sets, reps=pres.reps,
         rest_seconds=pres.rest_seconds, rir_target=pres.rir_target,
+        prescription_type="strength",
     )
 
 
@@ -143,27 +159,24 @@ def _prescribe_by_stimulus(
 
     if training_type == "strength":
         if role == "primary":
-            return Prescription(sets=4, reps="3-5", rest_seconds=180, rir_target=1.5)
+            return Prescription(sets=4, reps="3-5", rest_seconds=180, rir_target=1.5, prescription_type="strength")
         if role == "secondary":
-            return Prescription(sets=3, reps="5-8", rest_seconds=150, rir_target=2.0)
-        # isolation / core
-        return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0)
+            return Prescription(sets=3, reps="5-8", rest_seconds=150, rir_target=2.0, prescription_type="strength")
+        return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength")
 
     if training_type == "hypertrophy":
         if role == "primary":
-            return Prescription(sets=4, reps="6-10", rest_seconds=120, rir_target=2.0)
+            return Prescription(sets=4, reps="6-10", rest_seconds=120, rir_target=2.0, prescription_type="strength")
         if role == "secondary":
-            return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0)
-        # isolation / core
-        return Prescription(sets=3, reps="10-15", rest_seconds=75, rir_target=2.5)
+            return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength")
+        return Prescription(sets=3, reps="10-15", rest_seconds=75, rir_target=2.5, prescription_type="strength")
 
     # training_type == "volume"
     if role == "primary":
-        return Prescription(sets=3, reps="10-15", rest_seconds=90, rir_target=2.5)
+        return Prescription(sets=3, reps="10-15", rest_seconds=90, rir_target=2.5, prescription_type="strength")
     if role == "secondary":
-        return Prescription(sets=3, reps="12-15", rest_seconds=75, rir_target=3.0)
-    # isolation / core
-    return Prescription(sets=3, reps="12-20", rest_seconds=60, rir_target=3.0)
+        return Prescription(sets=3, reps="12-15", rest_seconds=75, rir_target=3.0, prescription_type="strength")
+    return Prescription(sets=3, reps="12-20", rest_seconds=60, rir_target=3.0, prescription_type="strength")
 
 
 # ── Power / plyometric ─────────────────────────────────────────────
@@ -179,11 +192,10 @@ def _prescribe_power(slot, exercise: dict, inputs) -> Prescription:
     "3-5 reps" on a sprint day — nonsense."""
     mp = exercise.get("movement_pattern") or ""
     if mp == "cardio":
-        # Short maximal sprints. Work:rest ≈ 1:6 for full ATP recovery.
-        return Prescription(sets=8, reps="10-15s", rest_seconds=120, rir_target=2.5)
+        return Prescription(sets=8, reps="10-15s", rest_seconds=120, rir_target=2.5, prescription_type="cardio_intervals")
     if mp == "plyometric":
-        return Prescription(sets=4, reps="3-5", rest_seconds=120, rir_target=2.5)
-    return Prescription(sets=5, reps="3-5", rest_seconds=150, rir_target=2.5)
+        return Prescription(sets=4, reps="3-5", rest_seconds=120, rir_target=2.5, prescription_type="strength")
+    return Prescription(sets=5, reps="3-5", rest_seconds=150, rir_target=2.5, prescription_type="strength")
 
 
 # ── Conditioning (cardio) ──────────────────────────────────────────
@@ -196,6 +208,11 @@ def _prescribe_conditioning(
     user's session_minutes budget. Interval counts and tempo block
     lengths scale with budget so a 60-minute cardio day doesn't ship
     as a 28-minute workout.
+
+    For primary cardio slots, equipment-specific guidance is built via
+    build_cardio_guidance so the prescription text reflects the user's
+    actual equipment (watts for a smart bike, speed+incline for a
+    treadmill, RPE fallback when no capability data is available).
 
     Scaling rules:
       - `session_minutes` pulled off `inputs` (PlannerInputs); defaults
@@ -212,103 +229,163 @@ def _prescribe_conditioning(
     label = (slot.label or "").lower()
     is_interval_ex = classify_cardio(exercise) == "intervals"
     session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
-    # Warmup + cooldown together eat ~10 min. Work block gets the rest.
     work_minutes = max(10, session_minutes - 10)
+
+    # Equipment capabilities from PlannerInputs (optional field).
+    user_caps: dict = {}
+    if inputs is not None:
+        user_caps = getattr(inputs, "user_equipment_capabilities", None) or {}
+    user_age = getattr(inputs, "user_age", None) if inputs else None
+    resting_hr = getattr(inputs, "resting_hr", None) if inputs else None
+
+    def _make_cardio(
+        sets: int,
+        base_reps: str,
+        rest: int,
+        rir: float,
+        p_type: str,
+        *,
+        enhance: bool = True,
+    ) -> Prescription:
+        """Build a Prescription, optionally enhancing it with modality-
+        specific cardio_guidance. ``enhance=True`` on main-block slots;
+        warm-up/cool-down slots skip guidance to stay concise."""
+        if not enhance:
+            return Prescription(sets=sets, reps=base_reps, rest_seconds=rest,
+                                rir_target=rir, prescription_type=p_type)
+        from .cardio import detect_cardio_modality
+        ex_name = exercise.get("name", "")
+        modality = detect_cardio_modality(ex_name)
+        caps = list(user_caps.get(modality, [])) if modality else []
+        guidance = build_cardio_guidance(
+            exercise,
+            archetype_name=archetype.value if archetype else "",
+            session_minutes=session_minutes,
+            capabilities=caps,
+            user_age=user_age,
+            resting_hr=resting_hr,
+        )
+        rep_text = render_cardio_prescription_text(guidance, ex_name)
+        return Prescription(
+            sets=sets,
+            reps=rep_text or base_reps,
+            rest_seconds=rest,
+            rir_target=rir,
+            prescription_type=p_type,
+            cardio_guidance=guidance,
+        )
 
     if archetype == DayArchetype.COND_ZONE2:
         if role == "primary":
-            # Zone 2 fills most of the session. Cap at 70 min so a
-            # wild session_minutes=180 request doesn't ship a 2h slog.
             z2_min = max(20, min(70, session_minutes - 8))
             z2_low = max(20, z2_min - 10)
-            return Prescription(sets=1, reps=f"{z2_low}-{z2_min} min", rest_seconds=0, rir_target=1.5)
-        return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
+            return _make_cardio(1, f"{z2_low}-{z2_min} min", 0, 1.5, "cardio_steady")
+        return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                            prescription_type="cardio_steady", enhance=False) if False else \
+               Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                            prescription_type="cardio_steady")
 
     if archetype == DayArchetype.COND_INTERVALS_SHORT:
         if "warmup" in label:
-            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
+            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         if "cooldown" in label:
-            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # ~2.75 min per interval (45s work + 120s rest, 1:3 work:rest
-        # ratio for near-maximal short intervals). Budget-scaled.
+            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         count = max(6, min(16, round(work_minutes / 2.75)))
-        return Prescription(sets=count, reps="30-45s", rest_seconds=120, rir_target=1.5)
+        return _make_cardio(count, "30-45s", 120, 1.5, "cardio_intervals")
 
     if archetype == DayArchetype.COND_INTERVALS_LONG:
         if "warmup" in label:
-            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
+            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         if "cooldown" in label:
-            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # ~5 min per interval (3 min on + 2.5 min rest).
+            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         count = max(4, min(8, round(work_minutes / 5)))
-        return Prescription(sets=count, reps="2-3 min", rest_seconds=150, rir_target=2.0)
+        return _make_cardio(count, "2-3 min", 150, 2.0, "cardio_intervals")
 
     if archetype == DayArchetype.COND_TEMPO:
         if "warmup" in label:
-            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
+            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         if "cooldown" in label:
-            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        # Tempo block fills the work budget, capped at 45 min.
+            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         tempo_min = max(15, min(45, work_minutes))
         tempo_low = max(12, tempo_min - 7)
-        return Prescription(sets=1, reps=f"{tempo_low}-{tempo_min} min", rest_seconds=0, rir_target=1.5)
+        return _make_cardio(1, f"{tempo_low}-{tempo_min} min", 0, 1.5, "cardio_steady")
 
     if archetype == DayArchetype.COND_CIRCUIT:
-        # Circuit day — round-based.
-        return Prescription(sets=4, reps="40s work / 20s rest", rest_seconds=60, rir_target=2.0)
+        return Prescription(sets=4, reps="40s work / 20s rest", rest_seconds=60,
+                            rir_target=2.0, prescription_type="cardio_intervals")
 
     if archetype == DayArchetype.COND_SPRINT_POWER:
         if "warmup" in label:
-            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
-        # Short explosive sprints with full rest.
-        return Prescription(sets=8, reps="10-15s", rest_seconds=120, rir_target=2.5)
+            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
+        return _make_cardio(8, "10-15s", 120, 2.5, "cardio_intervals")
 
     if archetype == DayArchetype.COND_MIXED:
         if "warmup" in label or "cooldown" in label:
-            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0)
+            return Prescription(sets=1, reps="5-8 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
         if is_interval_ex:
-            return Prescription(sets=6, reps="45s", rest_seconds=90, rir_target=2.0)
-        return Prescription(sets=1, reps="15-20 min", rest_seconds=0, rir_target=1.5)
+            return _make_cardio(6, "45s", 90, 2.0, "cardio_intervals")
+        return _make_cardio(1, "15-20 min", 0, 1.5, "cardio_steady")
 
-    # Recovery / stress-relief easy cardio.
     if archetype in (DayArchetype.RECOVERY_EASY, DayArchetype.STRESS_RELIEF_EASY):
-        return Prescription(sets=1, reps="20-30 min easy", rest_seconds=0, rir_target=1.0)
+        return _make_cardio(1, "20-30 min easy", 0, 1.0, "cardio_steady")
 
-    # Hybrid days — cardio portion uses a compact finisher prescription.
-    # These archetypes lead with strength slots, so the cardio slot is
-    # always a "finisher" block rather than the main work of the day.
     if archetype in (
         DayArchetype.HYBRID_UPPER_INTERVALS,
         DayArchetype.HYBRID_STRENGTH_INTERVALS,
     ):
         if "warmup" in label or "cooldown" in label:
-            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0)
-        return Prescription(sets=6, reps="30s", rest_seconds=60, rir_target=2.0)
+            return Prescription(sets=1, reps="3-5 min", rest_seconds=0, rir_target=1.0,
+                                prescription_type="cardio_steady")
+        return _make_cardio(6, "30s", 60, 2.0, "cardio_intervals")
     if archetype == DayArchetype.HYBRID_LOWER_POWER:
-        return Prescription(sets=6, reps="10-15s sprint", rest_seconds=90, rir_target=2.5)
+        return _make_cardio(6, "10-15s sprint", 90, 2.5, "cardio_intervals")
     if archetype == DayArchetype.HYBRID_FULL_BODY_CIRCUIT:
-        return Prescription(sets=3, reps="45s burst", rest_seconds=30, rir_target=2.0)
+        return _make_cardio(3, "45s burst", 30, 2.0, "cardio_intervals")
 
-    # Default conditioning fallback (shouldn't hit in practice).
-    return Prescription(sets=1, reps="20-30 min", rest_seconds=0, rir_target=1.5)
+    # PLUS_CARDIO finisher slots (mixed archetype, cardio role)
+    if role == "isolation":
+        return _make_cardio(1, "10-20 min", 0, 1.5, "cardio_steady")
+
+    return _make_cardio(1, "20-30 min", 0, 1.5, "cardio_steady")
 
 
 # ── Mobility ───────────────────────────────────────────────────────
 
 
 def _prescribe_mobility(slot, exercise: dict) -> Prescription:
-    """Mobility prescription: 2-3 rounds, 30-60 second holds or a
-    flow time, zero rest between movements. The "reps" string is a
-    hold time or flow duration — the frontend already handles the
-    duration format for time-tracked exercises."""
-    archetype_hint = (slot.label or "").lower()
-    if "stretch" in archetype_hint or "block" in archetype_hint:
-        # Focused static stretch.
-        return Prescription(sets=2, reps="45-60s hold", rest_seconds=15, rir_target=1.0)
-    if "flow" in archetype_hint:
-        return Prescription(sets=2, reps="5-8 reps flow", rest_seconds=15, rir_target=1.0)
-    # Default mobility drill.
-    return Prescription(sets=2, reps="8-10 reps", rest_seconds=10, rir_target=1.0)
+    """Mobility prescription: 2-3 rounds, 30-60 second holds or flow
+    time, minimal rest between movements.
+
+    Yoga exercises get a duration-based prescription with style context
+    rather than being treated as generic stretching. Detection uses the
+    exercise name and label — explicit enough to distinguish a yoga flow
+    from a foam-roll session without adding a schema field.
+    """
+    ex_name = (exercise.get("name") or "").lower()
+    label   = (slot.label or "").lower()
+
+    # Yoga — duration block, not sets × reps
+    is_yoga = "yoga" in ex_name or "yoga" in label or "vinyasa" in ex_name or "yin " in ex_name
+    if is_yoga:
+        return Prescription(sets=1, reps="15-20 min flow", rest_seconds=0,
+                            rir_target=1.0, prescription_type="yoga_flow")
+
+    if "stretch" in label or "block" in label or "hold" in ex_name:
+        return Prescription(sets=2, reps="45-60s hold", rest_seconds=15,
+                            rir_target=1.0, prescription_type="stretch_hold")
+    if "flow" in label:
+        return Prescription(sets=2, reps="5-8 reps flow", rest_seconds=15,
+                            rir_target=1.0, prescription_type="mobility")
+    return Prescription(sets=2, reps="8-10 reps", rest_seconds=10,
+                        rir_target=1.0, prescription_type="mobility")
 
 
 # ── Warmup ────────────────────────────────────────────────────────
@@ -329,7 +406,8 @@ def _prescribe_warmup(slot, exercise: dict) -> Prescription:
     sessions (<=30 min) skip this block entirely and go straight to
     ramp-up sets on the primary lift.
     """
-    return Prescription(sets=2, reps="6-8 reps flow", rest_seconds=0, rir_target=1.0)
+    return Prescription(sets=2, reps="6-8 reps flow", rest_seconds=0,
+                        rir_target=1.0, prescription_type="warmup")
 
 
 # ── Recovery ───────────────────────────────────────────────────────
@@ -341,5 +419,75 @@ def _prescribe_recovery(slot, exercise: dict) -> Prescription:
     walk or spin; for mobility rows (stress relief) it's a gentle
     flow."""
     if exercise.get("movement_pattern") == "cardio":
-        return Prescription(sets=1, reps="15-25 min easy", rest_seconds=0, rir_target=1.0)
-    return Prescription(sets=1, reps="5-8 reps easy", rest_seconds=10, rir_target=1.0)
+        return Prescription(sets=1, reps="15-25 min easy", rest_seconds=0,
+                            rir_target=1.0, prescription_type="recovery")
+    return Prescription(sets=1, reps="5-8 reps easy", rest_seconds=10,
+                        rir_target=1.0, prescription_type="recovery")
+
+
+# ── Core circuit ───────────────────────────────────────────────────────────────
+
+
+def _prescribe_core(slot, exercise: dict, inputs=None) -> Prescription:
+    """Core-circuit prescription.
+
+    Core slots are NOT prescribed as strength sets — dead bugs and
+    Pallof presses have no meaningful "weight × reps" structure, and
+    treating them identically to a bench press set produces prescriptions
+    like "3 × 8-12 reps" for an anti-extension hold, which is wrong.
+
+    Instead, each core movement gets a category-appropriate prescription:
+      anti_extension  → 3 rounds × 30-45s hold (or 8-12 reps for dynamic)
+      anti_rotation   → 3 rounds × 10-15 reps per side (or 30-45s hold)
+      lateral_stability → 2-3 rounds × 30-45s per side
+      flexion_lower_ab  → 3 rounds × 12-20 reps
+      carry / bracing   → 3 rounds × 30-40m or 40-60s
+
+    The pattern is encoded in the slot label (set by core_programmer.py)
+    so no schema change is needed.
+    """
+    label   = (slot.label or "").lower()
+    ex_name = (exercise.get("name") or "").lower()
+    mp      = (exercise.get("movement_pattern") or "").lower()
+    tm      = (exercise.get("default_tracking_mode") or "reps").lower()
+
+    # Carry / bracing — distance or timed
+    if "carry" in label or "bracing" in label or "carry" in ex_name:
+        return Prescription(sets=3, reps="30-40m or 40-60s", rest_seconds=60,
+                            rir_target=1.5, prescription_type="core_circuit")
+
+    # Anti-extension (plank, dead bug, rollout)
+    if "anti-extension" in label or "anti_extension" in mp:
+        if tm == "time" or any(kw in ex_name for kw in ("plank", "dead bug", "rollout", "hollow")):
+            return Prescription(sets=3, reps="30-45s hold", rest_seconds=45,
+                                rir_target=1.5, prescription_type="core_circuit")
+        return Prescription(sets=3, reps="8-12 reps", rest_seconds=45,
+                            rir_target=1.5, prescription_type="core_circuit")
+
+    # Anti-rotation (Pallof press, bird dog)
+    if "anti-rotation" in label or "anti_rotation" in mp:
+        if any(kw in ex_name for kw in ("pallof", "bird dog", "bird-dog")):
+            return Prescription(sets=3, reps="10-15 reps per side", rest_seconds=45,
+                                rir_target=1.5, prescription_type="core_circuit")
+        if tm == "time":
+            return Prescription(sets=3, reps="30-45s hold per side", rest_seconds=45,
+                                rir_target=1.5, prescription_type="core_circuit")
+        return Prescription(sets=3, reps="10-15 reps", rest_seconds=45,
+                            rir_target=1.5, prescription_type="core_circuit")
+
+    # Lateral stability (side plank, Copenhagen)
+    if "lateral" in label:
+        return Prescription(sets=3, reps="30-45s per side", rest_seconds=45,
+                            rir_target=1.5, prescription_type="core_circuit")
+
+    # Flexion / lower ab (hanging leg raise, reverse crunch)
+    if "lower ab" in label or "flexion" in label:
+        return Prescription(sets=3, reps="12-20 reps", rest_seconds=45,
+                            rir_target=2.0, prescription_type="core_circuit")
+
+    # Generic core fallback
+    if tm == "time":
+        return Prescription(sets=3, reps="30-45s", rest_seconds=45,
+                            rir_target=1.5, prescription_type="core_circuit")
+    return Prescription(sets=3, reps="10-15 reps", rest_seconds=45,
+                        rir_target=1.5, prescription_type="core_circuit")

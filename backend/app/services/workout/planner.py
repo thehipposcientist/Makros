@@ -109,6 +109,15 @@ class PlannerInputs:
     # User's age — threaded through so the recipe can inject extra rest days
     # for 50+ users (slower recovery) and the warmup can auto-scale.
     user_age: int | None = None
+    # Resting heart rate (bpm) — used by cardio HR-zone computation so the
+    # Karvonen formula can personalise zone boundaries. None = use 60 bpm default.
+    resting_hr: int | None = None
+    # Per-modality equipment capability lists, keyed by cardio modality
+    # constant (e.g. "treadmill", "bike", "rower"). Each value is a list of
+    # capability tokens from UserEquipmentProfile.capabilities. When present,
+    # the conditioning prescriber uses them to build the most specific
+    # prescription tier. Absent = RPE/duration fallback.
+    user_equipment_capabilities: dict | None = None
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────

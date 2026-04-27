@@ -719,3 +719,114 @@ def delete_meal(
     db.delete(meal)
     db.commit()
     _refresh_daily_metrics(db, current_user.id, affected_date)
+
+
+# ─── Weekly calorie smoothing ─────────────────────────────────────────────────
+
+
+@router.get("/adjusted-daily-target")
+def adjusted_daily_target(
+    target_date: date = Query(default=None, description="Date to compute adjustment for (defaults to today)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Return a smoothed daily calorie target for the current week.
+
+    When the user has logged more or fewer calories than their weekly target
+    allows, this endpoint spreads the difference across the remaining days
+    rather than creating a harsh single-day swing.
+
+    The response includes:
+      - ``adjusted_calories``: recommended daily target for remaining days
+      - ``base_daily_target``: unmodified per-day target from the user's plan
+      - ``adjustment_applied``: signed delta (negative = cut, positive = add)
+      - ``at_cap``: True when the adjustment was clipped by the goal cap
+      - ``adjusted_macros``: carbs/fat redistributed to hit adjusted_calories
+        (protein is always kept stable)
+      - ``note``: human-readable explanation
+    """
+    from datetime import date as date_cls, timedelta
+    from sqlmodel import func as sqlfunc
+    from app.models import UserProfile, UserGoal, UserCoachingState
+    from app.services.nutrition.calorie_calculator import compute_targets, CalorieInputs
+    from app.services.nutrition.weekly_calorie_budget import (
+        compute_adjusted_daily_target, compute_adjusted_macros,
+    )
+
+    today = target_date or date_cls.today()
+    # Day of week: Monday=0 … Sunday=6. Days remaining = 7 - weekday (includes today)
+    days_remaining = 7 - today.weekday()
+
+    # Week start = most recent Monday
+    week_start = today - timedelta(days=today.weekday())
+
+    # Calories logged this week
+    week_meals = db.exec(
+        select(Meal).where(
+            Meal.user_id == current_user.id,
+            Meal.meal_date >= week_start,
+            Meal.meal_date <= today,
+        )
+    ).all()
+    meal_ids = [m.id for m in week_meals]
+    if meal_ids:
+        calories_this_week = float(db.exec(
+            select(sqlfunc.coalesce(sqlfunc.sum(MealItem.calories), 0.0))
+            .where(MealItem.meal_id.in_(meal_ids))
+        ).one())
+    else:
+        calories_this_week = 0.0
+
+    # User profile + goal for base target computation
+    profile = db.exec(select(UserProfile).where(UserProfile.user_id == current_user.id)).first()
+    goal_row = db.exec(select(UserGoal).where(UserGoal.user_id == current_user.id)).first()
+    state = db.exec(select(UserCoachingState).where(UserCoachingState.user_id == current_user.id)).first()
+
+    if not profile:
+        raise HTTPException(status_code=404, detail="User profile not found")
+
+    goal_id   = goal_row.goal_id if goal_row else "general_health"
+    cal_adj   = state.calorie_adjustment if state else 0
+
+    inputs = CalorieInputs(
+        weight_lbs=float(profile.weight_lbs or 150),
+        height_feet=int(profile.height_feet or 5),
+        height_inches=int(profile.height_inches or 7),
+        age=int(profile.age or 30),
+        gender=str(profile.gender or "male"),
+        training_days_per_week=int(getattr(profile, "days_per_week", 4) or 4),
+        goal_id=goal_id,
+        pace=str(goal_row.pace if goal_row else "moderate"),
+    )
+    targets = compute_targets(inputs)
+    base_daily = targets.calories + cal_adj
+
+    result = compute_adjusted_daily_target(
+        base_daily_target=base_daily,
+        calories_logged_so_far=int(calories_this_week),
+        days_remaining=days_remaining,
+        goal=goal_id,
+    )
+
+    adjusted_macros = compute_adjusted_macros(
+        base_protein_g=targets.protein_g,
+        base_carbs_g=targets.carbs_g,
+        base_fat_g=targets.fat_g,
+        adjusted_calories=result.adjusted_calories,
+        base_calories=base_daily,
+    )
+
+    return {
+        "adjusted_calories":    result.adjusted_calories,
+        "base_daily_target":    result.base_daily_target,
+        "weekly_budget_remaining": result.weekly_budget_remaining,
+        "days_remaining":       result.days_remaining,
+        "calories_logged_so_far": int(calories_this_week),
+        "adjustment_applied":   result.adjustment_applied,
+        "at_cap":               result.at_cap,
+        "note":                 result.note,
+        "adjusted_macros":      adjusted_macros,
+        "goal":                 goal_id,
+        "week_start":           week_start.isoformat(),
+        "date":                 today.isoformat(),
+    }

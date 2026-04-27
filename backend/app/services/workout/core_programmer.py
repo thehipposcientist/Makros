@@ -294,6 +294,11 @@ class CoreDecision:
     category: Optional[str]   # None when add=False
     count: int                # number of exercises to append
     reason: str               # diagnostic string for logs
+    # Circuit structure hints passed to the prescriber so it can emit
+    # round-based prescriptions instead of generic strength sets.
+    rounds: int = 3           # target rounds per exercise
+    work_seconds: int = 0     # 0 = reps-based; >0 = timed work bout
+    rest_seconds: int = 45    # rest between exercises within the circuit
 
 
 def _is_session_dense(slots_count: int, session_minutes: Optional[int]) -> bool:

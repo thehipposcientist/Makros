@@ -694,6 +694,39 @@ class ExerciseEquipment(SQLModel, table=True):
     role: str = Field(default="primary")  # EquipmentRole: primary | support | optional
 
 
+# ─── User equipment profiles (capability-aware cardio tracking) ───────────────
+#
+# Tracks the specific machines/gear a user owns so cardio prescriptions can
+# use the right metric tier (watts+RPM for an IC6 bike, speed+incline for a
+# treadmill with display, RPE fallback for a basic bike with no metrics).
+# This is separate from the seeded Equipment library — that table maps exercises
+# to equipment types. This table maps users to their specific gear instances.
+
+class UserEquipmentProfile(SQLModel, table=True):
+    """One row per piece of cardio/strength equipment the user has registered."""
+    __tablename__ = "user_equipment_profiles"
+    __table_args__ = ()
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # Broad category: "cardio" | "strength" | "mobility" | "recovery"
+    category: str = Field(default="cardio")
+    # Specific type — matches modality constants in cardio.py
+    # e.g. "treadmill" | "bike" | "rower" | "elliptical" | "stair_climber"
+    equipment_type: str = Field(default="")
+    # User-facing label, e.g. "Life Fitness IC6"
+    display_name: str = Field(default="")
+    brand: str | None = Field(default=None)
+    # Model name stored as model_name to avoid shadowing Python's model()
+    model_name: str | None = Field(default=None)
+    # "home" | "gym" | "outdoor"
+    location: str = Field(default="gym")
+    # Capability tokens — subset of CAP_* constants in cardio.py
+    # e.g. ["time", "watts", "rpm", "heart_rate", "distance"]
+    capabilities: list = Field(default_factory=list, sa_column=Column(JSON))
+    notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Goal options (seeded reference data) ─────────────────────────────────────
 
 class GoalOption(SQLModel, table=True):
@@ -1365,3 +1398,35 @@ class FoodCreate(SQLModel):
     protein: float = 0
     carbs: float = 0
     fat: float = 0
+
+
+# ─── User equipment profile schemas ──────────────────────────────────────────
+
+class UserEquipmentProfileCreate(SQLModel):
+    """Create / update one piece of user equipment."""
+    category: str = "cardio"
+    equipment_type: str
+    display_name: str = ""
+    brand: str | None = None
+    model_name: str | None = None
+    location: str = "gym"
+    # List of capability tokens (see CAP_* constants in cardio.py):
+    # "time" | "distance" | "speed" | "incline" | "watts" | "rpm" |
+    # "resistance" | "heart_rate" | "calories" | "pace" | "stroke_rate"
+    capabilities: list[str] = []
+    notes: str | None = None
+
+
+class UserEquipmentProfileRead(SQLModel):
+    """Read schema for a registered equipment profile."""
+    id: int
+    user_id: int
+    category: str
+    equipment_type: str
+    display_name: str
+    brand: str | None
+    model_name: str | None
+    location: str
+    capabilities: list[str]
+    notes: str | None
+    created_at: datetime

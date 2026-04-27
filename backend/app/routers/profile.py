@@ -9,7 +9,8 @@ from app.models import (
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
     UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate,
     CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
-    WeightEntry,
+    WeightEntry, UserEquipmentProfile,
+    UserEquipmentProfileCreate, UserEquipmentProfileRead,
 )
 from app.auth import get_current_user
 
@@ -952,3 +953,110 @@ def sync_weight_entries(
             ))
     db.commit()
     return {"synced": len(entries)}
+
+
+# ─── User equipment profiles ───────────────────────────────────────────────────
+#
+# Lets users register their specific cardio/strength equipment so the
+# prescription engine can use the right metric tier (e.g. watts+RPM for an
+# IC6 bike, speed+incline for a treadmill). A simple capability-checkbox model
+# instead of a long setup form.
+
+@router.get("/cardio-equipment", response_model=list[UserEquipmentProfileRead])
+def list_cardio_equipment(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Return all equipment profiles registered by the current user."""
+    rows = session.exec(
+        select(UserEquipmentProfile).where(UserEquipmentProfile.user_id == current_user.id)
+    ).all()
+    return rows
+
+
+@router.post("/cardio-equipment", response_model=UserEquipmentProfileRead, status_code=201)
+def add_cardio_equipment(
+    body: UserEquipmentProfileCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Register a new equipment profile."""
+    profile = UserEquipmentProfile(
+        user_id=current_user.id,
+        category=body.category,
+        equipment_type=body.equipment_type,
+        display_name=body.display_name,
+        brand=body.brand,
+        model_name=body.model_name,
+        location=body.location,
+        capabilities=body.capabilities,
+        notes=body.notes,
+    )
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return profile
+
+
+@router.put("/cardio-equipment/{profile_id}", response_model=UserEquipmentProfileRead)
+def update_cardio_equipment(
+    profile_id: int,
+    body: UserEquipmentProfileCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Update an existing equipment profile."""
+    profile = session.get(UserEquipmentProfile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Equipment profile not found")
+    profile.category      = body.category
+    profile.equipment_type = body.equipment_type
+    profile.display_name  = body.display_name
+    profile.brand         = body.brand
+    profile.model_name    = body.model_name
+    profile.location      = body.location
+    profile.capabilities  = body.capabilities
+    profile.notes         = body.notes
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return profile
+
+
+@router.delete("/cardio-equipment/{profile_id}", status_code=204)
+def delete_cardio_equipment(
+    profile_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Remove an equipment profile."""
+    profile = session.get(UserEquipmentProfile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Equipment profile not found")
+    session.delete(profile)
+    session.commit()
+
+
+@router.get("/cardio-equipment/capabilities")
+def list_cardio_capability_tokens():
+    """Return the canonical list of equipment capability tokens with labels.
+    Clients use this to render the capability-checkbox UI during equipment setup.
+    """
+    from app.services.workout.cardio import (
+        CAP_TIME, CAP_DISTANCE, CAP_SPEED, CAP_INCLINE, CAP_WATTS,
+        CAP_RPM, CAP_RESISTANCE, CAP_HEART_RATE, CAP_CALORIES,
+        CAP_PACE, CAP_STROKE_RATE,
+    )
+    return [
+        {"token": CAP_TIME,         "label": "Time",              "icon": "⏱"},
+        {"token": CAP_DISTANCE,     "label": "Distance",          "icon": "📏"},
+        {"token": CAP_SPEED,        "label": "Speed (mph/kph)",   "icon": "🏃"},
+        {"token": CAP_INCLINE,      "label": "Incline (%)",       "icon": "⛰"},
+        {"token": CAP_WATTS,        "label": "Watts / Power",     "icon": "⚡"},
+        {"token": CAP_RPM,          "label": "RPM / Cadence",     "icon": "🔄"},
+        {"token": CAP_RESISTANCE,   "label": "Resistance level",  "icon": "🎚"},
+        {"token": CAP_HEART_RATE,   "label": "Heart rate",        "icon": "❤️"},
+        {"token": CAP_CALORIES,     "label": "Calories",          "icon": "🔥"},
+        {"token": CAP_PACE,         "label": "Pace (/500m, /mi)", "icon": "⏱"},
+        {"token": CAP_STROKE_RATE,  "label": "Stroke rate (SPM)", "icon": "🚣"},
+    ]
