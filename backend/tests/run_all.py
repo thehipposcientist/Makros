@@ -152,6 +152,13 @@ _TEST_MODULES = (
     # RecoveryActivity model + router (cold plunge, sauna, breathwork,
     # meditation logging).
     "tests.test_phase4_tracking",
+    # Coach chat: photo attachments + multi-turn conversation history
+    # (the active-workout coach can now see a snapped photo and answer
+    # follow-up questions without re-stating context).
+    "tests.test_coach_chat_photos",
+    # Social: privacy fix (soft-deleted users hidden) + digest perf
+    # (batched queries instead of per-friend N+1).
+    "tests.test_social_perf_and_privacy",
     # Nutrition score pipeline + allergen filter edge cases + solver.
     "tests.test_nutrition_score_unit",
     # Plan generation integration — full pipeline, equipment/injury/dislike

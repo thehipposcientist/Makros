@@ -26,7 +26,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -1315,12 +1315,85 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   };
 
+  const [postingToFeed, setPostingToFeed] = useState(false);
+  // Post the just-finished workout to the friends feed. Pulls a
+  // workout_summary off the local exercises array (date + focus +
+  // total sets/reps) — never includes calories/macros/weight, which
+  // is the social privacy boundary documented in CLAUDE.md.
+  const handlePostToFriendsFeed = useCallback(async () => {
+    if (!authToken) {
+      Alert.alert('Sign in', 'You need to be signed in to post to your friends feed.');
+      return;
+    }
+    const submitPost = async (caption: string | undefined) => {
+      try {
+        setPostingToFeed(true);
+        const summary: WorkoutPostSummary = {
+          focus: workout.focus ?? 'Workout',
+          duration_seconds: Math.round(((Date.now() - (startTime ?? Date.now())) / 1000)),
+          date: new Date().toISOString().slice(0, 10),
+          exercises: exercises.map(e => ({
+            name: e.name,
+            equipment: (e as any).equipment ?? null,
+            sets: e.sets.map(s => ({
+              reps: Number(s.reps) || 0,
+              weight_lbs: Number(s.weightLbs) || 0,
+            })),
+          })),
+          total_sets: exercises.reduce((sum, e) => sum + e.sets.length, 0),
+          total_reps: exercises.reduce(
+            (sum, e) => sum + e.sets.reduce((rs, s) => rs + (Number(s.reps) || 0), 0),
+            0,
+          ),
+          training_score: (summaryData as any)?.trainingScore ?? null,
+          training_rating: (summaryData as any)?.trainingRating ?? null,
+        };
+        await createSocialPost(authToken, {
+          caption: (caption ?? '').trim() || undefined,
+          workout_summary: summary,
+        });
+        try {
+          const f = await import('../utils/feedback');
+          f.hapticSuccess?.();
+        } catch {}
+        Alert.alert('Posted', 'Your workout is on your friends feed.');
+      } catch (e: any) {
+        Alert.alert('Could not post', e?.message ?? 'Try again later.');
+      } finally {
+        setPostingToFeed(false);
+      }
+    };
+    // Alert.prompt is iOS-only. On Android, post without an inline
+    // caption — the user can add one from a future compose UI; for v1
+    // a captionless workout share is still meaningful (the summary is
+    // the headline data).
+    if (Platform.OS === 'ios' && (Alert as any).prompt) {
+      (Alert as any).prompt(
+        'Share to Friends Feed',
+        'Optional caption — your friends see the workout summary either way.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Post', onPress: submitPost },
+        ],
+        'plain-text',
+        '',
+      );
+    } else {
+      submitPost(undefined);
+    }
+  }, [authToken, exercises, summaryData, workout, startTime]);
+
   const [finishModalVisible, setFinishModalVisible] = useState(false);
   const [coachModalVisible, setCoachModalVisible] = useState(false);
   const [coachInput, setCoachInput] = useState('');
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachPhotoLoading, setCoachPhotoLoading] = useState(false);
   const [coachChat, setCoachChat] = useState<WorkoutCoachMessage[]>([]);
+  // Photo staged for attachment to the next coach question. Shown as a
+  // thumbnail in the input area; cleared after send. Decoupled from
+  // `handleAnalyzeFormPhoto` (the dedicated quick-action flow) so the
+  // user can write a custom question + attach a photo in one turn.
+  const [coachPendingPhoto, setCoachPendingPhoto] = useState<{ base64: string; mime: string } | null>(null);
   const [addExerciseModalVisible, setAddExerciseModalVisible] = useState(false);
   const [exerciseSearch, setExerciseSearch] = useState('');
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
@@ -2720,7 +2793,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
-    if (!q) return;
+    const photo = coachPendingPhoto;
+    if (!q && !photo) return;
     // Pro-only: in-workout AI coach.
     const { requirePro } = await import('../utils/subscription');
     let profile: any = null;
@@ -2730,19 +2804,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } catch {}
     if (!requirePro(profile, 'ai_coach')) return;
 
-    const userMsg: WorkoutCoachMessage = { role: 'user', content: q };
+    // If user attaches a photo without typing, fall back to a sensible
+    // default prompt so the question still passes the 4-char gate.
+    const effectiveQ = q || 'Check my form in this photo.';
+
+    const userMsg: WorkoutCoachMessage = {
+      role: 'user',
+      content: photo ? `${effectiveQ} [photo attached]` : effectiveQ,
+    };
+    // Snapshot conversation BEFORE the new turn so we send only prior
+    // turns to the backend (the new turn is the question itself).
+    const priorConversation = coachChat
+      .map(m => ({ role: m.role, content: m.content }));
     setCoachChat(prev => [...prev, userMsg]);
     setCoachInput('');
+    setCoachPendingPhoto(null);
     setCoachLoading(true);
 
     try {
       const active = exercises[activeExIdx];
       const resp = await askWorkoutQuestion(authToken, {
-        question: q,
+        question: effectiveQ,
         workout,
         activeExerciseName: active?.name,
         currentSetNumber: (active?.sets?.length ?? 0) + 1,
         loggedSets: active?.sets ?? [],
+        image_base64: photo?.base64,
+        mime_type: photo?.mime,
+        conversation: priorConversation,
       });
       const cues = (resp.quick_cues ?? []).slice(0, 3).map((x: string) => `• ${x}`).join('\n');
       const content = [
@@ -2757,7 +2846,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setCoachLoading(false);
     }
-  }, [coachInput, exercises, activeExIdx, authToken, workout]);
+  }, [coachInput, coachPendingPhoto, coachChat, exercises, activeExIdx, authToken, workout]);
+
+  // Stage a photo for attachment to the next coach question. Doesn't
+  // call any AI yet — that happens when the user taps Send.
+  const handleAttachCoachPhoto = useCallback(async (source: 'camera' | 'library') => {
+    const permission = source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert(
+        'Permission needed',
+        `Please allow ${source === 'camera' ? 'camera' : 'photo library'} access to attach a photo.`,
+      );
+      return;
+    }
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any })
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    setCoachPendingPhoto({
+      base64: result.assets[0].base64,
+      mime: 'image/jpeg',
+    });
+  }, []);
 
   const handleAnalyzeFormPhoto = useCallback(async (source: 'camera' | 'library') => {
     if (!authToken) {
@@ -4291,7 +4403,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                 ) : null}
 
-                {/* Share + Feedback buttons */}
+                {/* Share image + Post-to-Friends-Feed + Feedback buttons.
+                    "Share" exports an image; "Post" sends the structured
+                    workout summary to the friends activity feed (no
+                    kcal/macros/weight ever — privacy boundary). */}
                 <View style={{ flexDirection: 'row', gap: 10 }}>
                   <TouchableOpacity
                     style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
@@ -4300,6 +4415,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     activeOpacity={0.85}>
                     <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
                       {shareLoading ? 'Saving…' : '📤 Share'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
+                    onPress={handlePostToFriendsFeed}
+                    disabled={postingToFeed || summaryLoading}
+                    activeOpacity={0.85}>
+                    <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                      {postingToFeed ? 'Posting…' : '👥 Post'}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -4526,7 +4650,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               )}
             </ScrollView>
 
+            {/* Pending-photo strip: shown when the user has attached a
+                photo to send with the next question. Tap × to clear. */}
+            {coachPendingPhoto && (
+              <View style={styles.coachPhotoStrip}>
+                <Image
+                  source={{ uri: `data:${coachPendingPhoto.mime};base64,${coachPendingPhoto.base64}` }}
+                  style={styles.coachPhotoThumb}
+                />
+                <Text style={styles.coachPhotoStripText}>Photo will be sent with your next question</Text>
+                <TouchableOpacity onPress={() => setCoachPendingPhoto(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.coachPhotoStripClear}>×</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             <View style={styles.coachInputRow}>
+              <TouchableOpacity
+                style={styles.coachAttachBtn}
+                onPress={() => {
+                  Alert.alert(
+                    'Attach photo',
+                    'Send a photo with your question — e.g., a snap of your knee or bar position.',
+                    [
+                      { text: 'Take photo', onPress: () => handleAttachCoachPhoto('camera') },
+                      { text: 'Choose from library', onPress: () => handleAttachCoachPhoto('library') },
+                      { text: 'Cancel', style: 'cancel' },
+                    ],
+                  );
+                }}
+                disabled={coachLoading || coachPhotoLoading}
+                accessibilityLabel="Attach photo"
+              >
+                <Ionicons name="camera-outline" size={20} color={themeColors.textSecondary} />
+              </TouchableOpacity>
               <TextInput
                 value={coachInput}
                 onChangeText={setCoachInput}
@@ -5471,6 +5628,21 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   },
   coachSendBtn: { backgroundColor: tc.primary, borderRadius: radius.md, minWidth: 64, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
   coachSendText: { color: tc.background, fontSize: 13, fontWeight: '700' },
+  coachAttachBtn: {
+    width: 44, height: 44, borderRadius: radius.md, borderWidth: 1,
+    borderColor: tc.border, backgroundColor: tc.background,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  coachPhotoStrip: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 16, paddingTop: 8,
+  },
+  coachPhotoThumb: {
+    width: 44, height: 44, borderRadius: radius.sm,
+    backgroundColor: tc.surfaceRaised,
+  },
+  coachPhotoStripText: { flex: 1, fontSize: 12, color: tc.textSecondary },
+  coachPhotoStripClear: { fontSize: 22, color: tc.textSecondary, paddingHorizontal: 8, fontWeight: '300' },
   addExerciseSearch: {
     marginHorizontal: 16,
     borderWidth: 1,

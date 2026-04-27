@@ -796,7 +796,17 @@ def ask_workout_question(
     body: WorkoutCoachQuestionRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Workout-session scoped coach Q&A focused on form, pain flags, and execution cues."""
+    """Workout-session scoped coach Q&A focused on form, pain flags, and
+    execution cues.
+
+    Optional `image_base64` attaches a photo (e.g., a phone snap of the
+    user's knee position mid-set) — the call routes through gpt-4o-mini's
+    vision endpoint when present. HEIC photos are re-encoded to JPEG on
+    the way in.
+
+    Optional `conversation` carries prior turns of the same coach session
+    so follow-up questions ("what about my back?") don't have to restate
+    context. We cap to the last 6 turns to keep prompt + cost bounded."""
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
@@ -812,6 +822,46 @@ def ask_workout_question(
         "loggedSets": body.loggedSets or [],
     }
 
+    # Build the latest user-turn content. When an image is present,
+    # switch to multipart vision format so gpt-4o-mini can see the
+    # attached photo alongside the textual context.
+    user_text = (
+        f"Workout question:\n{q}\n\n"
+        f"Context JSON:\n{json.dumps(context_blob, ensure_ascii=True)}\n\n"
+        'Return this JSON schema exactly: '
+        '{"answer": string, "quick_cues": [string], "adjustment": string, "safety_note": string}'
+    )
+    if body.image_base64:
+        from .scanning import _fix_image_mime
+        fb64, fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
+        latest_user = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_text},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{fmime};base64,{fb64}",
+                        "detail": "low",
+                    },
+                },
+            ],
+        }
+    else:
+        latest_user = {"role": "user", "content": user_text}
+
+    # Trim conversation to the last 6 turns to keep prompt + cost bounded.
+    # Sanitize: only accept role in {"user","assistant"} with string content.
+    history: list[dict] = []
+    if isinstance(body.conversation, list):
+        for turn in body.conversation[-6:]:
+            if not isinstance(turn, dict):
+                continue
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                history.append({"role": role, "content": content.strip()[:2000]})
+
     _wq_messages = [
         {
             "role": "system",
@@ -819,22 +869,27 @@ def ask_workout_question(
                 "You are an in-workout coach. Scope is limited to form cues, muscle targeting cues, "
                 "load/rep adjustment, pain/injury caution, and immediate substitutions. "
                 "If the user asks unrelated nutrition/lifestyle topics, reply briefly and suggest "
-                "using Ask Trainer from Home for broader planning. Return JSON only."
+                "using Ask Trainer from Home for broader planning. "
+                "When a photo is attached, comment on what you can actually see — joint angles, "
+                "bar path, foot position — and avoid claiming form details the photo doesn't show. "
+                "Return JSON only."
             ),
         },
-        {
-            "role": "user",
-            "content": (
-                f"Workout question:\n{q}\n\n"
-                f"Context JSON:\n{json.dumps(context_blob, ensure_ascii=True)}\n\n"
-                'Return this JSON schema exactly: '
-                '{"answer": string, "quick_cues": [string], "adjustment": string, "safety_note": string}'
-            ),
-        },
+        *history,
+        latest_user,
     ]
+
     client = OpenAI(api_key=api_key)
+    # Slightly higher token budget when an image is present so the
+    # response can carry the additional cue + safety detail vision
+    # input typically warrants. Keep text-only calls tight.
+    _max = 500 if body.image_base64 else 300
     try:
-        kwargs = _build_chat_kwargs(model_chat(), _wq_messages, json_schema=SCHEMA_WORKOUT_QUESTION, max_tokens=300, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_chat(), _wq_messages,
+            json_schema=SCHEMA_WORKOUT_QUESTION,
+            max_tokens=_max, timeout_secs=30,
+        )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:

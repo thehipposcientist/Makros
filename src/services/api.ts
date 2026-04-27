@@ -1810,6 +1810,13 @@ export async function askWorkoutQuestion(
     activeExerciseName?: string;
     currentSetNumber?: number;
     loggedSets?: any[];
+    /** Optional photo, e.g. a snap of the user's knee position. Triggers
+     *  the gpt-4o-mini vision endpoint server-side. */
+    image_base64?: string;
+    mime_type?: string;
+    /** Prior turns of THIS coach session so the AI can answer follow-ups
+     *  without restating context. Backend caps to last 6 turns. */
+    conversation?: { role: 'user' | 'assistant'; content: string }[];
   },
 ): Promise<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }> {
   console.log('[askWorkoutQuestion] SEND →', {
@@ -1817,6 +1824,8 @@ export async function askWorkoutQuestion(
     activeExercise: payload.activeExerciseName,
     currentSet: payload.currentSetNumber,
     loggedSetsCount: payload.loggedSets?.length ?? 0,
+    hasImage: !!payload.image_base64,
+    convoTurns: payload.conversation?.length ?? 0,
   });
 
   const resp = await request<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }>('/ai/workout-question', {

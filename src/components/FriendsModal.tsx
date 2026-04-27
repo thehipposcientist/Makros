@@ -9,7 +9,9 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  LayoutAnimation,
 } from 'react-native';
+import FadeInView from './FadeInView';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
@@ -29,6 +31,7 @@ import {
   type SocialMe,
   type SocialSearchHit,
 } from '../services/api';
+import SocialFeedView from './SocialFeedView';
 
 interface Props {
   visible: boolean;
@@ -58,10 +61,17 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const [digest, setDigest] = useState<SocialDigest | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [hits, setHits] = useState<SocialSearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [requestPending, setRequestPending] = useState<string | null>(null);
   const [showOptIn, setShowOptIn] = useState(false);
+  // Friends/Feed tab. Default to "friends" because it surfaces the
+  // already-loaded digest immediately; the feed lazy-loads on first
+  // tab tap so we don't pay for the round-trip when nobody opens it.
+  const [activeTab, setActiveTab] = useState<'friends' | 'feed'>('friends');
+  // Bumped to force the feed to re-fetch (e.g., after the user posts).
+  const [feedRefreshKey, setFeedRefreshKey] = useState(0);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -132,21 +142,39 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
 
   const onAccept = useCallback(
     async (id: number) => {
+      // Find the requester before the refresh so we can name them in
+      // the success toast — the row disappears from `incoming` after
+      // the refresh and we'd lose the display name.
+      const requester = (list?.pending ?? []).find((p) => p.friendship_id === id);
       try {
         await acceptFriend(authToken, id);
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
         await refresh();
-        if (me && !me.share_activity_enabled) setShowOptIn(true);
+        // Positive feedback: silent acceptance felt broken in user
+        // testing. Haptic + a short "now friends" toast confirms the
+        // accept landed before we surface the share-on opt-in.
+        try {
+          const f = await import('../utils/feedback');
+          f.hapticSuccess?.();
+        } catch { /* feedback module is best-effort */ }
+        if (me && !me.share_activity_enabled) {
+          setShowOptIn(true);
+        } else if (requester) {
+          const name = requester.display_name ?? requester.username;
+          Alert.alert("You're now friends", `${name} can now see your training activity (if sharing is on).`);
+        }
       } catch (e: any) {
         Alert.alert('Could not accept', e?.message ?? 'Try again');
       }
     },
-    [authToken, me, refresh],
+    [authToken, me, list, refresh],
   );
 
   const onReject = useCallback(
     async (id: number) => {
       try {
         await rejectFriend(authToken, id);
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
         await refresh();
       } catch (e: any) {
         Alert.alert('Could not reject', e?.message ?? 'Try again');
@@ -237,7 +265,49 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         </View>
       )}
 
-      {loading && !list ? (
+      {/* Friends / Feed tab strip. The Feed tab renders the activity
+          feed (post-workout shares from friends) backed by the
+          /social/feed endpoint that's been live but unused for months. */}
+      <View style={styles.tabStrip}>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
+          onPress={() => setActiveTab('friends')}
+        >
+          <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
+            Friends{friends.length > 0 ? `  ·  ${friends.length}` : ''}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'feed' && styles.tabActive]}
+          onPress={() => setActiveTab('feed')}
+        >
+          <Text style={[styles.tabText, activeTab === 'feed' && styles.tabTextActive]}>
+            Feed
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {activeTab === 'feed' ? (
+        <SocialFeedView
+          authToken={authToken}
+          themeName={themeName}
+          refreshKey={feedRefreshKey}
+          onViewAuthor={(uid, displayName) => {
+            // Reuse the existing friend-detail surface — find the
+            // matching digest entry so the parent can render their
+            // streak/sessions. If they're not in the digest (e.g.,
+            // not a friend yet) we still call onViewFriend so the
+            // parent can decide what to do.
+            const df = digest?.friends.find((d) => d.user_id === uid);
+            const digestFriend = df ?? {
+              user_id: uid, username: '', display_name: displayName,
+              goal: null, share_enabled: true,
+              sessions: 0, streak: 0, last_active_within_48h: false,
+            };
+            onViewFriend?.(uid, displayName, digestFriend);
+          }}
+        />
+      ) : loading && !list ? (
             <View style={{ padding: 24, alignItems: 'center' }}>
               <ActivityIndicator color={colors.primary} />
             </View>
@@ -284,8 +354,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               {incoming.length > 0 ? (
                 <View style={styles.section}>
                   <Text style={styles.sectionLabel}>REQUESTS</Text>
-                  {incoming.map((p) => (
-                    <View key={p.friendship_id} style={styles.friendRow}>
+                  {incoming.map((p, i) => (
+                    <FadeInView key={p.friendship_id} delay={i * 50} duration={250} slideDistance={6}>
+                    <View style={styles.friendRow}>
                       <View style={styles.avatar}>
                         <Text style={styles.avatarText}>
                           {(p.display_name?.[0] ?? p.username[0] ?? '?').toUpperCase()}
@@ -295,13 +366,14 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                         <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
                         <Text style={styles.friendMeta}>@{p.username}</Text>
                       </View>
-                      <TouchableOpacity style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
+                      <TouchableOpacity activeOpacity={0.75} style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
                         <Text style={styles.btnSecondaryText}>Decline</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.btnPrimary} onPress={() => onAccept(p.friendship_id)}>
+                      <TouchableOpacity activeOpacity={0.75} style={styles.btnPrimary} onPress={() => onAccept(p.friendship_id)}>
                         <Text style={styles.btnPrimaryText}>Accept</Text>
                       </TouchableOpacity>
                     </View>
+                    </FadeInView>
                   ))}
                 </View>
               ) : null}
@@ -384,8 +456,8 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               {/* Add friends */}
               <View style={styles.section}>
                 <Text style={styles.sectionLabel}>ADD FRIENDS</Text>
-                <View style={styles.searchRow}>
-                  <Ionicons name="search" size={16} color={colors.textMuted} />
+                <View style={[styles.searchRow, searchFocused && { borderColor: colors.primary, borderWidth: 1.5 }]}>
+                  <Ionicons name="search" size={16} color={searchFocused ? colors.primary : colors.textMuted} />
                   <TextInput
                     style={styles.searchInput}
                     placeholder="Search by username"
@@ -394,6 +466,8 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                     autoCorrect={false}
                     value={search}
                     onChangeText={setSearch}
+                    onFocus={() => setSearchFocused(true)}
+                    onBlur={() => setSearchFocused(false)}
                   />
                   {searching ? <ActivityIndicator size="small" color={colors.textMuted} /> : null}
                 </View>
@@ -502,6 +576,23 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: spacing.md,
     },
     title: { fontSize: 20, fontWeight: '800', color: colors.textPrimary },
+    tabStrip: {
+      flexDirection: 'row',
+      gap: 4,
+      marginBottom: spacing.md,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.border,
+    },
+    tab: {
+      paddingVertical: 10,
+      paddingHorizontal: 16,
+      borderBottomWidth: 2,
+      borderBottomColor: 'transparent',
+      marginBottom: -1,
+    },
+    tabActive: { borderBottomColor: colors.primary },
+    tabText: { fontSize: 13, fontWeight: '600', color: colors.textMuted, letterSpacing: 0.3 },
+    tabTextActive: { color: colors.primary },
     card: {
       backgroundColor: colors.surface,
       borderColor: colors.border,

@@ -174,7 +174,7 @@ function InputModal({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <TouchableOpacity style={im.backdrop} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity style={im.backdrop} activeOpacity={0.7} onPress={onClose}>
           <View style={im.sheet}>
             <View style={im.handle} />
             <Text style={im.title}>{title}</Text>
@@ -255,7 +255,7 @@ function AddFoodModal({ visible, onAdd, onClose, themeColors: c }: AddFoodModalP
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <TouchableOpacity style={im.backdrop} activeOpacity={1} onPress={handleClose}>
+        <TouchableOpacity style={im.backdrop} activeOpacity={0.7} onPress={handleClose}>
           <View style={im.sheet}>
             <View style={im.handle} />
             <Text style={im.title}>Add Food</Text>
@@ -1692,7 +1692,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         {/* Add Injury Modal */}
         <Modal visible={showAddInjury} transparent animationType="slide" onRequestClose={() => setShowAddInjury(false)}>
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-            <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowAddInjury(false)}>
+            <TouchableOpacity style={styles.modalBackdrop} activeOpacity={0.7} onPress={() => setShowAddInjury(false)}>
               <View style={[styles.modalSheet, { backgroundColor: tc.surface, borderTopColor: tc.border }]} onStartShouldSetResponder={() => true}>
                 <Text style={[styles.modalTitle, { color: tc.textPrimary }]}>Add Injury / Limitation</Text>
                 <Text style={[styles.sectionHint, { marginBottom: 12 }]}>Your trainer will avoid movements that aggravate this area.</Text>
@@ -2016,6 +2016,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           )}
           <TouchableOpacity
+            activeOpacity={0.75}
             style={[styles.addInjuryBtn, { borderColor: tc.border }]}
             onPress={() => { setInjuryDesc(''); setInjuryBodyPart(''); setShowAddInjury(true); }}>
             <Text style={[styles.addInjuryBtnText, { color: tc.primary }]}>+ Add Injury / Limitation</Text>

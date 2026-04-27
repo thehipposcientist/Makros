@@ -80,39 +80,76 @@ def compute_digest(
         "streak": _streak_days(you_dates, today),
     }
 
-    friends_payload: list[dict] = []
-    for fid in friend_ids:
-        # Respect each friend's share toggle. Friends who haven't opted in
-        # appear in the list but with sessions hidden.
-        prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == fid)).first()
-        share = bool(prof and prof.share_activity_enabled)
+    # Bulk-load every per-friend table in 4 queries instead of looping
+    # 4 queries per friend. With 20 friends this drops 80+ round trips
+    # to ~5 (profiles, users, goals, completions, friend-IDs already in
+    # hand). Soft-deleted users are filtered out at the user join.
+    if not friend_ids:
+        friends_payload: list[dict] = []
+    else:
+        from sqlmodel import col
+        profs_by_user: dict[int, UserSocialProfile] = {}
+        for p in db.exec(
+            select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(friend_ids))
+        ).all():
+            profs_by_user[p.user_id] = p
+        users_by_id: dict[int, User] = {}
+        for u in db.exec(
+            select(User)
+            .where(col(User.id).in_(friend_ids))
+            .where(User.is_active == True)  # noqa: E712  hide deactivated accounts
+        ).all():
+            users_by_id[u.id] = u
+        goals_by_user: dict[int, UserGoal] = {}
+        for g in db.exec(
+            select(UserGoal)
+            .where(col(UserGoal.user_id).in_(friend_ids))
+            .where(UserGoal.is_active == True)  # noqa: E712
+        ).all():
+            # Multiple active rows shouldn't exist but pick the first deterministically.
+            goals_by_user.setdefault(g.user_id, g)
 
-        user_row = db.exec(select(User).where(User.id == fid)).first()
-        if not user_row:
-            continue
-        goal_row = db.exec(
-            select(UserGoal).where(UserGoal.user_id == fid, UserGoal.is_active == True)  # noqa: E712
-        ).first()
+        # Single aggregated query for all friends' completion dates in window.
+        rows = db.exec(
+            select(WorkoutCompletion.user_id, WorkoutCompletion.workout_date).where(
+                col(WorkoutCompletion.user_id).in_(friend_ids),
+                WorkoutCompletion.workout_date >= window_start,
+                WorkoutCompletion.workout_date <= today,
+            )
+        ).all()
+        dates_by_user: dict[int, set[date]] = {}
+        for uid, d in rows:
+            dates_by_user.setdefault(uid, set()).add(d)
 
-        if share:
-            f_dates = _completion_dates(db, fid, window_start, today)
-            sessions = len(f_dates)
-            streak = _streak_days(f_dates, today)
-            la = _last_active(f_dates, today)
-            active_48h = bool(la and la >= cutoff_48h)
-        else:
-            sessions, streak, active_48h = 0, 0, False
+        friends_payload = []
+        for fid in friend_ids:
+            user_row = users_by_id.get(fid)
+            if not user_row:
+                # Soft-deleted or missing — drop silently from the list.
+                continue
+            prof = profs_by_user.get(fid)
+            share = bool(prof and prof.share_activity_enabled)
+            goal_row = goals_by_user.get(fid)
 
-        friends_payload.append({
-            "user_id": fid,
-            "username": user_row.username,
-            "display_name": (prof.display_name if prof and prof.display_name else user_row.username),
-            "goal": goal_row.goal_type.value if goal_row else None,
-            "share_enabled": share,
-            "sessions": sessions,
-            "streak": streak,
-            "last_active_within_48h": active_48h,
-        })
+            if share:
+                f_dates = dates_by_user.get(fid, set())
+                sessions = len(f_dates)
+                streak = _streak_days(f_dates, today)
+                la = _last_active(f_dates, today)
+                active_48h = bool(la and la >= cutoff_48h)
+            else:
+                sessions, streak, active_48h = 0, 0, False
+
+            friends_payload.append({
+                "user_id": fid,
+                "username": user_row.username,
+                "display_name": (prof.display_name if prof and prof.display_name else user_row.username),
+                "goal": goal_row.goal_type.value if goal_row else None,
+                "share_enabled": share,
+                "sessions": sessions,
+                "streak": streak,
+                "last_active_within_48h": active_48h,
+            })
 
     sharing = [f for f in friends_payload if f["share_enabled"]]
     trained = [f for f in sharing if f["sessions"] > 0]

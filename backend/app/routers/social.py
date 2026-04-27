@@ -121,7 +121,12 @@ def _friendship_between(db: Session, a: int, b: int) -> Friendship | None:
 
 
 def _hydrate_friend(db: Session, viewer_id: int, other_id: int, friendship_id: int, *, include_streak: bool = True) -> FriendRead:
-    other = db.exec(select(User).where(User.id == other_id)).first()
+    # Filter `is_active=True` to hide soft-deleted users from any social
+    # surface (lists, search, feed). Deactivated rows still exist in DB
+    # so referential integrity holds, but they must not leak.
+    other = db.exec(
+        select(User).where(User.id == other_id, User.is_active == True)  # noqa: E712
+    ).first()
     if not other:
         raise HTTPException(404, "user not found")
     prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == other_id)).first()
@@ -212,7 +217,9 @@ def list_friends(
         if r.status == "accepted":
             friends.append(_hydrate_friend(db, current_user.id, other_id, r.id))
         elif r.status == "pending":
-            other = db.exec(select(User).where(User.id == other_id)).first()
+            other = db.exec(
+                select(User).where(User.id == other_id, User.is_active == True)  # noqa: E712
+            ).first()
             if not other:
                 continue
             prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == other_id)).first()
@@ -235,7 +242,9 @@ def request_friend(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    target = db.exec(select(User).where(User.username == body.username)).first()
+    target = db.exec(
+        select(User).where(User.username == body.username, User.is_active == True)  # noqa: E712
+    ).first()
     if not target:
         raise HTTPException(404, "user not found")
     if target.id == current_user.id:
@@ -385,6 +394,7 @@ def search_users(
         select(User)
         .where(User.username.ilike(f"{needle}%"))
         .where(User.id != current_user.id)
+        .where(User.is_active == True)  # noqa: E712  hide soft-deleted accounts
         .limit(10)
     ).all()
     out: list[SearchHit] = []
@@ -496,17 +506,36 @@ def get_feed(
         ).all()
         liked_by_me = set(my_likes)
 
+    # Bulk-load user + profile rows for every author in `rows` so the
+    # feed render is one query each instead of N+1. Soft-deleted users
+    # don't make the cache → their items render as "unknown" and the
+    # client can decide whether to filter them.
     user_cache: dict[int, tuple[str, str | None]] = {}
-    items: list[dict] = []
-    for r in rows:
-        if r.user_id not in user_cache:
-            u = db.exec(select(User).where(User.id == r.user_id)).first()
-            p = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == r.user_id)).first()
-            user_cache[r.user_id] = (
+    if rows:
+        from sqlmodel import col
+        author_ids = list({r.user_id for r in rows})
+        users_by_id = {
+            u.id: u for u in db.exec(
+                select(User)
+                .where(col(User.id).in_(author_ids))
+                .where(User.is_active == True)  # noqa: E712
+            ).all()
+        }
+        profs_by_id = {
+            p.user_id: p for p in db.exec(
+                select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(author_ids))
+            ).all()
+        }
+        for uid in author_ids:
+            u = users_by_id.get(uid)
+            p = profs_by_id.get(uid)
+            user_cache[uid] = (
                 u.username if u else "unknown",
                 p.display_name if p and p.display_name else None,
             )
-        uname, dname = user_cache[r.user_id]
+    items: list[dict] = []
+    for r in rows:
+        uname, dname = user_cache.get(r.user_id, ("unknown", None))
         items.append({
             "id": r.id,
             "user_id": r.user_id,
@@ -568,7 +597,9 @@ def get_user_feed(
         ).all()
         liked_by_me = set(my_likes)
 
-    u = db.exec(select(User).where(User.id == user_id)).first()
+    u = db.exec(
+        select(User).where(User.id == user_id, User.is_active == True)  # noqa: E712
+    ).first()
     p = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == user_id)).first()
     uname = u.username if u else "unknown"
     dname = p.display_name if p and p.display_name else None

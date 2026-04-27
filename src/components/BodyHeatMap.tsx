@@ -55,6 +55,10 @@ export default function BodyHeatMap({ recovery, themeName, height = 260 }: Props
 
   // Subtle opacity pulse on the currently-selected muscle for visual feedback.
   const pulse = useRef(new Animated.Value(1)).current;
+  // Scale pulse on the whole figure when a muscle is tapped — adds a tactile
+  // "thump" beneath the per-muscle opacity flash so the selection registers
+  // through the user's eye even if the colored fill is subtle.
+  const tapScale = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (!selected) return;
     pulse.setValue(0.55);
@@ -64,19 +68,38 @@ export default function BodyHeatMap({ recovery, themeName, height = 260 }: Props
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start();
-  }, [selected, pulse]);
-
-  // Fade-in of the whole figure on mount / side flip.
-  const figureOpacity = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    figureOpacity.setValue(0);
-    Animated.timing(figureOpacity, {
+    tapScale.setValue(0.985);
+    Animated.spring(tapScale, {
       toValue: 1,
-      duration: 300,
-      easing: Easing.out(Easing.cubic),
+      damping: 12,
+      stiffness: 220,
+      mass: 0.4,
       useNativeDriver: true,
     }).start();
-  }, [side, figureOpacity]);
+  }, [selected, pulse, tapScale]);
+
+  // Fade-in of the whole figure on mount / side flip + small scale to
+  // sell depth on the flip (figure leans in from 0.95).
+  const figureOpacity = useRef(new Animated.Value(0)).current;
+  const figureScale   = useRef(new Animated.Value(0.95)).current;
+  useEffect(() => {
+    figureOpacity.setValue(0);
+    figureScale.setValue(0.95);
+    Animated.parallel([
+      Animated.timing(figureOpacity, {
+        toValue: 1,
+        duration: 300,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(figureScale, {
+        toValue: 1,
+        duration: 320,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [side, figureOpacity, figureScale]);
 
   const recoveryFor = (m: HeatMuscleKey): number => {
     const v = recovery[m];
@@ -169,7 +192,7 @@ export default function BodyHeatMap({ recovery, themeName, height = 260 }: Props
       </View>
 
       <View style={{ alignItems: 'center' }}>
-        <Animated.View style={{ opacity: figureOpacity }}>
+        <Animated.View style={{ opacity: figureOpacity, transform: [{ scale: Animated.multiply(figureScale, tapScale) }] }}>
           <Svg width={height * (200 / 360)} height={height} viewBox="0 0 200 360">
             {/* Head */}
             <Ellipse cx="100" cy="34" rx="22" ry="24" fill={tc.surfaceRaised} stroke={strokeColor} strokeWidth={strokeW} />

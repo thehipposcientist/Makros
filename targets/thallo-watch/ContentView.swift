@@ -189,6 +189,14 @@ struct ContentView: View {
                     }
                 )
                 .navigationBarBackButtonHidden(true)
+                // CRITICAL: navigationDestination(isPresented:) does NOT propagate
+                // @EnvironmentObject to its destination on watchOS 9+. Without these
+                // explicit injections, ActiveWorkoutView crashes on first render with
+                // "No ObservableObject of type ThemeStore found" — and because the
+                // phone's applicationContext retains status:active, every relaunch
+                // re-presents the same crashing view (the "can't get back in" loop).
+                .environmentObject(conn)
+                .environmentObject(theme)
             }
         }
         .onAppear {

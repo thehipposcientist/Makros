@@ -6,17 +6,63 @@
 //
 // No hormone names. No scores. Ever.
 
-import { useCallback, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, Modal, ScrollView, Platform } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, Modal, ScrollView, Platform, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { getRecoveryFlags, RecoveryFlag } from '../services/api';
+import FadeInView from './FadeInView';
 
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
   thyroidOptIn?: boolean;
+}
+
+/** 8px alert dot with a soft, looping pulse — opacity 1.0 → 0.55 → 1.0
+ *  paired with a subtle 1.0 → 1.4 → 1.0 scale halo. Only shown on the
+ *  fueling-recovery summary row so the eye is drawn to actionable
+ *  signals without nagging when everything is green. */
+function PulsingDot({ color }: { color: string }) {
+  const opacity = useRef(new Animated.Value(1)).current;
+  const haloScale = useRef(new Animated.Value(1)).current;
+  const haloOpacity = useRef(new Animated.Value(0.5)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(opacity, { toValue: 0.55, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+          Animated.timing(opacity, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        ]),
+        Animated.sequence([
+          Animated.parallel([
+            Animated.timing(haloScale,   { toValue: 1.8, duration: 1100, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+            Animated.timing(haloOpacity, { toValue: 0,   duration: 1100, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          ]),
+          Animated.parallel([
+            Animated.timing(haloScale,   { toValue: 1,   duration: 0, useNativeDriver: true }),
+            Animated.timing(haloOpacity, { toValue: 0.5, duration: 0, useNativeDriver: true }),
+          ]),
+          Animated.delay(300),
+        ]),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity, haloScale, haloOpacity]);
+  return (
+    <View style={{ width: 8, height: 8, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{
+        position: 'absolute', width: 8, height: 8, borderRadius: 4,
+        backgroundColor: color, opacity: haloOpacity,
+        transform: [{ scale: haloScale }],
+      }} />
+      <Animated.View style={{
+        width: 8, height: 8, borderRadius: 4, backgroundColor: color, opacity,
+      }} />
+    </View>
+  );
 }
 
 export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn }: Props) {
@@ -60,9 +106,7 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
           borderWidth: 1, borderColor: badgeColor + '44',
         }}
       >
-        <View style={{
-          width: 8, height: 8, borderRadius: 4, backgroundColor: badgeColor,
-        }} />
+        <PulsingDot color={badgeColor} />
         <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
           {actionable.length === 1
             ? `${worst.label} needs attention`
@@ -100,7 +144,11 @@ function FuelingRecoveryModal({
           </TouchableOpacity>
         </View>
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12 }}>
-          {flags.map(f => <FlagCard key={f.key} flag={f} tc={tc} />)}
+          {flags.map((f, i) => (
+            <FadeInView key={f.key} delay={i * 60} duration={260} slideDistance={8}>
+              <FlagCard flag={f} tc={tc} />
+            </FadeInView>
+          ))}
           <View style={{
             marginTop: 8, padding: 12, borderRadius: radius.md,
             backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,

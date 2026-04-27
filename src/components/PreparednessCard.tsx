@@ -8,8 +8,8 @@
 //   - backend /meals/averages (protein/calorie rolling)
 //   - local workout history (yesterday's training minutes)
 
-import { useCallback, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, Platform, UIManager } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, Platform, UIManager, Animated, Easing } from 'react-native';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
@@ -18,6 +18,59 @@ import { scorePreparedness, PreparednessResult } from '../services/preparedness'
 import { loadSleepHistory, getCycleStatus } from '../services/appleHealth';
 import { getFatigueScore, getMealAverages } from '../services/api';
 import { loadWorkoutHistory, loadHealthSummary } from '../utils/workoutHistory';
+import FadeInView from './FadeInView';
+
+/** Pillar bar with animated width AND animated color crossfade between
+ *  threshold tiers. The track holds a base layer at the new color and
+ *  fades the previous color over it during transitions so the eye sees
+ *  one bar shifting hue, not a hard swap on the threshold boundary. */
+function AnimatedPillarBar({ pct, color, trackColor }: { pct: number; color: string; trackColor: string }) {
+  const widthAnim = useRef(new Animated.Value(0)).current;
+  const lastWidth = useRef(0);
+  const [prevColor, setPrevColor] = useState<string>(color);
+  const [activeColor, setActiveColor] = useState<string>(color);
+  const fade = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(widthAnim, {
+      toValue: pct,
+      duration: 600,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+    lastWidth.current = pct;
+  }, [pct, widthAnim]);
+
+  useEffect(() => {
+    if (color === activeColor) return;
+    setPrevColor(activeColor);
+    setActiveColor(color);
+    fade.setValue(1);
+    Animated.timing(fade, {
+      toValue: 0,
+      duration: 380,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: false,
+    }).start();
+  }, [color, activeColor, fade]);
+
+  return (
+    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: trackColor, overflow: 'hidden' }}>
+      <Animated.View style={{
+        width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+        height: 5, borderRadius: 3, backgroundColor: activeColor,
+      }}>
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: prevColor, opacity: fade,
+          }}
+        />
+      </Animated.View>
+    </View>
+  );
+}
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -170,29 +223,26 @@ export default function PreparednessCard({
 
       {expanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
-          {pillarRows.map(({ label, pts, max, missingKey }) => {
+          {pillarRows.map(({ label, pts, max, missingKey }, rowIdx) => {
             const isMissing = result.missing.includes(missingKey);
             const pct = Math.max(0, Math.min(1, pts / max));
             const barColor = pct >= 0.75 ? tc.success : pct >= 0.50 ? tc.primary : pct >= 0.30 ? tc.warning : tc.error;
             return (
-              <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <FadeInView key={label} delay={rowIdx * 35} duration={240} slideDistance={4}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                   {label}
                 </Text>
                 {isMissing ? (
                   <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border, opacity: 0.4 }} />
                 ) : (
-                  <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                    <View style={{
-                      width: `${Math.max(3, pct * 100)}%` as any,
-                      height: 5, borderRadius: 3, backgroundColor: barColor,
-                    }} />
-                  </View>
+                  <AnimatedPillarBar pct={Math.max(3, pct * 100)} color={barColor} trackColor={tc.border} />
                 )}
                 <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: isMissing ? tc.textMuted : tc.textSecondary, textAlign: 'right' }}>
                   {isMissing ? '—' : `${pts}/${max}`}
                 </Text>
               </View>
+              </FadeInView>
             );
           })}
           {result.insights.length > 1 && (

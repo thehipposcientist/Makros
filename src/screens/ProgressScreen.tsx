@@ -731,6 +731,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 if (trend.length < 2) {
                   return (
                     <View style={styles.emptyBox}>
+                      <Ionicons name="trending-up-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
                       <Text style={styles.emptyTitle}>Not enough data</Text>
                       <Text style={styles.emptyBody}>Complete at least 2 sessions with {selectedExercise} to see a trend.</Text>
                     </View>
@@ -1254,7 +1255,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     ? Math.round(pr.weightLbs * (1 + pr.reps / 30))
                     : null;
                   return (
-                    <View key={i} style={styles.prCard}>
+                    <FadeInView key={i} delay={Math.min(i * 35, 350)} duration={260} slideDistance={6}>
+                    <View style={styles.prCard}>
                       <View style={styles.prLeft}>
                         <Text style={styles.prName}>{pr.exerciseName}</Text>
                         <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
@@ -1270,6 +1272,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={styles.prReps}>{pr.reps} reps</Text>
                       </View>
                     </View>
+                    </FadeInView>
                   );
                 })}
               </>

@@ -288,7 +288,7 @@ export default function NutritionCard({
         {/* Day score — tap to open combined nutrition modal */}
         {dayScore.score > 0 && (() => {
           const sc = dayScore;
-          const scoreColor = sc.score >= 70 ? '#22C55E' : sc.score >= 45 ? '#F59E0B' : '#EF4444';
+          const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
           return (
             <TouchableOpacity
               activeOpacity={0.7}
@@ -320,9 +320,9 @@ export default function NutritionCard({
                     {chips.map((c, i) => (
                       <View key={i} style={{
                         paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12,
-                        backgroundColor: (c.win ? '#22C55E' : '#F59E0B') + '18',
+                        backgroundColor: (c.win ? colors.success : colors.warning) + '18',
                       }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: c.win ? '#22C55E' : '#F59E0B' }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: c.win ? colors.success : colors.warning }}>
                           {c.win ? '✓ ' : '⚠ '}{c.text}
                         </Text>
                       </View>
@@ -353,7 +353,7 @@ export default function NutritionCard({
                 {/* ── Section 1: Nutrition Score ── */}
                 {dayScore.score > 0 && (() => {
                   const sc = dayScore;
-                  const scoreColor = sc.score >= 70 ? '#22C55E' : sc.score >= 45 ? '#F59E0B' : '#EF4444';
+                  const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
                   return (
                     <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 }}>
@@ -368,9 +368,9 @@ export default function NutritionCard({
                         </View>
                       </View>
                       {[
-                        { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? '#22C55E' : sc.adherence >= 45 ? '#F59E0B' : '#EF4444' },
-                        { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? '#22C55E' : sc.quality >= 45 ? '#F59E0B' : '#EF4444' },
-                        { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? '#22C55E' : sc.micro >= 45 ? '#F59E0B' : '#EF4444' },
+                        { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? colors.success : sc.adherence >= 45 ? colors.warning : colors.error },
+                        { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? colors.success : sc.quality >= 45 ? colors.warning : colors.error },
+                        { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? colors.success : sc.micro >= 45 ? colors.warning : colors.error },
                       ].map(sub => (
                         <View key={sub.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                           <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textSecondary, width: 85 }}>{sub.label}</Text>
@@ -403,14 +403,14 @@ export default function NutritionCard({
                         <View style={{ marginTop: 6, gap: 3 }}>
                           {sc.wins.map(w => (
                             <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                              <Ionicons name="checkmark-circle" size={12} color="#22C55E" />
-                              <Text style={{ fontSize: 10, color: '#22C55E', fontWeight: '600' }}>{w}</Text>
+                              <Ionicons name="checkmark-circle" size={12} color={colors.success} />
+                              <Text style={{ fontSize: 10, color: colors.success, fontWeight: '600' }}>{w}</Text>
                             </View>
                           ))}
                           {sc.improvements.map(imp => (
                             <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                              <Ionicons name="arrow-up-circle" size={12} color="#F59E0B" />
-                              <Text style={{ fontSize: 10, color: '#F59E0B', fontWeight: '600' }}>{imp}</Text>
+                              <Ionicons name="arrow-up-circle" size={12} color={colors.warning} />
+                              <Text style={{ fontSize: 10, color: colors.warning, fontWeight: '600' }}>{imp}</Text>
                             </View>
                           ))}
                         </View>
@@ -434,7 +434,7 @@ export default function NutritionCard({
                       </Text>
                     </View>
                     {dayScore.quality_breakdown.map(b => {
-                      const c = b.on_track ? '#22C55E' : b.value_pct >= 50 ? '#F59E0B' : '#EF4444';
+                      const c = b.on_track ? colors.success : b.value_pct >= 50 ? colors.warning : colors.error;
                       return (
                         <View key={b.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 }}>
                           <Text style={{ width: 120, fontSize: 11, fontWeight: '600', color: colors.textSecondary }}>{b.label}</Text>
@@ -694,10 +694,10 @@ export default function NutritionCard({
                 <View style={{ flexDirection: 'row', gap: 16, paddingVertical: 12, justifyContent: 'center' }}>
                   {[
                     { label: 'On track', color: colors.primary },
-                    { label: 'Below target', color: '#F59E0B' },
+                    { label: 'Below target', color: colors.warning },
                     { label: 'Above target', color: colors.error },
-                    { label: 'Whole', color: '#22C55E' },
-                    { label: 'Processed', color: '#EF4444' },
+                    { label: 'Whole', color: colors.success },
+                    { label: 'Processed', color: colors.error },
                   ].map(l => (
                     <View key={l.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: l.color }} />

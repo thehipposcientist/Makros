@@ -1,9 +1,32 @@
-import { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { getAdherenceTrend, getStreak, AdherenceWeek, StreakSummary } from '../services/api';
+
+/** A single week's column whose height eases up from 0 → target on mount,
+ *  with a per-bar delay so the row sweeps left → right like a stadium wave. */
+function AnimatedWeekBar({ height, color, delay }: { height: number; color: string; delay: number }) {
+  const h = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(h, {
+      toValue: height,
+      duration: 600,
+      delay,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [height, delay, h]);
+  return (
+    <Animated.View style={{
+      width: '65%',
+      height: h,
+      borderRadius: 4,
+      backgroundColor: color,
+    }} />
+  );
+}
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -122,19 +145,14 @@ export default function AdherenceTrendCard({ authToken, themeName }: Props) {
             gap: 4,
             height: 120,
           }}>
-            {weeks.map((w) => {
+            {weeks.map((w, wIdx) => {
               const h = maxPct > 0 ? Math.max(6, (w.compliance_pct / 100) * 100) : 6;
               return (
                 <View key={w.week_start} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', gap: 3 }}>
                   <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted }}>
                     {w.completed}/{w.planned}
                   </Text>
-                  <View style={{
-                    width: '65%',
-                    height: h,
-                    borderRadius: 4,
-                    backgroundColor: barColor(w.compliance_pct),
-                  }} />
+                  <AnimatedWeekBar height={h} color={barColor(w.compliance_pct)} delay={wIdx * 60} />
                   <Text style={{ fontSize: 8, color: tc.textMuted }}>
                     {formatWeekLabel(w.week_start)}
                   </Text>

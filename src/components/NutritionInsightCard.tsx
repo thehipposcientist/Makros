@@ -1,6 +1,8 @@
-import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, UIManager } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, UIManager, Animated } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { configureExpandAnimation } from '../utils/layoutAnim';
+import FadeInView from './FadeInView';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -102,6 +104,17 @@ function warningLabel(key: string, direction: 'min' | 'max', severity: 'critical
 
 export default function NutritionInsightCard({ insight, themeColors, meals, window }: Props) {
   const [expanded, setExpanded] = useState(false);
+
+  // Smooth chevron rotation tied to expand state. 0 = collapsed (▼),
+  // 1 = expanded (▲ — 180° flip on the down-chevron icon).
+  const chevronAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(chevronAnim, {
+      toValue: expanded ? 1 : 0,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, chevronAnim]);
   // Severity → theme semantic. The insight card is a shared component
   // without a direct theme handle; callers already pass `themeColors`
   // (the prop-bundle version of tc). `warning` for critical,
@@ -157,7 +170,9 @@ export default function NutritionInsightCard({ insight, themeColors, meals, wind
           <Text style={[styles.severity, { color: accent }]}>
             {statusLabel}
           </Text>
-          <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{expanded ? '▲' : '▼'}</Text>
+          <Animated.View style={{ transform: [{ rotate: chevronAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] }) }] }}>
+            <Ionicons name="chevron-down" size={14} color={themeColors.textMuted} />
+          </Animated.View>
         </View>
       </View>
       <Text style={[styles.numbers, { color: themeColors.textSecondary }]}>
@@ -178,7 +193,8 @@ export default function NutritionInsightCard({ insight, themeColors, meals, wind
                 {isOver ? 'Biggest contributors' : 'Current sources'}
               </Text>
               {culprits.slice(0, 5).map((c, i) => (
-                <View key={`${c.food}-${i}`} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4, borderBottomWidth: i < Math.min(culprits.length, 5) - 1 ? 1 : 0, borderBottomColor: themeColors.border }}>
+                <FadeInView key={`${c.food}-${i}`} delay={i * 50} duration={240} slideDistance={4}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4, borderBottomWidth: i < Math.min(culprits.length, 5) - 1 ? 1 : 0, borderBottomColor: themeColors.border }}>
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontSize: 13, color: themeColors.textPrimary, fontWeight: '500' }} numberOfLines={1}>{c.food}</Text>
                     {c.meal ? <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{c.meal}</Text> : null}
@@ -187,6 +203,7 @@ export default function NutritionInsightCard({ insight, themeColors, meals, wind
                     {c.amount < 10 ? (Math.round(c.amount * 10) / 10) : Math.round(c.amount)}{insight.unit}
                   </Text>
                 </View>
+                </FadeInView>
               ))}
             </View>
           )}
@@ -202,10 +219,12 @@ export default function NutritionInsightCard({ insight, themeColors, meals, wind
                 {isOver ? 'Lower-' + insight.label.toLowerCase() + ' swaps' : 'Foods rich in ' + insight.label.toLowerCase()}
               </Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                {suggestions.slice(0, 6).map(f => (
-                  <View key={f} style={{ backgroundColor: (isOver ? accent : themeColors.primary) + '20', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 }}>
+                {suggestions.slice(0, 6).map((f, sIdx) => (
+                  <FadeInView key={f} delay={150 + sIdx * 50} duration={220} slideDistance={4}>
+                  <View style={{ backgroundColor: (isOver ? accent : themeColors.primary) + '20', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 }}>
                     <Text style={{ fontSize: 12, color: isOver ? accent : themeColors.primary, fontWeight: '600' }}>{f}</Text>
                   </View>
+                  </FadeInView>
                 ))}
               </View>
             </View>

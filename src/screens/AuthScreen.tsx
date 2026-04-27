@@ -1,11 +1,12 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions, Alert,
+  Platform, Image, Dimensions, Alert, Animated,
 } from 'react-native';
 import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
+import FadeInView from '../components/FadeInView';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white.png');
@@ -44,6 +45,17 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const confirmPasswordRef = useRef<TextInput>(null);
   const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
+
+  // Sliding pill indicator behind the Login/Sign Up toggle. 0 = login,
+  // 1 = signup. Reset modes share the login slot so the pill stays parked.
+  const togglePos = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(togglePos, {
+      toValue: mode === 'signup' ? 1 : 0,
+      duration: 220,
+      useNativeDriver: false,
+    }).start();
+  }, [mode, togglePos]);
 
   const switchMode = (next: 'login' | 'signup' | 'reset_email' | 'reset_answer') => {
     setMode(next);
@@ -162,15 +174,23 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
         {/* Auth form */}
         <View style={styles.formCard}>
-          {/* Login / Sign Up toggle */}
+          {/* Login / Sign Up toggle — sliding pill indicator */}
           <View style={styles.toggle}>
+            <Animated.View
+              pointerEvents="none"
+              style={[styles.toggleIndicator, {
+                left: togglePos.interpolate({ inputRange: [0, 1], outputRange: ['0%', '50%'] }),
+              }]}
+            />
             <TouchableOpacity
-              style={[styles.toggleButton, mode === 'login' && styles.toggleActive]}
+              activeOpacity={0.75}
+              style={styles.toggleButton}
               onPress={() => switchMode('login')}>
               <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Log In</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.toggleButton, mode === 'signup' && styles.toggleActive]}
+              activeOpacity={0.75}
+              style={styles.toggleButton}
               onPress={() => switchMode('signup')}>
               <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Sign Up</Text>
             </TouchableOpacity>
@@ -197,7 +217,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 blurOnSubmit={false}
               />
               {signupDisabled && (
-                <Text style={styles.inlineError}>Enter a valid email address</Text>
+                <FadeInView duration={200} slideDistance={4}>
+                  <Text style={styles.inlineError}>Enter a valid email address</Text>
+                </FadeInView>
               )}
             </>
           )}
@@ -257,7 +279,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
                 blurOnSubmit={false}
               />
-              <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
+              <TouchableOpacity style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
@@ -277,7 +299,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 returnKeyType="next"
                 onSubmitEditing={() => mode === 'signup' ? answerRef.current?.focus() : handleSubmit()}
               />
-              <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowConfirmPassword(v => !v)}>
+              <TouchableOpacity style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowConfirmPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showConfirmPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
@@ -336,7 +358,11 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </>
           )}
 
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? (
+            <FadeInView duration={220} slideDistance={6}>
+              <Text style={styles.error}>{error}</Text>
+            </FadeInView>
+          ) : null}
 
           <TouchableOpacity
             style={[styles.submitButton, (loading || signupDisabled) && styles.submitButtonDisabled]}
@@ -399,9 +425,22 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     borderWidth: 1,
     borderColor: colors.border,
+    position: 'relative',
+  },
+  toggleIndicator: {
+    position: 'absolute',
+    top: 3,
+    bottom: 3,
+    width: '50%',
+    backgroundColor: colors.primary,
+    borderRadius: radius.full,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   toggleButton:     { flex: 1, paddingVertical: 12, borderRadius: radius.full, alignItems: 'center' },
-  toggleActive:     { backgroundColor: colors.primary, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
   toggleText:       { fontSize: 15, fontWeight: '600', color: colors.textMuted },
   toggleTextActive: { color: '#FFFFFF', fontWeight: '700' },
 

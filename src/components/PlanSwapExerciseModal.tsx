@@ -60,9 +60,9 @@ export default function PlanSwapExerciseModal({
   }, [base, library, ownedEquipment]);
 
   const overlapColor = (pct: number) => {
-    if (pct >= 80) return '#22C55E';
-    if (pct >= 60) return '#F59E0B';
-    return '#EF4444';
+    if (pct >= 80) return tc.success;
+    if (pct >= 60) return tc.warning;
+    return tc.error;
   };
 
   return (

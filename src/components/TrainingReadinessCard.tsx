@@ -23,17 +23,23 @@ import { loadPreparednessInputs } from '../services/preparednessLoader';
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { getFatigueScore, FatigueScore } from '../services/api';
 import { loadHealthSummary, saveHealthSummary } from '../utils/workoutHistory';
+import FadeInView from './FadeInView';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-// Animated width bar. Re-runs whenever `pct` changes (so switching focus
-// mid-session animates the new target). Uses JS driver because percentage
-// width isn't supported by the native one.
+// Animated width bar with color crossfade. Re-runs whenever `pct` changes
+// (so switching focus mid-session animates the new target) AND whenever
+// `color` crosses a threshold (success → warning → error). Uses JS driver
+// because percentage width isn't supported by the native one.
 function AnimBar({ pct, color, trackColor }: { pct: number; color: string; trackColor: string }) {
   const w = useRef(new Animated.Value(0)).current;
   const last = useRef<number>(-1);
+  const [prevColor, setPrevColor] = useState<string>(color);
+  const [activeColor, setActiveColor] = useState<string>(color);
+  const fade = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     if (last.current === pct) return;
     last.current = pct;
@@ -44,12 +50,34 @@ function AnimBar({ pct, color, trackColor }: { pct: number; color: string; track
       useNativeDriver: false,
     }).start();
   }, [pct, w]);
+
+  useEffect(() => {
+    if (color === activeColor) return;
+    setPrevColor(activeColor);
+    setActiveColor(color);
+    fade.setValue(1);
+    Animated.timing(fade, {
+      toValue: 0,
+      duration: 380,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: false,
+    }).start();
+  }, [color, activeColor, fade]);
+
   return (
-    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: trackColor }}>
+    <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: trackColor, overflow: 'hidden' }}>
       <Animated.View style={{
         width: w.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
-        height: 5, borderRadius: 3, backgroundColor: color,
-      }} />
+        height: 5, borderRadius: 3, backgroundColor: activeColor,
+      }}>
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: prevColor, opacity: fade,
+          }}
+        />
+      </Animated.View>
     </View>
   );
 }
@@ -453,12 +481,13 @@ export default function TrainingReadinessCard({
               <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
                 {focusMuscles.length > 0 ? 'TODAY\'S MUSCLES' : 'MOST FATIGUED'}
               </Text>
-              {relevantMuscles.map(([muscle, fat]) => {
+              {relevantMuscles.map(([muscle, fat], mIdx) => {
                 const pct = Math.round(fat * 100);
                 const recovery = Math.max(0, Math.min(100, 100 - pct));
                 const barColor = muscleBarColor(recovery);
                 return (
-                  <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <FadeInView key={muscle} delay={mIdx * 35} duration={240} slideDistance={4}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
                     <Text style={{ width: 92, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>
                       {muscle.replace('_', ' ')}
                     </Text>
@@ -467,6 +496,7 @@ export default function TrainingReadinessCard({
                       {recovery}%
                     </Text>
                   </View>
+                  </FadeInView>
                 );
               })}
             </View>
@@ -489,12 +519,13 @@ export default function TrainingReadinessCard({
               'Resting HR': 'Resting heart rate vs your 30-day baseline. Elevated RHR often means under-recovered.',
               "Yesterday's load": 'How hard yesterday\'s training was. A short or rest day = more points today; 2+ hours of training yesterday pulls the score down because you\'re less recovered.',
             };
-            return pillarRows.map(([label, pts, max]) => {
+            return pillarRows.map(([label, pts, max], pIdx) => {
               const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
               const barColor = barColorFor(pct);
               const desc = descriptions[label as string];
               return (
-                <View key={label as string} style={{ marginBottom: 6 }}>
+                <FadeInView key={label as string} delay={150 + pIdx * 35} duration={240} slideDistance={4}>
+                <View style={{ marginBottom: 6 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                     <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label as string}</Text>
                     <AnimBar pct={pct} color={barColor} trackColor={tc.border} />
@@ -508,6 +539,7 @@ export default function TrainingReadinessCard({
                     </Text>
                   )}
                 </View>
+                </FadeInView>
               );
             });
           })()}

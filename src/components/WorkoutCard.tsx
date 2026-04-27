@@ -6,6 +6,7 @@ import { getTheme, radius } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
+import FadeInView from './FadeInView';
 
 /** Turn a planner-emitted equipment string into a display label.
  *  The planner outputs comma-separated slugs like
@@ -172,18 +173,19 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
       {/* ── Exercise list ───────────────────────────────────────────────── */}
       <View style={styles.body}>
         {workout.exercises.map((exercise, index) => (
-          <ExerciseRow
-            key={index}
-            index={index}
-            exercise={exercise}
-            isLast={index === workout.exercises.length - 1}
-            section={s}
-            c={c}
-            styles={styles}
-            onOpenVideo={onOpenExerciseVideo}
-            onSwap={onSwapExercise}
-            onView={onViewExercise}
-          />
+          <FadeInView key={index} delay={index * 40} duration={260} slideDistance={6}>
+            <ExerciseRow
+              index={index}
+              exercise={exercise}
+              isLast={index === workout.exercises.length - 1}
+              section={s}
+              c={c}
+              styles={styles}
+              onOpenVideo={onOpenExerciseVideo}
+              onSwap={onSwapExercise}
+              onView={onViewExercise}
+            />
+          </FadeInView>
         ))}
       </View>
 
@@ -357,6 +359,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
                 styles.videoChip,
                 { borderColor: section.strong, backgroundColor: pressed ? section.strong + '28' : section.strong + '12' },
               ]}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               onPress={() => onOpenVideo(exercise.name)}>
               <Ionicons name="open-outline" size={11} color={section.strong} />
               <Text style={[styles.videoChipText, { color: section.strong }]}>Form</Text>
@@ -368,6 +371,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
                 styles.videoChip,
                 { borderColor: c.textMuted, backgroundColor: pressed ? c.textMuted + '22' : c.surface },
               ]}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               onPress={() => onView(exercise.name)}
               accessibilityLabel={`view-${exercise.name}`}
             >
@@ -381,6 +385,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
                 styles.videoChip,
                 { borderColor: c.textMuted, backgroundColor: pressed ? c.textMuted + '22' : c.surface },
               ]}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               onPress={() => onSwap(index, exercise.name)}
               accessibilityLabel={`swap-${exercise.name}`}
             >

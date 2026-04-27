@@ -93,10 +93,12 @@ const SUBTYPES: Record<ActivityCategory, SubtypeDef[]> = {
   ],
 };
 
-const INTENSITIES: { key: ActivityIntensity; label: string; icon: string; color: string }[] = [
-  { key: 'easy',     label: 'Easy',     icon: 'leaf-outline',  color: '#22C55E' },
-  { key: 'moderate', label: 'Moderate', icon: 'flash-outline', color: '#F59E0B' },
-  { key: 'hard',     label: 'Hard',     icon: 'flame-outline', color: '#EF4444' },
+// `colorKey` maps to a theme token at render time so the chips track the
+// active theme (success/warning/error) instead of hardcoded hex.
+const INTENSITIES: { key: ActivityIntensity; label: string; icon: string; colorKey: 'success' | 'warning' | 'error' }[] = [
+  { key: 'easy',     label: 'Easy',     icon: 'leaf-outline',  colorKey: 'success' },
+  { key: 'moderate', label: 'Moderate', icon: 'flash-outline', colorKey: 'warning' },
+  { key: 'hard',     label: 'Hard',     icon: 'flame-outline', colorKey: 'error' },
 ];
 
 const CARDIO_STYLES: { key: CardioStyle; label: string }[] = [
@@ -450,17 +452,19 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     <View style={{ flexDirection: 'row', gap: 8 }}>
                       {INTENSITIES.map(opt => {
                         const active = intensity === opt.key;
+                        const optColor = tc[opt.colorKey];
                         return (
                           <TouchableOpacity
                             key={opt.key}
+                            activeOpacity={0.75}
                             style={[s.intensityBtn, {
                               flex: 1,
-                              borderColor: active ? opt.color : tc.border,
-                              backgroundColor: active ? opt.color + '18' : tc.surfaceRaised,
+                              borderColor: active ? optColor : tc.border,
+                              backgroundColor: active ? optColor + '18' : tc.surfaceRaised,
                             }]}
                             onPress={() => setIntensity(opt.key)}>
-                            <Ionicons name={opt.icon as any} size={18} color={active ? opt.color : tc.textMuted} />
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: active ? opt.color : tc.textSecondary }}>{opt.label}</Text>
+                            <Ionicons name={opt.icon as any} size={18} color={active ? optColor : tc.textMuted} />
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: active ? optColor : tc.textSecondary }}>{opt.label}</Text>
                           </TouchableOpacity>
                         );
                       })}

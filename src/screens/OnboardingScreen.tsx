@@ -56,7 +56,7 @@ function getSteps(): StepKey[] {
 const SUPPLEMENT_CATEGORIES = [
   {
     key: 'protein',
-    icon: '🥛',
+    icon: 'nutrition-outline',
     label: 'Protein',
     items: ['Whey Protein', 'Casein Protein', 'Plant Protein', 'Egg White Protein', 'Collagen Peptides'],
   },
@@ -726,6 +726,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             scrollEnabled
           />
           <TouchableOpacity
+            activeOpacity={0.75}
             style={{
               backgroundColor: colors.primary, borderRadius: 10,
               paddingVertical: 12, alignItems: 'center', justifyContent: 'center',
@@ -767,12 +768,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             re-flow the entire grid and look broken). Selected card just
             gets a highlighted border + checkmark + longer description. */}
         <View style={styles.goalGrid}>
-          {LAUNCH_GOALS.map(g => {
+          {LAUNCH_GOALS.map((g, gIdx) => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = selectedGoal === g.id;
             return (
+              <FadeInView key={g.id} delay={gIdx * 40} duration={260} slideDistance={8} style={styles.goalCardWrap}>
               <TouchableOpacity
-                key={g.id}
                 testID={`goal-card-${g.id}`}
                 accessibilityLabel={`goal-card-${g.id}`}
                 style={[styles.goalCard, active && styles.goalCardActive]}
@@ -800,6 +801,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                   {g.description}
                 </Text>
               </TouchableOpacity>
+              </FadeInView>
             );
           })}
         </View>
@@ -1974,7 +1976,8 @@ const styles = StyleSheet.create({
   stepDescription: { fontSize: 15, color: colors.textSecondary, lineHeight: 22, marginBottom: 24 },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  goalCard: { width: '48%', padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
+  goalCardWrap: { width: '48%' },
+  goalCard: { width: '100%', padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   goalIcon: { fontSize: 26, marginBottom: 6 },
   goalLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },

@@ -199,6 +199,16 @@ class WorkoutCoachQuestionRequest(BaseModel):
     activeExerciseName: str | None = None
     currentSetNumber: int | None = None
     loggedSets: list[dict] | None = None
+    # Optional photo attached to the question — e.g., "is my knee
+    # tracking right?" with a screenshot from a phone camera. Routes
+    # the call through the gpt-4o-mini vision endpoint when present.
+    image_base64: str | None = None
+    mime_type: str = "image/jpeg"
+    # Multi-turn context. Pass the prior turns of THIS coach session so
+    # the user can ask follow-ups ("ok what about my back?") without
+    # re-stating context. Each entry: {role: "user"|"assistant", content: str}.
+    # Bounded by the endpoint to avoid runaway prompt growth.
+    conversation: list[dict] | None = None
 
 
 class FoodPhotoRequest(BaseModel):
