@@ -41,6 +41,10 @@ export type WatchWorkoutPayload = {
    *  exercise as a dismissable card so users can cue off them without
    *  pulling the phone out. Empty / undefined = no card. */
   warmupSteps?: string[];
+  /** The phone-side user id. Embedded in the workout dict (not just the
+   *  top-level context) so the watch can reject cross-account payloads
+   *  that arrive after a user switch before the context is re-keyed. */
+  userId?: string | null;
   syncedAtMs: number;
 };
 

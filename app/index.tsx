@@ -866,6 +866,11 @@ export default function Index() {
       // Different user on same device — clear the previous user's state
       // before hydrating this one so nothing leaks across accounts.
       await AsyncStorage.multiRemove(USER_SCOPED_KEYS);
+      // Clear transient active-workout keys so the watch pull_state handler
+      // doesn't see a stale isWorkoutInProgress flag for the new account.
+      await AsyncStorage.multiRemove([
+        'activeWorkoutStartTime', 'activeWatchSessionId', 'activeWorkoutSession',
+      ]).catch(() => {});
       setTrainerNote(null);
       setNutritionistNote(null);
       setSupplementStack([]);
@@ -1002,6 +1007,11 @@ export default function Index() {
       // a proper wipe) rather than arriving without a userId key at all.
       WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
+    // Clear transient active-workout keys so a stale session doesn't bleed
+    // into the next login (e.g. next user's pull_state sees isWorkoutInProgress).
+    await AsyncStorage.multiRemove([
+      'activeWorkoutStartTime', 'activeWatchSessionId', 'activeWorkoutSession',
+    ]).catch(() => {});
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();
     setAuthToken(null);

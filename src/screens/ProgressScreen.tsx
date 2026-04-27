@@ -23,7 +23,7 @@ import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, Pl
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
-import WeeklyCoachingCard from '../components/WeeklyCoachingCard';
+import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
@@ -528,6 +528,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // was removed because its pillars weren't grounded in anything — a
   // user could hit "100" by logging 20 random exercises without ever
   // getting stronger or doing cardio.
+  const [weeklyCheckinVisible, setWeeklyCheckinVisible] = useState(false);
   const [compositeFitness, setCompositeFitness] = useState<import('../services/api').FitnessCompositeScore | null>(null);
   // Track the composite-fitness fetch state so the Records tab can
   // show a skeleton while it's in flight instead of an empty flash.
@@ -1898,15 +1899,33 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
           {authToken && (
-            <WeeklyCoachingCard
-              authToken={authToken}
-              themeName={userProfile.themePreference}
-              weightSlopeLbsPerWeek={(healthSummary as any)?.weightSlopeLbsPerWeek ?? null}
-              avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
-              avgRestingHr={healthSummary?.restingHeartRate ?? null}
-              avgSteps={healthSummary?.avgSteps7d ?? null}
-              readinessScore={null}
-            />
+            <TouchableOpacity
+              onPress={() => setWeeklyCheckinVisible(true)}
+              activeOpacity={0.8}
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: 12,
+                backgroundColor: themeColors.surface, borderRadius: radius.md,
+                borderWidth: 1, borderColor: themeColors.primary + '60',
+                padding: 16, marginBottom: 4,
+              }}
+            >
+              <View style={{
+                width: 40, height: 40, borderRadius: 20,
+                backgroundColor: themeColors.primary + '20',
+                alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Ionicons name="clipboard-outline" size={20} color={themeColors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary }}>
+                  Week in Review
+                </Text>
+                <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 2 }}>
+                  Scorecard · Coach notes · Next week adjustments
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={themeColors.textMuted} />
+            </TouchableOpacity>
           )}
           {authToken && (
             <Zone2TargetCard
@@ -3105,6 +3124,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
         </View>
       )}
+      <WeeklyCheckinModal
+        visible={weeklyCheckinVisible}
+        authToken={authToken}
+        goal={userProfile.goal ?? 'body_recomp'}
+        themeName={userProfile.themePreference}
+        avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
+        avgRestingHr={healthSummary?.restingHeartRate ?? null}
+        avgSteps={healthSummary?.avgSteps7d ?? null}
+        onClose={() => setWeeklyCheckinVisible(false)}
+        onComplete={() => setWeeklyCheckinVisible(false)}
+      />
       <LogActivityModal
         visible={showLogActivity}
         onClose={() => setShowLogActivity(false)}

@@ -204,7 +204,8 @@
       "Read(//opt/homebrew/**)",
       "Read(//usr/local/**)",
       "Bash(eas *)",
-      "Bash(wait *)"
+      "Bash(wait *)",
+      "Bash(rg -n \"start_workout|start_custom_workout|pull_state|watchCmdHandlersRef|setActiveWorkout|activeWorkoutStartTime|activeWatchSessionId\" --include=\"*.ts\" --include=\"*.tsx\" .)"
     ]
   }
 }

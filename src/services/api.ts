@@ -2926,6 +2926,104 @@ export interface ApplyActionResult {
   error: string | null;
 }
 
+// ── Weekly Coach Check-In ─────────────────────────────────────────────────────
+
+export interface WeekCheckinCoachFindings {
+  wins: string[];
+  needs_attention: string[];
+  recovery_notes: string[];
+  nutrition_notes: string[];
+}
+
+export interface WeekSummaryResponse {
+  week_id: number;
+  plan_status: string;
+  planned_workouts: number;
+  completed_workouts: number;
+  missed_workouts: number;
+  adherence_pct: number;
+  cardio_minutes: number;
+  zone2_minutes: number;
+  strength_sessions: number;
+  nutrition_adherence_pct: number;
+  days_logged: number;
+  avg_sleep_hours: number | null;
+  avg_resting_hr: number | null;
+  goal: string;
+  week_start: string;
+  week_end: string;
+  headline: string;
+  coach_findings: WeekCheckinCoachFindings;
+}
+
+export type DifficultyRating =
+  | 'too_easy' | 'about_right' | 'too_hard'
+  | 'too_time_consuming' | 'did_not_like_plan';
+
+export type BlockerType =
+  | 'time' | 'fatigue' | 'soreness' | 'equipment'
+  | 'motivation' | 'cardio_boring' | 'exercise_discomfort'
+  | 'nutrition_hard' | 'none';
+
+export type PainArea =
+  | 'none' | 'shoulder' | 'elbow_wrist' | 'low_back'
+  | 'knee' | 'hip' | 'foot_ankle' | 'other';
+
+export type CheckinDecision =
+  | 'apply_recommendations' | 'customize'
+  | 'keep_current_style' | 'make_easier' | 'make_harder';
+
+export interface WeekCheckinAnswers {
+  overall_difficulty?: DifficultyRating;
+  biggest_blocker?: BlockerType;
+  pain_area?: PainArea;
+  goal_q4?: string;
+  user_decision: CheckinDecision;
+  weight_slope_lbs_per_week?: number | null;
+  avg_sleep_hours?: number | null;
+  avg_resting_hr?: number | null;
+  avg_steps?: number | null;
+  readiness_score?: number | null;
+}
+
+export interface RecommendedAdjustments {
+  difficulty_adjustment: 'easier' | 'same' | 'harder';
+  volume_adjustment_pct: number;
+  intensity_adjustment: 'reduce' | 'maintain' | 'increase';
+  session_length_adjustment: 'shorter' | 'same' | 'longer' | null;
+  cardio_adjustment: string | null;
+  mobility_adjustment: string | null;
+  nutrition_adjustment: string | null;
+  muscle_priorities: string[];
+  avoid_patterns: string[];
+  preferred_cardio_modes: string[];
+  summary: string;
+}
+
+export interface WeekCheckinResponse {
+  summary: RecommendedAdjustments;
+  applied: Array<{ type: string; summary: string }>;
+  coach_message: string;
+}
+
+export async function getWeekSummary(token: string): Promise<WeekSummaryResponse> {
+  return request<WeekSummaryResponse>('/plans/week-summary', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function postWeekCheckin(
+  token: string,
+  answers: WeekCheckinAnswers,
+): Promise<WeekCheckinResponse> {
+  return request<WeekCheckinResponse>('/plans/week-checkin', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(answers),
+  });
+}
+
 // ── Readiness (server-side canonical compute) ─────────────────────
 //
 // The phone calls this and renders the response directly — no

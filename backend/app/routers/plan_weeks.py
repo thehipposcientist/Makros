@@ -79,6 +79,20 @@ class StartNewWeekRequest(BaseModel):
     force: bool = False
 
 
+class WeekCheckinAnswersRequest(BaseModel):
+    overall_difficulty: str | None = None
+    biggest_blocker: str | None = None
+    pain_area: str | None = None
+    goal_q4: str | None = None
+    user_decision: str = "apply_recommendations"
+    # Optional health signals from the client
+    weight_slope_lbs_per_week: float | None = None
+    avg_sleep_hours: float | None = None
+    avg_resting_hr: float | None = None
+    avg_steps: float | None = None
+    readiness_score: int | None = None
+
+
 class PatchDayWorkoutRequest(BaseModel):
     workout_json: dict
 
@@ -764,3 +778,172 @@ def regenerate_remaining(
 
     days = get_week_days(db, pw.id)
     return _plan_week_to_response(pw, days)
+
+
+# ── Weekly Coach Check-In ─────────────────────────────────────────────────────
+
+
+@router.get("/week-summary")
+def get_week_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """Return structured weekly summary for the check-in modal.
+
+    Computes adherence stats + coach findings from the most recent plan
+    week. Purely deterministic — no AI calls.
+    """
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.services.workout.week_checkin_logic import compute_checkin_summary_from_review
+
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        from app.models import PlanWeek as _PW
+        pw = db.exec(
+            select(_PW)
+            .where(_PW.user_id == current_user.id)
+            .order_by(_PW.created_at.desc())
+        ).first()
+    if not pw:
+        raise HTTPException(status_code=404, detail="No plan week found")
+
+    try:
+        review = compute_weekly_review(db, current_user.id)
+    except Exception as e:
+        logger.warning(f"[week-summary] compute_weekly_review failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not compute weekly review")
+
+    summary = compute_checkin_summary_from_review(review)
+    result = summary.to_dict()
+    result["week_id"] = pw.id
+    result["plan_status"] = pw.status
+    return result
+
+
+@router.post("/week-checkin")
+def submit_week_checkin(
+    body: WeekCheckinAnswersRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """Accept structured check-in answers, return recommended adjustments,
+    and optionally apply them to UserPreferences / UserCoachingState.
+
+    user_decision options:
+      apply_recommendations  — calls apply_action for each actionable item.
+      customize              — returns recs but does NOT apply.
+      keep_current_style     — records noop, no changes.
+      make_easier / make_harder — override and apply.
+    """
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.services.workout.week_checkin_logic import (
+        WeeklyCheckinAnswers,
+        compute_checkin_summary_from_review,
+        compute_checkin_recommendations,
+    )
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserProfile
+
+    try:
+        review = compute_weekly_review(
+            db, current_user.id,
+            weight_trend_lbs_per_week=body.weight_slope_lbs_per_week,
+            avg_sleep_hours=body.avg_sleep_hours,
+            avg_resting_hr=body.avg_resting_hr,
+            avg_steps=body.avg_steps,
+            readiness_score=body.readiness_score,
+        )
+    except Exception as e:
+        logger.warning(f"[week-checkin] compute_weekly_review failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not compute weekly review")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    goal = str(getattr(profile, "goal", "body_recomp") or "body_recomp")
+
+    summary = compute_checkin_summary_from_review(review)
+    answers = WeeklyCheckinAnswers(
+        overall_difficulty=body.overall_difficulty,
+        biggest_blocker=body.biggest_blocker,
+        pain_area=body.pain_area,
+        goal_q4=body.goal_q4,
+        user_decision=body.user_decision,
+    )
+    adj = compute_checkin_recommendations(summary, answers, goal)
+
+    applied_results: list[dict] = []
+    should_apply = body.user_decision in ("apply_recommendations", "make_easier", "make_harder")
+
+    if should_apply:
+        import datetime as _dt
+
+        # Volume adjustment → UserCoachingState
+        if adj.volume_adjustment_pct != 0:
+            from app.models import UserCoachingState
+            coaching = db.exec(
+                select(UserCoachingState).where(UserCoachingState.user_id == current_user.id)
+            ).first()
+            if not coaching:
+                coaching = UserCoachingState(user_id=current_user.id)
+                db.add(coaching)
+            coaching.volume_adjustment_pct = max(-30, min(15, adj.volume_adjustment_pct))
+            coaching.updated_at = _dt.datetime.now(_dt.timezone.utc)
+            db.add(coaching)
+            applied_results.append({
+                "type": "volume_adjustment",
+                "summary": f"Volume {coaching.volume_adjustment_pct:+d}% next week",
+            })
+
+        # Actionable items via apply_action
+        for action in adj.action_list:
+            if action.get("type") in ("noop", "descriptive_only"):
+                continue
+            try:
+                result = apply_action(db, current_user.id, action)
+                if result.applied:
+                    applied_results.append({"type": action.get("type"), "summary": result.summary})
+            except Exception as e:
+                logger.warning(f"[week-checkin] apply_action failed for {action}: {e}")
+
+        # Pain area → append to UserPreferences.injuries
+        if answers.pain_area and answers.pain_area != "none":
+            from app.models import UserPreferences
+            prefs = db.exec(
+                select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+            ).first()
+            if prefs:
+                existing = list(getattr(prefs, "injuries", []) or [])
+                if answers.pain_area not in existing:
+                    existing.append(answers.pain_area)
+                    prefs.injuries = existing
+                    db.add(prefs)
+                    applied_results.append({
+                        "type": "injury_flag",
+                        "summary": f"Flagged {answers.pain_area} — planner will avoid high-risk patterns.",
+                    })
+
+        # Preferred cardio / muscle priorities → CoachMemory
+        from app.models import CoachMemory
+        if adj.preferred_cardio_modes:
+            db.add(CoachMemory(
+                user_id=current_user.id,
+                event_type="preferred_cardio_mode",
+                summary=f"User prefers: {', '.join(adj.preferred_cardio_modes)}",
+                details={"modes": adj.preferred_cardio_modes},
+            ))
+        if adj.muscle_priorities:
+            db.add(CoachMemory(
+                user_id=current_user.id,
+                event_type="muscle_priority",
+                summary=f"Prioritize: {', '.join(adj.muscle_priorities)}",
+                details={"muscles": adj.muscle_priorities},
+            ))
+
+        db.commit()
+
+    return {
+        "summary": adj.to_dict(),
+        "applied": applied_results,
+        "coach_message": adj.summary,
+    }

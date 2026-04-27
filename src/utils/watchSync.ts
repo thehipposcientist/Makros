@@ -23,6 +23,7 @@ import {
   WatchReadinessFactor,
   WatchWeightPayload,
 } from '../../modules/thallo-watch-bridge';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
 
@@ -53,6 +54,7 @@ export function buildWatchWorkoutPayload(
     /** Plain-text warm-up steps to mirror on the watch. Usually the
      *  output of `buildWarmupPlan(day)` on the phone. */
     warmupSteps?: string[];
+    userId?: string | null;
   },
 ): WatchWorkoutPayload | null {
   if (!day) {
@@ -66,6 +68,7 @@ export function buildWatchWorkoutPayload(
         readiness: opts.readiness ?? null,
         readinessLabel: opts.readinessLabel ?? null,
         exercises: [],
+        userId: opts.userId ?? null,
         syncedAtMs: Date.now(),
       };
     }
@@ -98,6 +101,7 @@ export function buildWatchWorkoutPayload(
     ...(opts.warmupSteps && opts.warmupSteps.length > 0 && (opts.status === 'active' || opts.status === 'scheduled')
       ? { warmupSteps: opts.warmupSteps }
       : {}),
+    userId: opts.userId ?? null,
     syncedAtMs: Date.now(),
   };
 }
@@ -155,12 +159,19 @@ export async function pushWorkoutToWatch(
     readiness?: number | null;
     readinessLabel?: string | null;
     warmupSteps?: string[];
+    userId?: string | null;
   },
 ): Promise<boolean> {
-  const payload = buildWatchWorkoutPayload(day, opts);
+  // Resolve userId: caller can pass it explicitly; otherwise fall back to
+  // the stored last_user_id so every push carries the correct identity
+  // without requiring every call site to look it up.
+  const userId = opts.userId !== undefined
+    ? opts.userId
+    : await AsyncStorage.getItem('last_user_id').catch(() => null);
+  const payload = buildWatchWorkoutPayload(day, { ...opts, userId });
   if (!payload) return false;
   if (!canPush()) { wsLog('pushWorkoutToWatch skipped — bridge unavailable'); return false; }
-  wsLog('pushWorkoutToWatch', { status: opts.status, focus: payload.focus });
+  wsLog('pushWorkoutToWatch', { status: opts.status, focus: payload.focus, userId: userId?.slice(0, 4) });
   return WatchBridge.syncWorkout(payload);
 }
 

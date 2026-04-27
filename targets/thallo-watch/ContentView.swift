@@ -87,19 +87,38 @@ struct ContentView: View {
             HeartRateStore.saveDiag("skip: stale \(Int(ageMs/1000))s")
             return false
         }
-        // Reject workout from a different account.
+        // Reject workout from a different account. w.userId is now embedded
+        // in every workout payload the phone sends, so a nil here means a
+        // stale payload from before the userId field existed — treat as
+        // cross-account until the phone re-pushes with the field present.
         if let storedUser = conn.currentUserId, !storedUser.isEmpty {
-            // We can't check the workout's userId directly (it's not on
-            // WatchWorkout), but if the ConnectivityStore just wiped state
-            // due to a user mismatch, conn.workout would be nil and we
-            // wouldn't get here. This guard catches the edge case where
-            // a stale workout survived because no userId was on the push.
-            // In that case, if we have a stored user but the workout
-            // arrived without userId validation, treat it as potentially
-            // stale and require the phone to re-push.
+            guard let workoutUser = w.userId, !workoutUser.isEmpty, workoutUser == storedUser else {
+                HeartRateStore.saveDiag("skip resume: userId missing/mismatch (stored=\(storedUser.prefix(4)))")
+                return false
+            }
         }
         HeartRateStore.saveDiag("resume OK sid=\(sid.prefix(8))")
         return true
+    }
+
+    /// Start the local HK session immediately when the user taps Start,
+    /// then notify the phone. Avoids the race where the watch sits idle
+    /// waiting for the phone's active echo before starting HR collection.
+    private func startWatchWorkoutLocally(command: String, payload: [String: Any] = [:]) {
+        HeartRateStore.saveDiag("Watch Start tapped → starting local HK")
+        watchStartPending = true
+        if heartRate.running {
+            // HK session already going (e.g. re-tap) — just navigate.
+            active = true
+        } else {
+            heartRate.start {
+                HeartRateStore.saveDiag("local HK collecting → active")
+                active = true
+            }
+        }
+        var merged = payload
+        merged["source"] = "watch"
+        conn.sendCommand(command, payload: merged)
     }
 
     private func consumePendingLaunch() {
@@ -127,9 +146,7 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        HeartRateStore.saveDiag("Watch Start tapped → pending")
-                        watchStartPending = true
-                        conn.sendCommand("start_workout", payload: ["source": "watch"])
+                        startWatchWorkoutLocally(command: "start_workout")
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
@@ -139,13 +156,10 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        HeartRateStore.saveDiag("Custom Watch Start → pending")
-                        watchStartPending = true
-                        conn.sendCommand("start_custom_workout", payload: [
-                            "category": category,
-                            "subtype": subtype,
-                            "label": label,
-                        ])
+                        startWatchWorkoutLocally(
+                            command: "start_custom_workout",
+                            payload: ["category": category, "subtype": subtype, "label": label]
+                        )
                     })
                     WeightView()
                 }
@@ -211,9 +225,13 @@ struct ContentView: View {
                 if !active {
                     let pending = watchStartPending
                     if pending || shouldResumeWorkout(w) {
-                        HeartRateStore.saveDiag("rcv active → starting HK pending=\(pending)")
+                        HeartRateStore.saveDiag("rcv active → HK pending=\(pending) running=\(heartRate.running)")
                         watchStartPending = false
-                        heartRate.start { active = true }
+                        if heartRate.running {
+                            active = true
+                        } else {
+                            heartRate.start { active = true }
+                        }
                     }
                 }
             case .completed, .skipped:

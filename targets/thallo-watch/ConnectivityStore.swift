@@ -166,14 +166,15 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             }
             if let data = try? JSONSerialization.data(withJSONObject: w),
                let decoded = try? JSONDecoder().decode(WatchWorkout.self, from: data) {
-                // userId mismatch: if the workout payload carries a userId that
-                // doesn't match the stored user, reject it. Prevents a stale
-                // workout from a previous account from surfacing when the phone
-                // sends the payload without the top-level userId change signal.
-                if let wUserId = decoded.userId, !wUserId.isEmpty,
-                   let stored = currentUserId, !stored.isEmpty,
-                   wUserId != stored {
+                // Reject if userId is present and mismatched, OR if we have a
+                // stored userId and the payload omits it entirely (stale push
+                // from before the userId field existed in workout payloads).
+                let stored = currentUserId ?? ""
+                let wUserId = decoded.userId ?? ""
+                if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
                     HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
+                } else if !stored.isEmpty && wUserId.isEmpty {
+                    HeartRateStore.saveDiag("rejected workout: missing userId (stored=\(stored.prefix(4)))")
                 } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
                     HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil")")
                     self.workout = decoded

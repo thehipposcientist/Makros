@@ -74,7 +74,7 @@ import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
-import { getActiveWatchSessionId } from '../utils/activeWatchSession';
+import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 
 interface HomeScreenProps {
   authToken: string;
@@ -2399,8 +2399,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const liveSchedule = refState.schedule as any[];
             const today = liveSchedule?.[0]?.workout ?? refState.workoutPlan?.days?.[0];
             console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
-            if (today) watchCmdHandlersRef.current.start(today);
-            else console.warn('[watch cmd] start_workout: no today workout available');
+            if (today) {
+              // Immediately stamp active state so pull_state/reachability
+              // handlers see isWorkoutInProgress = true and so the watch
+              // gets an authoritative active echo before ActiveWorkoutScreen
+              // has a chance to mount (which was the race causing the watch
+              // to stay idle while the phone started).
+              const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              setActiveWatchSessionId(sessionId);
+              AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
+              AsyncStorage.setItem('activeWorkoutStartTime', String(Date.now())).catch(() => {});
+              // Push active status immediately — don't wait for ActiveWorkoutScreen to mount.
+              (async () => {
+                try {
+                  const { pushWorkoutToWatch } = await import('../utils/watchSync');
+                  const s = rePushStateRef.current;
+                  await pushWorkoutToWatch(today, {
+                    dateISO: new Date().toISOString().slice(0, 10),
+                    status: 'active',
+                    sessionId,
+                    readiness: s.readinessScore?.score ?? null,
+                    readinessLabel: s.readinessScore?.label ?? null,
+                  }).catch(() => {});
+                } catch { /* non-fatal */ }
+              })();
+              watchCmdHandlersRef.current.start(today);
+            } else {
+              console.warn('[watch cmd] start_workout: no today workout available');
+            }
           } else if (command === 'skip_workout') {
             const refState = rePushStateRef.current;
             const liveSchedule = refState.schedule as any[];
