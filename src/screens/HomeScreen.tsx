@@ -4738,7 +4738,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : schedule;
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'parchment', 'steel', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'paper', 'frost', 'clay', 'sage'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'arctic', 'parchment', 'steel', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'paper', 'frost', 'clay', 'sage', 'mist', 'dune', 'blush', 'canary', 'petal'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -5844,6 +5844,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
                     return idx >= 0 && regeneratingDayIdxs.has(idx);
                   })()}
+                  sessionMinutes={userProfile.workoutDurationMinutes ?? 60}
                   onSwapExercise={async (workout, exIdx, exName) => {
                     // The picker reads from `exerciseLibrary` state.
                     // If we open the modal BEFORE the library is
@@ -6937,6 +6938,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           { key: 'bronze',    label: 'Bronze',    swatch: '#8060F8', mode: 'dark' },
           { key: 'plum',      label: 'Plum',      swatch: '#90D818', mode: 'dark' },
           { key: 'rust',      label: 'Rust',      swatch: '#38C0F0', mode: 'dark' },
+          // More dark combo: tinted medium-dark bg + cross-hue primary
+          { key: 'cinder',    label: 'Cinder',    swatch: '#FF2898', mode: 'dark' },
+          { key: 'moss',      label: 'Moss',      swatch: '#F02848', mode: 'dark' },
+          { key: 'smoke',     label: 'Smoke',     swatch: '#A0D820', mode: 'dark' },
+          { key: 'maroon',    label: 'Maroon',    swatch: '#20D8E8', mode: 'dark' },
+          { key: 'navy',      label: 'Navy',      swatch: '#F0C030', mode: 'dark' },
           // Light themes
           { key: 'arctic',    label: 'Arctic',    swatch: '#2474C8', mode: 'light' },
           { key: 'sunrise',   label: 'Sunrise',   swatch: '#F28C28', mode: 'light' },
@@ -6953,6 +6960,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           { key: 'frost',     label: 'Frost',     swatch: '#E06830', mode: 'light' },
           { key: 'clay',      label: 'Clay',      swatch: '#2870CC', mode: 'light' },
           { key: 'sage',      label: 'Sage',      swatch: '#C87820', mode: 'light' },
+          // More light combo
+          { key: 'mist',      label: 'Mist',      swatch: '#D01880', mode: 'light' },
+          { key: 'dune',      label: 'Dune',      swatch: '#3828A8', mode: 'light' },
+          { key: 'blush',     label: 'Blush',     swatch: '#1A7850', mode: 'light' },
+          { key: 'canary',    label: 'Canary',    swatch: '#C01840', mode: 'light' },
+          { key: 'petal',     label: 'Petal',     swatch: '#1A7878', mode: 'light' },
         ];
         const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
         const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
@@ -9483,7 +9496,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -9508,6 +9521,9 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   /** Local "this card is regenerating" flag set by the parent when a
    *  Switch-Day tap fires generateWorkoutDay. Drives a shimmer overlay. */
   isRegenerating?: boolean;
+  /** Top of the user's chosen session duration range — passed to WorkoutCard
+   *  to cap the estimated time display. */
+  sessionMinutes?: number;
   /** Opens the plan-view swap modal. Parent manages the modal state +
    *  plan persistence. Passes the target workout so the parent can
    *  match-and-mutate by focus + date without a dayIndex lookup. */
@@ -10030,6 +10046,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
               <WorkoutCard
                 workout={item.workout!}
                 themeName={themeName}
+                sessionMinutes={sessionMinutes}
                 onSwapExercise={
                   onSwapExercise
                     ? (exIdx, exName) => onSwapExercise(item.workout!, exIdx, exName)

@@ -24,6 +24,10 @@ function formatEquipmentLabel(raw: string | null | undefined): string {
 interface WorkoutCardProps {
   workout: WorkoutDay;
   themeName?: AppThemeName;
+  /** Top of the user's chosen duration range (e.g. 60 for "45–60 min").
+   *  Used to cap the estimated time display so stale cache or unusual
+   *  reps strings can't produce nonsensical values like 246 min. */
+  sessionMinutes?: number;
   onOpenExerciseVideo?: (exerciseName: string) => void;
   /** Open the swap picker for the exercise at this index. Enables a
    *  swap button on each exercise row so plan-view swaps use the same
@@ -35,7 +39,7 @@ interface WorkoutCardProps {
   onViewExercise?: (exerciseName: string) => void;
 }
 
-export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, onSwapExercise, onViewExercise }: WorkoutCardProps) {
+export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -144,8 +148,10 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
       return total + sets * WORK_STRENGTH_SEC + restTotal + transition;
     }, 0);
     void nonWarmupCount;
-    return { estimatedSeconds: secs, estimatedMinutes: Math.max(1, Math.round(secs / 60)) };
-  }, [workout.exercises]);
+    const rawMinutes = Math.max(1, Math.round(secs / 60));
+    const cap = sessionMinutes ? Math.round(sessionMinutes * 1.25) : 120;
+    return { estimatedSeconds: secs, estimatedMinutes: Math.min(rawMinutes, cap) };
+  }, [workout.exercises, sessionMinutes]);
 
   return (
     <View style={styles.card}>

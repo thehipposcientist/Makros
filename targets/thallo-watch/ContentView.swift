@@ -65,14 +65,16 @@ struct ContentView: View {
     private func shouldResumeWorkout(_ w: WatchWorkout) -> Bool {
         guard w.status == .active else { return false }
         let sid = w.sessionId ?? ""
-        guard !sid.isEmpty else {
-            HeartRateStore.saveDiag("skip: empty sessionId")
-            return false
-        }
-        let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
-        if sid == lastEnded {
-            HeartRateStore.saveDiag("skip: sessionId=lastEnded")
-            return false
+        // Don't gate on empty sessionId — the phone's first push after a
+        // Watch-initiated start arrives before ActiveWorkoutScreen renders
+        // and stamps the sessionId, so the push legitimately has sid=nil.
+        // Age + lastEnded are sufficient guards against false positives.
+        if !sid.isEmpty {
+            let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
+            if sid == lastEnded {
+                HeartRateStore.saveDiag("skip: sessionId=lastEnded")
+                return false
+            }
         }
         let ageMs = Date().timeIntervalSince1970 * 1000 - w.syncedAtMs
         if ageMs > 15 * 60 * 1000 {
@@ -119,12 +121,7 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        HeartRateStore.saveDiag("Watch Start tapped → starting local HealthKit")
-                        heartRate.start {
-                            HeartRateStore.saveDiag("local HK collecting → active")
-                            active = true
-                        }
-                        HeartRateStore.saveDiag("sent start_workout to phone")
+                        HeartRateStore.saveDiag("Watch Start tapped → sent start_workout to phone")
                         conn.sendCommand("start_workout", payload: ["source": "watch"])
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
@@ -135,11 +132,7 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        HeartRateStore.saveDiag("Custom Watch Start → starting local HealthKit")
-                        heartRate.start {
-                            HeartRateStore.saveDiag("local HK collecting (custom) → active")
-                            active = true
-                        }
+                        HeartRateStore.saveDiag("Custom Watch Start → sent start_custom_workout to phone")
                         conn.sendCommand("start_custom_workout", payload: [
                             "category": category,
                             "subtype": subtype,

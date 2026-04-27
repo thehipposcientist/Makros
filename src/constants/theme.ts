@@ -10,7 +10,9 @@ export type AppThemeName =
   | 'slate'    | 'ash'     | 'jade'    | 'cosmos'
   | 'iron'     | 'driftwood'| 'pine'   | 'bronze'
   | 'plum'     | 'rust'
-  | 'frost'    | 'clay'    | 'sage';
+  | 'frost'    | 'clay'    | 'sage'
+  | 'cinder'   | 'moss'    | 'smoke'   | 'maroon'  | 'navy'
+  | 'mist'     | 'dune'    | 'blush'   | 'canary'  | 'petal';
 
 export interface ThemeColors {
   background: string;
@@ -1271,6 +1273,300 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#100C28', strong: '#8060F8', text: '#C0A8FF' },  // violet
       planner: { soft: '#181028', strong: '#A080FF', text: '#D0C0FF' },  // lavender
       account: { soft: '#1A1808', strong: '#D8B030', text: '#F0D880' },  // gold
+    },
+  },
+
+  // ── MORE DARK COMBO (tinted medium-dark bg × cross-hue primary) ──────────────
+
+  cinder: {
+    name: 'cinder',
+    label: 'Cinder & Fuchsia',
+    description: 'Cool dark neutral grey with vivid hot-pink primary — crisp modern base, electric header.',
+    colors: {
+      background:    '#181C20',
+      surface:       '#20262E',
+      surfaceRaised: '#2A323C',
+      border:        '#3A4450',
+      primary:       '#FF2898',
+      primaryDark:   '#C80070',
+      primaryLight:  '#FF80CC',
+      accent:        '#20E890',
+      textPrimary:   '#F2F4F8',
+      textSecondary: '#A0AABB',
+      textMuted:     '#606878',
+      error:         '#F04858',
+      warning:       '#F0A828',
+      success:       '#48C870',
+    },
+    sections: {
+      workout: { soft: '#1A1028', strong: '#FF2898', text: '#FF90D0' },  // FUCHSIA
+      meals:   { soft: '#0C2018', strong: '#20E890', text: '#80FFCC' },  // MINT
+      ai:      { soft: '#101830', strong: '#6080F0', text: '#A8C0FF' },  // blue
+      planner: { soft: '#201418', strong: '#FF5888', text: '#FFB0D0' },  // pink
+      account: { soft: '#182028', strong: '#20C0E8', text: '#80E8FF' },  // cyan
+    },
+  },
+
+  moss: {
+    name: 'moss',
+    label: 'Moss & Crimson',
+    description: 'Deep teal-green panels with vivid crimson primary — cool-green base, red header punch.',
+    colors: {
+      background:    '#0E1C18',
+      surface:       '#162820',
+      surfaceRaised: '#203228',
+      border:        '#304838',
+      primary:       '#F02848',
+      primaryDark:   '#C00828',
+      primaryLight:  '#F87890',
+      accent:        '#30E898',
+      textPrimary:   '#E8FFF4',
+      textSecondary: '#88C0A8',
+      textMuted:     '#487860',
+      error:         '#F04050',
+      warning:       '#E8A830',
+      success:       '#38D880',
+    },
+    sections: {
+      workout: { soft: '#0A1C18', strong: '#30E898', text: '#90F8D0' },  // MINT
+      meals:   { soft: '#280C10', strong: '#F02848', text: '#F890A8' },  // CRIMSON
+      ai:      { soft: '#101028', strong: '#7068E8', text: '#C0B8FF' },  // violet
+      planner: { soft: '#182018', strong: '#58D870', text: '#A0F0B8' },  // green
+      account: { soft: '#200C0C', strong: '#E85060', text: '#F8A8B0' },  // rose
+    },
+  },
+
+  smoke: {
+    name: 'smoke',
+    label: 'Smoke & Lime',
+    description: 'Steel-blue smoke panels with electric acid-lime primary — industrial cool, neon pop.',
+    colors: {
+      background:    '#141E28',
+      surface:       '#1E2C38',
+      surfaceRaised: '#283848',
+      border:        '#384E60',
+      primary:       '#A0D820',
+      primaryDark:   '#78A808',
+      primaryLight:  '#C8F060',
+      accent:        '#FF8040',
+      textPrimary:   '#EEF4FF',
+      textSecondary: '#90A8C0',
+      textMuted:     '#507080',
+      error:         '#F05870',
+      warning:       '#F0A830',
+      success:       '#40C870',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#A0D820', text: '#D0F870' },  // ACID LIME
+      meals:   { soft: '#281808', strong: '#FF8040', text: '#FFBA80' },  // ORANGE
+      ai:      { soft: '#141430', strong: '#7060E8', text: '#C0B0FF' },  // violet
+      planner: { soft: '#181E28', strong: '#60A8E8', text: '#A8D0FF' },  // sky
+      account: { soft: '#102018', strong: '#30B858', text: '#80E0A0' },  // green
+    },
+  },
+
+  maroon: {
+    name: 'maroon',
+    label: 'Maroon & Cyan',
+    description: 'Deep burgundy-red panels with electric cyan primary — blood-warm base, arctic header pop.',
+    colors: {
+      background:    '#201018',
+      surface:       '#2C1620',
+      surfaceRaised: '#38202C',
+      border:        '#583040',
+      primary:       '#20D8E8',
+      primaryDark:   '#10A8C0',
+      primaryLight:  '#70E8F8',
+      accent:        '#FF6840',
+      textPrimary:   '#FFF0F4',
+      textSecondary: '#C098A8',
+      textMuted:     '#806070',
+      error:         '#F04850',
+      warning:       '#F0A828',
+      success:       '#40C870',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#20D8E8', text: '#80F0F8' },  // CYAN
+      meals:   { soft: '#281010', strong: '#FF6840', text: '#FFAB80' },  // ORANGE
+      ai:      { soft: '#180828', strong: '#A060E8', text: '#D0A8FF' },  // violet
+      planner: { soft: '#182028', strong: '#50B8F0', text: '#A0D8FF' },  // sky
+      account: { soft: '#281018', strong: '#E05870', text: '#F8A0B0' },  // rose
+    },
+  },
+
+  navy: {
+    name: 'navy',
+    label: 'Navy & Gold',
+    description: 'Rich deep navy panels with golden-yellow primary — classic nautical contrast, clean and bold.',
+    colors: {
+      background:    '#0E1838',
+      surface:       '#162240',
+      surfaceRaised: '#1E2C50',
+      border:        '#2C3C68',
+      primary:       '#F0C030',
+      primaryDark:   '#C09010',
+      primaryLight:  '#F8E080',
+      accent:        '#60C0FF',
+      textPrimary:   '#EEF4FF',
+      textSecondary: '#98A8D0',
+      textMuted:     '#5068A0',
+      error:         '#F05870',
+      warning:       '#F0B830',
+      success:       '#40C870',
+    },
+    sections: {
+      workout: { soft: '#101830', strong: '#60C0FF', text: '#A8DCFF' },  // ICE BLUE
+      meals:   { soft: '#201808', strong: '#F0C030', text: '#F8E080' },  // GOLD
+      ai:      { soft: '#180A30', strong: '#9060E8', text: '#C8A0FF' },  // violet
+      planner: { soft: '#0E1430', strong: '#90B8FF', text: '#C8D8FF' },  // periwinkle
+      account: { soft: '#141C38', strong: '#60C0FF', text: '#A8DCFF' },  // ice
+    },
+  },
+
+  // ── MORE LIGHT COMBO (tinted bg × cross-hue primary) ─────────────────────────
+
+  mist: {
+    name: 'mist',
+    label: 'Mist & Raspberry',
+    description: 'Pale misty sage background with vivid raspberry primary — soft cool base, bold warm header.',
+    colors: {
+      background:    '#EBF0EC',
+      surface:       '#F8FDFA',
+      surfaceRaised: '#DCE8DF',
+      border:        '#B0CAB8',
+      primary:       '#D01880',
+      primaryDark:   '#A00058',
+      primaryLight:  '#F060A8',
+      accent:        '#1888A0',
+      textPrimary:   '#0E2018',
+      textSecondary: '#305040',
+      textMuted:     '#608068',
+      error:         '#CC2030',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#CCE8D8', strong: '#1A8858', text: '#084830' },  // EMERALD
+      meals:   { soft: '#FFE0EE', strong: '#D01880', text: '#580030' },  // RASPBERRY
+      ai:      { soft: '#E0E4F4', strong: '#4860B0', text: '#182870' },  // blue-slate
+      planner: { soft: '#FBE8C0', strong: '#B07808', text: '#502800' },  // amber
+      account: { soft: '#D8EDF4', strong: '#1888A0', text: '#063848' },  // teal
+    },
+  },
+
+  dune: {
+    name: 'dune',
+    label: 'Dune & Indigo',
+    description: 'Sandy warm parchment background with deep indigo primary — desert light meets twilight sky.',
+    colors: {
+      background:    '#F2EDDC',
+      surface:       '#FFFDF4',
+      surfaceRaised: '#EBE3C8',
+      border:        '#D0C4A0',
+      primary:       '#3828A8',
+      primaryDark:   '#1E1480',
+      primaryLight:  '#7060D0',
+      accent:        '#C06020',
+      textPrimary:   '#1C1804',
+      textSecondary: '#4A3C18',
+      textMuted:     '#806840',
+      error:         '#CC2030',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#DCE0F4', strong: '#3828A8', text: '#0E0C50' },  // INDIGO
+      meals:   { soft: '#FFE0C8', strong: '#C06020', text: '#4A1C04' },  // AMBER-ORANGE
+      ai:      { soft: '#F0E0F4', strong: '#8040B0', text: '#300840' },  // violet
+      planner: { soft: '#F4ECC8', strong: '#9C7820', text: '#4A3800' },  // gold
+      account: { soft: '#E8F4E8', strong: '#2A7840', text: '#0A3018' },  // forest
+    },
+  },
+
+  blush: {
+    name: 'blush',
+    label: 'Blush & Emerald',
+    description: 'Soft rose-blush background with deep emerald green primary — romantic warmth, forest coolness.',
+    colors: {
+      background:    '#F6EDF0',
+      surface:       '#FFFCFD',
+      surfaceRaised: '#EED8DF',
+      border:        '#D4B0BC',
+      primary:       '#1A7850',
+      primaryDark:   '#0C5038',
+      primaryLight:  '#50B080',
+      accent:        '#C83060',
+      textPrimary:   '#1C080E',
+      textSecondary: '#503038',
+      textMuted:     '#906070',
+      error:         '#CC2030',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#C8E8D8', strong: '#1A7850', text: '#053828' },  // EMERALD
+      meals:   { soft: '#FFD8E8', strong: '#C83060', text: '#500818' },  // ROSE-RED
+      ai:      { soft: '#E0DCF0', strong: '#5840A0', text: '#200848' },  // violet
+      planner: { soft: '#F8EAC8', strong: '#B07808', text: '#4A2800' },  // amber
+      account: { soft: '#E0F0F8', strong: '#1A6890', text: '#063048' },  // ocean
+    },
+  },
+
+  canary: {
+    name: 'canary',
+    label: 'Canary & Crimson',
+    description: 'Pale lime-cream background with deep crimson primary — acidic bright base, bold warm header.',
+    colors: {
+      background:    '#F2F7DC',
+      surface:       '#FAFFEE',
+      surfaceRaised: '#E8F0C8',
+      border:        '#C8D8A0',
+      primary:       '#C01840',
+      primaryDark:   '#8A0828',
+      primaryLight:  '#E86080',
+      accent:        '#1858A0',
+      textPrimary:   '#0C1808',
+      textSecondary: '#304820',
+      textMuted:     '#607040',
+      error:         '#CC2030',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#D8E8F8', strong: '#1858A0', text: '#082848' },  // BLUE
+      meals:   { soft: '#FFD8E0', strong: '#C01840', text: '#480810' },  // CRIMSON
+      ai:      { soft: '#E8E0F4', strong: '#6040A8', text: '#200850' },  // violet
+      planner: { soft: '#F2EAC0', strong: '#A07808', text: '#4A3000' },  // amber
+      account: { soft: '#D0ECD8', strong: '#1A7840', text: '#083020' },  // emerald
+    },
+  },
+
+  petal: {
+    name: 'petal',
+    label: 'Petal & Teal',
+    description: 'Soft pink-blush tinted background with deep teal primary — gentle warm panels, cool crisp header.',
+    colors: {
+      background:    '#F4EAEE',
+      surface:       '#FFF8FA',
+      surfaceRaised: '#EDD8DF',
+      border:        '#D4B0BE',
+      primary:       '#1A7878',
+      primaryDark:   '#0C5050',
+      primaryLight:  '#50AAAA',
+      accent:        '#D04880',
+      textPrimary:   '#1C0810',
+      textSecondary: '#503040',
+      textMuted:     '#906070',
+      error:         '#CC2030',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#C8E8E8', strong: '#1A7878', text: '#043838' },  // TEAL
+      meals:   { soft: '#FFD8EC', strong: '#D04880', text: '#500830' },  // PINK
+      ai:      { soft: '#E0DCF0', strong: '#5838A0', text: '#200848' },  // violet
+      planner: { soft: '#F8E8C8', strong: '#B07808', text: '#4A2800' },  // amber
+      account: { soft: '#D8EDF8', strong: '#1860A0', text: '#062840' },  // cobalt
     },
   },
 

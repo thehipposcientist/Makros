@@ -351,7 +351,9 @@ def _prescribe_conditioning(
         return _make_cardio(3, "45s burst", 30, 2.0, "cardio_intervals")
 
     # PLUS_CARDIO finisher slots (mixed archetype, cardio role)
-    if role == "isolation":
+    # Role was "isolation" historically; changed to "secondary" so the
+    # finisher survives density trimming on 45-min sessions. Accept both.
+    if role in ("isolation", "secondary"):
         return _make_cardio(1, "10-20 min", 0, 1.5, "cardio_steady")
 
     return _make_cardio(1, "20-30 min", 0, 1.5, "cardio_steady")
