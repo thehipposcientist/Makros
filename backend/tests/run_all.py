@@ -59,6 +59,7 @@ _TEST_MODULES = (
     "tests.test_rolling_e1rm",
     "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
+    "tests.test_plan_week",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
     "tests.test_switch_day",
     # Switch-day rotation + split-anchor: prefer_swap, pin injection, history scenarios.

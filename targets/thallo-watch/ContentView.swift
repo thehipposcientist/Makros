@@ -41,6 +41,22 @@ struct ContentView: View {
         )
     }
 
+    private func consumePendingLaunch() {
+        guard UserDefaults.standard.bool(forKey: "thallo.pendingWorkoutLaunch") else { return }
+        UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
+        if active { return }
+        HeartRateStore.saveDiag("pendingLaunch→start")
+        if heartRate.running {
+            active = true
+            conn.requestPull()
+        } else {
+            heartRate.start {
+                active = true
+                conn.requestPull()
+            }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -49,7 +65,7 @@ struct ContentView: View {
                     TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
                         heartRate.start {
                             active = true
-                            conn.sendCommand("start_workout")
+                            conn.sendCommand("start_workout", payload: ["source": "watch"])
                         }
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
@@ -107,16 +123,14 @@ struct ContentView: View {
         }
         .onAppear {
             heartRate.prewarmAuth()
+            consumePendingLaunch()
             if let w = conn.workout, w.status == .active, !active {
                 HeartRateStore.saveDiag("onAppear reconcile→start")
                 heartRate.start { active = true }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchWorkoutLaunch)) { _ in
-            if !active {
-                HeartRateStore.saveDiag("HK launch→start")
-                heartRate.start { active = true }
-            }
+            consumePendingLaunch()
         }
         .onReceive(conn.$theme) { palette in theme.palette = palette }
         .onReceive(conn.$workout) { w in

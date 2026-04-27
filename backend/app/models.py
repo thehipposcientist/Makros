@@ -421,6 +421,54 @@ class NutritionPlan(SQLModel, table=True):
     deactivation_reason: str | None = Field(default=None)  # "regen" | "goal_change" | "manual"
 
 
+# ─── Weekly Plan Model ────────────────────────────────────────────────────────
+
+class PlanWeek(SQLModel, table=True):
+    """One committed 7-day plan. One `status='active'` row per user at a time.
+    Days are date-stamped and individually lockable. A new week starts only
+    on explicit user request (`POST /plans/start-new-week`)."""
+    __tablename__ = "plan_weeks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "start_date", name="uq_plan_week_user_start"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    start_date: date
+    end_date: date
+    planner_version: str
+    goal: str
+    days_per_week: int
+    preferred_split: str | None = Field(default=None)
+    status: str = Field(default="active")  # active | completed | abandoned
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = Field(default=None)
+    abandoned_at: datetime | None = Field(default=None)
+
+
+class PlanDay(SQLModel, table=True):
+    """Individual day within a PlanWeek. Holds workout + nutrition payloads.
+    Locked days are never touched by adapt/regenerate flows."""
+    __tablename__ = "plan_days"
+    __table_args__ = (
+        UniqueConstraint("plan_week_id", "day_date", name="uq_plan_day_week_date"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    plan_week_id: int = Field(foreign_key="plan_weeks.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    day_date: date
+    day_index: int
+    status: str = Field(default="planned")  # planned | started | completed | skipped | edited
+    is_rest: bool = Field(default=False)
+    workout_json: dict | None = Field(default=None, sa_column=Column(JSON))
+    nutrition_json: dict | None = Field(default=None, sa_column=Column(JSON))
+    locked: bool = Field(default=False)
+    locked_at: datetime | None = Field(default=None)
+    lock_reason: str | None = Field(default=None)  # completed | started | manual_edit | skipped
+    generation_source: str = Field(default="initial")  # initial | adapt | swap | manual | backfill
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class BodyScan(SQLModel, table=True):
     """Persisted body-scan result. Previously stored client-side only
     (AsyncStorage `bodyScanHistory`), which meant users lost scan

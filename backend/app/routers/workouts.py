@@ -1285,6 +1285,14 @@ def mark_workout_complete(
 
     db.commit()
     logger.info(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
+
+    # Auto-lock the corresponding PlanDay if the weekly model is active.
+    try:
+        from app.services.workout.week_manager import lock_day_on_complete
+        lock_day_on_complete(db, current_user.id, body.workout_date, body.focus_label)
+    except Exception as e:
+        logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
+
     # Verify the row exists
     verify = db.exec(
         select(WorkoutCompletion)

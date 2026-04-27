@@ -403,6 +403,34 @@ def _persist_active_workout_plan(
             f"[workout-plan] persisted active plan for user={user_id} "
             f"version={PLANNER_VERSION} reason={reason} future_day_rows_cleared={cleared}"
         )
+
+        # Dual-write: also create a PlanWeek so the new weekly model stays in sync.
+        try:
+            from app.services.workout.week_manager import create_plan_week, default_training_pattern
+            from datetime import date as _date2
+            wp_data = plan_json.get("workout_plan", plan_json) if isinstance(plan_json, dict) else {}
+            workout_days = wp_data.get("days", [])
+            dpw = int(getattr(req, "daysPerWeek", 0) or 0) or len(workout_days)
+            if workout_days and dpw:
+                create_plan_week(
+                    db, user_id,
+                    start_date=_date2.today(),
+                    workout_days=workout_days,
+                    nutrition_templates=[],
+                    training_day_pattern=default_training_pattern(dpw),
+                    goal=str(getattr(req, "goal", "") or ""),
+                    days_per_week=dpw,
+                    preferred_split=getattr(req, "preferredSplit", None) or None,
+                    planner_version=PLANNER_VERSION,
+                )
+                print(f"[workout-plan] dual-write PlanWeek for user={user_id}")
+        except Exception as pw_exc:
+            print(f"[workout-plan] PlanWeek dual-write failed (non-fatal): {pw_exc}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
     except Exception as exc:
         # Non-fatal — the plan still ships via the job queue's result_json.
         # This table is a convenience for cross-device sync + version

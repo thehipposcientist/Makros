@@ -685,9 +685,178 @@ def _ensure_exercise_set_cardio_hr_columns() -> None:
         print(f"[migration] exercise_sets cardio/HR columns failed (non-fatal): {e}")
 
 
+def _ensure_plan_week_tables() -> None:
+    """Create plan_weeks + plan_days tables if they don't exist yet.
+    These are created by SQLModel.metadata.create_all, but we add indexes
+    that create_all doesn't handle (partial indexes, composite)."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_week_user_active "
+                "ON plan_weeks(user_id) WHERE status = 'active'"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_day_user_date "
+                "ON plan_days(user_id, day_date)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_day_week_unlocked "
+                "ON plan_days(plan_week_id) WHERE locked = FALSE"
+            ))
+    except Exception as e:
+        print(f"[migration] plan_week indexes failed (non-fatal): {e}")
+
+
+def _backfill_plan_weeks() -> None:
+    """One-time backfill: for every user with an active WorkoutPlan but no
+    active PlanWeek, generate a PlanWeek from their current plan.
+    Runs on startup — idempotent (skips users who already have one)."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        from app.models import WorkoutPlan, NutritionPlan, PlanWeek, PlanDay, WorkoutCompletion
+        from app.services.workout.weekly_recipe import PLANNER_VERSION
+        from datetime import date, datetime, timedelta, timezone
+        import json
+
+        with Session(engine) as db:
+            active_plans = db.exec(
+                text(
+                    "SELECT wp.id, wp.user_id, wp.goal, wp.days_per_week, "
+                    "wp.preferred_split, wp.planner_version, wp.plan_json "
+                    "FROM workout_plans wp "
+                    "WHERE wp.is_active = TRUE "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM plan_weeks pw "
+                    "  WHERE pw.user_id = wp.user_id AND pw.status = 'active'"
+                    ")"
+                )
+            ).all()
+            if not active_plans:
+                return
+
+            print(f"[backfill] plan_weeks: {len(active_plans)} users to backfill")
+            today = date.today()
+            # Monday of this week
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+
+            for row in active_plans:
+                wp_id, user_id, goal, days_per_week, preferred_split, pv, plan_json = row
+                if not plan_json:
+                    continue
+
+                days_list = []
+                if isinstance(plan_json, dict):
+                    wp_data = plan_json.get("workout_plan", plan_json)
+                    days_list = wp_data.get("days", [])
+                elif isinstance(plan_json, str):
+                    try:
+                        parsed = json.loads(plan_json)
+                        wp_data = parsed.get("workout_plan", parsed)
+                        days_list = wp_data.get("days", [])
+                    except Exception:
+                        continue
+
+                if not days_list:
+                    continue
+
+                # Load nutrition templates
+                nutrition_templates = []
+                try:
+                    np_row = db.exec(
+                        text(
+                            "SELECT plans_json FROM nutrition_plans "
+                            "WHERE user_id = :uid AND is_active = TRUE LIMIT 1"
+                        ),
+                        {"uid": user_id},
+                    ).first()
+                    if np_row and np_row[0]:
+                        nutrition_templates = json.loads(np_row[0]) if isinstance(np_row[0], str) else np_row[0]
+                except Exception:
+                    pass
+
+                # Load completions this week to mark days as completed
+                completions_this_week: set[date] = set()
+                try:
+                    comp_rows = db.exec(
+                        text(
+                            "SELECT DISTINCT workout_date FROM workout_completions "
+                            "WHERE user_id = :uid AND workout_date >= :start AND workout_date <= :end"
+                        ),
+                        {"uid": user_id, "start": start, "end": end},
+                    ).all()
+                    for cr in comp_rows:
+                        completions_this_week.add(cr[0])
+                except Exception:
+                    pass
+
+                # Training day pattern: default to Mon-Fri for days_per_week<=5,
+                # else fill from Monday
+                training_indices = list(range(min(days_per_week, 7)))
+
+                pw = PlanWeek(
+                    user_id=user_id,
+                    start_date=start,
+                    end_date=end,
+                    planner_version=pv or PLANNER_VERSION,
+                    goal=goal or "",
+                    days_per_week=days_per_week or len(days_list),
+                    preferred_split=preferred_split,
+                    status="active",
+                )
+                db.add(pw)
+                db.flush()  # get pw.id
+
+                workout_idx = 0
+                for i in range(7):
+                    d = start + timedelta(days=i)
+                    is_training = i in training_indices
+                    is_rest = not is_training
+
+                    workout_payload = None
+                    if is_training and days_list:
+                        workout_payload = days_list[workout_idx % len(days_list)]
+                        workout_idx += 1
+
+                    nutrition_payload = None
+                    if nutrition_templates:
+                        nutrition_payload = nutrition_templates[i % len(nutrition_templates)]
+
+                    day_completed = d in completions_this_week
+                    day_in_past = d < today
+
+                    pd = PlanDay(
+                        plan_week_id=pw.id,
+                        user_id=user_id,
+                        day_date=d,
+                        day_index=i,
+                        status="completed" if day_completed else ("planned" if not day_in_past or is_rest else "planned"),
+                        is_rest=is_rest,
+                        workout_json=workout_payload,
+                        nutrition_json=nutrition_payload,
+                        locked=day_completed,
+                        locked_at=datetime.now(timezone.utc) if day_completed else None,
+                        lock_reason="completed" if day_completed else None,
+                        generation_source="backfill",
+                    )
+                    db.add(pd)
+
+                db.commit()
+            print(f"[backfill] plan_weeks: done ({len(active_plans)} users)")
+    except Exception as e:
+        print(f"[backfill] plan_weeks failed (non-fatal): {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -714,6 +883,8 @@ def create_db_and_tables():
     _backfill_mealitem_food_ids()
     _recompute_recent_daily_metrics()
     _seed_supplement_ingredients()
+    _ensure_plan_week_tables()
+    _backfill_plan_weeks()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:
         seed_equipment(session)   # must run before exercises (FK dependency)

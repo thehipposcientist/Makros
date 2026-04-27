@@ -61,6 +61,12 @@ from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket,
 from .goal_profiles import GoalProfile
 
 
+def _is_ul_family(split: str | None) -> bool:
+    """True for upper_lower, lower_focused, upper_focused."""
+    from .day_templates import SPLIT_UPPER_LOWER, SPLIT_LOWER_FOCUSED, SPLIT_UPPER_FOCUSED
+    return split in (SPLIT_UPPER_LOWER, SPLIT_LOWER_FOCUSED, SPLIT_UPPER_FOCUSED)
+
+
 # ── Recovery allocation ─────────────────────────────────────────────
 #
 # Recovery is a distinct concept from conditioning. Zone 2 and intervals
@@ -460,27 +466,47 @@ def _lifting_recipe(profile: GoalProfile, split: str, days: int, *, priority_reg
         return seq[:min(days, len(seq))]
 
     # ── Region-emphasis splits (Apr 2026) ────────────────────────────
-    # Replace the old priority_region tilt for users who explicitly
-    # want a lower- or upper-body bias. Cleaner mental model: the
-    # split itself encodes the emphasis.
+    # Asymmetric ~2:1 focus:other allocation for users who explicitly
+    # want a lower- or upper-body bias (e.g. glute development).
     #
-    # LOWER_FOCUSED — 2× Lower per week starting day 1, Upper between
-    # to allow recovery. Days table:
-    #   3d: [Lower, Upper, Lower]
-    #   4d: [Lower, Upper, Lower, Upper]
-    #   5d: [Lower, Upper, Lower, Upper, Lower]   (3 Lower / 2 Upper)
-    #   6d: [Lower, Upper, Lower, Upper, Lower, Upper]
-    #   7d: [Lower, Upper, Lower, Upper, Lower, Upper, Lower]
-    if split == "lower_focused":
-        return [
-            DayArchetype.LIFT_LOWER if i % 2 == 0 else DayArchetype.LIFT_UPPER
-            for i in range(days)
-        ]
-    if split == "upper_focused":
-        return [
-            DayArchetype.LIFT_UPPER if i % 2 == 0 else DayArchetype.LIFT_LOWER
-            for i in range(days)
-        ]
+    # LOWER_FOCUSED day table:
+    #   3d: 2L/1U  [L, U, L]
+    #   4d: 3L/1U  [L, U, L, L]
+    #   5d: 3L/2U  [L, U, L, U, L]
+    #   6d: 4L/2U  [L, U, L, L, U, L]
+    #   7d: 5L/2U  [L, U, L, L, U, L, L]
+    if split in ("lower_focused", "upper_focused"):
+        is_lower = split == "lower_focused"
+        focus = DayArchetype.LIFT_LOWER if is_lower else DayArchetype.LIFT_UPPER
+        other = DayArchetype.LIFT_UPPER if is_lower else DayArchetype.LIFT_LOWER
+        _focused_patterns = {
+            1: [focus],
+            2: [focus, other],
+            3: [focus, other, focus],
+            4: [focus, other, focus, focus],
+            5: [focus, other, focus, other, focus],
+            6: [focus, other, focus, focus, other, focus],
+            7: [focus, other, focus, focus, other, focus, focus],
+        }
+        out = list(_focused_patterns.get(
+            days, [focus, other] * (days // 2) + [focus] * (days % 2),
+        ))
+        if _has_stimulus and days >= 3:
+            fh = DayArchetype.LIFT_LOWER_HEAVY if is_lower else DayArchetype.LIFT_UPPER_HEAVY
+            fy = DayArchetype.LIFT_LOWER_HYPERTROPHY if is_lower else DayArchetype.LIFT_UPPER_HYPERTROPHY
+            oh = DayArchetype.LIFT_UPPER_HEAVY if is_lower else DayArchetype.LIFT_LOWER_HEAVY
+            oy = DayArchetype.LIFT_UPPER_HYPERTROPHY if is_lower else DayArchetype.LIFT_LOWER_HYPERTROPHY
+            focus_cycle = [fh, fy, focus]
+            other_cycle = [oh, oy, other]
+            fi = oi = 0
+            for i in range(len(out)):
+                if out[i] == focus:
+                    out[i] = focus_cycle[fi % len(focus_cycle)]
+                    fi += 1
+                elif out[i] == other:
+                    out[i] = other_cycle[oi % len(other_cycle)]
+                    oi += 1
+        return out
 
     # Unknown split — conservative full-body fallback.
     return [DayArchetype.LIFT_FULL_BODY] * days
@@ -834,10 +860,10 @@ def _lifting_plus_cardio_recipe(
     # DON'T break the split's natural rotation. For PPL, cardio goes
     # after each full Push→Pull→Legs cycle. For UL, after each U→L
     # pair. For Full Body, evenly spaced.
-    from .day_templates import SPLIT_PPL, SPLIT_PPL_UL, SPLIT_UPPER_LOWER, SPLIT_FULL_BODY
+    from .day_templates import SPLIT_PPL, SPLIT_PPL_UL, SPLIT_FULL_BODY
     if effective_split in (SPLIT_PPL, SPLIT_PPL_UL):
         cycle_len = 3  # PPL cycle
-    elif effective_split == SPLIT_UPPER_LOWER:
+    elif _is_ul_family(effective_split):
         cycle_len = 2  # UL pair
     elif effective_split == SPLIT_FULL_BODY:
         cycle_len = 2  # every other day
@@ -1107,20 +1133,20 @@ def _promote_same_day_cardio(
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL,
         SPLIT_PPL_UL as _SPLIT_PPL_UL,
-        SPLIT_UPPER_LOWER as _SPLIT_UL,
     )
     if lifting_split == _SPLIT_PPL:
         rotation_pool = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
     elif lifting_split == _SPLIT_PPL_UL:
-        # PPL+UL hybrid: full 5-day rotation so the filler lift picked
-        # to replace a promoted cardio day can be Upper/Lower — not just
-        # PPL (which was creating duplicate Push days on 5-day PPL+UL).
         rotation_pool = [
             DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS,
             DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER,
         ]
-    elif lifting_split == _SPLIT_UL:
-        rotation_pool = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
+    elif _is_ul_family(lifting_split):
+        from .day_templates import SPLIT_LOWER_FOCUSED as _SPLIT_LF_PROMO
+        if lifting_split == _SPLIT_LF_PROMO:
+            rotation_pool = [DayArchetype.LIFT_LOWER, DayArchetype.LIFT_UPPER]
+        else:
+            rotation_pool = [DayArchetype.LIFT_UPPER, DayArchetype.LIFT_LOWER]
     else:
         rotation_pool = [DayArchetype.LIFT_FULL_BODY]
     rotation_pool = [a for a in rotation_pool if a in profile.allowed_archetypes]
@@ -1157,10 +1183,18 @@ def _promote_same_day_cardio(
             _fam(out[i]) for i in (ci - 1, ci + 1) if 0 <= i < len(out)
         }
         # Rank candidates by (family_count_so_far, priority_in_rotation).
-        ranked = sorted(
-            rotation_pool,
-            key=lambda a: (family_counts.get(_fam(a), 0), rotation_pool.index(a)),
-        )
+        # For focused splits (lower_focused / upper_focused), use pool
+        # order directly — the focus family is already first and we want
+        # to preserve the asymmetric allocation instead of balancing.
+        from .day_templates import SPLIT_LOWER_FOCUSED as _SLF, SPLIT_UPPER_FOCUSED as _SUF
+        _is_focused = lifting_split in (_SLF, _SUF)
+        if _is_focused:
+            ranked = list(rotation_pool)
+        else:
+            ranked = sorted(
+                rotation_pool,
+                key=lambda a: (family_counts.get(_fam(a), 0), rotation_pool.index(a)),
+            )
         replacement = next(
             (a for a in ranked if _fam(a) not in adjacent_fams),
             ranked[0],
@@ -1462,9 +1496,12 @@ def _repair_adjacent_duplicates(
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL_TD,
         SPLIT_PPL_UL as _SPLIT_PPL_UL_TD,
+        SPLIT_LOWER_FOCUSED as _SPLIT_LF_TD,
+        SPLIT_UPPER_FOCUSED as _SPLIT_UF_TD,
     )
-    _skip_tier_d = bool(user_chose_split) and lifting_split in (
-        _SPLIT_PPL_TD, _SPLIT_PPL_UL_TD,
+    _skip_tier_d = (
+        (bool(user_chose_split) and lifting_split in (_SPLIT_PPL_TD, _SPLIT_PPL_UL_TD))
+        or lifting_split in (_SPLIT_LF_TD, _SPLIT_UF_TD)
     )
     for _ in range(0 if _skip_tier_d else len(out)):
         if _total_dups(out) == 0:
@@ -2140,7 +2177,6 @@ def _preserves_split_identity(
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL_GUARD,
         SPLIT_PPL_UL as _SPLIT_PPL_UL_GUARD,
-        SPLIT_UPPER_LOWER as _SPLIT_UL_GUARD,
     )
 
     if not recipe:
@@ -2164,7 +2200,7 @@ def _preserves_split_identity(
             return now_breaks <= base_breaks
         return now_breaks == 0
 
-    if lifting_split == _SPLIT_UL_GUARD and user_chose_split:
+    if _is_ul_family(lifting_split) and user_chose_split:
         now_breaks = _ul_alt_breaks(tokens_now)
         if baseline is not None:
             base_breaks = _ul_alt_breaks(_lift_tokens_of(baseline))
@@ -2195,7 +2231,6 @@ def _next_in_split_rotation(
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL_NXT,
         SPLIT_PPL_UL as _SPLIT_PPL_UL_NXT,
-        SPLIT_UPPER_LOWER as _SPLIT_UL_NXT,
     )
     if not last_family:
         return None
@@ -2227,7 +2262,7 @@ def _next_in_split_rotation(
         # produce a predictable rotation.
         _canonical = {"push": "pull", "pull": "legs", "legs": "push"}
         return _canonical.get(last_family)
-    if lifting_split == _SPLIT_UL_NXT:
+    if _is_ul_family(lifting_split):
         ul_next = {"upper": "lower", "lower": "upper"}
         return ul_next.get(last_family)
     return None
@@ -2572,7 +2607,6 @@ def generate_weekly_recipe(
         lift_days = days - recovery_days
         _A = DayArchetype
         from .day_templates import (
-            SPLIT_UPPER_LOWER as _SPLIT_UL_STR,
             SPLIT_PPL_UL as _SPLIT_PPL_UL_STR,
             SPLIT_PPL as _SPLIT_PPL_STR,
             SPLIT_FULL_BODY as _SPLIT_FB_STR,
@@ -2581,7 +2615,7 @@ def generate_weekly_recipe(
         # A missing split argument falls through to UL (historical default).
         _is_ppl = lifting_split in (_SPLIT_PPL_STR, _SPLIT_PPL_UL_STR)
         _is_fb = lifting_split == _SPLIT_FB_STR
-        _is_ul = lifting_split == _SPLIT_UL_STR
+        _is_ul = _is_ul_family(lifting_split)
 
         # ── PPL strength cycle ────────────────────────────────────
         # Strict Push → Pull → Legs rotation so the week is always
@@ -2606,6 +2640,11 @@ def generate_weekly_recipe(
         elif _is_fb:
             _fb_pattern = [_A.LIFT_FULL_BODY_STRENGTH, _A.LIFT_FULL_BODY]
             _str_cycle = [_fb_pattern[i % 2] for i in range(lift_days)]
+        # ── Focused split strength cycle ──────────────────────────
+        # Asymmetric allocation with stimulus variants handled by
+        # _lifting_recipe (same as the lifting mode path).
+        elif lifting_split in ("lower_focused", "upper_focused"):
+            _str_cycle = list(_lifting_recipe(profile, lifting_split, lift_days))
         # ── Upper/Lower strength cycle (default) ──────────────────
         # Keeps historical behavior for UL and the no-split-argument
         # case. `_ul_strict` mirrors the previous `_ul_only` — when
@@ -3257,14 +3296,13 @@ def _enforce_strict_split_composition(
                 for _ in range(extras):
                     base["legs"] += 1
                 return base
-        if split == SPLIT_LOWER_FOCUSED:
-            lower = (n_lifts + 1) // 2
-            upper = n_lifts - lower
-            return {"lower": lower, "upper": upper}
-        if split == SPLIT_UPPER_FOCUSED:
-            upper = (n_lifts + 1) // 2
-            lower = n_lifts - upper
-            return {"upper": upper, "lower": lower}
+        if split in (SPLIT_LOWER_FOCUSED, SPLIT_UPPER_FOCUSED):
+            _focus_counts = {1: 1, 2: 1, 3: 2, 4: 3, 5: 3, 6: 4, 7: 5}
+            n_focus = _focus_counts.get(n_lifts, max(1, n_lifts - n_lifts // 3))
+            n_other = n_lifts - n_focus
+            if split == SPLIT_LOWER_FOCUSED:
+                return {"lower": n_focus, "upper": n_other}
+            return {"upper": n_focus, "lower": n_other}
         if split == SPLIT_FULL_BODY:
             return {"full_body": n_lifts}
         if split == SPLIT_BRO:
