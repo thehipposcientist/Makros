@@ -869,6 +869,13 @@ export default function Index() {
       setTrainerNote(null);
       setNutritionistNote(null);
       setSupplementStack([]);
+      // Wipe watch data immediately so the old workout/meals don't
+      // linger while the new user's plan loads (userId is already
+      // updated above so this push carries the correct identity).
+      try {
+        const { clearWatchData } = await import('../src/utils/watchSync');
+        await clearWatchData();
+      } catch { /* bridge optional */ }
     }
 
     // Same user (or user-switched) — pull from backend first, then load

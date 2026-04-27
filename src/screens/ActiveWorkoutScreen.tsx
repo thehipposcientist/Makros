@@ -37,6 +37,7 @@ import FormVideoModal from '../components/FormVideoModal';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
 import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { isWatchReachable } from '../utils/watchSync';
+import { setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -524,6 +525,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // reports reachable (i.e., the user opened it).
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
   const watchSessionId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  // Write session ID synchronously to the module-level store so HomeScreen's
+  // pull_state / reachability handlers can read it immediately without waiting
+  // for AsyncStorage (which is async and loses the race against pull_state).
+  setActiveWatchSessionId(watchSessionId.current);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
@@ -532,7 +537,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (!isNaN(ts) && ts > 0) startTime.current = ts;
         // Rehydrate sessionId from persistence so reopen gets same id.
         AsyncStorage.getItem('activeWatchSessionId').then(sid => {
-          if (sid) watchSessionId.current = sid;
+          if (sid) {
+            watchSessionId.current = sid;
+            setActiveWatchSessionId(sid);
+          }
         }).catch(() => {});
       } else {
         AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
@@ -545,6 +553,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // end fires the audio without a few-hundred-ms decode delay.
     // Idempotent across remounts.
     import('../utils/feedback').then(f => f.preloadRestTimerSound()).catch(() => {});
+    return () => { setActiveWatchSessionId(null); };
   }, []);
   // Fetch HR zones for cardio prescription display
   useEffect(() => {

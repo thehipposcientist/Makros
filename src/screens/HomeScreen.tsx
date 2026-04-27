@@ -74,6 +74,7 @@ import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
+import { getActiveWatchSessionId } from '../utils/activeWatchSession';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1852,10 +1853,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           } catch { /* fall back to backend score */ }
         }
-        let activeSessionId: string | null = null;
-        if (status === 'active') {
-          try { activeSessionId = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
-        }
+        const activeSessionId = status === 'active' ? getActiveWatchSessionId() : null;
         await pushWorkoutToWatch(todayWorkout, {
           dateISO: todayISO,
           status,
@@ -2126,10 +2124,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : s.skippedDates.has(todayKey()) ? 'skipped'
               : todayItem?.isRest ? 'rest'
               : 'scheduled';
-            let reachSid: string | null = null;
-            if (status === 'active') {
-              try { reachSid = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
-            }
+            const reachSid = status === 'active' ? getActiveWatchSessionId() : null;
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
             pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
@@ -2375,10 +2370,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   : s.skippedDates.has(todayKey()) ? 'skipped'
                   : todayItem?.isRest ? 'rest'
                   : 'scheduled';
-                let pullSid: string | null = null;
-                if (status === 'active') {
-                  try { pullSid = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
-                }
+                const pullSid = status === 'active' ? getActiveWatchSessionId() : null;
                 pushWorkoutToWatch(todayWorkout, {
                   dateISO: todayISO,
                   status,
