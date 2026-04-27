@@ -32,7 +32,7 @@ struct ContentView: View {
             focus: "Workout",
             durationMinutes: 60,
             dateISO: String(ISO8601DateFormatter().string(from: Date()).prefix(10)),
-            status: .active,
+            status: .scheduled,
             sessionId: nil,
             readiness: nil,
             readinessLabel: nil,
@@ -40,6 +40,23 @@ struct ContentView: View {
             warmupSteps: nil,
             syncedAtMs: Date().timeIntervalSince1970 * 1000
         )
+    }
+
+    /// Returns the workout with stale `.active` downgraded to `.scheduled`
+    /// so the Today tab shows "Start" instead of "Rejoin workout" when the
+    /// active status is from a previous account or expired session.
+    private var todayWorkout: WatchWorkout? {
+        guard let w = conn.workout else { return nil }
+        if w.status == .active, !shouldResumeWorkout(w) {
+            return WatchWorkout(
+                focus: w.focus, durationMinutes: w.durationMinutes,
+                dateISO: w.dateISO, status: .scheduled, sessionId: w.sessionId,
+                readiness: w.readiness, readinessLabel: w.readinessLabel,
+                exercises: w.exercises, warmupSteps: w.warmupSteps,
+                syncedAtMs: w.syncedAtMs
+            )
+        }
+        return w
     }
 
     /// Only auto-resume a workout if it's genuinely active, recent, and
@@ -92,7 +109,7 @@ struct ContentView: View {
             ZStack {
                 theme.background.ignoresSafeArea()
                 TabView {
-                    TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
+                    TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
                         heartRate.start {
                             active = true
                             conn.sendCommand("start_workout", payload: ["source": "watch"])
