@@ -22,6 +22,12 @@ struct ContentView: View {
 
     @State private var active: Bool = false
     @StateObject private var heartRate: HeartRateStore = HeartRateStore()
+    // Set to true when the user explicitly taps Start (scheduled or custom).
+    // Lets onReceive start HK on the phone's first active push without
+    // waiting for a valid sessionId or passing the age check — the phone
+    // may push with a stale syncedAtMs on the first delivery. Cleared once
+    // HK actually starts.
+    @State private var watchStartPending: Bool = false
     // Show a brief "← swipe →" hint on the first launch the user
     // sees, then never again (persisted in UserDefaults). Covers the
     // "I didn't know there were pages" discoverability gap.
@@ -121,7 +127,8 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        HeartRateStore.saveDiag("Watch Start tapped → sent start_workout to phone")
+                        HeartRateStore.saveDiag("Watch Start tapped → pending")
+                        watchStartPending = true
                         conn.sendCommand("start_workout", payload: ["source": "watch"])
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
@@ -132,7 +139,8 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        HeartRateStore.saveDiag("Custom Watch Start → sent start_custom_workout to phone")
+                        HeartRateStore.saveDiag("Custom Watch Start → pending")
+                        watchStartPending = true
                         conn.sendCommand("start_custom_workout", payload: [
                             "category": category,
                             "subtype": subtype,
@@ -201,18 +209,21 @@ struct ContentView: View {
             switch w.status {
             case .active:
                 if !active {
-                    if shouldResumeWorkout(w) {
-                        HeartRateStore.saveDiag("rcv active → starting HK (passive resume)")
+                    let pending = watchStartPending
+                    if pending || shouldResumeWorkout(w) {
+                        HeartRateStore.saveDiag("rcv active → starting HK pending=\(pending)")
+                        watchStartPending = false
                         heartRate.start { active = true }
                     }
                 }
             case .completed, .skipped:
+                watchStartPending = false
                 if active {
                     active = false
                     heartRate.end()
                 }
             case .rest, .scheduled:
-                break
+                watchStartPending = false
             }
         }
     }

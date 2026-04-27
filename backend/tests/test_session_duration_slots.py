@@ -337,6 +337,99 @@ def test_plan_at_60_and_75_same_structure_different_count():
     _ok("75-min plan: same split structure, more exercises on lift days")
 
 
+# ─── Cardio Finisher duration scaling ────────────────────────────────────────
+
+def _finisher_reps(session_minutes: int) -> str:
+    """Run the actual prescription path and return the reps string the
+    Cardio Finisher slot would get at this session_minutes."""
+    from app.services.workout.prescriptions import _prescribe_conditioning
+    from app.services.workout.slots import Slot
+    from types import SimpleNamespace
+
+    finisher_slot = Slot("Cardio Finisher", "cardio", None, "secondary")
+    fake_exercise = {
+        "name": "Treadmill",
+        "movement_pattern": "cardio",
+        "primary_muscle": "cardio",
+    }
+    fake_inputs = SimpleNamespace(
+        session_minutes=session_minutes,
+        user_equipment_capabilities={},
+        user_age=None,
+        resting_hr=None,
+    )
+    presc = _prescribe_conditioning(
+        DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+        finisher_slot,
+        fake_exercise,
+        fake_inputs,
+    )
+    return presc.reps
+
+
+def _displayed_minutes(reps: str) -> int:
+    """Pull the leading 'N min' value rendered by render_cardio_prescription_text."""
+    import re
+    m = re.match(r"\s*(\d+)\s*min", reps)
+    return int(m.group(1)) if m else 0
+
+
+def test_cardio_finisher_short_at_45_min():
+    """At 45 min sessions, Cardio Finisher caps near 5 min so the
+    lift portion still fits the budget."""
+    print("\n[test] cardio finisher: 45 min → ≤5 min finisher")
+    reps = _finisher_reps(45)
+    mins = _displayed_minutes(reps)
+    assert 3 <= mins <= 5, f"expected 3-5 min at sm=45, got: {mins} min ('{reps}')"
+    _ok(f"45 min: '{reps}'")
+
+
+def test_cardio_finisher_medium_at_60_min():
+    """At 60 min, Cardio Finisher caps near 12 min so lift+cardio total
+    stays within the user's chosen 45-60 range."""
+    print("\n[test] cardio finisher: 60 min → ≤12 min finisher")
+    reps = _finisher_reps(60)
+    mins = _displayed_minutes(reps)
+    assert 8 <= mins <= 12, f"expected 8-12 min at sm=60, got: {mins} min ('{reps}')"
+    _ok(f"60 min: '{reps}'")
+
+
+def test_cardio_finisher_extended_at_75_min():
+    """At 75 min, Cardio Finisher is 12-18 min."""
+    print("\n[test] cardio finisher: 75 min → 12-18 min finisher")
+    reps = _finisher_reps(75)
+    mins = _displayed_minutes(reps)
+    assert 12 <= mins <= 18, f"expected 12-18 min at sm=75, got: {mins} min ('{reps}')"
+    _ok(f"75 min: '{reps}'")
+
+
+def test_cardio_finisher_long_at_90_min():
+    """At 90 min, Cardio Finisher is 18-25 min."""
+    print("\n[test] cardio finisher: 90 min → 18-25 min finisher")
+    reps = _finisher_reps(90)
+    mins = _displayed_minutes(reps)
+    assert 18 <= mins <= 25, f"expected 18-25 min at sm=90, got: {mins} min ('{reps}')"
+    _ok(f"90 min: '{reps}'")
+
+
+def test_cardio_finisher_scales_monotonically():
+    """Sanity: each tier's finisher midpoint should be ≥ the previous tier."""
+    print("\n[test] cardio finisher: midpoint scales monotonically with session_minutes")
+    import re
+
+    def _mid(reps: str) -> float:
+        m = re.search(r"(\d+)\s*-\s*(\d+)\s*min", reps)
+        if m:
+            return (int(m.group(1)) + int(m.group(2))) / 2.0
+        m = re.search(r"(\d+)\s*min", reps)
+        return float(m.group(1)) if m else 0.0
+
+    mids = [_mid(_finisher_reps(sm)) for sm in (45, 60, 75, 90)]
+    for prev, cur in zip(mids, mids[1:]):
+        assert cur >= prev, f"finisher midpoints not monotonic: {mids}"
+    _ok(f"midpoints monotonic: {mids}")
+
+
 cases = [
     test_inject_bonus_no_op_at_60,
     test_inject_bonus_one_at_75,
@@ -352,6 +445,11 @@ cases = [
     test_bonus_slot_survives_at_generous_budget,
     test_plan_has_more_exercises_at_90_than_60,
     test_plan_at_60_and_75_same_structure_different_count,
+    test_cardio_finisher_short_at_45_min,
+    test_cardio_finisher_medium_at_60_min,
+    test_cardio_finisher_extended_at_75_min,
+    test_cardio_finisher_long_at_90_min,
+    test_cardio_finisher_scales_monotonically,
 ]
 
 if __name__ == "__main__":

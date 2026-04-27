@@ -65,6 +65,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 print("[watch] userId changed \(prev) → \(incoming) — wiping state")
                 HeartRateStore.saveDiag("userId changed \(prev.prefix(4))→\(incoming.prefix(4)) → wiping state")
                 wipeUserState()
+            } else {
+                HeartRateStore.saveDiag("userId same \(incoming.prefix(4)) — no wipe")
             }
             UserDefaults.standard.set(incoming, forKey: Self.userIdKey)
         }

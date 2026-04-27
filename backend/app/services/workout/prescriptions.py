@@ -265,6 +265,17 @@ def _prescribe_conditioning(
             user_age=user_age,
             resting_hr=resting_hr,
         )
+        # The prescription's base_reps is the authoritative duration —
+        # override the session_minutes-derived value from build_cardio_guidance
+        # so a Cardio Finisher with "8-12 min" reps doesn't get rendered as
+        # a 50-minute Zone 2 block.
+        import re as _re
+        _range_match = _re.search(r"(\d+)\s*-\s*(\d+)\s*min", base_reps)
+        _single_match = None if _range_match else _re.search(r"^\s*(\d+)\s*min", base_reps)
+        if _range_match:
+            guidance["duration_min"] = int(_range_match.group(2))
+        elif _single_match:
+            guidance["duration_min"] = int(_single_match.group(1))
         rep_text = render_cardio_prescription_text(guidance, ex_name)
         return Prescription(
             sets=sets,
@@ -353,8 +364,19 @@ def _prescribe_conditioning(
     # PLUS_CARDIO finisher slots (mixed archetype, cardio role)
     # Role was "isolation" historically; changed to "secondary" so the
     # finisher survives density trimming on 45-min sessions. Accept both.
+    # Duration scales with session_minutes so the lift+cardio total stays
+    # in the user's chosen range — the lift portion of a 7-slot template
+    # already runs ~50 min, leaving ~5-15 min for the finisher at sm=60.
     if role in ("isolation", "secondary"):
-        return _make_cardio(1, "10-20 min", 0, 1.5, "cardio_steady")
+        if session_minutes <= 45:
+            finisher_reps = "3-5 min"
+        elif session_minutes <= 60:
+            finisher_reps = "8-12 min"
+        elif session_minutes <= 75:
+            finisher_reps = "12-18 min"
+        else:
+            finisher_reps = "18-25 min"
+        return _make_cardio(1, finisher_reps, 0, 1.5, "cardio_steady")
 
     return _make_cardio(1, "20-30 min", 0, 1.5, "cardio_steady")
 
