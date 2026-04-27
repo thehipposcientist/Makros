@@ -13,9 +13,11 @@ that depend on targets degrade gracefully to None when targets are missing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from statistics import fmean
+from typing import Optional
 
 from sqlmodel import Session, select
 
@@ -34,6 +36,157 @@ from .plan import PlanSnapshot, get_plan_snapshot
 
 WINDOWS: tuple[int, ...] = (7, 14, 28)
 ROLLUP_LOOKBACK_DAYS = 35  # enough history to populate the 28d window
+
+
+# ─── Window preloader (used by recompute_user) ────────────────────────────────
+#
+# The per-day helpers (`_sum_nutrition_for_day`, `_session_stats_for_day`,
+# `_latest_checkin_on_or_before`) each issue 1–3 queries. Looping them
+# day-by-day across a 35-day backfill = ~5–7 queries × 35 = up to 245
+# round trips. The window preloader bulk-fetches everything in 5 queries
+# and lets the per-day computation read from in-memory dicts.
+
+@dataclass
+class _WindowCache:
+    """In-memory snapshot of the data needed by `compute_daily_rollup`
+    across a full date window. Fields are intentionally narrow — only what
+    the per-day helpers consume."""
+    items_by_meal: dict[int, list] = field(default_factory=lambda: defaultdict(list))
+    meals_by_day: dict[date, list] = field(default_factory=lambda: defaultdict(list))
+    session_by_day: dict[date, "WorkoutSession"] = field(default_factory=dict)
+    exercises_by_session: dict[int, list] = field(default_factory=lambda: defaultdict(list))
+    sets_by_exercise: dict[int, list] = field(default_factory=lambda: defaultdict(list))
+    checkin_by_day: dict[date, "WeeklyCheckIn"] = field(default_factory=dict)
+    # Sorted ascending so we can find "latest ≤ day" via reverse linear scan.
+    checkins_sorted: list = field(default_factory=list)
+    rollup_by_day: dict[date, "DailyRollup"] = field(default_factory=dict)
+
+
+def _preload_window(db: Session, user_id: int, start: date, end: date) -> _WindowCache:
+    cache = _WindowCache()
+
+    meals = db.exec(
+        select(Meal).where(
+            Meal.user_id == user_id,
+            Meal.meal_date >= start,
+            Meal.meal_date <= end,
+        )
+    ).all()
+    for m in meals:
+        cache.meals_by_day[m.meal_date].append(m)
+    meal_ids = [m.id for m in meals]
+    if meal_ids:
+        for it in db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all():
+            cache.items_by_meal[it.meal_id].append(it)
+
+    sessions = db.exec(
+        select(WorkoutSession).where(
+            WorkoutSession.user_id == user_id,
+            WorkoutSession.workout_date >= start,
+            WorkoutSession.workout_date <= end,
+        )
+    ).all()
+    for s in sessions:
+        cache.session_by_day[s.workout_date] = s
+    completed_session_ids = [s.id for s in sessions if s.completed_at is not None]
+    exercises = []
+    if completed_session_ids:
+        exercises = db.exec(
+            select(WorkoutExercise).where(WorkoutExercise.session_id.in_(completed_session_ids))
+        ).all()
+        for e in exercises:
+            cache.exercises_by_session[e.session_id].append(e)
+    ex_ids = [e.id for e in exercises]
+    if ex_ids:
+        for st in db.exec(
+            select(ExerciseSet).where(ExerciseSet.workout_exercise_id.in_(ex_ids))
+        ).all():
+            cache.sets_by_exercise[st.workout_exercise_id].append(st)
+
+    # Pull every checkin ≤ end so "latest on or before any day in window"
+    # is a single in-memory walk.
+    checkins = db.exec(
+        select(WeeklyCheckIn)
+        .where(WeeklyCheckIn.user_id == user_id, WeeklyCheckIn.checkin_date <= end)
+        .order_by(WeeklyCheckIn.checkin_date.asc())
+    ).all()
+    cache.checkins_sorted = checkins
+    for c in checkins:
+        if start <= c.checkin_date <= end:
+            cache.checkin_by_day[c.checkin_date] = c
+
+    rollups = db.exec(
+        select(DailyRollup)
+        .where(
+            DailyRollup.user_id == user_id,
+            DailyRollup.day >= start,
+            DailyRollup.day <= end,
+        )
+    ).all()
+    for r in rollups:
+        cache.rollup_by_day[r.day] = r
+
+    return cache
+
+
+def _sum_nutrition_for_day_cached(cache: _WindowCache, day: date) -> tuple[float, float, float, float, int]:
+    meals = cache.meals_by_day.get(day, [])
+    if not meals:
+        return 0.0, 0.0, 0.0, 0.0, 0
+    kcal = protein = carbs = fat = 0.0
+    for m in meals:
+        for it in cache.items_by_meal.get(m.id, []):
+            kcal += it.calories
+            protein += it.protein_g
+            carbs += it.carbs_g
+            fat += it.fat_g
+    return kcal, protein, carbs, fat, len(meals)
+
+
+def _session_stats_for_day_cached(cache: _WindowCache, day: date) -> dict:
+    session = cache.session_by_day.get(day)
+    if not session:
+        return {
+            "session_planned": False,
+            "session_completed": False,
+            "session_focus": None,
+            "session_rpe_avg": None,
+            "session_duration_min": None,
+        }
+    completed = session.completed_at is not None
+    rpe_avg: Optional[float] = None
+    if completed:
+        rpes = [
+            s.rpe
+            for e in cache.exercises_by_session.get(session.id, [])
+            for s in cache.sets_by_exercise.get(e.id, [])
+            if s.rpe is not None
+        ]
+        if rpes:
+            rpe_avg = round(fmean(rpes), 1)
+    duration_min: Optional[int] = None
+    if completed and session.completed_at and session.created_at:
+        delta = session.completed_at - session.created_at
+        mins = int(delta.total_seconds() // 60)
+        if 5 <= mins <= 240:
+            duration_min = mins
+    return {
+        "session_planned": True,
+        "session_completed": completed,
+        "session_focus": session.focus,
+        "session_rpe_avg": rpe_avg,
+        "session_duration_min": duration_min,
+    }
+
+
+def _latest_checkin_on_or_before_cached(cache: _WindowCache, day: date) -> Optional["WeeklyCheckIn"]:
+    """Return latest checkin with date ≤ day. List is sorted ascending."""
+    latest = None
+    for c in cache.checkins_sorted:
+        if c.checkin_date > day:
+            break
+        latest = c
+    return latest
 
 
 # ─── Daily rollup ─────────────────────────────────────────────────────────────
@@ -111,12 +264,19 @@ def compute_daily_rollup(
     user_id: int,
     day: date,
     plan: PlanSnapshot | None = None,
+    *,
+    cache: _WindowCache | None = None,
 ) -> DailyRollup:
     """Compute (or recompute) a single DailyRollup. Upserts in place.
 
     `plan` is the current active plan snapshot; targets are copied into the row
     so flag evaluation can be done entirely off precomputed rows. If None, the
     row is written without targets (flags degrade gracefully).
+
+    `cache` is an optional pre-loaded window. When provided (e.g. from
+    `recompute_user`), per-day data comes from in-memory dicts rather than
+    fresh DB queries — turns a 5–7-query-per-day loop into a single 5-query
+    bulk load up front. Single-day callers omit it and pay the per-day price.
 
     NOTE: we snapshot the *current* plan target onto every recomputed day. This
     means historical "adherence" always measures against the plan the user is
@@ -125,18 +285,26 @@ def compute_daily_rollup(
     versioned plan-target history. Revisit in phase 5 if plans start changing
     mid-week and we want true point-in-time adherence.
     """
-    kcal, protein, carbs, fat, meals_logged = _sum_nutrition_for_day(db, user_id, day)
-    sess = _session_stats_for_day(db, user_id, day)
+    if cache is not None:
+        kcal, protein, carbs, fat, meals_logged = _sum_nutrition_for_day_cached(cache, day)
+        sess = _session_stats_for_day_cached(cache, day)
+        exact_checkin = cache.checkin_by_day.get(day)
+        latest_checkin = exact_checkin or _latest_checkin_on_or_before_cached(cache, day)
+        existing = cache.rollup_by_day.get(day)
+    else:
+        kcal, protein, carbs, fat, meals_logged = _sum_nutrition_for_day(db, user_id, day)
+        sess = _session_stats_for_day(db, user_id, day)
+        exact_checkin = db.exec(
+            select(WeeklyCheckIn).where(
+                WeeklyCheckIn.user_id == user_id,
+                WeeklyCheckIn.checkin_date == day,
+            )
+        ).first()
+        latest_checkin = exact_checkin or _latest_checkin_on_or_before(db, user_id, day)
+        existing = db.exec(
+            select(DailyRollup).where(DailyRollup.user_id == user_id, DailyRollup.day == day)
+        ).first()
 
-    # Body + recovery: weight from any checkin on this exact day, else null.
-    # Self-report carries forward from the latest checkin ≤ day.
-    exact_checkin = db.exec(
-        select(WeeklyCheckIn).where(
-            WeeklyCheckIn.user_id == user_id,
-            WeeklyCheckIn.checkin_date == day,
-        )
-    ).first()
-    latest_checkin = exact_checkin or _latest_checkin_on_or_before(db, user_id, day)
     weight_lbs = exact_checkin.weight_lbs if exact_checkin else None
     # Map 1–5 sleep rating to approximate hours (rough, until HealthKit wiring lands).
     sleep_h: float | None = None
@@ -146,9 +314,6 @@ def compute_daily_rollup(
         # Only trust sleep-as-hours from same-day checkin, not forward-carried.
         sleep_h = {1: 4.5, 2: 5.5, 3: 6.5, 4: 7.5, 5: 8.5}.get(latest_checkin.sleep)
 
-    existing = db.exec(
-        select(DailyRollup).where(DailyRollup.user_id == user_id, DailyRollup.day == day)
-    ).first()
     if existing:
         row = existing
     else:
@@ -334,15 +499,21 @@ def recompute_user(db: Session, user_id: int, as_of: date | None = None, lookbac
     """Recompute daily rollups for the last `lookback_days` and all window rollups.
 
     Returns a small summary dict for the caller (endpoint, cron job, tests).
+
+    Bulk-loads every meal/session/checkin/rollup row in the window once, then
+    feeds an in-memory cache to per-day rollup computation. Replaces the prior
+    O(days × per-day-queries) pattern with O(window-queries + days × dict-reads).
     """
     as_of = as_of or date.today()
     start = as_of - timedelta(days=lookback_days - 1)
 
     plan = get_plan_snapshot(db, user_id)
+    cache = _preload_window(db, user_id, start, as_of)
+
     day = start
     daily_count = 0
     while day <= as_of:
-        compute_daily_rollup(db, user_id, day, plan=plan)
+        compute_daily_rollup(db, user_id, day, plan=plan, cache=cache)
         daily_count += 1
         day += timedelta(days=1)
 

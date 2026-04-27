@@ -228,6 +228,14 @@ class WeeklyCheckIn(SQLModel, table=True):
     checkin_date: date = Field(index=True)
     weight_lbs: float
     waist_in: float | None = Field(default=None)
+    # Body composition — optional. Lets the app distinguish muscle gain
+    # (weight ↑, BF% ↓) from fat gain on a bulk, and surface a lean-mass
+    # trendline alongside the raw weight EMA.
+    body_fat_pct: float | None = Field(default=None)
+    # Optional blood pressure — for users tracking hypertension or in
+    # cardiac rehab. No scoring yet, just storage + trend chart.
+    bp_systolic: int | None = Field(default=None)
+    bp_diastolic: int | None = Field(default=None)
     energy: int = Field(default=3)
     sleep: int = Field(default=3)
     adherence: int = Field(default=3)
@@ -243,6 +251,32 @@ class CoachMemory(SQLModel, table=True):
     summary: str
     details: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RecoveryActivity(SQLModel, table=True):
+    """User-logged recovery modalities — cold plunge, sauna, breathwork,
+    meditation. Stored separately from workouts since they're aimed at
+    parasympathetic recovery, not training stimulus. Lets the app
+    correlate "ice bath last night → next-morning HRV" so users can see
+    whether the modality is actually doing anything for them."""
+    __tablename__ = "recovery_activities"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    activity_date: date = Field(index=True)
+    modality: str       # "cold_plunge" | "sauna" | "breathwork" | "meditation" | "stretching" | "other"
+    duration_min: int   # whole minutes; UI step is 1
+    intensity: str | None = Field(default=None)  # e.g. "30s @ 50°F" — optional free text
+    notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RecoveryActivityCreate(SQLModel):
+    """Client → server payload for logging a recovery activity."""
+    activity_date: date
+    modality: str
+    duration_min: int
+    intensity: str | None = None
+    notes: str | None = None
 
 
 # ─── AI check-in system: rollups, flags, decisions ────────────────────────────
@@ -1289,6 +1323,9 @@ class WeeklyCheckInCreate(SQLModel):
     checkin_date: date
     weight_lbs: float
     waist_in: float | None = None
+    body_fat_pct: float | None = None
+    bp_systolic: int | None = None
+    bp_diastolic: int | None = None
     energy: int = 3
     sleep: int = 3
     adherence: int = 3

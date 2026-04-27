@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import BodyHeatMap, { HeatMuscleKey, HeatRecoveryMap } from './BodyHeatMap';
+import FadeInView from './FadeInView';
 
 /**
  * Per-muscle recovery bar with animated fill. Width is a layout prop so
@@ -155,6 +156,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
       </View>
 
       {expanded && (
+        <FadeInView delay={0} duration={300} slideDistance={10}>
         <View style={{ marginTop: 10 }}>
           {/* Explainer: the bars aggregate fatigue over a decay window
               (day 0 = 100%, day 1 = 50%, day 2 = 25%, day 3 = 10%) so
@@ -188,13 +190,13 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
           {/* Compact exact-value list — two columns */}
           <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap' }}>
-            {muscleEntries.map(([muscle, fatigue]) => {
+            {muscleEntries.map(([muscle, fatigue], idx) => {
               const pct = Math.round(fatigue * 100);
               const recovery = Math.max(0, Math.min(100, 100 - pct));
               const color = recovery >= 70 ? tc.success : recovery >= 40 ? tc.warning : tc.error;
               return (
+                <FadeInView key={muscle} delay={120 + idx * 30} duration={220} slideDistance={0}>
                 <View
-                  key={muscle}
                   style={{
                     width: '50%',
                     flexDirection: 'row',
@@ -209,6 +211,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                   </Text>
                   <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{recovery}%</Text>
                 </View>
+                </FadeInView>
               );
             })}
           </View>
@@ -336,6 +339,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
             );
           })()}
         </View>
+        </FadeInView>
       )}
     </TouchableOpacity>
   );

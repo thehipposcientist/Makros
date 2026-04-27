@@ -18,7 +18,9 @@ from typing import Callable
 from sqlmodel import Session, select
 
 from app.models import (
+    DailyHealthSnapshot,
     DailyRollup,
+    SleepLog,
     UserFlag,
     UserGoal,
     UserRollup,
@@ -55,6 +57,17 @@ class FlagThresholds:
     # schedule_conflict_pattern
     schedule_conflict_misses: int = 3     # same weekday missed ≥ N times
     schedule_conflict_window_weeks: int = 4
+    # suppressed_hrv_7d (CNS-fatigue early warning)
+    hrv_suppression_ratio: float = 0.90   # 7d avg < 0.90× 30d baseline
+    hrv_suppression_min_days: int = 3     # minimum suppressed days in 7d window
+    hrv_suppression_min_baseline_days: int = 14  # need 14d baseline before firing
+    # elevated_respiratory_rate_7d
+    rr_elevated_low_bpm: float = 16.0     # >16 bpm = low (slightly elevated)
+    rr_elevated_med_bpm: float = 18.0     # >18 bpm = med (clear stress signal)
+    rr_min_days: int = 4                  # need ≥4 nights of RR data in 7d
+    # erratic_hrv_7d (chronic stress / poor sleep proxy)
+    hrv_cv_threshold_pct: float = 30.0    # coefficient of variation >30% = erratic
+    hrv_cv_min_days: int = 5              # need ≥5 days of HRV in 7d
 
 
 FLAG_CONFIG = FlagThresholds()
@@ -278,6 +291,124 @@ def flag_schedule_conflict_pattern(db: Session, user_id: int, as_of: date) -> di
     }
 
 
+def _hrv_series(db: Session, user_id: int, as_of: date, days: int) -> list[float]:
+    """Pull HRV values from DailyHealthSnapshot for the last `days` days,
+    inclusive of `as_of`. Skips None entries — sparse wear is expected."""
+    start = as_of - timedelta(days=days - 1)
+    rows = db.exec(
+        select(DailyHealthSnapshot)
+        .where(
+            DailyHealthSnapshot.user_id == user_id,
+            DailyHealthSnapshot.snapshot_date >= start,
+            DailyHealthSnapshot.snapshot_date <= as_of,
+        )
+        .order_by(DailyHealthSnapshot.snapshot_date.asc())
+    ).all()
+    return [float(r.hrv_ms) for r in rows if r.hrv_ms is not None and r.hrv_ms > 0]
+
+
+def flag_suppressed_hrv_7d(db: Session, user_id: int, as_of: date) -> dict | None:
+    """CNS-fatigue early warning. Fires when 7d HRV is suppressed against
+    a 30d baseline — distinct from per-muscle fatigue, which is read-out
+    from training volume. Catches under-recovery before it shows up in
+    strength performance.
+
+    Cooldown is implicit: a deload week raises the 7d avg, so the flag
+    naturally clears once the user actually rests."""
+    baseline_window = _hrv_series(db, user_id, as_of, 30)
+    if len(baseline_window) < FLAG_CONFIG.hrv_suppression_min_baseline_days:
+        return None
+    recent_window = _hrv_series(db, user_id, as_of, 7)
+    if len(recent_window) < FLAG_CONFIG.hrv_suppression_min_days:
+        return None
+    baseline_median = sorted(baseline_window)[len(baseline_window) // 2]
+    if baseline_median <= 0:
+        return None
+    threshold = baseline_median * FLAG_CONFIG.hrv_suppression_ratio
+    suppressed_days = sum(1 for v in recent_window if v < threshold)
+    if suppressed_days < FLAG_CONFIG.hrv_suppression_min_days:
+        return None
+    avg_7d = sum(recent_window) / len(recent_window)
+    ratio = avg_7d / baseline_median
+    severity = "med" if ratio < 0.85 else "low"
+    return {
+        "severity": severity,
+        "value": (
+            f"7d HRV {avg_7d:.0f}ms vs 30d baseline {baseline_median:.0f}ms "
+            f"({int(ratio * 100)}%)"
+        ),
+        "details": {
+            "hrv_7d_avg_ms": round(avg_7d, 1),
+            "hrv_30d_baseline_ms": round(baseline_median, 1),
+            "ratio": round(ratio, 3),
+            "suppressed_days": suppressed_days,
+        },
+    }
+
+
+def flag_elevated_respiratory_rate_7d(db: Session, user_id: int, as_of: date) -> dict | None:
+    """Elevated respiratory rate as a systemic-stress / acute-illness proxy.
+
+    Reads from `SleepLog.respiratory_rate` (per night). For some users RR
+    is a cleaner overtraining signal than HRV — it's also among the
+    earliest signs of an upper-respiratory infection (typically rising
+    1–2 bpm before symptoms)."""
+    start = as_of - timedelta(days=6)
+    rows = db.exec(
+        select(SleepLog)
+        .where(
+            SleepLog.user_id == user_id,
+            SleepLog.night_date >= start,
+            SleepLog.night_date <= as_of,
+        )
+    ).all()
+    rr_values = [float(r.respiratory_rate) for r in rows if r.respiratory_rate]
+    if len(rr_values) < FLAG_CONFIG.rr_min_days:
+        return None
+    avg = sum(rr_values) / len(rr_values)
+    if avg < FLAG_CONFIG.rr_elevated_low_bpm:
+        return None
+    severity = "med" if avg >= FLAG_CONFIG.rr_elevated_med_bpm else "low"
+    return {
+        "severity": severity,
+        "value": f"avg respiratory rate {avg:.1f}/min over {len(rr_values)} nights",
+        "details": {
+            "rr_avg_per_min": round(avg, 2),
+            "nights": len(rr_values),
+        },
+    }
+
+
+def flag_erratic_hrv_7d(db: Session, user_id: int, as_of: date) -> dict | None:
+    """High day-to-day HRV variance. Distinguishes "low HRV" (tired) from
+    "erratic HRV" (chronic stress / inconsistent sleep). Coefficient of
+    variation = stdev / mean, expressed as a percentage. >30% suggests
+    the user's autonomic state is unstable — coachable into sleep
+    consistency or stress-management rather than just deload."""
+    values = _hrv_series(db, user_id, as_of, 7)
+    if len(values) < FLAG_CONFIG.hrv_cv_min_days:
+        return None
+    mean = sum(values) / len(values)
+    if mean <= 0:
+        return None
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    stdev = variance ** 0.5
+    cv_pct = (stdev / mean) * 100.0
+    if cv_pct < FLAG_CONFIG.hrv_cv_threshold_pct:
+        return None
+    severity = "med" if cv_pct >= 45.0 else "low"
+    return {
+        "severity": severity,
+        "value": f"HRV variability {cv_pct:.0f}% over {len(values)} days",
+        "details": {
+            "hrv_cv_pct": round(cv_pct, 1),
+            "hrv_mean_ms": round(mean, 1),
+            "hrv_stdev_ms": round(stdev, 1),
+            "days": len(values),
+        },
+    }
+
+
 FLAG_REGISTRY: dict[str, FlagFn] = {
     "low_adherence_7d":         flag_low_adherence_7d,
     "low_protein_7d":           flag_low_protein_7d,
@@ -288,6 +419,9 @@ FLAG_REGISTRY: dict[str, FlagFn] = {
     "missed_sessions_7d":       flag_missed_sessions_7d,
     "missed_lower_body":        flag_missed_lower_body,
     "schedule_conflict_pattern": flag_schedule_conflict_pattern,
+    "suppressed_hrv_7d":           flag_suppressed_hrv_7d,
+    "elevated_respiratory_rate_7d": flag_elevated_respiratory_rate_7d,
+    "erratic_hrv_7d":              flag_erratic_hrv_7d,
 }
 
 

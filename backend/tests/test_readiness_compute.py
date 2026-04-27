@@ -154,14 +154,20 @@ def test_computed_at_ms_always_populated():
 
 
 def test_computed_at_ms_strictly_advances():
-    """Two consecutive calls produce strictly increasing timestamps so
-    the watch's ordering check (later wins) works correctly."""
+    """Two consecutive uncached calls produce strictly increasing timestamps so
+    the watch's ordering check (later wins) works correctly.
+
+    `use_cache=False` is required because the per-process TTL cache (added
+    for perf) intentionally returns the same object for identical-signature
+    calls within the TTL window — so its `computed_at_ms` doesn't advance.
+    Cache invalidation hooks fire on every relevant write, so fresh
+    timestamps still flow to the watch in production."""
     print("\n[test] readiness: computed_at_ms monotonically increases")
     from app.services.readiness.compute import compute_readiness
     _, s, u = _setup()
-    a = compute_readiness(s, u.id)
+    a = compute_readiness(s, u.id, use_cache=False)
     time.sleep(0.005)
-    b = compute_readiness(s, u.id)
+    b = compute_readiness(s, u.id, use_cache=False)
     assert b.computed_at_ms > a.computed_at_ms
 
 

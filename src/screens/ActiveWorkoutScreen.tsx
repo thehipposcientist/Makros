@@ -180,6 +180,22 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
+function AnimatedBarFill({ pct, color, delay = 0 }: { pct: number; color: string; delay?: number }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const t = setTimeout(() => {
+      Animated.timing(anim, { toValue: pct, duration: 500, useNativeDriver: false }).start();
+    }, delay);
+    return () => clearTimeout(t);
+  }, [pct, delay]);
+  return (
+    <Animated.View style={{
+      width: anim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+      height: '100%', backgroundColor: color, borderRadius: 3,
+    }} />
+  );
+}
+
 const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 // `isBodyweightOnly` name-regex was replaced by the richer
@@ -771,12 +787,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // to WorkoutSession + per-exercise tables so per-set detail survives a
   // force-quit or an AsyncStorage wipe.
   const syncDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSyncedSetCountRef = useRef(0);
   const syncPartialToBackend = useCallback((sessionExercises: SessionExercise[]) => {
     if (!authToken) return;
     const hasLoggedSet = sessionExercises.some(ex => ex.sets.length > 0);
     if (!hasLoggedSet) return;
+    const totalSets = sessionExercises.reduce((t, ex) => t + ex.sets.length, 0);
+    if (totalSets - lastSyncedSetCountRef.current < 3) return;
     if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
     syncDebounceRef.current = setTimeout(() => {
+      lastSyncedSetCountRef.current = totalSets;
       const payload = sessionExercises
         .filter(ex => ex.sets.length > 0)
         .map((ex, i) => ({
@@ -1029,7 +1049,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     Animated.sequence([
       Animated.spring(v, { toValue: 1.15, friction: 5, tension: 120, useNativeDriver: true }),
       Animated.spring(v, { toValue: 1.0,  friction: 8, tension: 140, useNativeDriver: true }),
-    ]).start();
+    ]).start(() => {
+      // Prune accumulated Animated.Values for this exercise now that it's done.
+      for (let slot = 0; slot < 20; slot++) {
+        const base = `${idx}-${slot}`;
+        delete setBadgeScales[base];
+        delete setBadgeWasLogged[base];
+        delete setPulseValues[base];
+        delete inputFocusValues[`${base}-weight`];
+        delete inputFocusValues[`${base}-reps`];
+      }
+      delete exerciseCompleteScales[idx];
+      delete exerciseCompleteWasDone[idx];
+    });
   };
   // Pulse animation values keyed by "exIdx-setSlot". Drives the green
   // flash-fade that runs when a set is successfully logged. We lazily
@@ -3348,6 +3380,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               key={rir}
                               onPress={() => {
                                 const setIdx = pendingRir!.setIdx;
+                                const updatedSets = exercises[i].sets.map((s, si) =>
+                                  si === setIdx ? { ...s, rir } : s
+                                );
                                 setExercises(prev => prev.map((e, ei) => {
                                   if (ei !== i) return e;
                                   const sets = e.sets.slice();
@@ -3355,6 +3390,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   return { ...e, sets };
                                 }));
                                 setPendingRir(null);
+                                refreshRecommendationForExercise(i, updatedSets);
                               }}
                               style={{ flex: 1, minWidth: 44, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: workoutPalette.strong }}>
                               <Text style={{ color: '#fff', fontSize: 13, fontWeight: '800' }}>{label}</Text>
@@ -3362,7 +3398,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           );
                         })}
                       </View>
-                      <TouchableOpacity onPress={() => setPendingRir(null)} style={{ alignSelf: 'flex-end', paddingVertical: 2 }}>
+                      <TouchableOpacity onPress={() => {
+                        setPendingRir(null);
+                        refreshRecommendationForExercise(i, exercises[i].sets);
+                      }} style={{ alignSelf: 'flex-end', paddingVertical: 2 }}>
                         <Text style={{ fontSize: 11, color: themeColors.textMuted, fontWeight: '700' }}>Skip</Text>
                       </TouchableOpacity>
                     </View>
@@ -3375,13 +3414,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
                     </View>
                   )}
-                  {/* Render gate: only show the AI tip card once the user
-                      has rated the last logged set. The fetch itself is
-                      already gated in handleSetFeedback, but this second
-                      check belt-and-braces any state-ordering races. */}
-                  {!isAiLoading && ex.aiRecommendation && (
-                    ex.sets.length === 0 || !!ex.sets[ex.sets.length - 1]?.feedback
-                  ) && (
+                  {!isAiLoading && isAiError && (
+                    <View style={[styles.aiBubble, styles.aiBubbleError]}>
+                      <Ionicons name="alert-circle-outline" size={14} color={themeColors.error} />
+                      <Text style={[styles.aiText, { color: themeColors.textMuted, marginLeft: 6 }]}>Couldn't load tip</Text>
+                    </View>
+                  )}
+                  {!isAiLoading && !isAiError && ex.aiRecommendation && ex.sets.length > 0 && (
                     <View style={styles.aiBubble}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.aiLabel}>AI TIP</Text>
@@ -3524,7 +3563,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 if (!metrics) return null;
                                 return (
                                   <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 8, borderWidth: 1, borderColor: themeColors.border }}>
-                                    <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted }}>Session Details (optional)</Text>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted }}>Session Details</Text>
+                                      <Text style={{ fontSize: 10, color: themeColors.textMuted, fontStyle: 'italic' }}>Fill in what's relevant</Text>
+                                    </View>
                                     {metrics.map(m => (
                                       <View key={m.key} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                                         <Text style={{ fontSize: 13, color: themeColors.textSecondary, fontWeight: '600' }}>{m.label}</Text>
@@ -3777,16 +3819,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     );
                   })()}
 
-                  {/* Feedback buttons removed — recommendations now derive
-                      from actual reps vs target reps automatically. */}
-
                   {(() => {
                     const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
                     const unitLabel = timedInterval ? 'Interval' : 'Set';
+                    const extras = extraSetCounts[i] ?? 0;
                     return (
                       <>
                         {isDone && (
                           <Text style={[styles.doneText, { textAlign: 'center', marginTop: 4 }]}>All sets complete!</Text>
+                        )}
+                        {extras > 2 && (
+                          <Text style={{ fontSize: 11, color: themeColors.warning ?? '#F59E0B', textAlign: 'center', marginTop: 4, fontWeight: '600' }}>
+                            {extras} extra sets beyond the plan — great effort, consider wrapping up
+                          </Text>
                         )}
                         <View style={styles.doneRow}>
                           <TouchableOpacity
@@ -4112,87 +4157,71 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         </View>
                       ) : null}
                     </View>
-                    {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
-                      <View style={{ marginTop: 10, marginBottom: 8, paddingHorizontal: 2 }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8, textAlign: 'center' }}>
-                          TIME IN ZONES
-                        </Text>
-                        {/* Zone circles — ring size scales with time in that
-                            zone relative to the peak zone. Minutes + label
-                            inline under each. Legible at a glance and photo-
-                            shareable for the summary card. */}
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end' }}>
-                          {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
-                            const min = summaryData.hrZoneMinutes![i];
-                            const peak = Math.max(...summaryData.hrZoneMinutes!, 1);
-                            // Min ring 36 when zero, max ring 60 at peak.
-                            const size = 36 + Math.round(24 * (min / peak));
-                            const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
-                            const isEmpty = min < 0.5;
-                            return (
-                              <View key={label} style={{ alignItems: 'center' }}>
-                                <View style={{
-                                  width: size, height: size, borderRadius: size / 2,
-                                  borderWidth: 3,
-                                  borderColor: isEmpty ? themeColors.border : zoneColor,
-                                  backgroundColor: isEmpty ? 'transparent' : zoneColor + '22',
-                                  alignItems: 'center', justifyContent: 'center',
-                                }}>
-                                  <Text style={{ fontSize: 13, fontWeight: '800', color: isEmpty ? themeColors.textMuted : zoneColor }}>
-                                    {Math.round(min)}
-                                  </Text>
-                                  <Text style={{ fontSize: 8, fontWeight: '600', color: isEmpty ? themeColors.textMuted : zoneColor, marginTop: -1 }}>
-                                    min
-                                  </Text>
-                                </View>
-                                <Text style={{ fontSize: 10, fontWeight: '800', color: isEmpty ? themeColors.textMuted : zoneColor, marginTop: 4, letterSpacing: 0.5 }}>
-                                  {label}
-                                </Text>
-                              </View>
-                            );
-                          })}
-                        </View>
-                      </View>
-                    ) : null}
-
-                    {/* Training score — 0-100 productivity dial. Same
-                        visual language as the readiness dial so users
-                        can mentally compare effort vs recovery later
-                        on the Progress tab. */}
                     {summaryData?.trainingScore != null && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 10 }}>
-                        <View style={{
-                          width: 56, height: 56, borderRadius: 28,
-                          borderWidth: 4,
-                          borderColor: summaryData.trainingScore >= 85 ? themeColors.success
-                            : summaryData.trainingScore >= 65 ? themeColors.primary
-                            : summaryData.trainingScore >= 45 ? themeColors.warning
-                            : themeColors.error,
-                          backgroundColor: themeColors.surface,
-                          alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          <Text style={{ fontSize: 18, fontWeight: '900',
-                            color: summaryData.trainingScore >= 85 ? themeColors.success
-                              : summaryData.trainingScore >= 65 ? themeColors.primary
-                              : summaryData.trainingScore >= 45 ? themeColors.warning
-                              : themeColors.error,
-                            lineHeight: 20 }}>
-                            {summaryData.trainingScore}
-                          </Text>
-                          <Text style={{ fontSize: 7, fontWeight: '700', letterSpacing: 0.4, marginTop: -1, color: themeColors.textMuted }}>
-                            SCORE
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center',
+                        backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
+                        borderRadius: 10, padding: 12, marginTop: 10, marginBottom: 4, gap: 12,
+                      }}>
+                        <View style={{ alignItems: 'flex-start' }}>
+                          <AnimatedNumber
+                            value={summaryData.trainingScore}
+                            duration={900}
+                            style={{
+                              fontSize: 38, fontWeight: '900', lineHeight: 42,
+                              color: summaryData.trainingScore >= 85 ? themeColors.success
+                                : summaryData.trainingScore >= 65 ? themeColors.primary
+                                : summaryData.trainingScore >= 45 ? themeColors.warning
+                                : themeColors.error,
+                            }}
+                          />
+                          <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginTop: 1 }}>
+                            TRAINING SCORE
                           </Text>
                         </View>
+                        <View style={{ width: 1, height: 40, backgroundColor: themeColors.border }} />
                         <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary }}>
+                          <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 3 }}>
                             {summaryData.trainingRating ?? '—'}
                           </Text>
-                          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                          <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 15 }}>
                             Effort {summaryData.trainingPillars?.effort ?? 0}/40 · Volume {summaryData.trainingPillars?.volume ?? 0}/25 · Time {summaryData.trainingPillars?.duration ?? 0}/20
                           </Text>
                         </View>
                       </View>
                     )}
+
+                    {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
+                      <View style={{ marginTop: 8, marginBottom: 8, paddingHorizontal: 2 }}>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>
+                          TIME IN ZONES
+                        </Text>
+                        {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
+                          const min = summaryData.hrZoneMinutes![i];
+                          const peak = Math.max(...summaryData.hrZoneMinutes!, 1);
+                          const pct = Math.round((min / peak) * 100);
+                          const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
+                          const isEmpty = min < 0.5;
+                          return (
+                            <FadeInView key={label} delay={i * 80} duration={300} slideDistance={0}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 5, gap: 8 }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', color: isEmpty ? themeColors.textMuted : zoneColor, width: 18 }}>
+                                  {label}
+                                </Text>
+                                <View style={{ flex: 1, height: 6, backgroundColor: themeColors.border, borderRadius: 3, overflow: 'hidden' }}>
+                                  {!isEmpty && (
+                                    <AnimatedBarFill pct={pct} color={zoneColor} delay={i * 80 + 150} />
+                                  )}
+                                </View>
+                                <Text style={{ fontSize: 10, fontWeight: '600', color: isEmpty ? themeColors.textMuted : themeColors.textSecondary, width: 28, textAlign: 'right' }}>
+                                  {isEmpty ? '—' : `${Math.round(min)}m`}
+                                </Text>
+                              </View>
+                            </FadeInView>
+                          );
+                        })}
+                      </View>
+                    ) : null}
 
                     {/* Best sets */}
                     {(summaryData?.achievements?.length ?? 0) > 0 && (

@@ -409,7 +409,22 @@ def auto_renew_week(
         readiness_score=readiness_score,
     )
 
-    # Step 2: Auto-apply safe recommendations
+    # Step 2a: Readiness-based auto-deload — if readiness is Fatigued or
+    # Overtrained (< 40), immediately reduce volume for the new week so
+    # the planner reads a lower adjustment before generating the plan.
+    if readiness_score is not None and readiness_score < 40:
+        from app.models import UserCoachingState
+        coaching = db.exec(
+            select(UserCoachingState).where(UserCoachingState.user_id == user_id)
+        ).first()
+        if coaching is None:
+            coaching = UserCoachingState(user_id=user_id)
+            db.add(coaching)
+        existing_adj = getattr(coaching, "volume_adjustment_pct", 0) or 0
+        coaching.volume_adjustment_pct = max(existing_adj - 20, -40)
+        db.commit()
+
+    # Step 2b: Auto-apply safe recommendations
     rec_dicts = [r.to_dict() for r in review.recommendations]
     auto_applied, needs_review = compute_auto_apply_defaults(rec_dicts)
 

@@ -2886,6 +2886,9 @@ export interface WeeklyReviewResponse {
   avg_fiber_g: number;
   weight_trend_lbs_per_week: number | null;
   weight_trend_direction: 'up' | 'down' | 'flat' | 'unknown';
+  /** EMA-smoothed weight from the 7-day UserRollup. Cleaner trend
+   *  display than raw slope alone — slope is noisy week-to-week. */
+  weight_ema_lbs?: number | null;
   avg_sleep_hours: number | null;
   avg_resting_hr: number | null;
   headline: string;
@@ -3059,6 +3062,11 @@ export async function getReadinessToday(
     avgHrvMs?: number | null;
     lastNightSleepScore?: number | null;
     nutritionAdherencePct?: number | null;
+    /** Optional cycle phase from `getCycleStatus()` — adds a "Cycle"
+     *  factor to readiness that validates "luteal week feels harder."
+     *  Skipped silently for male users / users without HK grant. */
+    cyclePhase?: 'menses' | 'follicular' | 'ovulation' | 'luteal' | 'unknown' | null;
+    dayOfCycle?: number | null;
   },
 ): Promise<ReadinessTodayResponse> {
   return request<ReadinessTodayResponse>('/readiness/today', {
@@ -3070,6 +3078,8 @@ export async function getReadinessToday(
       avg_hrv_ms: signals?.avgHrvMs ?? null,
       last_night_sleep_score: signals?.lastNightSleepScore ?? null,
       nutrition_adherence_pct: signals?.nutritionAdherencePct ?? null,
+      cycle_phase: signals?.cyclePhase ?? null,
+      day_of_cycle: signals?.dayOfCycle ?? null,
     }),
   });
 }

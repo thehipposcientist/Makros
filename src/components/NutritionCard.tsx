@@ -14,6 +14,7 @@ import { classifyFood, computeNutritionScore, computePlanGutHealth } from '../ut
 import NutritionInsightCard from './NutritionInsightCard';
 import SwipeableRow, { SwipeAction } from './SwipeableRow';
 import AnimatedNumber from './AnimatedNumber';
+import FadeInView from './FadeInView';
 
 interface NutritionCardProps {
   title?: string;
@@ -837,8 +838,8 @@ export default function NutritionCard({
             </TouchableOpacity>
           )}
           {visibleMeals.map(({ key, emoji, meal }, i) => (
+            <FadeInView key={key} delay={i * 40} duration={260} slideDistance={8}>
             <MealRow
-              key={key}
               emoji={emoji}
               mealType={key}
               meal={meal}
@@ -859,6 +860,7 @@ export default function NutritionCard({
               mealAccent={section}
               isSaved={(savedMealNames ?? new Set<string>()).has((meal.meal || '').toLowerCase().trim())}
             />
+            </FadeInView>
           ))}
           {hiddenMeals.length > 0 && (
             <View style={styles.hiddenMealRow}>
@@ -920,6 +922,15 @@ function MacroTracker({
   const pct      = target > 0 ? Math.min(actual / target, 1) : 0;
   const over     = actual > target;
   const barColor = over ? colors.error : color;
+  const barAnim  = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(barAnim, {
+      toValue: Math.round(pct * 100),
+      duration: 500,
+      useNativeDriver: false,
+    }).start();
+  }, [pct]);
 
   return (
     <View style={styles.macroTracker}>
@@ -930,7 +941,10 @@ function MacroTracker({
         <Text style={styles.macroTarget}>{target}{unit}</Text>
       </View>
       <View style={styles.macroBarTrack}>
-        <View style={[styles.macroBarFill, { width: `${Math.round(pct * 100)}%` as any, backgroundColor: barColor }]} />
+        <Animated.View style={[styles.macroBarFill, {
+          width: barAnim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+          backgroundColor: barColor,
+        }]} />
       </View>
       {over && (
         <Text style={[styles.macroRemaining, { color: colors.error }]}>

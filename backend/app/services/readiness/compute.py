@@ -45,6 +45,13 @@ from app.models import (
 # ── Pillar weights (must match the legacy client total) ─────────────
 # 30 + 20 + 20 + 15 + 10 + 5 = 100. Keeping the same numerator so
 # users don't see scores jump when we move compute server-side.
+#
+# Cycle phase is OPTIONAL (only present when cycle data is available)
+# and lives outside the 100-point base. Score is reweighted against
+# pillars actually present, so the cycle pillar's weight only affects
+# users who have cycle data — male users and unsynced female users see
+# no change. This validates "luteal week feels harder" without punishing
+# anyone who lacks the data.
 
 W_SLEEP = 30
 W_HRV = 20
@@ -52,6 +59,7 @@ W_FATIGUE = 20
 W_NUTRITION = 15
 W_RHR = 10
 W_YESTERDAY = 5
+W_CYCLE = 10
 
 # Pillars that represent real "today" health signals. The yesterday-
 # strain pillar is excluded — it's always available (rest day = full
@@ -99,6 +107,56 @@ class ReadinessResult:
             "signals_total": self.signals_total,
             "computed_at_ms": self.computed_at_ms,
         }
+
+
+# ── Per-process TTL cache for compute_readiness ────────────────────
+#
+# Readiness is hit on every app foreground + every watch refresh. Each
+# call does ~5–6 small queries (SleepLog, DailyHealthSnapshot×2,
+# DailyNutritionMetrics, WorkoutCompletion). For a watch that polls every
+# 60s we'd issue >5k queries/day per active user — most returning the
+# same value because today's data hasn't changed.
+#
+# The cache keys on (user_id, signal_signature) so a client passing
+# fresh HK numbers gets fresh compute. TTL is short enough that a new
+# meal log shows up within a minute.
+
+_READINESS_CACHE_TTL_S = 60.0
+_readiness_cache: dict[tuple, tuple[float, "ReadinessResult"]] = {}
+
+
+def _readiness_cache_key(
+    user_id: int,
+    avg_sleep_hours: float | None,
+    avg_resting_hr: float | None,
+    avg_hrv_ms: float | None,
+    last_night_sleep_score: int | None,
+    nutrition_adherence_pct: float | None,
+    cycle_phase: str | None = None,
+    day_of_cycle: int | None = None,
+) -> tuple:
+    # Round float signals so trivial decimal noise doesn't break cache hits.
+    def _r(v):
+        return round(v, 1) if isinstance(v, float) else v
+    return (
+        user_id,
+        _r(avg_sleep_hours), _r(avg_resting_hr), _r(avg_hrv_ms),
+        last_night_sleep_score, _r(nutrition_adherence_pct),
+        cycle_phase, day_of_cycle,
+    )
+
+
+def invalidate_readiness_cache(user_id: int | None = None) -> None:
+    """Drop cached readiness results.
+
+    Pass a `user_id` to invalidate just that user (call after meal save,
+    workout completion, or HealthKit push). With no argument, drops the
+    entire cache (e.g. on schema changes that affect compute output)."""
+    if user_id is None:
+        _readiness_cache.clear()
+        return
+    for k in [k for k in _readiness_cache if k[0] == user_id]:
+        del _readiness_cache[k]
 
 
 def _label_for(score: int) -> str:
@@ -206,6 +264,51 @@ def _score_yesterday(yesterday_minutes: int | None) -> tuple[int | None, str | N
     return int(round(W_YESTERDAY * 0.40)), f"{yesterday_minutes}min yesterday"
 
 
+# Cycle phases sourced from `src/services/appleHealth.ts:getCycleStatus`.
+# Multipliers reflect typical recovery / training-tolerance research:
+#   • follicular    — peak: highest tolerance, fastest recovery
+#   • ovulation     — strong, slight tendon-laxity caveat (not gated here)
+#   • menses        — highly variable; we treat as "near-baseline" (recovery
+#                      often improves on day 2–3 as hormones rebound)
+#   • luteal        — late luteal especially: lower energy, lower HRV
+#                      systemic baseline. Soft penalty validates the feeling
+#                      instead of letting the user blame themselves.
+_CYCLE_PHASE_MULTIPLIERS: dict[str, tuple[float, str]] = {
+    "follicular": (1.00, "follicular phase (high recovery)"),
+    "ovulation":  (0.95, "ovulation phase"),
+    "menses":     (0.85, "menstrual phase"),
+    "luteal":     (0.70, "luteal phase (lower recovery is normal)"),
+}
+
+
+def _score_cycle_phase(
+    cycle_phase: str | None,
+    day_of_cycle: int | None = None,
+) -> tuple[int | None, str | None]:
+    """Score the cycle phase pillar. Returns (None, None) when there's no
+    cycle data (e.g. male users, missing HealthKit grant) so the pillar
+    is skipped entirely and the readiness score is normalized against
+    the pillars actually present.
+
+    `day_of_cycle` is currently informational only — included in the
+    factor detail string when present. Future extension: late-luteal
+    (day 22+ of a 28d cycle) could pick up an extra ~5% penalty since
+    the dip is sharpest in the days before menses."""
+    if not cycle_phase:
+        return None, None
+    phase = cycle_phase.lower()
+    if phase == "unknown":
+        return None, None
+    mult, label = _CYCLE_PHASE_MULTIPLIERS.get(phase, (None, None))
+    if mult is None:
+        return None, None
+    pts = int(round(W_CYCLE * mult))
+    detail = label
+    if day_of_cycle and day_of_cycle > 0:
+        detail = f"{label} · day {day_of_cycle}"
+    return pts, detail
+
+
 # ── Top-level compute ─────────────────────────────────────────────
 
 def compute_readiness(
@@ -220,6 +323,12 @@ def compute_readiness(
     avg_hrv_ms: float | None = None,
     last_night_sleep_score: int | None = None,
     nutrition_adherence_pct: float | None = None,
+    # Cycle context — phone reads this from HealthKit via getCycleStatus()
+    # and forwards as-is. Both fields are optional; if cycle_phase is None
+    # or "unknown" the pillar is skipped (male users, no HK grant).
+    cycle_phase: str | None = None,
+    day_of_cycle: int | None = None,
+    use_cache: bool = True,
 ) -> ReadinessResult:
     """Compute the canonical readiness for this user. Pure function-ish:
     reads from DB but never writes. Caller decides whether to cache or
@@ -227,7 +336,23 @@ def compute_readiness(
 
     Server is the only computer of readiness — phone + watch are
     consumers. The output `computed_at_ms` is the version stamp
-    WCSession uses to reject stale pushes."""
+    WCSession uses to reject stale pushes.
+
+    Per-process TTL cache (60s) is consulted by default; pass
+    `use_cache=False` to force a recompute (e.g. tests or after a meal
+    write that should immediately reflect in adherence). Cache is
+    invalidated explicitly via `invalidate_readiness_cache(user_id)`
+    on writes the caller knows about."""
+    if use_cache:
+        key = _readiness_cache_key(
+            user_id, avg_sleep_hours, avg_resting_hr, avg_hrv_ms,
+            last_night_sleep_score, nutrition_adherence_pct,
+            cycle_phase, day_of_cycle,
+        )
+        now_s = time.time()
+        cached = _readiness_cache.get(key)
+        if cached is not None and (now_s - cached[0]) < _READINESS_CACHE_TTL_S:
+            return cached[1]
     factors: list[ReadinessFactor] = []
     missing: list[str] = []
     pillar_scores: dict[str, tuple[int, int]] = {}  # name → (got, max)
@@ -409,6 +534,23 @@ def compute_readiness(
     else:
         missing.append("yesterday")
 
+    # ── Cycle phase (W_CYCLE) — optional ───────────────────────────
+    # Only contributes when the phone passes meaningful cycle data.
+    # Skipped silently for male users / users without HK cycle reads —
+    # the reweighting step normalizes against pillars actually present
+    # so absence isn't penalized. When present, validates "luteal week
+    # feels harder" with a soft 30% pillar penalty rather than hiding
+    # the dip and letting the user blame themselves.
+    pts, detail = _score_cycle_phase(cycle_phase, day_of_cycle)
+    if pts is not None:
+        pillar_scores["cycle"] = (pts, W_CYCLE)
+        v100 = int(round((pts / W_CYCLE) * 100))
+        factors.append(ReadinessFactor(
+            label="Cycle", value=v100, status=_factor_status(v100), detail=detail,
+        ))
+    # No `missing.append("cycle")` — its absence is the default state,
+    # not a missing signal worth nagging the user about.
+
     # ── Minimum-signals gate ──────────────────────────────────────
     # Without enough real "today" health pillars, any number we
     # publish is misleading. The yesterday-strain pillar is excluded
@@ -418,7 +560,7 @@ def compute_readiness(
     health_pillars_present = sum(1 for p in pillar_scores if p in _HEALTH_PILLARS)
 
     if health_pillars_present < _MIN_HEALTH_PILLARS:
-        return ReadinessResult(
+        result = ReadinessResult(
             score=0,
             label="—",
             summary=_no_data_summary(missing),
@@ -428,6 +570,9 @@ def compute_readiness(
             signals_total=6,
             computed_at_ms=int(time.time() * 1000),
         )
+        if use_cache:
+            _readiness_cache[key] = (time.time(), result)
+        return result
 
     # ── Reweight against pillars actually present ──────────────────
     # If the user has 2+ health pillars, score normalizes against
@@ -438,7 +583,7 @@ def compute_readiness(
     score = int(round((raw / max_possible) * 100))
     score = max(0, min(100, score))
 
-    return ReadinessResult(
+    result = ReadinessResult(
         score=score,
         label=_label_for(score),
         summary=_summary_for(score),
@@ -448,6 +593,9 @@ def compute_readiness(
         signals_total=6,
         computed_at_ms=int(time.time() * 1000),
     )
+    if use_cache:
+        _readiness_cache[key] = (time.time(), result)
+    return result
 
 
 def _no_data_summary(missing: list[str]) -> str:

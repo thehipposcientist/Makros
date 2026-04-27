@@ -716,6 +716,57 @@ def _ensure_user_equipment_profiles_table() -> None:
         print(f"[migration] user_equipment_profiles table failed (non-fatal): {e}")
 
 
+def _ensure_weekly_checkin_body_columns() -> None:
+    """Add body_fat_pct / bp_systolic / bp_diastolic to weekly_checkins
+    if they don't exist yet. All optional — `None` for any user who
+    doesn't log them, no scoring impact when absent."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE weekly_checkins "
+                "ADD COLUMN IF NOT EXISTS body_fat_pct DOUBLE PRECISION"
+            ))
+            conn.execute(text(
+                "ALTER TABLE weekly_checkins "
+                "ADD COLUMN IF NOT EXISTS bp_systolic INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE weekly_checkins "
+                "ADD COLUMN IF NOT EXISTS bp_diastolic INTEGER"
+            ))
+    except Exception as e:
+        print(f"[migration] weekly_checkins body columns failed (non-fatal): {e}")
+
+
+def _ensure_recovery_activities_table() -> None:
+    """Create recovery_activities table for cold plunge / sauna /
+    breathwork / meditation logging if it doesn't exist yet."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS recovery_activities (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+                    activity_date DATE NOT NULL,
+                    modality VARCHAR NOT NULL,
+                    duration_min INTEGER NOT NULL,
+                    intensity VARCHAR,
+                    notes TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_recovery_activities_user_date "
+                "ON recovery_activities(user_id, activity_date DESC)"
+            ))
+    except Exception as e:
+        print(f"[migration] recovery_activities table failed (non-fatal): {e}")
+
+
 def _ensure_plan_week_tables() -> None:
     """Create plan_weeks + plan_days tables if they don't exist yet.
     These are created by SQLModel.metadata.create_all, but we add indexes
@@ -909,6 +960,8 @@ def create_db_and_tables():
     _ensure_exercise_set_duration_columns()
     _ensure_exercise_set_cardio_hr_columns()
     _ensure_user_equipment_profiles_table()
+    _ensure_weekly_checkin_body_columns()
+    _ensure_recovery_activities_table()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

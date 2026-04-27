@@ -1455,6 +1455,14 @@ def mark_workout_complete(
     except Exception as e:
         logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
 
+    # Yesterday-strain pillar in readiness changes the moment a workout
+    # lands. Drop the cache so the next /readiness/today recomputes.
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
+
     # Verify the row exists
     verify = db.exec(
         select(WorkoutCompletion)

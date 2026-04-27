@@ -2185,12 +2185,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const { pushReadinessToWatch } = watchSync;
               const { getReadinessToday } = await import('../services/api');
               const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+              const { getCycleStatus } = await import('../services/appleHealth');
               const cached = await getCachedHealthDataSummary().catch(() => null);
               const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+              const cycle = await getCycleStatus().catch(() => null);
               const serverResp = await getReadinessToday(authToken, {
                 avgSleepHours: sleepHours,
                 avgRestingHr: cached?.restingHeartRate ?? null,
                 avgHrvMs: cached?.hrv ?? null,
+                cyclePhase: cycle?.phase ?? null,
+                dayOfCycle: cycle?.dayOfCycle ?? null,
               }).catch(() => null);
               if (!serverResp) return;
               await pushReadinessToWatch({
@@ -2283,6 +2287,52 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       toggleMeal: (date: string, mealType: string) => handleToggleMeal(date, mealType),
     };
   });
+
+  // ── Hourly readiness refresh on app foreground ─────────────────────────
+  // Backed by the per-process readiness TTL cache (60s) on the server, so
+  // multiple foreground transitions in a short window are cheap. Cache
+  // already invalidates on workout completion, meal save, and HK push, so
+  // a foreground after any of those returns a fresh number.
+  // Watch ordering protocol: the server's `computed_at_ms` lets the watch
+  // ignore any payload older than its current value, so even rapid
+  // mid-day pushes can't out-of-order each other.
+  useEffect(() => {
+    if (!authToken) return;
+    let lastRefreshAt = 0;
+    const REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 min between refreshes
+
+    const refreshReadiness = async () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < REFRESH_MIN_INTERVAL_MS) return;
+      lastRefreshAt = now;
+      try {
+        const { getReadinessToday } = await import('../services/api');
+        const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+        const { getCycleStatus } = await import('../services/appleHealth');
+        const { pushReadinessToWatch } = await import('../utils/watchSync');
+        const cached = await getCachedHealthDataSummary().catch(() => null);
+        const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+        const cycle = await getCycleStatus().catch(() => null);
+        const r = await getReadinessToday(authToken, {
+          avgSleepHours: sleepHours,
+          avgRestingHr: cached?.restingHeartRate ?? null,
+          avgHrvMs: cached?.hrv ?? null,
+          cyclePhase: cycle?.phase ?? null,
+          dayOfCycle: cycle?.dayOfCycle ?? null,
+        }).catch(() => null);
+        if (!r) return;
+        await pushReadinessToWatch({
+          score: r.score, label: r.label, summary: r.summary,
+          factors: r.factors as any, syncedAtMs: r.computed_at_ms,
+        } as any).catch(() => {});
+      } catch { /* non-fatal */ }
+    };
+
+    const sub = require('react-native').AppState.addEventListener('change', (next: string) => {
+      if (next === 'active') refreshReadiness();
+    });
+    return () => sub.remove();
+  }, [authToken]);
   useEffect(() => {
     // Same ref-token pattern as the reachability listener: cleanup
     // can fire before the async import resolves, so we have to be

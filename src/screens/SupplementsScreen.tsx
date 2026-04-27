@@ -3,6 +3,7 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal,
 } from 'react-native';
+import FadeInView from '../components/FadeInView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -59,9 +60,9 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
   const myStack = SUPPLEMENT_LIBRARY.filter(s => selected.has(s.name));
 
   const evidenceColor = (e: SupplementEntry['evidence']) =>
-    e === 'strong' ? '#00C488' : e === 'moderate' ? '#FFB300' : '#FF6B6B';
+    e === 'strong' ? c.success : e === 'moderate' ? c.warning : c.error;
   const evidenceLabel = (e: SupplementEntry['evidence']) =>
-    e === 'strong' ? '✓ Well-studied' : e === 'moderate' ? '◑ Some evidence' : '⚠ Early research';
+    e === 'strong' ? 'Well-studied' : e === 'moderate' ? 'Some evidence' : 'Early research';
 
   const styles = createStyles(c, meal);
 
@@ -82,7 +83,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
 
         {/* Search */}
         <View style={[styles.searchRow, { backgroundColor: c.surfaceRaised, borderColor: c.border }]}>
-          <Text style={{ fontSize: 15, marginRight: 6 }}>🔍</Text>
+          <Ionicons name="search-outline" size={16} color={c.textMuted} style={{ marginRight: 6 }} />
           <TextInput
             style={[styles.searchInput, { color: c.textPrimary }]}
             placeholder="Search supplements…"
@@ -91,8 +92,8 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
             onChangeText={setSearch}
           />
           {search.length > 0 && (
-            <TouchableOpacity onPress={() => setSearch('')}>
-              <Ionicons name="close" size={16} color={c.textMuted} />
+            <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}>
+              <Ionicons name="close-circle" size={16} color={c.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -100,7 +101,10 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
         {/* My Stack */}
         {myStack.length > 0 && !search && (
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>💊 My Stack ({myStack.length})</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Ionicons name="layers-outline" size={15} color={c.textPrimary} />
+              <Text style={[styles.sectionTitle, { color: c.textPrimary, marginBottom: 0 }]}>My Stack ({myStack.length})</Text>
+            </View>
             <View style={styles.chipRow}>
               {myStack.map(s => (
                 <TouchableOpacity
@@ -122,7 +126,10 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
         {/* AI Recommended */}
         {aiRecommended.length > 0 && !search && (
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>🤖 AI Recommended for You</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Ionicons name="sparkles-outline" size={15} color={c.textPrimary} />
+              <Text style={[styles.sectionTitle, { color: c.textPrimary, marginBottom: 0 }]}>Recommended for You</Text>
+            </View>
             <Text style={[styles.sectionSub, { color: c.textMuted }]}>Based on your current plan and goals</Text>
             <View style={styles.aiRow}>
               {aiRecommended.map(s => {
@@ -139,10 +146,12 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                     {ai && <Text style={[styles.aiCardDose, { color: c.textMuted }]}>{ai.dose}</Text>}
                     {ai && <Text style={[styles.aiCardPurpose, { color: c.textSecondary }]} numberOfLines={2}>{ai.purpose}</Text>}
                     <TouchableOpacity
-                      style={[styles.aiCardToggle, { backgroundColor: taking ? meal.strong : 'transparent', borderColor: meal.strong }]}
-                      onPress={() => toggle(s.name)}>
+                      style={[styles.aiCardToggle, { backgroundColor: taking ? meal.strong : 'transparent', borderColor: meal.strong, flexDirection: 'row', alignItems: 'center', gap: 4 }]}
+                      onPress={() => toggle(s.name)}
+                      activeOpacity={0.75}>
+                      <Ionicons name={taking ? 'checkmark' : 'add'} size={14} color={taking ? '#fff' : meal.strong} />
                       <Text style={[styles.aiCardToggleText, { color: taking ? '#fff' : meal.strong }]}>
-                        {taking ? '✓ Taking' : '+ Add'}
+                        {taking ? 'Taking' : 'Add'}
                       </Text>
                     </TouchableOpacity>
                   </TouchableOpacity>
@@ -164,7 +173,8 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
               <TouchableOpacity
                 key={cat.key}
                 style={[styles.catChip, active && { backgroundColor: meal.strong, borderColor: meal.strong }]}
-                onPress={() => setActiveCategory(cat.key)}>
+                onPress={() => setActiveCategory(cat.key)}
+                activeOpacity={0.75}>
                 <Text style={[styles.catChipText, { color: active ? '#fff' : c.textSecondary }]}>{cat.label}</Text>
               </TouchableOpacity>
             );
@@ -173,42 +183,63 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
 
         {/* Supplement list */}
         <View style={styles.list}>
-          {filtered.map(s => {
+          {filtered.length === 0 ? (
+            <View style={{ alignItems: 'center', paddingVertical: 32, gap: 8 }}>
+              <Ionicons name="search-outline" size={32} color={c.textMuted} />
+              <Text style={{ fontSize: 15, fontWeight: '600', color: c.textSecondary }}>No results</Text>
+              <Text style={{ fontSize: 13, color: c.textMuted }}>
+                {search ? `Nothing matched "${search}"` : 'Try a different category'}
+              </Text>
+              {search.length > 0 && (
+                <TouchableOpacity onPress={() => setSearch('')} activeOpacity={0.75}
+                  style={{ marginTop: 4, paddingHorizontal: 16, paddingVertical: 8, borderRadius: radius.full, borderWidth: 1, borderColor: c.border }}>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: c.textSecondary }}>Clear search</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ) : filtered.map((s, index) => {
             const taking = selected.has(s.name);
             const isAiRec = aiStack.some(a => a.name.toLowerCase() === s.name.toLowerCase());
             return (
-              <TouchableOpacity
-                key={s.name}
-                style={[styles.suppCard, { backgroundColor: c.surfaceRaised, borderColor: taking ? meal.strong + '66' : c.border }]}
-                onPress={() => setDetailSupp(s)}
-                activeOpacity={0.8}>
-                <View style={styles.suppCardLeft}>
-                  <Text style={styles.suppCardIcon}>{s.icon}</Text>
-                </View>
-                <View style={styles.suppCardBody}>
-                  <View style={styles.suppCardTitleRow}>
-                    <Text style={[styles.suppCardName, { color: c.textPrimary }]}>{s.name}</Text>
-                    {isAiRec && (
-                      <View style={[styles.aiRecBadge, { backgroundColor: meal.strong + '22', borderColor: meal.strong + '44' }]}>
-                        <Text style={[styles.aiRecBadgeText, { color: meal.strong }]}>AI Pick</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={[styles.suppCardTagline, { color: c.textSecondary }]} numberOfLines={1}>{s.tagline}</Text>
-                  <View style={styles.suppCardMeta}>
-                    <Text style={[styles.evidenceBadge, { color: evidenceColor(s.evidence) }]}>{evidenceLabel(s.evidence)}</Text>
-                    <Text style={[styles.suppCardCategory, { color: c.textMuted }]}>{s.category}</Text>
-                  </View>
-                </View>
+              <FadeInView key={s.name} delay={index * 25} duration={240} slideDistance={8}>
                 <TouchableOpacity
-                  style={[styles.takeToggle, { borderColor: taking ? meal.strong : c.border, backgroundColor: taking ? meal.strong : 'transparent' }]}
-                  onPress={() => toggle(s.name)}
-                  hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}>
-                  <Text style={[styles.takeToggleText, { color: taking ? '#fff' : c.textMuted }]}>
-                    {taking ? '✓' : '+'}
-                  </Text>
+                  style={[styles.suppCard, { backgroundColor: c.surfaceRaised, borderColor: taking ? meal.strong + '66' : c.border }]}
+                  onPress={() => setDetailSupp(s)}
+                  activeOpacity={0.78}>
+                  <View style={styles.suppCardLeft}>
+                    <Text style={styles.suppCardIcon}>{s.icon}</Text>
+                  </View>
+                  <View style={styles.suppCardBody}>
+                    <View style={styles.suppCardTitleRow}>
+                      <Text style={[styles.suppCardName, { color: c.textPrimary }]}>{s.name}</Text>
+                      {isAiRec && (
+                        <View style={[styles.aiRecBadge, { backgroundColor: meal.strong + '22', borderColor: meal.strong + '44' }]}>
+                          <Text style={[styles.aiRecBadgeText, { color: meal.strong }]}>AI Pick</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={[styles.suppCardTagline, { color: c.textSecondary }]} numberOfLines={1}>{s.tagline}</Text>
+                    <View style={styles.suppCardMeta}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                        <Ionicons
+                          name={s.evidence === 'strong' ? 'checkmark-circle' : s.evidence === 'moderate' ? 'ellipse-outline' : 'alert-circle-outline'}
+                          size={11}
+                          color={evidenceColor(s.evidence)}
+                        />
+                        <Text style={[styles.evidenceBadge, { color: evidenceColor(s.evidence) }]}>{evidenceLabel(s.evidence)}</Text>
+                      </View>
+                      <Text style={[styles.suppCardCategory, { color: c.textMuted }]}>{s.category}</Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.takeToggle, { borderColor: taking ? meal.strong : c.border, backgroundColor: taking ? meal.strong : 'transparent' }]}
+                    onPress={() => toggle(s.name)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    activeOpacity={0.75}>
+                    <Ionicons name={taking ? 'checkmark' : 'add'} size={16} color={taking ? '#fff' : c.textMuted} />
+                  </TouchableOpacity>
                 </TouchableOpacity>
-              </TouchableOpacity>
+              </FadeInView>
             );
           })}
         </View>
@@ -237,15 +268,20 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                       backgroundColor: selected.has(detailSupp.name) ? meal.strong : 'transparent',
                       borderColor: meal.strong,
                     }]}
-                    onPress={() => toggle(detailSupp.name)}>
-                    <Text style={[styles.detailToggleBtnText, { color: selected.has(detailSupp.name) ? '#fff' : meal.strong }]}>
-                      {selected.has(detailSupp.name) ? '✓ Taking' : '+ Add'}
-                    </Text>
+                    onPress={() => toggle(detailSupp.name)}
+                    activeOpacity={0.75}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Ionicons name={selected.has(detailSupp.name) ? 'checkmark' : 'add'} size={14} color={selected.has(detailSupp.name) ? '#fff' : meal.strong} />
+                      <Text style={[styles.detailToggleBtnText, { color: selected.has(detailSupp.name) ? '#fff' : meal.strong }]}>
+                        {selected.has(detailSupp.name) ? 'Taking' : 'Add'}
+                      </Text>
+                    </View>
                   </TouchableOpacity>
                 </View>
 
-                <ScrollView contentContainerStyle={styles.detailContent}>
+                <ScrollView key={detailSupp.name} contentContainerStyle={styles.detailContent}>
                   {/* Hero */}
+                  <FadeInView delay={0} duration={280} slideDistance={10}>
                   <View style={[styles.detailHero, { backgroundColor: meal.soft, borderColor: meal.strong + '40' }]}>
                     <Text style={styles.detailHeroIcon}>{detailSupp.icon}</Text>
                     <Text style={[styles.detailHeroCategory, { color: meal.text }]}>{detailSupp.category.toUpperCase()}</Text>
@@ -259,14 +295,18 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                       </Text>
                     </View>
                   </View>
+                  </FadeInView>
 
                   {/* What it does */}
+                  <FadeInView delay={80} duration={260} slideDistance={8}>
                   <View style={styles.detailBlock}>
                     <Text style={[styles.detailBlockTitle, { color: c.textPrimary }]}>What It Does</Text>
                     <Text style={[styles.detailBlockText, { color: c.textSecondary }]}>{detailSupp.whatItDoes}</Text>
                   </View>
+                  </FadeInView>
 
                   {/* Dosing */}
+                  <FadeInView delay={160} duration={260} slideDistance={8}>
                   <View style={[styles.detailDoseBlock, { backgroundColor: c.surfaceRaised, borderColor: c.border }]}>
                     <View style={styles.detailDoseRow}>
                       <Text style={[styles.detailDoseLabel, { color: c.textMuted }]}>DOSE</Text>
@@ -278,8 +318,10 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                       <Text style={[styles.detailDoseValue, { color: c.textPrimary }]}>{detailSupp.timing}</Text>
                     </View>
                   </View>
+                  </FadeInView>
 
                   {/* Best for */}
+                  <FadeInView delay={240} duration={260} slideDistance={8}>
                   <View style={styles.detailBlock}>
                     <Text style={[styles.detailBlockTitle, { color: c.textPrimary }]}>Best For</Text>
                     <View style={styles.goodForRow}>
@@ -290,12 +332,18 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                       ))}
                     </View>
                   </View>
+                  </FadeInView>
 
                   {/* Cautions */}
-                  <View style={[styles.detailBlock, { backgroundColor: '#FF6B6B12', borderRadius: radius.md, borderWidth: 1, borderColor: '#FF6B6B33', padding: 12 }]}>
-                    <Text style={[styles.detailBlockTitle, { color: '#FF6B6B' }]}>Cautions</Text>
+                  <FadeInView delay={320} duration={260} slideDistance={8}>
+                  <View style={[styles.detailBlock, { backgroundColor: c.error + '12', borderRadius: radius.md, borderWidth: 1, borderColor: c.error + '33', padding: 12 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+                      <Ionicons name="warning-outline" size={13} color={c.error} />
+                      <Text style={[styles.detailBlockTitle, { color: c.error, marginBottom: 0 }]}>Cautions</Text>
+                    </View>
                     <Text style={[styles.detailBlockText, { color: c.textSecondary }]}>{detailSupp.cautions}</Text>
                   </View>
+                  </FadeInView>
 
                   <View style={{ height: 32 }} />
                 </ScrollView>

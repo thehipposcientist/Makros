@@ -94,6 +94,13 @@ def upsert_snapshot(
         )
         session.add(row)
     session.commit()
+    # Sleep / HRV / RHR are readiness pillars — drop the cache so the
+    # next /readiness/today reflects the freshly pushed snapshot.
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 
@@ -142,6 +149,11 @@ def upsert_snapshot_batch(
                 updated_at=now,
             ))
     session.commit()
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return {"status": "ok", "count": len(body)}
 
 

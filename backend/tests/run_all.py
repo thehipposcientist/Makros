@@ -138,6 +138,20 @@ _TEST_MODULES = (
     # Session-duration slot injection — bonus isolations at 75/90 min,
     # PLUS_CARDIO/non-lift exclusions, density interaction, integration.
     "tests.test_session_duration_slots",
+    # Phase 1 perf bundle — meal-refresh debounce, rollup window batching,
+    # readiness TTL cache + invalidation hooks.
+    "tests.test_phase1_perf",
+    # Phase 2 — three new health-signal flags (HRV trend, respiratory
+    # rate elevated, HRV erratic / chronic stress).
+    "tests.test_phase2_flags",
+    # Phase 3 — cycle-aware readiness pillar + weight EMA on weekly
+    # review. Hourly readiness refresh is mostly client-side and
+    # covered by Phase 1's cache + invalidation tests.
+    "tests.test_phase3_readiness",
+    # Phase 4 — body comp + BP fields on WeeklyCheckIn, plus the new
+    # RecoveryActivity model + router (cold plunge, sauna, breathwork,
+    # meditation logging).
+    "tests.test_phase4_tracking",
     # Nutrition score pipeline + allergen filter edge cases + solver.
     "tests.test_nutrition_score_unit",
     # Plan generation integration — full pipeline, equipment/injury/dislike

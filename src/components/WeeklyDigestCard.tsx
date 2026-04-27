@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { getWeeklyDigest, WeeklyDigest } from '../services/api';
+import AnimatedNumber from './AnimatedNumber';
 
 interface Props {
   authToken: string;
@@ -138,27 +139,21 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
 
       <View style={{ flexDirection: 'row', gap: 12, marginBottom: 12 }}>
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 22, fontWeight: '800', color: tc.text }}>
-            {digest.sessions.completed}
-          </Text>
+          <AnimatedNumber value={digest.sessions.completed} style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={600} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>sessions</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {deltaLabel(sessionsDelta)}
           </Text>
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 22, fontWeight: '800', color: tc.text }}>
-            {digest.sessions.adherence_pct}%
-          </Text>
+          <AnimatedNumber value={digest.sessions.adherence_pct} suffix="%" style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={700} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>adherence</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {digest.sessions.distinct_days}/{digest.sessions.planned} planned days
           </Text>
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 22, fontWeight: '800', color: tc.text }}>
-            {digest.volume.total_sets}
-          </Text>
+          <AnimatedNumber value={digest.volume.total_sets} style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={800} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>sets</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {deltaLabel(setsDelta)}
@@ -172,9 +167,10 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
 
       {digest.pr_count > 0 && (
         <View style={{ backgroundColor: tc.background, padding: 10, borderRadius: radius.md, marginTop: 4 }}>
-          <Text style={{ fontSize: 13, fontWeight: '700', color: tc.text, marginBottom: 4 }}>
-            🏆 PRs this week
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+            <Ionicons name="trophy" size={13} color={tc.warning ?? '#F0A820'} />
+            <Text style={{ fontSize: 13, fontWeight: '700', color: tc.text }}>PRs this week</Text>
+          </View>
           {digest.prs.slice(0, 4).map((pr, i) => (
             <Text key={i} style={{ fontSize: 12, color: tc.textMuted }}>
               {pr.exercise_name} — {pr.kind === 'heaviest_weight'

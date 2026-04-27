@@ -28,12 +28,19 @@ class ReadinessTodayBody(BaseModel):
     today's freshest HK data without round-tripping a snapshot push.
 
     All optional. Backend pulls from DailyHealthSnapshot + SleepLog
-    when fields are missing."""
+    when fields are missing.
+
+    Cycle fields come from the phone's `getCycleStatus` (HealthKit
+    menstrual flow). Backend never persists or queries cycle data —
+    it's a transient input that contributes to readiness when present
+    and is ignored for users without it (male / no HK grant)."""
     avg_sleep_hours: float | None = None
     avg_resting_hr: float | None = None
     avg_hrv_ms: float | None = None
     last_night_sleep_score: int | None = None
     nutrition_adherence_pct: float | None = None
+    cycle_phase: str | None = None       # "menses" | "follicular" | "ovulation" | "luteal"
+    day_of_cycle: int | None = None
 
 
 @router.post("/today")
@@ -53,5 +60,7 @@ def readiness_today(
         avg_hrv_ms=body.avg_hrv_ms,
         last_night_sleep_score=body.last_night_sleep_score,
         nutrition_adherence_pct=body.nutrition_adherence_pct,
+        cycle_phase=body.cycle_phase,
+        day_of_cycle=body.day_of_cycle,
     )
     return result.to_dict()

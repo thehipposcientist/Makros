@@ -183,69 +183,54 @@ def compute_weekly_volume(
             total_hard_sets=0, sessions_counted=len(sessions), by_muscle={},
         )
 
-    exercises = db.exec(
-        select(WorkoutExercise).where(WorkoutExercise.session_id.in_(session_ids))
+    # Single JOIN: WorkoutExercise + Exercise + ExerciseSet — collapses three
+    # round-trips into one query. Rows are (we_id, primary_muscle,
+    # secondary_muscles, set.completed, set.set_type).
+    joined_rows = db.exec(
+        select(
+            WorkoutExercise.id,
+            Exercise.primary_muscle,
+            Exercise.secondary_muscles,
+            ExerciseSet.completed,
+            ExerciseSet.set_type,
+        )
+        .join(Exercise, WorkoutExercise.exercise_id == Exercise.id)
+        .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .where(WorkoutExercise.session_id.in_(session_ids))
     ).all()
-    exercise_ids = [e.exercise_id for e in exercises if e.exercise_id is not None]
-    exercise_rows = {}
-    if exercise_ids:
-        exercise_rows = {
-            ex.id: ex
-            for ex in db.exec(
-                select(Exercise).where(Exercise.id.in_(exercise_ids))
-            ).all()
-        }
 
-    # Workout-exercise id → (primary_muscle_str, [secondary_muscle_str])
+    # Build we_muscle map and accumulate counts in a single pass.
     we_muscle: dict[int, tuple[str, list[str]]] = {}
-    for we in exercises:
-        if we.id is None:
+    primary_counts: dict[str, float] = defaultdict(float)
+    secondary_counts: dict[str, float] = defaultdict(float)
+    total_hard_sets = 0.0
+
+    for we_id, pm, sm, completed, set_type in joined_rows:
+        # Build muscle map lazily on first encounter for this workout_exercise.
+        if we_id not in we_muscle:
+            prim_str = (pm.value if hasattr(pm, "value") else str(pm)).lower()
+            sec_list: list[str] = []
+            for s in (sm or []):
+                sec_list.append((str(s.value) if hasattr(s, "value") else str(s)).lower())
+            we_muscle[we_id] = (prim_str, sec_list)
+
+        if not completed:
             continue
-        ex = exercise_rows.get(we.exercise_id) if we.exercise_id else None
-        if ex is None:
+        st = (set_type or "working").lower()
+        if st in ("warmup", "warm_up", "mobility", "recovery"):
             continue
-        primary = ex.primary_muscle.value if hasattr(ex.primary_muscle, "value") else str(ex.primary_muscle)
-        # secondary_muscles JSON stores strings or enum values depending on
-        # how seeded; coerce to string and lowercase for comparison.
-        secondary: list[str] = []
-        for s in (ex.secondary_muscles or []):
-            if hasattr(s, "value"):
-                secondary.append(str(s.value).lower())
-            else:
-                secondary.append(str(s).lower())
-        we_muscle[we.id] = (primary.lower(), secondary)
+
+        prim_str, sec_list = we_muscle[we_id]
+        primary_counts[prim_str] += 1.0
+        total_hard_sets += 1.0
+        for sec in sec_list:
+            secondary_counts[sec] += 0.5
 
     if not we_muscle:
         return WeeklyVolumeSnapshot(
             user_id=user_id, window_start=start, window_end=end_date,
             total_hard_sets=0, sessions_counted=len(sessions), by_muscle={},
         )
-
-    # Pull working sets for those exercises.
-    sets = db.exec(
-        select(ExerciseSet).where(ExerciseSet.workout_exercise_id.in_(list(we_muscle.keys())))
-    ).all()
-
-    primary_counts: dict[str, float] = defaultdict(float)
-    secondary_counts: dict[str, float] = defaultdict(float)
-    total_hard_sets = 0.0
-    for s in sets:
-        if not s.completed:
-            continue
-        # Skip warmup rows — they're not stimulus for volume budgeting.
-        st = (s.set_type or "working").lower()
-        if st in ("warmup", "warm_up", "mobility", "recovery"):
-            continue
-        muscles = we_muscle.get(s.workout_exercise_id)
-        if muscles is None:
-            continue
-        primary, secondary = muscles
-        primary_counts[primary] += 1.0
-        total_hard_sets += 1.0
-        for sec in secondary:
-            # Secondary contributions weighted 0.5x — a synergist set
-            # is real stimulus but not equivalent to the primary mover.
-            secondary_counts[sec] += 0.5
 
     # 28-day baseline lookup for spike detection. We average the prior
     # 3 weeks (days -28 to -7) and compare this week against that. If
@@ -314,43 +299,32 @@ def _compute_prior_weeks_avg(
     if not sessions:
         return {}
     session_ids = [s.id for s in sessions if s.id is not None]
-    exercises = db.exec(
-        select(WorkoutExercise).where(WorkoutExercise.session_id.in_(session_ids))
-    ).all() if session_ids else []
-    exercise_ids = [e.exercise_id for e in exercises if e.exercise_id is not None]
-    if not exercise_ids:
+    if not session_ids:
         return {}
-    exercise_rows = {
-        ex.id: ex
-        for ex in db.exec(
-            select(Exercise).where(Exercise.id.in_(exercise_ids))
-        ).all()
-    }
+    # Single JOIN: replaces 3 round-trips
+    rows = db.exec(
+        select(
+            WorkoutExercise.id,
+            Exercise.primary_muscle,
+            ExerciseSet.completed,
+            ExerciseSet.set_type,
+        )
+        .join(Exercise, WorkoutExercise.exercise_id == Exercise.id)
+        .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .where(WorkoutExercise.session_id.in_(session_ids))
+    ).all()
     we_muscle: dict[int, str] = {}
-    for we in exercises:
-        if we.id is None:
-            continue
-        ex = exercise_rows.get(we.exercise_id) if we.exercise_id else None
-        if ex is None:
-            continue
-        primary = ex.primary_muscle.value if hasattr(ex.primary_muscle, "value") else str(ex.primary_muscle)
-        we_muscle[we.id] = primary.lower()
-
-    sets = db.exec(
-        select(ExerciseSet).where(ExerciseSet.workout_exercise_id.in_(list(we_muscle.keys())))
-    ).all() if we_muscle else []
     totals: dict[str, float] = {}
-    for s in sets:
-        if not s.completed:
+    for we_id, pm, completed, set_type in rows:
+        if we_id not in we_muscle:
+            we_muscle[we_id] = (pm.value if hasattr(pm, "value") else str(pm)).lower()
+        if not completed:
             continue
-        st = (s.set_type or "working").lower()
+        st = (set_type or "working").lower()
         if st in ("warmup", "warm_up", "mobility", "recovery"):
             continue
-        m = we_muscle.get(s.workout_exercise_id)
-        if m is None:
-            continue
+        m = we_muscle[we_id]
         totals[m] = totals.get(m, 0.0) + 1.0
-    # Average per week
     return {m: v / weeks for m, v in totals.items()}
 
 

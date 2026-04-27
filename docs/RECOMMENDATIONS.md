@@ -120,12 +120,12 @@ Findings from a deep review of `services/nutrition/*`, `routers/meals.py`, `serv
 
 ### Performance
 
-- **[HIGH] N+1 in `/meals/common` and `/meals/insights`** — `meal_history.py:154, 262` loops fetch `FoodNutrition` per meal-item. With 1k logged items this is 1k+ round trips. Batch with `food_id.in_(ids)` once → lookup dict. Estimated ~70% latency cut on those endpoints.
+- ~~**[HIGH] N+1 in `/meals/common` and `/meals/insights`**~~ — **already fixed**. Verified `meal_history.py` lines 154, 246, 304, 380 all use batched `IN` queries.
 - **[MEDIUM] `_refresh_daily_metrics` is unconditional** — every save recomputes daily metrics with `allow_ai=True` even if nothing changed. Pair with the client-side debounce already on the perf list to coalesce multi-meal saves into one refresh.
 - **[MEDIUM] `recompute_user(lookback_days=35)` has no per-window batching** — `rollups.py:333–349` queries meals/sessions/checkins inside the day-loop. Pull all 35 days once, group in memory, compute per-day from dicts. ~70–80% latency cut on backfill paths.
 - **[LOW] Allergen match is O(items × keywords)** — `meals.py:257–262`. Pre-compile a regex/trie. Negligible today; matters once a user has 50+ blocked items.
-- **[LOW] No `(user_id, meal_date DESC)` composite index** — weekly review filters meal_date post-fetch. Add the index; ~5–10ms on heavy users.
-- **[LOW] Readiness compute is uncached** — `routers/coach.py` re-queries 5 tables per call. Add a 10-min in-process LRU keyed by `user_id` + last-write timestamp; invalidate on HealthKit push or workout completion.
+- ~~**[LOW] No `(user_id, meal_date DESC)` composite index**~~ — **already exists** as `ix_meal_user_date` on `Meal.__table_args__`.
+- **[LOW] Readiness compute is uncached** — `services/readiness/compute.py` re-queries 5 tables per call. Add a 60s in-process TTL cache keyed by `user_id` + client signals hash.
 
 ### Feature gaps — Nutrition
 

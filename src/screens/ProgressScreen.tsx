@@ -687,7 +687,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <TouchableOpacity
                             key={b.id}
                             style={[styles.exerciseChip, active && styles.exerciseChipActive]}
-                            onPress={() => setChartMuscleFilter(b.id)}>
+                            onPress={() => setChartMuscleFilter(b.id)}
+                            activeOpacity={0.75}>
                             <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
                               {b.label}
                             </Text>
@@ -776,12 +777,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={styles.graphTitle}>{selectedExercise}</Text>
                         <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
                           {hasWeight && (
-                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('weight')}>
+                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('weight')} activeOpacity={0.75}>
                               <Text style={styles.chartModeBtnText}>Weight</Text>
                             </TouchableOpacity>
                           )}
                           {hasWeight && (
-                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')}>
+                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
                               <Text style={styles.chartModeBtnText}>Volume</Text>
                             </TouchableOpacity>
                           )}
@@ -1040,25 +1041,93 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   Consider a deload week — reduce weights by 40% for one week to recover.
                 </Text>
               )}
-              <TouchableOpacity
-                onPress={() => {
-                  AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
-                  setPlateauDismissed(true);
-                }}
-                style={{
-                  alignSelf: 'flex-start',
-                  marginTop: 10,
-                  paddingHorizontal: 12,
-                  paddingVertical: 6,
-                  borderRadius: 8,
-                  borderWidth: 1,
-                  borderColor: tc.border,
-                  backgroundColor: tc.surface,
-                }}>
-                <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>Dismiss</Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                <TouchableOpacity
+                  onPress={() => setWeeklyCheckinVisible(true)}
+                  style={{
+                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+                    backgroundColor: tc.primary,
+                  }}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.background }}>Review with Coach →</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
+                    setPlateauDismissed(true);
+                  }}
+                  style={{
+                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+                    borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surface,
+                  }}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
+
+          {/* Cardio PRs — best distance, pace, and output per exercise type */}
+          {paceHistory.length > 0 && (() => {
+            const exerciseNames = [...new Set(paceHistory.map(p => p.exercise))];
+            const cardioPRs = exerciseNames.map(name => {
+              const pts = paceHistory.filter(p => p.exercise === name);
+              const bestDist = pts.reduce((best, p) => p.distance != null && p.distance > (best ?? 0) ? p.distance : best, null as number | null);
+              const ptsWithPace = pts.filter(p => p.pace);
+              const lastPace = ptsWithPace.length > 0 ? ptsWithPace[ptsWithPace.length - 1].pace : null;
+              const bestDur = pts.reduce((best, p) => p.duration_seconds != null && p.duration_seconds > (best ?? 0) ? p.duration_seconds : best, null as number | null);
+              const extraKeys: string[] = [];
+              pts.forEach(p => { if (p.metrics) Object.keys(p.metrics).forEach(k => { if (!extraKeys.includes(k)) extraKeys.push(k); }); });
+              const extraBests: Record<string, string> = {};
+              extraKeys.forEach(k => {
+                const vals = pts.filter(p => p.metrics?.[k]).map(p => parseFloat(p.metrics![k])).filter(v => !isNaN(v));
+                if (vals.length) extraBests[k] = String(Math.max(...vals));
+              });
+              return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: pts.length };
+            }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null);
+            if (!cardioPRs.length) return null;
+            return (
+              <View style={{ marginBottom: 16 }}>
+                <Text style={styles.sectionLabel}>Cardio Bests</Text>
+                <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
+                  {cardioPRs.map(pr => (
+                    <View key={pr.name}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, marginBottom: 4 }}>{pr.name}</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {pr.bestDist != null && (
+                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{pr.bestDist.toFixed(1)}</Text>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>BEST DIST</Text>
+                          </View>
+                        )}
+                        {pr.lastPace && (
+                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{pr.lastPace}</Text>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>LAST PACE</Text>
+                          </View>
+                        )}
+                        {pr.bestDur != null && (
+                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>
+                              {pr.bestDur >= 3600
+                                ? `${Math.floor(pr.bestDur / 3600)}h ${Math.floor((pr.bestDur % 3600) / 60)}m`
+                                : `${Math.floor(pr.bestDur / 60)}m`}
+                            </Text>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>BEST DUR</Text>
+                          </View>
+                        )}
+                        {Object.entries(pr.extraBests).slice(0, 2).map(([k, v]) => (
+                          <View key={k} style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{v}</Text>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>{k.toUpperCase()}</Text>
+                          </View>
+                        ))}
+                      </View>
+                      <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>{pr.sessionCount} session{pr.sessionCount !== 1 ? 's' : ''} logged</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            );
+          })()}
 
           {/* Estimated 1RM showcase — deterministic Epley estimates
               from recent logged sessions for the main compound lifts.

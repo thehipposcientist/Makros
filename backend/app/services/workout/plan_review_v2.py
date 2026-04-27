@@ -28,7 +28,7 @@ from typing import Any, Literal
 from sqlmodel import select
 
 from app.models import (
-    DailyNutritionMetrics, UserGoal, WorkoutCompletion, WorkoutPlan,
+    DailyNutritionMetrics, UserGoal, UserRollup, WorkoutCompletion, WorkoutPlan,
 )
 from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
@@ -82,6 +82,9 @@ class WeeklyReview:
     # Weight trend signals.
     weight_trend_lbs_per_week: float | None = None
     weight_trend_direction: str = "flat"    # "up" | "down" | "flat" | "unknown"
+    # Smoothed weight (EMA) — cleaner trend display than raw slope alone,
+    # which is noisy week to week. Surfaced in WeeklyCoachingCard.
+    weight_ema_lbs: float | None = None
     # Recovery signals (averages; each card still owns the daily view).
     avg_sleep_hours: float | None = None
     avg_resting_hr: float | None = None
@@ -107,6 +110,7 @@ class WeeklyReview:
             "avg_fiber_g": round(self.avg_fiber_g, 1),
             "weight_trend_lbs_per_week": self.weight_trend_lbs_per_week,
             "weight_trend_direction": self.weight_trend_direction,
+            "weight_ema_lbs": self.weight_ema_lbs,
             "avg_sleep_hours": self.avg_sleep_hours,
             "avg_resting_hr": self.avg_resting_hr,
             "headline": self.headline,
@@ -492,6 +496,20 @@ def compute_weekly_review(
         avg_sleep_hours=avg_sleep_hours,
     )
 
+    # Smoothed weight (EMA) — pulled from the 7-day UserRollup. Cleaner
+    # than the raw slope alone (which is noisy week-to-week) and gives
+    # the UI a "current weight, smoothed: X lbs" line that doesn't
+    # whiplash on a single bad weigh-in.
+    weight_ema_lbs: float | None = None
+    rollup_7d = db.exec(
+        select(UserRollup).where(
+            UserRollup.user_id == user_id,
+            UserRollup.window_days == 7,
+        )
+    ).first()
+    if rollup_7d and rollup_7d.weight_ema_lbs is not None:
+        weight_ema_lbs = float(rollup_7d.weight_ema_lbs)
+
     return WeeklyReview(
         user_id=user_id,
         week_start=start,
@@ -509,6 +527,7 @@ def compute_weekly_review(
         avg_fiber_g=avg_fiber,
         weight_trend_lbs_per_week=weight_trend_lbs_per_week,
         weight_trend_direction=weight_trend_direction,
+        weight_ema_lbs=weight_ema_lbs,
         avg_sleep_hours=avg_sleep_hours,
         avg_resting_hr=avg_resting_hr,
         headline=headline,

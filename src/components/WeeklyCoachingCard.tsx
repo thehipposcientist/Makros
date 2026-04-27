@@ -204,6 +204,31 @@ export default function WeeklyCoachingCard({
 
       {expanded && (
         <View style={{ marginTop: 14 }}>
+          {/* Weight trend — smoothed value alongside slope so the user
+              sees a clean number that doesn't whiplash on a single bad
+              weigh-in. Hidden when the user lacks weight history (rollup
+              not populated). */}
+          {(review.weight_ema_lbs != null || review.weight_trend_lbs_per_week != null) && (
+            <View style={{ marginBottom: 14, padding: 10, borderRadius: radius.md, backgroundColor: tc.surface }}>
+              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textSecondary, letterSpacing: 0.6, marginBottom: 4 }}>
+                WEIGHT TREND
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+                {review.weight_ema_lbs != null && (
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>
+                    {review.weight_ema_lbs.toFixed(1)} lbs
+                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '500' }}> smoothed</Text>
+                  </Text>
+                )}
+                {review.weight_trend_lbs_per_week != null && (
+                  <Text style={{ fontSize: 13, color: tc.textSecondary, fontWeight: '600' }}>
+                    {review.weight_trend_lbs_per_week >= 0 ? '+' : ''}
+                    {review.weight_trend_lbs_per_week.toFixed(2)} lbs/wk
+                  </Text>
+                )}
+              </View>
+            </View>
+          )}
           {/* Volume bars by muscle */}
           {volumeRows.length > 0 && (
             <View style={{ marginBottom: 12 }}>

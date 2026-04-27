@@ -95,14 +95,40 @@ def _build_meal_response(meal: Meal, db: Session) -> dict:
 # 30 times pays for AI exactly once. Without allow_ai=True we'd
 # silently zero out collagen + CFU for every food the deterministic
 # keyword classifier doesn't recognise — which was the bug.
+#
+# Burst-save debounce: a user adding several meals in quick succession
+# (or the watch + phone double-firing) used to trigger N consecutive
+# recomputes. We coalesce by skipping refreshes within
+# `_REFRESH_DEBOUNCE_SECONDS` of the last refresh for the same
+# (user_id, meal_date). The skipped writes' data still lands in the
+# next score/readiness fetch — both `compute_today_score` and
+# `/gut-health` self-refresh on read.
+import time as _time
+_last_refresh_at: dict[tuple[int, date], float] = {}
+_REFRESH_DEBOUNCE_SECONDS = 3.0
+
+
 def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
     """Recompute DailyNutritionMetrics for the given user + date. Called
     after any write that changes what meals exist on that day so the
     Nutrition Score reflects reality on the next /meals/score fetch.
     Non-blocking — failures here never break the caller."""
+    key = (user_id, meal_date)
+    now = _time.time()
+    last = _last_refresh_at.get(key, 0.0)
+    if now - last < _REFRESH_DEBOUNCE_SECONDS:
+        return
+    _last_refresh_at[key] = now
     try:
         from app.services.nutrition.gut_health import compute_daily_metrics
         compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=True)
+    except Exception:
+        pass
+    # Nutrition adherence is one of readiness's pillars — clear the
+    # per-user cache so the next /readiness/today reflects the new meal.
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(user_id)
     except Exception:
         pass
 

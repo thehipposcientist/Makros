@@ -205,7 +205,8 @@
       "Read(//usr/local/**)",
       "Bash(eas *)",
       "Bash(wait *)",
-      "Bash(rg -n \"start_workout|start_custom_workout|pull_state|watchCmdHandlersRef|setActiveWorkout|activeWorkoutStartTime|activeWatchSessionId\" --include=\"*.ts\" --include=\"*.tsx\" .)"
+      "Bash(rg -n \"start_workout|start_custom_workout|pull_state|watchCmdHandlersRef|setActiveWorkout|activeWorkoutStartTime|activeWatchSessionId\" --include=\"*.ts\" --include=\"*.tsx\" .)",
+      "Bash(/Users/sawyerhannel/.nvm/versions/node/v22.14.0/bin/npx tsc *)"
     ]
   }
 }

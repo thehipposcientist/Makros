@@ -22,11 +22,9 @@ struct ContentView: View {
 
     @State private var active: Bool = false
     @StateObject private var heartRate: HeartRateStore = HeartRateStore()
-    // Set to true when the user explicitly taps Start (scheduled or custom).
-    // Lets onReceive start HK on the phone's first active push without
-    // waiting for a valid sessionId or passing the age check — the phone
-    // may push with a stale syncedAtMs on the first delivery. Cleared once
-    // HK actually starts.
+    // Set to true when the user explicitly taps Start so onReceive can
+    // start HK on the phone's first active echo without the age check.
+    // Cleared when HK starts or any non-active status arrives.
     @State private var watchStartPending: Bool = false
     // Show a brief "← swipe →" hint on the first launch the user
     // sees, then never again (persisted in UserDefaults). Covers the
@@ -66,15 +64,13 @@ struct ContentView: View {
         return w
     }
 
-    /// Only auto-resume a workout if it's genuinely active, recent, from
-    /// the current user, and not from a session we already ended.
+    /// Auto-resume only when: status is active, session wasn't already
+    /// ended by this watch, and the push is recent (< 15 min). Cross-
+    /// account protection is handled upstream in absorbContext, so no
+    /// userId check here.
     private func shouldResumeWorkout(_ w: WatchWorkout) -> Bool {
         guard w.status == .active else { return false }
         let sid = w.sessionId ?? ""
-        // Don't gate on empty sessionId — the phone's first push after a
-        // Watch-initiated start arrives before ActiveWorkoutScreen renders
-        // and stamps the sessionId, so the push legitimately has sid=nil.
-        // Age + lastEnded are sufficient guards against false positives.
         if !sid.isEmpty {
             let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
             if sid == lastEnded {
@@ -87,38 +83,8 @@ struct ContentView: View {
             HeartRateStore.saveDiag("skip: stale \(Int(ageMs/1000))s")
             return false
         }
-        // Reject workout from a different account. w.userId is now embedded
-        // in every workout payload the phone sends, so a nil here means a
-        // stale payload from before the userId field existed — treat as
-        // cross-account until the phone re-pushes with the field present.
-        if let storedUser = conn.currentUserId, !storedUser.isEmpty {
-            guard let workoutUser = w.userId, !workoutUser.isEmpty, workoutUser == storedUser else {
-                HeartRateStore.saveDiag("skip resume: userId missing/mismatch (stored=\(storedUser.prefix(4)))")
-                return false
-            }
-        }
         HeartRateStore.saveDiag("resume OK sid=\(sid.prefix(8))")
         return true
-    }
-
-    /// Start the local HK session immediately when the user taps Start,
-    /// then notify the phone. Avoids the race where the watch sits idle
-    /// waiting for the phone's active echo before starting HR collection.
-    private func startWatchWorkoutLocally(command: String, payload: [String: Any] = [:]) {
-        HeartRateStore.saveDiag("Watch Start tapped → starting local HK")
-        watchStartPending = true
-        if heartRate.running {
-            // HK session already going (e.g. re-tap) — just navigate.
-            active = true
-        } else {
-            heartRate.start {
-                HeartRateStore.saveDiag("local HK collecting → active")
-                active = true
-            }
-        }
-        var merged = payload
-        merged["source"] = "watch"
-        conn.sendCommand(command, payload: merged)
     }
 
     private func consumePendingLaunch() {
@@ -146,7 +112,23 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        startWatchWorkoutLocally(command: "start_workout")
+                        if let w = todayWorkout, w.status == .active {
+                            // Rejoin: phone already confirmed this session active.
+                            // Start HK directly and navigate — no round-trip needed.
+                            HeartRateStore.saveDiag("Rejoin tapped → starting HK")
+                            if heartRate.running {
+                                active = true
+                            } else {
+                                heartRate.start { active = true }
+                            }
+                        } else {
+                            // Fresh start: tell the phone, wait for its status:active
+                            // echo before starting HK. The phone pushes immediately so
+                            // the delay is ~100 ms — hidden by the 3-2-1 overlay.
+                            HeartRateStore.saveDiag("Start tapped → waiting for phone echo")
+                            watchStartPending = true
+                            conn.sendCommand("start_workout")
+                        }
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
@@ -156,10 +138,13 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        startWatchWorkoutLocally(
-                            command: "start_custom_workout",
-                            payload: ["category": category, "subtype": subtype, "label": label]
-                        )
+                        // Custom workouts go through the phone too — wait for echo.
+                        HeartRateStore.saveDiag("QuickStart tapped → waiting for phone echo")
+                        watchStartPending = true
+                        conn.sendCommand("start_custom_workout", payload: [
+                            "category": category, "subtype": subtype,
+                            "label": label, "source": "watch",
+                        ])
                     })
                     WeightView()
                 }
@@ -178,6 +163,7 @@ struct ContentView: View {
                             }
                     }
                 }
+
             }
             .navigationDestination(isPresented: $active) {
                 ActiveWorkoutView(
