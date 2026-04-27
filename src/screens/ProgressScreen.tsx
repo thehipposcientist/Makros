@@ -1904,27 +1904,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               activeOpacity={0.8}
               style={{
                 flexDirection: 'row', alignItems: 'center', gap: 12,
-                backgroundColor: themeColors.surface, borderRadius: radius.md,
-                borderWidth: 1, borderColor: themeColors.primary + '60',
+                backgroundColor: tc.surface, borderRadius: radius.md,
+                borderWidth: 1, borderColor: tc.primary + '60',
                 padding: 16, marginBottom: 4,
               }}
             >
               <View style={{
                 width: 40, height: 40, borderRadius: 20,
-                backgroundColor: themeColors.primary + '20',
+                backgroundColor: tc.primary + '20',
                 alignItems: 'center', justifyContent: 'center',
               }}>
-                <Ionicons name="clipboard-outline" size={20} color={themeColors.primary} />
+                <Ionicons name="clipboard-outline" size={20} color={tc.primary} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary }}>
+                <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>
                   Week in Review
                 </Text>
-                <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 2 }}>
+                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
                   Scorecard · Coach notes · Next week adjustments
                 </Text>
               </View>
-              <Ionicons name="chevron-forward" size={18} color={themeColors.textMuted} />
+              <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
             </TouchableOpacity>
           )}
           {authToken && (

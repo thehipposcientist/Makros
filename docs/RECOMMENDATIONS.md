@@ -1,6 +1,6 @@
 # Thallo — Recommendations & Roadmap
 
-Last updated: 2026-04-20
+Last updated: 2026-04-27
 
 ---
 
@@ -20,13 +20,14 @@ Beyond those, the app is feature-complete for a pilot. This doc is the priority 
 
 1. [Priority Queue (P0 → P3)](#priority-queue)
 2. [In Flight](#in-flight)
-3. [Open Features](#open-features)
-4. [Performance & Scalability](#performance--scalability)
-5. [Engineering Backlog](#engineering-backlog)
-6. [Storage & Retention Strategy](#storage--retention-strategy)
-7. [Pre-Deploy Hardening (historical)](#pre-deploy-hardening-historical)
-8. [Completed — shipped work](#completed)
-9. [Feature Matrix](#feature-matrix)
+3. [2026-04-27 Audit — Meal & Health Tracking](#2026-04-27-audit--meal--health-tracking)
+4. [Open Features](#open-features)
+5. [Performance & Scalability](#performance--scalability)
+6. [Engineering Backlog](#engineering-backlog)
+7. [Storage & Retention Strategy](#storage--retention-strategy)
+8. [Pre-Deploy Hardening (historical)](#pre-deploy-hardening-historical)
+9. [Completed — shipped work](#completed)
+10. [Feature Matrix](#feature-matrix)
 
 ---
 
@@ -100,6 +101,68 @@ First EAS build needs an interactive `eas build` run to register the widget's ne
 - Workout reminder — daily at user-picked time, only on training days.
 - Meal-log nudge — at 8pm, if <50% of today's meals are checked.
 Both toggled in Edit Profile. Local only — no APNs infra.
+
+---
+
+## 2026-04-27 Audit — Meal & Health Tracking
+
+Findings from a deep review of `services/nutrition/*`, `routers/meals.py`, `services/coach/rollups.py`, `services/coach/flags.py`, `services/readiness/*`, and the HealthKit / Apple Watch sync surfaces. All items are NEW vs. the rest of this doc.
+
+### Bugs / correctness
+
+- **`_refresh_daily_metrics` race on concurrent meal writes** — `meals.py:145, 279` commit, then call refresh outside the txn. Two simultaneous logs (e.g., user + watch) can interleave and one overwrites the other's daily totals. Wrap refresh inside the same txn or take a row-level lock on `DailyNutritionMetrics`.
+- **Custom food save accepts inconsistent macros** — `saved_meals.py:85–99` writes `cal/protein/carbs/fat` blind. A user can save 100 cal / 10P / 10C / 20F (= 300 cal). Add a `4×P + 4×C + 9×F` check with ±10% tolerance and return a soft warning the UI can surface.
+- **`DailyRollup.steps` is read but never written** — `rollups.py` populates sleep/RHR/HRV from `DailyHealthSnapshot` but skips steps. Field exists on the model, frontend reads zeros. Add `row.steps = snapshot.steps` in `compute_daily_rollup`.
+- **Weight EMA computed, plateau never detected** — `UserRollup.weight_ema_lbs` is stored but no flag fires when EMA stays flat (<0.3 lbs Δ over 14d on an active cut). Add `flag_weight_plateau_14d`.
+- **No RHR-spike or suppressed-HRV flags** — readiness scores them but no flag/coaching surface fires when RHR jumps >10 bpm above 7d avg or HRV stays <0.90× baseline for 3+ days. Both are early illness / overtraining signatures and are ~2h each.
+- **Meal-check key collision across regenerations** — confirmed root cause: `HomeScreen.tsx:1410` keys checks by `meal_${idx}`. Already mentioned in In Flight; flagging here that the fix needs `_localId` stamped at meal creation across `mealTracker.ts` + every read site.
+- **`food_classifier._BRAND_NOISE` strips quality keywords** — "grass-fed beef" → "beef". Low impact today (USDA macros are similar) but the signal is lost for any future quality-grade scoring.
+
+### Performance
+
+- **[HIGH] N+1 in `/meals/common` and `/meals/insights`** — `meal_history.py:154, 262` loops fetch `FoodNutrition` per meal-item. With 1k logged items this is 1k+ round trips. Batch with `food_id.in_(ids)` once → lookup dict. Estimated ~70% latency cut on those endpoints.
+- **[MEDIUM] `_refresh_daily_metrics` is unconditional** — every save recomputes daily metrics with `allow_ai=True` even if nothing changed. Pair with the client-side debounce already on the perf list to coalesce multi-meal saves into one refresh.
+- **[MEDIUM] `recompute_user(lookback_days=35)` has no per-window batching** — `rollups.py:333–349` queries meals/sessions/checkins inside the day-loop. Pull all 35 days once, group in memory, compute per-day from dicts. ~70–80% latency cut on backfill paths.
+- **[LOW] Allergen match is O(items × keywords)** — `meals.py:257–262`. Pre-compile a regex/trie. Negligible today; matters once a user has 50+ blocked items.
+- **[LOW] No `(user_id, meal_date DESC)` composite index** — weekly review filters meal_date post-fetch. Add the index; ~5–10ms on heavy users.
+- **[LOW] Readiness compute is uncached** — `routers/coach.py` re-queries 5 tables per call. Add a 10-min in-process LRU keyed by `user_id` + last-write timestamp; invalidate on HealthKit push or workout completion.
+
+### Feature gaps — Nutrition
+
+- **Per-meal macro target chips** *(small)* — when logging meal N of M, show "you still need ~40g protein in remaining meals today." Backend has the daily target; expose `/meals/daily-status`. Real-time adherence feedback inside the day, not just end-of-day.
+- **Smart food-swap (macro-matched)** *(small)* — `/meals/swap` already exists but does category match. Rank candidates by macro-distance instead. Reduces friction on repetitive meals.
+- **Meal-photo OCR + portion estimation** *(large)* — snap a plate, AI extracts foods + portions. Photo skeleton exists in EditProfileScreen but no meal-side capture/storage. Highest casual-user retention lever in the nutrition space.
+- **Brand + UPC indexed in food search** *(medium)* — OpenFoodFacts results currently fold brand into `name`. Index brand and most-common serving per brand so "Quest Bar" disambiguates without ambiguous portion math.
+- **Barcode-scan verification step** *(small)* — wrong-digit misscans silently log wrong macros today. After a scan, show a confirm screen with the source's nutrition facts and a "doesn't match my package" override.
+- **Serving-unit sanity check** *(medium)* — block "1 cup chicken" with a "did you mean grams/oz?" hint based on food category. Catches ~30% of portion errors before they land.
+- **Intra-day protein distribution flag** *(small)* — `recovery_flags.py` covers weekly EA but not within-day. Flag if >60% of daily protein is in one meal. Coachable, evidence-based.
+- **Workout-aware hydration target** *(small)* — multiply baseline by 1.5–2× on training days, scaled by session duration. Hydration pillar exists; target is currently static.
+- **Micronutrient source drill-down** *(medium)* — show which logged foods contributed to each tracked micro, sorted by contribution. Catches "all my iron came from one steak" scenarios.
+- **Meal CSV/JSON export** *(small)* — `GET /profile/export` covers full-account; add `GET /meals/export?days=30&format=csv` for dietitian-friendly subsets.
+- **AI-generated nutrition audit trail** *(medium)* — surface "selected for: 25g protein, omega-3, fiber" reasoning on plan-generated meals. Trust + learning. Reasoning is computed during generation but not stored on the meal.
+- **AI macro fact-check pass** *(medium)* — periodically (e.g., on plan regen) cross-validate AI-estimated foods against USDA when available; flag macro outliers. Catches hallucinations like "100g chicken = 2000 cal."
+- **Meal-log heatmap** *(small)* — GitHub-style calendar grid of which days/meal-slots were logged. Habit-tracker style engagement, uses existing `getMealChecks()`.
+
+### Feature gaps — Health & Recovery
+
+- **Acute-illness detection pattern** *(small)* — composite flag: RHR +10 bpm AND soreness ≥4/5 AND sleep <6h, ≥2 consecutive days. Suggests rest-day swap. Prevents 7-day debt from training through a cold.
+- **HRV-trend deload trigger** *(small)* — when 7d HRV <0.90× rolling 30d baseline for 3+ days, suggest deload. CNS fatigue early warning that's distinct from per-muscle fatigue.
+- **Sleep → workout intensity micro-adjustment** *(medium)* — auto-downgrade tomorrow's primary RPE/loads by ~10% when last night's sleep <5.5h or sleep score <50. Server-side, plan-mutating; needs the "this is downgraded because…" badge.
+- **Cycle-aware readiness pillar** *(medium)* — menstrual flow is already read in `appleHealth.ts:443–499` but never used in scoring. Adjust readiness ±10% by phase (lower in luteal, higher in follicular). Major UX win for women: validates "luteal week feels harder."
+- **Travel / jet-lag mode** *(medium)* — opt-in toggle + new timezone → 2–3 days of light/recovery sessions auto-injected. Prevents PR attempts while jet-lagged.
+- **Respiratory-rate flag** *(small)* — `DailyHealthSnapshot.respiratory_rate` already populated but unused. Flag 7d avg >16/min as systemic-stress proxy. Some users have better RR signal than HRV.
+- **HRV consistency score (CV%)** *(small)* — high day-to-day HRV variance (CV >30%) = chronic stress / poor sleep, distinct from "low HRV." Computed from existing series.
+- **Body-fat % tracking + lean-mass trendline** *(medium)* — DB field + UI card. Distinguishes muscle gain (weight ↑, BF% ↓) from fat gain. Estimation skeleton already in `recovery_flags.py:80–87`.
+- **Optional blood-pressure logging** *(small)* — UI field in weekly check-in for systolic/diastolic; storage + trend chart only. Low effort, big for cardiac-rehab / hypertension users.
+- **Recovery-modality logging** *(small)* — 1-tap log of cold plunge / sauna / breathwork / meditation; correlate with next-morning HRV. Users with $2k cold plunges want the data.
+- **Hourly readiness refresh** *(medium)* — if Watch HealthKit observe queries fire mid-day, recompute readiness so the user can answer "am I recovered enough for an evening run?" with a fresh score. Today readiness is stale after morning compute.
+- **Expose weight EMA in UI alongside slope** *(small)* — already computed in `UserRollup.weight_ema_lbs`. Slope is noisy; EMA shows direction more cleanly. UI-only.
+
+### Notes for future passes
+
+- **Sleep-hours fallback table is hardcoded** in `rollups.py:147` (`{1: 4.5, 2: 5.5, …}`). Once HealthKit sleep data lands, deprecate this proxy to avoid double-counting.
+- **RHR baseline uses unweighted history** — a user who trained for 2 years then took 2 months off has a stale baseline. Switch readiness's RHR baseline to a rolling 30-day median.
+- **VO2 Max + grip strength are read but never trended** — both are leading indicators; tracking deltas would round out the recovery picture without new HealthKit reads.
 
 ---
 
