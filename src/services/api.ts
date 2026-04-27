@@ -1046,12 +1046,26 @@ export async function generateWorkoutWeek(
      *  lands on a freshly-generated plan whose day indices may not
      *  match the visual schedule the user tapped. */
     current_days?: any[] | null;
+    change_mode?: 'single' | 'smart' | null;
+    day_statuses?: string[] | null;
   },
 ): Promise<{
   days: any[];
   total_days_in_recipe: number;
   plan_name: string;
   focus_readiness: Record<string, number>;
+  change_result?: {
+    mode: 'single' | 'smart';
+    changed_indices: number[];
+    exercises_needed: number[];
+    conflicts: Array<{
+      kind: string;
+      severity: string;
+      message: string;
+      affected_days: number[];
+      suggestion: string | null;
+    }>;
+  };
 }> {
   return request('/workouts/generate-week', {
     method: 'POST',

@@ -28,12 +28,38 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var lastError: String?
 
     private let session: WCSession?
+    private static let userIdKey = "thallo.watchUserId"
 
     private override init() {
         self.session = WCSession.isSupported() ? WCSession.default : nil
         super.init()
         session?.delegate = self
         session?.activate()
+    }
+
+    private func handleUserSwitch(_ incomingUserId: String?) {
+        let stored = UserDefaults.standard.string(forKey: Self.userIdKey)
+        if let incoming = incomingUserId, !incoming.isEmpty {
+            if let prev = stored, prev != incoming {
+                print("[watch] userId changed \(prev) → \(incoming) — wiping state")
+                wipeUserState()
+            }
+            UserDefaults.standard.set(incoming, forKey: Self.userIdKey)
+        } else if stored != nil {
+            print("[watch] userId cleared — wiping state")
+            wipeUserState()
+            UserDefaults.standard.removeObject(forKey: Self.userIdKey)
+        }
+    }
+
+    private func wipeUserState() {
+        workout = nil
+        meals = nil
+        supplements = nil
+        sleep = nil
+        readiness = nil
+        weight = nil
+        theme = .midnight
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -90,6 +116,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     // ─── Message routing ────────────────────────────────────────────
 
     private func absorbContext(_ ctx: [String: Any]) {
+        let incomingUserId = ctx["userId"] as? String
+        handleUserSwitch(incomingUserId)
+
         if let w = ctx["workout"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: w),
                let decoded = try? JSONDecoder().decode(WatchWorkout.self, from: data) {

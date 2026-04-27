@@ -539,6 +539,14 @@ export default function Index() {
         // handles the blob + has an explicit workoutHistory fallback.
         pullUserStateFromBackend(persistedToken).catch(() => null);
         setAuthToken(persistedToken);
+        // Stamp userId on watch bridge so applicationContext carries it.
+        try {
+          const storedUid = await AsyncStorage.getItem(LAST_USER_ID_KEY);
+          if (storedUid) {
+            const { WatchBridge } = await import('../modules/thallo-watch-bridge');
+            WatchBridge.setUserId(storedUid);
+          }
+        } catch { /* bridge optional */ }
       } catch (err: any) {
         if (isAuthFailureError(err)) {
           console.log('[initApp] stale token detected, hard-resetting session:', err?.message);
@@ -831,6 +839,11 @@ export default function Index() {
         await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
       }
     }
+    // Stamp userId on the watch bridge so applicationContext carries it.
+    try {
+      const { WatchBridge } = await import('../modules/thallo-watch-bridge');
+      WatchBridge.setUserId(incomingUserId != null ? String(incomingUserId) : null);
+    } catch { /* bridge optional */ }
 
     // IMPORTANT: we hydrate profile state BEFORE setting authToken. If we
     // set authToken first, React renders one frame where authToken is

@@ -47,6 +47,7 @@ export function buildWatchWorkoutPayload(
   opts: {
     dateISO?: string;
     status: WatchWorkoutStatus;
+    sessionId?: string | null;
     readiness?: number | null;
     readinessLabel?: string | null;
     /** Plain-text warm-up steps to mirror on the watch. Usually the
@@ -61,6 +62,7 @@ export function buildWatchWorkoutPayload(
         durationMinutes: 0,
         dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
         status: 'rest',
+        sessionId: opts.sessionId ?? null,
         readiness: opts.readiness ?? null,
         readinessLabel: opts.readinessLabel ?? null,
         exercises: [],
@@ -87,6 +89,7 @@ export function buildWatchWorkoutPayload(
     durationMinutes: Number((day as any).durationMinutes ?? (day as any).duration ?? 60),
     dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
     status: opts.status,
+    sessionId: opts.sessionId ?? null,
     readiness: opts.readiness ?? null,
     readinessLabel: opts.readinessLabel ?? null,
     exercises,
@@ -148,6 +151,7 @@ export async function pushWorkoutToWatch(
   opts: {
     dateISO?: string;
     status: WatchWorkoutStatus;
+    sessionId?: string | null;
     readiness?: number | null;
     readinessLabel?: string | null;
     warmupSteps?: string[];
@@ -314,33 +318,30 @@ export async function pushWeightToWatch(opts: {
 }
 
 /** Wipe the watch's local store on sign-out / user-switch. Pushes
- *  empty payloads for workout / meals / supplements so the watch
- *  doesn't retain the previous user's plan + meals + macros after a
- *  swap. Theme stays — it's user-preference, not user-data, and
- *  defaults will arrive on the next sign-in.
+ *  empty payloads for workout / meals / supplements / theme and
+ *  clears userId so the watch doesn't retain the previous user's
+ *  data after a swap. Theme is also cleared because it carries the
+ *  previous user's palette and the watch would briefly flash it
+ *  before the new user's theme arrives.
  *
  *  iOS WCSession's applicationContext persists across app re-launches
  *  on the watch side — without this wipe, the watch would happily
- *  show your wife's meal plan when YOU sign in. (This is the bug
- *  the user originally flagged.) */
+ *  show your wife's meal plan when YOU sign in. */
 export async function clearWatchData(): Promise<void> {
   if (!canPush()) return;
+  WatchBridge.setUserId(null);
   const now = Date.now();
-  // Empty workout = "rest" status with no exercises. Watch's
-  // ContentView treats `.rest` as "nothing to do today" and bails
-  // out of any active state.
   await WatchBridge.syncWorkout({
     focus: 'Rest',
     durationMinutes: 0,
     dateISO: new Date().toISOString().slice(0, 10),
     status: 'rest',
+    sessionId: null,
     readiness: null,
     readinessLabel: null,
     exercises: [],
     syncedAtMs: now,
   } as any).catch(() => {});
-  // Empty meals — null score, no items. Watch's MealsView shows
-  // the "Open Thallo on iPhone" empty state.
   await WatchBridge.syncMeals({
     dateISO: new Date().toISOString().slice(0, 10),
     targets: { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
@@ -349,12 +350,12 @@ export async function clearWatchData(): Promise<void> {
     meals: [],
     syncedAtMs: now,
   }).catch(() => {});
-  // Empty supplement stack.
   await WatchBridge.syncSupplements({
     dateISO: new Date().toISOString().slice(0, 10),
     items: [],
     syncedAtMs: now,
   }).catch(() => {});
+  await WatchBridge.syncTheme(buildWatchPalette(undefined)).catch(() => {});
   wsLog('clearWatchData');
 }
 

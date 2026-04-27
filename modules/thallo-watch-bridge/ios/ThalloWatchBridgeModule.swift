@@ -36,6 +36,10 @@ public class ThalloWatchBridgeModule: Module {
             }
         }
 
+        Function("setUserId") { (userId: String?) in
+            self.sessionHolder.setUserId(userId)
+        }
+
         // Query helpers — the JS API wraps these as booleans.
         Function("isAvailable") { () -> Bool in
             WCSession.isSupported()
@@ -106,6 +110,9 @@ public class ThalloWatchBridgeModule: Module {
 // incoming commands into the Expo event stream.
 private class _SessionHolder: NSObject, WCSessionDelegate {
     private var dispatchEvent: ((String, [String: Any]) -> Void)?
+    private var userId: String?
+
+    func setUserId(_ id: String?) { self.userId = id }
 
     func activate(sendEvent: @escaping (String, [String: Any]) -> Void) {
         self.dispatchEvent = sendEvent
@@ -177,6 +184,11 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         do {
             var merged = s.applicationContext
             for (k, v) in cleaned { merged[k] = v }
+            if let uid = userId, !uid.isEmpty {
+                merged["userId"] = uid
+            } else {
+                merged.removeValue(forKey: "userId")
+            }
             try s.updateApplicationContext(merged)
             return true
         } catch {

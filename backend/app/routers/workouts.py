@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from sqlalchemy import func
 from datetime import datetime, date, timezone
+from typing import Literal
 from pydantic import BaseModel
 
 from app.database import get_session
@@ -316,6 +317,12 @@ class GenerateWeekRequest(BaseModel):
     # User's current plan in visual order. When set, the pin is applied
     # to THIS week (single-day swap) instead of a freshly generated one.
     current_days: list[dict] | None = None
+    # Change-day-type mode: "single" or "smart". When set (along with
+    # pin_day_index, pin_focus, current_days), routes through the
+    # change_day_type service instead of the legacy switch-day pin.
+    change_mode: Literal["single", "smart"] | None = None
+    # Per-day statuses: "completed", "started", "pending", "locked", "skipped".
+    day_statuses: list[str] | None = None
 
 
 @router.post("/generate-day")
@@ -772,6 +779,157 @@ def generate_full_week(
         days = plan.get("workout_plan", {}).get("days", [])
         if not days:
             raise HTTPException(status_code=500, detail="Planner produced no days")
+
+    # ── Change-day-type path ──────────────────────────────────────
+    # When the client sends change_mode, route through the new
+    # change_day_type service and return early. This replaces the
+    # old pin logic for the "Change Focus" UI.
+    if (
+        body.change_mode
+        and body.current_days
+        and body.pin_day_index is not None
+        and body.pin_focus
+    ):
+        from app.services.workout.change_day_type import change_day_type as _cdt
+        day_statuses = body.day_statuses or ["pending"] * len(body.current_days)
+        cdt_result = _cdt(
+            current_days=list(body.current_days),
+            day_index=body.pin_day_index,
+            new_focus=body.pin_focus,
+            day_statuses=day_statuses,
+            mode=body.change_mode,
+            split=body.preferred_split,
+            days_per_week=body.days_per_week,
+            focus_readiness=fatigue_snapshot.focus_readiness if fatigue_snapshot else None,
+        )
+        logger.info(
+            f"[generate-week] change_day_type mode={body.change_mode} "
+            f"idx={body.pin_day_index} focus={body.pin_focus} "
+            f"changed={cdt_result.changed_indices} "
+            f"conflicts={len(cdt_result.conflicts)}"
+        )
+
+        # For each day that needs new exercises, regenerate via planner.
+        # Non-lifting days get dedicated generators. Lifting days pull
+        # exercises from a single plan regen (one regen, multiple days).
+        from app.services.workout.switch_day import (
+            _focus_family, _canonical_cycle_for_split, SPLIT_FOR_FOCUS,
+        )
+        lift_needed: list[tuple[int, str, str]] = []  # (idx, proposed_focus, base_focus)
+        for ex_idx in cdt_result.exercises_needed:
+            proposed_focus = cdt_result.proposed_days[ex_idx].get("focus", "")
+            nf_lower = proposed_focus.lower().strip()
+            if nf_lower in ("recovery", "active recovery"):
+                from app.services.workout.planner import generate_recovery_day
+                cdt_result.proposed_days[ex_idx] = generate_recovery_day(
+                    body.session_minutes or 45
+                )
+            elif nf_lower in ("mobility", "stretching"):
+                from app.services.workout.planner import generate_mobility_day
+                cdt_result.proposed_days[ex_idx] = generate_mobility_day(
+                    body.session_minutes or 45
+                )
+            elif nf_lower in ("cardio", "conditioning"):
+                from app.services.workout.planner import generate_cardio_day
+                cdt_result.proposed_days[ex_idx] = generate_cardio_day(
+                    body.session_minutes or 45,
+                    body.goal or "body_recomp",
+                    equipment_owned=body.equipment,
+                )
+            else:
+                base = nf_lower.replace(" + cardio", "").strip()
+                lift_needed.append((ex_idx, proposed_focus, base))
+
+        if lift_needed:
+            from dataclasses import replace as _dc_replace
+            # Only override split if the focus doesn't belong to the
+            # user's current split cycle.
+            target_split = body.preferred_split
+            cycle = _canonical_cycle_for_split(target_split)
+            sample_base = lift_needed[0][2]
+            if cycle and _focus_family(sample_base) not in [_focus_family(c) for c in cycle]:
+                if sample_base in SPLIT_FOR_FOCUS:
+                    target_split = SPLIT_FOR_FOCUS[sample_base]
+            alt_inputs = _dc_replace(inputs, preferred_split=target_split)
+            alt_plan = generate_workout_plan(
+                alt_inputs, SEED_EXERCISES,
+                history_familiarity=history_familiarity,
+                recent_muscle_exercises=recent_muscle_exercises,
+            )
+            alt_days = alt_plan.get("workout_plan", {}).get("days", [])
+
+            for ex_idx, proposed_focus, base in lift_needed:
+                target_fam = _focus_family(base)
+                matched = False
+                for ad in alt_days:
+                    af = (ad.get("focus") or "").lower().strip()
+                    if _focus_family(af) == target_fam:
+                        cdt_result.proposed_days[ex_idx] = {
+                            **ad,
+                            "focus": proposed_focus,
+                        }
+                        matched = True
+                        break
+                if not matched:
+                    cdt_result.proposed_days[ex_idx]["focus"] = proposed_focus
+
+        result_days = cdt_result.proposed_days
+        result_plan = {"days": result_days, "name": ""}
+
+        try:
+            from app.models import WorkoutPlan
+            from app.services.workout.weekly_recipe import PLANNER_VERSION
+            now = datetime.now(timezone.utc)
+            active_rows = db.exec(
+                select(WorkoutPlan).where(
+                    WorkoutPlan.user_id == current_user.id,
+                    WorkoutPlan.is_active == True,
+                )
+            ).all()
+            for row in active_rows:
+                row.is_active = False
+                row.deactivated_at = now
+                row.deactivation_reason = "change_day_type"
+                db.add(row)
+            new_row = WorkoutPlan(
+                user_id=current_user.id,
+                planner_version=PLANNER_VERSION,
+                goal=body.goal,
+                days_per_week=body.days_per_week,
+                preferred_split=body.preferred_split,
+                plan_json=result_plan,
+                is_active=True,
+            )
+            db.add(new_row)
+            db.commit()
+            logger.info(
+                f"[generate-week] persisted plan user={current_user.id} "
+                f"reason=change_day_type"
+            )
+        except Exception as e:
+            logger.warning(f"[generate-week] plan persistence failed: {e}")
+
+        return {
+            "days": result_days,
+            "total_days_in_recipe": len(result_days),
+            "plan_name": "",
+            "focus_readiness": fatigue_snapshot.focus_readiness if fatigue_snapshot else {},
+            "change_result": {
+                "mode": cdt_result.mode,
+                "changed_indices": cdt_result.changed_indices,
+                "exercises_needed": cdt_result.exercises_needed,
+                "conflicts": [
+                    {
+                        "kind": c.kind,
+                        "severity": c.severity,
+                        "message": c.message,
+                        "affected_days": c.affected_days,
+                        "suggestion": c.suggestion,
+                    }
+                    for c in cdt_result.conflicts
+                ],
+            },
+        }
 
     # Image enrichment — mirrors generate-day.
     try:

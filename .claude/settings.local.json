@@ -200,7 +200,9 @@
       "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\")",
       "Bash(./node_modules/.bin/tsc --noEmit)",
       "Bash(/usr/libexec/PlistBuddy *)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Read(//opt/homebrew/**)",
+      "Read(//usr/local/**)"
     ]
   }
 }

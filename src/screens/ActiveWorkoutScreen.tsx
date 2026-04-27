@@ -523,14 +523,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // user to open Thallo on the watch. Auto-hides the moment the watch
   // reports reachable (i.e., the user opened it).
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
+  const watchSessionId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
       if (saved) {
         const ts = parseInt(saved, 10);
         if (!isNaN(ts) && ts > 0) startTime.current = ts;
+        // Rehydrate sessionId from persistence so reopen gets same id.
+        AsyncStorage.getItem('activeWatchSessionId').then(sid => {
+          if (sid) watchSessionId.current = sid;
+        }).catch(() => {});
       } else {
         AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
+        AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
         // Fresh start — play the countdown.
         setShowStartCountdown(true);
       }
@@ -580,6 +586,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const pushActive = () => pushWorkoutToWatch(workout as any, {
           dateISO: new Date().toISOString().slice(0, 10),
           status: 'active',
+          sessionId: watchSessionId.current,
           warmupSteps: warmupStepsRef.current,
         }).catch(() => {});
         // Initial push on mount.
@@ -658,6 +665,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 await pushWorkoutToWatch(workout as any, {
                   dateISO: new Date().toISOString().slice(0, 10),
                   status: 'active',
+                  sessionId: watchSessionId.current,
                   warmupSteps: warmupStepsRef.current,
                 });
               } catch { /* bridge optional */ }
@@ -2398,7 +2406,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleFinish = async () => {
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -2421,6 +2429,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       completed: true,
     };
     await saveWorkoutSession(session);
+    // Push completed status immediately so the watch exits active state.
+    import('../utils/watchSync').then(({ pushWorkoutToWatch }) =>
+      pushWorkoutToWatch(workout as any, {
+        dateISO: new Date().toISOString().slice(0, 10),
+        status: 'completed',
+        sessionId: watchSessionId.current,
+      }).catch(() => {}),
+    ).catch(() => {});
     // Snapshot the exact WorkoutDay the user just finished so plan
     // regeneration can't replace today's card with a different workout.
     await savePreservedCompletedWorkout(dateKey(now), workout);
@@ -2885,7 +2901,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
           'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); onCancel(); } }]
+          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {}); import('../utils/watchSync').then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, { dateISO: new Date().toISOString().slice(0, 10), status: 'skipped', sessionId: watchSessionId.current }).catch(() => {})).catch(() => {}); onCancel(); } }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
         </TouchableOpacity>

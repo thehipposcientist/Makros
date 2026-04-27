@@ -66,12 +66,13 @@ PPL_CYCLE = ["push", "pull", "legs"]
 UL_CYCLE = ["upper", "lower"]
 LOWER_FOCUSED_CYCLE = ["lower", "upper"]
 UPPER_FOCUSED_CYCLE = ["upper", "lower"]
+PPL_UL_CYCLE = ["push", "pull", "legs", "upper", "lower"]
+FULL_BODY_CYCLE = ["full_body"]
 
 
 def _canonical_cycle_for_split(preferred_split: Optional[str]) -> Optional[list[str]]:
-    """The canonical cycle for a given split id. Returns None for
-    splits that don't have a cycle (full_body, ppl_upper_lower, or
-    when no split is set)."""
+    """The canonical cycle for a given split id. Returns None only
+    when no split is set."""
     if not preferred_split:
         return None
     s = preferred_split.lower().strip()
@@ -85,6 +86,10 @@ def _canonical_cycle_for_split(preferred_split: Optional[str]) -> Optional[list[
         return LOWER_FOCUSED_CYCLE
     if s == "upper_focused":
         return UPPER_FOCUSED_CYCLE
+    if s == "ppl_upper_lower":
+        return PPL_UL_CYCLE
+    if s == "full_body":
+        return FULL_BODY_CYCLE
     return None
 
 

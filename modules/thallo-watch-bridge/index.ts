@@ -30,6 +30,10 @@ export type WatchWorkoutPayload = {
   durationMinutes: number;
   dateISO: string;
   status: WatchWorkoutStatus;
+  /** Unique per-session id. Generated when the phone starts a workout.
+   *  The watch uses this to distinguish a fresh start from a stale
+   *  `.active` lingering in applicationContext after cancel/end. */
+  sessionId?: string | null;
   readiness: number | null;
   readinessLabel: string | null;
   exercises: WatchExercise[];
@@ -141,6 +145,11 @@ export const WatchBridge = {
   isAvailable: (): boolean => !!native?.isAvailable?.(),
   isPaired:    (): boolean => !!native?.isPaired?.(),
   isReachable: (): boolean => !!native?.isReachable?.(),
+
+  setUserId(id: string | null): void {
+    if (!native) return;
+    try { native.setUserId(id); } catch {}
+  },
 
   async syncWorkout(payload: WatchWorkoutPayload): Promise<boolean> {
     if (!native) return false;

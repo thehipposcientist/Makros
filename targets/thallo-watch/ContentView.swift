@@ -33,6 +33,7 @@ struct ContentView: View {
             durationMinutes: 60,
             dateISO: String(ISO8601DateFormatter().string(from: Date()).prefix(10)),
             status: .active,
+            sessionId: nil,
             readiness: nil,
             readinessLabel: nil,
             exercises: [],
@@ -111,11 +112,19 @@ struct ContentView: View {
                         active = false
                         heartRate.end()
                         conn.sendCommand("end_workout")
+                        if let sid = conn.workout?.sessionId, !sid.isEmpty {
+                            UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
+                        }
+                        UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
                     },
                     onCancelWorkout: {
                         active = false
                         heartRate.discard()
                         conn.sendCommand("cancel_workout")
+                        if let sid = conn.workout?.sessionId, !sid.isEmpty {
+                            UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
+                        }
+                        UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
                     }
                 )
                 .navigationBarBackButtonHidden(true)
@@ -125,8 +134,12 @@ struct ContentView: View {
             heartRate.prewarmAuth()
             consumePendingLaunch()
             if let w = conn.workout, w.status == .active, !active {
-                HeartRateStore.saveDiag("onAppear reconcile→start")
-                heartRate.start { active = true }
+                let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
+                let sid = w.sessionId ?? ""
+                if sid.isEmpty || sid != lastEnded {
+                    HeartRateStore.saveDiag("onAppear reconcile→start")
+                    heartRate.start { active = true }
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchWorkoutLaunch)) { _ in
@@ -138,9 +151,11 @@ struct ContentView: View {
             switch w.status {
             case .active:
                 if !active {
-                    HeartRateStore.saveDiag("rcv active→start")
-                    heartRate.start {
-                        active = true
+                    let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
+                    let sid = w.sessionId ?? ""
+                    if sid.isEmpty || sid != lastEnded {
+                        HeartRateStore.saveDiag("rcv active→start")
+                        heartRate.start { active = true }
                     }
                 }
             case .completed, .skipped:

@@ -1852,9 +1852,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           } catch { /* fall back to backend score */ }
         }
+        let activeSessionId: string | null = null;
+        if (status === 'active') {
+          try { activeSessionId = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
+        }
         await pushWorkoutToWatch(todayWorkout, {
           dateISO: todayISO,
           status,
+          sessionId: activeSessionId,
           readiness: unifiedPrepScore,
           readinessLabel: unifiedPrepLabel,
         });
@@ -2121,10 +2126,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : s.skippedDates.has(todayKey()) ? 'skipped'
               : todayItem?.isRest ? 'rest'
               : 'scheduled';
+            let reachSid: string | null = null;
+            if (status === 'active') {
+              try { reachSid = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
+            }
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
             pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
               status,
+              sessionId: reachSid,
               readiness: s.readinessScore?.score ?? null,
               readinessLabel: s.readinessScore?.label ?? null,
             }).catch(() => {});
@@ -2365,9 +2375,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   : s.skippedDates.has(todayKey()) ? 'skipped'
                   : todayItem?.isRest ? 'rest'
                   : 'scheduled';
+                let pullSid: string | null = null;
+                if (status === 'active') {
+                  try { pullSid = await AsyncStorage.getItem('activeWatchSessionId'); } catch {}
+                }
                 pushWorkoutToWatch(todayWorkout, {
                   dateISO: todayISO,
                   status,
+                  sessionId: pullSid,
                   readiness: s.readinessScore?.score ?? null,
                   readinessLabel: s.readinessScore?.label ?? null,
                 }).catch(() => {});
@@ -2472,21 +2487,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               } catch { /* non-fatal */ }
             })();
           } else if (command === 'cancel_workout') {
-            // Watch-originated cancel — drop any in-progress phone-side
-            // workout state AND mark today as skipped so the next watch
-            // sync push goes out as status:'skipped' instead of
-            // re-displaying the workout that was just cancelled.
             (async () => {
               try {
                 const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
                 const keys = await AsyncStorage.getAllKeys();
                 const sessionKeys = keys.filter(k => k.startsWith('workoutSessionState_') || k.startsWith('activeWorkoutLogs_'));
                 if (sessionKeys.length > 0) await AsyncStorage.multiRemove(sessionKeys);
+                await AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
               } catch { /* non-fatal */ }
-              // Mark today's planned focus as skipped via the same handler
-              // the phone Skip button uses. Without this, cancel-on-watch
-              // would silently leave the workout "scheduled" and the next
-              // reachability re-push would re-show it on the wrist.
+              // Push explicit skipped status so watch exits active state immediately.
+              try {
+                const { pushWorkoutToWatch } = await import('../utils/watchSync');
+                const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
+                const todayWorkout = todayItem?.workout ?? null;
+                await pushWorkoutToWatch(todayWorkout, {
+                  dateISO: new Date().toISOString().slice(0, 10),
+                  status: 'skipped',
+                  sessionId: null,
+                });
+              } catch { /* non-fatal */ }
               try {
                 const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
                 const focus = String(todayItem?.workout?.focus || todayItem?.focus || 'workout');
@@ -5942,12 +5961,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         .filter(i => i.status !== 'resolved')
                         .map(i => `${i.bodyPart || i.description} (status: ${i.status})`);
 
-                      // 1. Pin day in current week — backend swaps target with
-                      //    closest matching lift. We send `current_days` so the
-                      //    pin operates on the user's existing plan instead of
-                      //    a freshly regenerated week (which would replace
-                      //    every day and the pin would land at the wrong
-                      //    visual index).
+                      // Build per-recipe-index day statuses from the schedule.
+                      const dayStatuses: string[] = workoutPlan.days.map((_, rIdx) => {
+                        const si = scheduleRaw.find(s => s.workout && workoutPlan.days.indexOf(s.workout as any) === rIdx);
+                        if (!si) return 'pending';
+                        const dk = dateKey(si.date);
+                        if (completedDates.has(dk)) return 'completed';
+                        if (skippedDates.has(dk)) return 'skipped';
+                        return 'pending';
+                      });
+
                       const { generateWorkoutWeek, getActiveWorkoutPlan } = await import('../services/api');
                       await generateWorkoutWeek(authToken, {
                         goal: userProfile.goal,
@@ -5962,6 +5985,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         pin_day_index: dayIdx,
                         pin_focus: newFocus,
                         current_days: workoutPlan.days,
+                        change_mode: 'smart',
+                        day_statuses: dayStatuses,
                       });
 
                       // 2. Read back from DB — single source of truth
@@ -9836,12 +9861,12 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                       }}
                       onPress={onToggleSwitch}>
                       <Ionicons name="swap-horizontal-outline" size={16} color={workoutPalette.strong} />
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: workoutPalette.strong }}>Switch Day</Text>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: workoutPalette.strong }}>Change Focus</Text>
                     </TouchableOpacity>
                   ) : (
                     <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: tc.border }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Switch to:</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Change focus to:</Text>
                         <TouchableOpacity onPress={onToggleSwitch} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Ionicons name="close-circle" size={20} color={tc.textMuted} />
                         </TouchableOpacity>
