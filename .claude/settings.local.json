@@ -202,7 +202,9 @@
       "Bash(/usr/libexec/PlistBuddy *)",
       "Bash(pip show *)",
       "Read(//opt/homebrew/**)",
-      "Read(//usr/local/**)"
+      "Read(//usr/local/**)",
+      "Bash(eas *)",
+      "Bash(wait *)"
     ]
   }
 }

@@ -15,7 +15,6 @@
 
 import Foundation
 import HealthKit
-import WatchKit
 
 final class HeartRateStore: NSObject, ObservableObject {
     @Published var heartRate: Int? = nil
@@ -28,11 +27,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     private var builder: HKLiveWorkoutBuilder?
     private var userAge: Int = 30
 
-    // Explicit extended runtime session — belt-and-suspenders with the
-    // HK workout session. If the HK session's automatic extended runtime
-    // doesn't kick in (provisioning/signing issue), this keeps the app alive.
-    private var extSession: WKExtendedRuntimeSession?
-
+    private var startInFlight: Bool = false
     private var intentionalEnd: Bool = false
     private var autoRestartCount: Int = 0
     private static let maxAutoRestarts = 3
@@ -90,17 +85,13 @@ final class HeartRateStore: NSObject, ObservableObject {
             if running { onReady?() }
             return
         }
-        // Start an explicit extended runtime session BEFORE the HK session.
-        // HKWorkoutSession is supposed to grant this automatically, but if
-        // the provisioning profile strips the entitlement, the explicit
-        // session keeps the app alive.
-        if extSession == nil {
-            let ext = WKExtendedRuntimeSession()
-            ext.delegate = self
-            ext.start()
-            self.extSession = ext
-            Self.saveDiag("ext session started")
+        // Reentrancy guard — multiple onAppear/onReceive/pendingLaunch events
+        // can race into start() before beginSession creates the session ref.
+        if startInFlight {
+            Self.saveDiag("start: already in-flight, skipping")
+            return
         }
+        startInFlight = true
         intentionalEnd = false
         autoRestartCount = 0
         let status = store.authorizationStatus(for: HKObjectType.workoutType())
@@ -108,7 +99,7 @@ final class HeartRateStore: NSObject, ObservableObject {
         if status != .notDetermined {
             beginSession(onReady: onReady)
         } else {
-            Self.saveDiag("requesting auth…")
+            Self.saveDiag("requesting auth")
             let read: Set<HKObjectType> = [
                 HKObjectType.quantityType(forIdentifier: .heartRate)!,
                 HKObjectType.workoutType(),
@@ -141,6 +132,7 @@ final class HeartRateStore: NSObject, ObservableObject {
             bld.beginCollection(withStart: start) { [weak self] ok, err in
                 Self.saveDiag("collecting ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
                 DispatchQueue.main.async {
+                    self?.startInFlight = false
                     if ok {
                         self?.running = true
                         onReady?()
@@ -154,15 +146,15 @@ final class HeartRateStore: NSObject, ObservableObject {
             }
         } catch {
             Self.saveDiag("ERR:\(error.localizedDescription)")
+            startInFlight = false
             DispatchQueue.main.async { self.errorMessage = error.localizedDescription }
         }
     }
 
     func end() {
         intentionalEnd = true
+        startInFlight = false
         Self.saveDiag("end() called")
-        extSession?.invalidate()
-        extSession = nil
         guard let sess = session, let bld = builder else {
             running = false
             return
@@ -185,9 +177,8 @@ final class HeartRateStore: NSObject, ObservableObject {
     /// so the next `start()` begins cleanly.
     func discard() {
         intentionalEnd = true
+        startInFlight = false
         Self.saveDiag("discard() called")
-        extSession?.invalidate()
-        extSession = nil
         session?.end()
         builder?.discardWorkout()
         heartRate = nil
@@ -204,18 +195,6 @@ final class HeartRateStore: NSObject, ObservableObject {
         if pct < 0.80 { return 3 }
         if pct < 0.90 { return 4 }
         return 5
-    }
-}
-
-extension HeartRateStore: WKExtendedRuntimeSessionDelegate {
-    func extendedRuntimeSessionDidStart(_ session: WKExtendedRuntimeSession) {
-        Self.saveDiag("EXT:started")
-    }
-    func extendedRuntimeSession(_ session: WKExtendedRuntimeSession, didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason, error: Error?) {
-        Self.saveDiag("EXT:invalid \(reason.rawValue) \(error?.localizedDescription ?? "")")
-    }
-    func extendedRuntimeSessionWillExpire(_ session: WKExtendedRuntimeSession) {
-        Self.saveDiag("EXT:expiring")
     }
 }
 

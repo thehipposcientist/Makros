@@ -60,6 +60,12 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         readiness = nil
         weight = nil
         theme = .midnight
+        // Clear persisted watch state so stale flags from a previous
+        // account can't auto-start HealthKit on the next app open.
+        UserDefaults.standard.removeObject(forKey: "thallo.pendingWorkoutLaunch")
+        UserDefaults.standard.removeObject(forKey: "thallo.lastEndedSessionId")
+        UserDefaults.standard.removeObject(forKey: "thallo.activeWorkoutState")
+        UserDefaults.standard.removeObject(forKey: "thallo.hrDiag")
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────

@@ -42,19 +42,48 @@ struct ContentView: View {
         )
     }
 
+    /// Only auto-resume a workout if it's genuinely active, recent, and
+    /// not from a session we already ended. Prevents stale applicationContext
+    /// from a different account or old session from crashing the app on open.
+    private func shouldResumeWorkout(_ w: WatchWorkout) -> Bool {
+        guard w.status == .active else { return false }
+        let sid = w.sessionId ?? ""
+        // Require a non-empty sessionId — payloads without one are legacy/stale.
+        guard !sid.isEmpty else {
+            HeartRateStore.saveDiag("skip resume: empty sessionId")
+            return false
+        }
+        let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
+        if sid == lastEnded {
+            HeartRateStore.saveDiag("skip resume: sessionId matches lastEnded")
+            return false
+        }
+        // Reject payloads older than 15 minutes — they're stale from a
+        // previous app lifecycle or an old account push.
+        let ageMs = Date().timeIntervalSince1970 * 1000 - w.syncedAtMs
+        if ageMs > 15 * 60 * 1000 {
+            HeartRateStore.saveDiag("skip resume: payload too old (\(Int(ageMs/1000))s)")
+            return false
+        }
+        return true
+    }
+
     private func consumePendingLaunch() {
         guard UserDefaults.standard.bool(forKey: "thallo.pendingWorkoutLaunch") else { return }
         UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
         if active { return }
-        HeartRateStore.saveDiag("pendingLaunch→start")
-        if heartRate.running {
-            active = true
-            conn.requestPull()
-        } else {
-            heartRate.start {
+        // Always pull fresh state from the phone first.
+        conn.requestPull()
+        // Only start HK if we already have a valid active workout.
+        if let w = conn.workout, shouldResumeWorkout(w) {
+            HeartRateStore.saveDiag("pendingLaunch→start (valid session)")
+            if heartRate.running {
                 active = true
-                conn.requestPull()
+            } else {
+                heartRate.start { active = true }
             }
+        } else {
+            HeartRateStore.saveDiag("pendingLaunch: no valid active workout, waiting for pull")
         }
     }
 
@@ -133,13 +162,9 @@ struct ContentView: View {
         .onAppear {
             heartRate.prewarmAuth()
             consumePendingLaunch()
-            if let w = conn.workout, w.status == .active, !active {
-                let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
-                let sid = w.sessionId ?? ""
-                if sid.isEmpty || sid != lastEnded {
-                    HeartRateStore.saveDiag("onAppear reconcile→start")
-                    heartRate.start { active = true }
-                }
+            if let w = conn.workout, !active, shouldResumeWorkout(w) {
+                HeartRateStore.saveDiag("onAppear reconcile→start")
+                heartRate.start { active = true }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchWorkoutLaunch)) { _ in
@@ -150,13 +175,9 @@ struct ContentView: View {
             guard let w = w else { return }
             switch w.status {
             case .active:
-                if !active {
-                    let lastEnded = UserDefaults.standard.string(forKey: "thallo.lastEndedSessionId") ?? ""
-                    let sid = w.sessionId ?? ""
-                    if sid.isEmpty || sid != lastEnded {
-                        HeartRateStore.saveDiag("rcv active→start")
-                        heartRate.start { active = true }
-                    }
+                if !active, shouldResumeWorkout(w) {
+                    HeartRateStore.saveDiag("rcv active→start")
+                    heartRate.start { active = true }
                 }
             case .completed, .skipped:
                 if active {
