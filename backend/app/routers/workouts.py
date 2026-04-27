@@ -1195,12 +1195,13 @@ def mark_workout_complete(
                 ex_list = []
                 for ep in body.exercises:
                     seed = seed_map.get(ep.name.lower(), {})
-                    # Pass structured per-set data (reps, weight, RIR) so
+                    # Pass structured per-set data (reps, weight, RIR, HR) so
                     # resolve_exercise_fatigue can compute volume-load and
                     # stimulus-specific fatigue (heavy vs hypertrophy vs volume
-                    # produce different systemic/muscular ratios).
+                    # produce different systemic/muscular ratios). HR enables
+                    # cardiovascular intensity estimation per exercise.
                     set_dicts = [
-                        {"reps": s.reps, "weight_lbs": s.weight_lbs, "rir": s.rir}
+                        {"reps": s.reps, "weight_lbs": s.weight_lbs, "rir": s.rir, "heart_rate_avg": s.heart_rate_avg}
                         for s in ep.sets
                     ]
                     ex_list.append({

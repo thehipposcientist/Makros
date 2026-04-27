@@ -55,7 +55,7 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
   //   "30-45 min", "25-40 minutes"            → minutes (midpoint)
   // A plain number or rep-range like "6-8" falls back to the
   // 45s-per-set working estimate (normal strength set timing).
-  const parseWorkSecondsPerSet = (reps: unknown, exerciseName?: string): number | null => {
+  const parseWorkSecondsPerSet = (reps: unknown, exerciseName?: string, primaryMuscle?: string): number | null => {
     if (reps == null) return null;
     const s = String(reps).trim().toLowerCase();
     if (!s) return null;
@@ -85,8 +85,8 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
       if (repMatch) return parseInt(repMatch[1], 10) * 5;
     }
     // Bare number heuristic: if the value is a plain number ≥ 20 AND
-    // the exercise looks like cardio (name contains cardio keywords),
-    // treat it as minutes. "60" on an elliptical = 60 min, not 60 reps.
+    // the exercise looks like cardio (name contains cardio keywords OR
+    // primary_muscle is 'cardio'), treat it as minutes.
     // Below 20, it's almost certainly rep-based (squats × 15, etc.).
     const bareNum = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
     if (bareNum) {
@@ -94,6 +94,10 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
       const hi = bareNum[2] ? parseInt(bareNum[2], 10) : lo;
       const mid = Math.round((lo + hi) / 2);
       if (mid >= 20) {
+        // Structured field check first
+        const pm = (primaryMuscle ?? '').toLowerCase();
+        if (pm === 'cardio') return mid * 60;
+        // Regex fallback for old cached data
         const name = (exerciseName ?? '').toLowerCase();
         const isCardio = ['elliptical', 'treadmill', 'bike', 'cycling', 'running', 'jogging', 'walk', 'rowing', 'stair', 'swim', 'cardio', 'zone'].some(k => name.includes(k));
         if (isCardio) return mid * 60; // treat as minutes
@@ -120,11 +124,18 @@ export default function WorkoutCard({ workout, themeName, onOpenExerciseVideo, o
     const secs = workout.exercises.reduce((total, ex, idx) => {
       const sets = Number(ex.sets) || 3;
       const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
-      const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name);
+      const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name, (ex as any).primary_muscle ?? (ex as any)._primary_muscle);
       const restTotal = Math.max(0, sets - 1) * rest * REST_FUDGE;
       // Transition between exercises (only between, not after last)
       const isLast = idx === workout.exercises.length - 1;
-      const isMobility = /mobility|stretch|warm.?up|flow|pose|dog|cat|hip|shoulder.dis|dead hang/i.test(ex.name) || (ex as any)._role === 'warmup';
+      const exPrimaryMuscle = ((ex as any).primary_muscle ?? (ex as any)._primary_muscle ?? '').toLowerCase();
+      const exTrainingType = ((ex as any)._training_type ?? (ex as any).training_type ?? '').toLowerCase();
+      const exRole = ((ex as any)._role ?? '').toLowerCase();
+      const isMobility = exPrimaryMuscle === 'mobility'
+        || exTrainingType === 'mobility' || exTrainingType === 'recovery' || exTrainingType === 'stretch'
+        || exRole === 'warmup'
+        // Regex fallback for old cached data without structured fields
+        || /mobility|stretch|warm.?up|flow|pose|dog|cat|hip|shoulder.dis|dead hang/i.test(ex.name);
       const transition = isLast ? 0 : (isMobility ? TRANSITION_MOBILITY_SEC : TRANSITION_STRENGTH_SEC);
 
       if (timedWorkSec != null) {

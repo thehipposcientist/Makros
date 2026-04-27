@@ -182,6 +182,11 @@ export const WatchBridge = {
     try { return await native.updateProgress(progress); } catch { return false; }
   },
 
+  async startWatchWorkout(): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.startWatchWorkout(); } catch { return false; }
+  },
+
   /** Listen for commands the user taps on the watch (Start / Skip /
    *  End / rest controls). Returns an unsubscribe function. */
   addCommandListener(

@@ -22,6 +22,7 @@ const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
+import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
@@ -164,6 +165,56 @@ interface ExerciseLibraryItem {
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ── Structured focus → muscle-group mapping ──────────────────────────────────
+// Used for fatigue readiness lookups, focus-family normalization, and
+// muscle-chip filtering instead of ad-hoc regex chains.
+const FOCUS_MUSCLE_MAP: Record<string, string[]> = {
+  push: ['chest', 'shoulders', 'triceps'],
+  chest: ['chest', 'shoulders', 'triceps'],
+  pull: ['back', 'biceps'],
+  back: ['back', 'biceps'],
+  legs: ['quads', 'hamstrings', 'glutes', 'calves'],
+  lower: ['quads', 'hamstrings', 'glutes', 'calves'],
+  upper: ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
+  full_body: ['chest', 'back', 'shoulders', 'quads', 'glutes', 'hamstrings'],
+  shoulders: ['shoulders'],
+  arms: ['biceps', 'triceps'],
+  cardio: ['cardio'],
+};
+
+// Stimulus values that indicate a non-lifting (easy/recovery/mobility) day.
+const EASY_STIMULUS = new Set(['conditioning', 'mobility', 'recovery']);
+
+// Focus-string keywords mapped to normalized family keys for structured lookup.
+// Order matters: first match wins when scanning focus strings.
+const FOCUS_KEY_PATTERNS: [string, string][] = [
+  ['push', 'push'], ['chest', 'chest'], ['pressing', 'push'],
+  ['pull', 'pull'], ['back', 'back'], ['bicep', 'pull'], ['lat', 'pull'],
+  ['legs', 'legs'], ['quad', 'legs'], ['hamstring', 'legs'], ['glute', 'legs'], ['lower', 'lower'],
+  ['upper', 'upper'],
+  ['full body', 'full_body'], ['full_body', 'full_body'], ['total', 'full_body'],
+  ['shoulder', 'shoulders'],
+  ['arms', 'arms'], ['arm', 'arms'],
+  ['cardio', 'cardio'], ['zone', 'cardio'], ['interval', 'cardio'],
+];
+
+/** Resolve a focus string to its FOCUS_MUSCLE_MAP key via keyword match. */
+function resolveFocusMuscleKey(focus: string): string | null {
+  const lower = focus.toLowerCase();
+  for (const [keyword, key] of FOCUS_KEY_PATTERNS) {
+    if (lower.includes(keyword)) return key;
+  }
+  return null;
+}
+
+// Focus keywords for the split-inference fallback when preferredSplit is missing.
+const SPLIT_FOCUS_KEYWORDS: Record<string, string[]> = {
+  bro: ['chest', 'back', 'shoulders', 'arms'],
+  upper_lower: ['upper', 'lower'],
+  full_body: ['full body', 'full_body'],
+  ppl: ['push', 'pull'],
+};
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
 const EMAIL_BANNER_DISMISS_KEY = 'emailBannerDismissedAt';
@@ -896,231 +947,7 @@ function mealDayLabel(date: Date, index: number): string {
   return `${DAY_NAMES[date.getDay()]} · ${MONTH_NAMES[date.getMonth()]} ${date.getDate()}`;
 }
 
-function humanizeToken(value?: string | null): string {
-  if (!value) return '';
-  return String(value)
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (match) => match.toUpperCase());
-}
-
-function joinParts(parts: string[]): string {
-  if (parts.length <= 1) return parts[0] ?? '';
-  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
-  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
-}
-
-type MovementPattern =
-  | 'curl' | 'extension_elbow' | 'press_horizontal' | 'press_vertical'
-  | 'fly' | 'row' | 'pulldown' | 'raise' | 'squat' | 'hinge'
-  | 'lunge' | 'hip_thrust' | 'calf_raise' | 'plank' | 'crunch' | 'generic';
-
-function detectMovementPattern(name: string, primary: string): MovementPattern {
-  const n = name.toLowerCase();
-  const p = (primary ?? '').toLowerCase();
-  if (/(curl|bicep curl|hammer curl|preacher)/.test(n)) return 'curl';
-  if (/(tricep|skull crusher|pushdown|kickback|overhead extension)/.test(n) && /(extend|press)/.test(n)) return 'extension_elbow';
-  if (/pushdown|tricep extension|skull crusher|kickback/.test(n)) return 'extension_elbow';
-  if (/(bench press|chest press|push.?up|dip|pec dec)/.test(n) && !/(overhead|shoulder)/.test(n)) return 'press_horizontal';
-  if (/(fly|pec|cable cross)/.test(n)) return 'fly';
-  if (/(overhead press|shoulder press|military|arnold|lateral raise|front raise|upright row)/.test(n)) {
-    if (/raise/.test(n)) return 'raise';
-    return 'press_vertical';
-  }
-  if (/(lateral raise|front raise|rear delt|face pull)/.test(n)) return 'raise';
-  if (/(row|pull.?up|chin.?up|lat pull)/.test(n)) {
-    if (/pulldown|lat pull/.test(n)) return 'pulldown';
-    return 'row';
-  }
-  if (/(squat|goblet|hack squat|leg press)/.test(n)) return 'squat';
-  if (/(deadlift|rdl|romanian|good morning|hip hinge)/.test(n)) return 'hinge';
-  if (/lunge/.test(n)) return 'lunge';
-  if (/(hip thrust|glute bridge)/.test(n)) return 'hip_thrust';
-  if (/(calf raise|standing calf|seated calf)/.test(n)) return 'calf_raise';
-  if (/(plank|hollow|l.sit)/.test(n)) return 'plank';
-  if (/(crunch|sit.?up|ab|cable crunch)/.test(n)) return 'crunch';
-  return 'generic';
-}
-
-function buildExerciseGuide(ex: ExerciseLibraryItem) {
-  const primary = humanizeToken(ex.primary_muscle) || 'the target muscle';
-  const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
-  const equipment = humanizeToken(ex.equipment) || 'the equipment';
-  const supportText = secondary.length ? ` with help from ${joinParts(secondary)}` : '';
-  const pattern = detectMovementPattern(ex.name, ex.primary_muscle ?? '');
-  const p = primary.toLowerCase();
-  const sec = secondary.map(s => s.toLowerCase());
-
-  // Pattern-specific phase descriptions
-  const phaseDescriptions: Record<MovementPattern, { concentric: string; eccentric: string; why: string; setup: string; movement: string; feel: string; mistake: string }> = {
-    curl: {
-      concentric: `As you curl the weight up, the ${p} contracts and shortens — pulling your forearm toward your upper arm. Peak contraction happens at the top: squeeze hard and hold for a beat to maximize tension.`,
-      eccentric: `Lowering is where real growth happens. Control the descent over 2–3 seconds as the ${p} lengthens under load. Rushing the lowering phase throws away half the stimulus.`,
-      why: `The elbow flexion arc puts the ${p} under tension through its full range. With a supinated (underhand) grip, the forearm rotation adds a secondary function the ${p} is designed for, making curls uniquely effective.`,
-      setup: `Stand tall, pin your elbows to your sides. Grab the ${equipment.toLowerCase()} with a shoulder-width underhand grip. Brace your core so only your forearms move.`,
-      movement: `Initiate from the ${p} — not from your wrists or shoulders. The upper arm stays fixed. Drive the weight up, squeeze at the top, then lower with control.`,
-      feel: `You should feel a deep burn in the front of your upper arm. If your shoulder or forearm is dominating, you're probably swinging or using too much weight.`,
-      mistake: `Swinging the torso to heave the weight up. This shifts load to your lower back and delts. Keep your upper arms pinned — only your forearms move.`,
-    },
-    extension_elbow: {
-      concentric: `As you straighten your arm (or push the weight away), the ${p} fires and shortens, driving your elbow toward full extension. The lockout at the end is pure tricep output.`,
-      eccentric: `As you bend the elbow (lowering toward your skull on a skull crusher, or descending in a dip), the ${p} lengthens under load. Overhead variations create the biggest eccentric stretch because the long head spans both joints.`,
-      why: `All pushing and straightening movements require elbow extension — the ${p}'s primary job. The ${p} makes up roughly two-thirds of your upper arm, so developing it adds more arm size than bicep work alone.`,
-      setup: `Position yourself so the ${p} starts in a stretched position. For overhead work, keep elbows pointing forward and close together.`,
-      movement: `Drive from elbow extension — push the weight away by straightening your arm. Think "push my elbow straight" rather than "move the weight." Lock out fully at the top.`,
-      feel: `You should feel the back of your upper arm working — the horseshoe shape should harden and contract. Avoid letting elbows flare wide, which shifts load to the chest.`,
-      mistake: `Letting elbows flare out or cut the range short. Flaring shifts work to shoulders/chest. Partial reps skip the deepest stretch where the long head grows most.`,
-    },
-    press_horizontal: {
-      concentric: `As you press the weight away from your chest, the ${p} shortens and contracts — driving the arms from a bent, lowered position to full extension. The ${p} works hardest in the mid-range to lockout.`,
-      eccentric: `Lowering the bar (or dumbbells) to your chest stretches the ${p} under load. This bottom-range stretch is a key growth stimulus — don't bounce the bar off your chest; control the descent.`,
-      why: `The horizontal pushing motion is perfectly aligned with the ${p}'s fiber direction — from the sternum and clavicle outward. Both shoulder flexion and horizontal adduction (bringing arms together) happen simultaneously, which is exactly what the ${p} does.`,
-      setup: `Lie flat (or at the target angle), retract and depress your shoulder blades into the bench, plant your feet. Grip the ${equipment.toLowerCase()} at roughly 1.5× shoulder width.`,
-      movement: `Lower with control to your chest or chin level, then press explosively. Think "push the bar away from you" or "push yourself away from the bar." Keep wrists stacked over elbows.`,
-      feel: `You should feel a stretch across your chest at the bottom and a squeeze when your arms come together at the top. If your shoulder is the limiting factor, check grip width and elbow angle.`,
-      mistake: `Flaring elbows to 90° (too wide) puts massive stress on the shoulder joint and reduces ${p} involvement. Aim for elbows ~45–75° from your torso.`,
-    },
-    fly: {
-      concentric: `As your arms come together in front of you, the ${p} performs horizontal adduction — bringing the upper arms toward the midline of the body. The muscle fibers slide closer together.`,
-      eccentric: `Opening your arms wide stretches the ${p} fibers across a longer range than any pressing movement. This deep stretch under load is the fly's biggest advantage for hypertrophy.`,
-      why: `The ${p}'s primary action is horizontal adduction (bringing arms together). Flies isolate this motion without triceps helping to lock out, which keeps tension on the ${p} through the full arc.`,
-      setup: `Set up with a slight bend in the elbows (maintain this angle throughout — it reduces elbow stress). Use a light enough weight that you can fully control the arc.`,
-      movement: `Think "hugging a barrel" — arc the arms in a wide circle rather than bending them. Lead with your elbows on the way down, and squeeze the ${p} at the peak.`,
-      feel: `A deep stretch across your chest at the bottom. If you feel it in your biceps or shoulder instead, reduce the weight and focus on form.`,
-      mistake: `Turning a fly into a press by bending the elbows more as the weight gets heavy. The moment you do that you've lost the isolation — go lighter.`,
-    },
-    row: {
-      concentric: `Pulling the weight toward your torso involves the ${p} retracting the scapula and extending the shoulder. The ${p} shortens as your elbow drives back past your torso.`,
-      eccentric: `Letting the weight back out with control stretches the ${p} fibers and allows the scapula to protract. This controlled lowering builds thickness in the back.`,
-      why: `Rows align the pulling motion with the ${p}'s fiber direction — running diagonally across the back from the lumbar/pelvis up to the upper arm. The more horizontal the pull, the more the ${p} works.`,
-      setup: `Hinge at the hips with a neutral spine (not rounded). Keep the ${equipment.toLowerCase()} below your shoulders at the start. Engage your lats before pulling.`,
-      movement: `Drive your elbows back (not up). Think "elbow to pocket" for lower-back engagement or "elbow to ear" for upper-back. Squeeze the muscle at the top of the pull.`,
-      feel: `A tight squeeze between your shoulder blades at the peak and a stretch across your back at full arm extension. If you feel it mainly in your biceps, you're pulling with your arms too much.`,
-      mistake: `Rounding the lower back and using momentum to heave the weight. A rounded spine under load is a spinal injury risk. Brace the core and move only your arms and shoulders.`,
-    },
-    pulldown: {
-      concentric: `As you pull the bar (or cable) down toward your collarbone, the ${p} adducts and extends the shoulder — pulling your upper arms down and back. The lats and ${p} shorten together.`,
-      eccentric: `Allowing the bar to rise back to full arm extension stretches the entire back musculature under tension. Control this phase and feel the full stretch in your sides.`,
-      why: `The pulldown angle closely mimics the ${p}'s line of pull — the fibers run from the outer edges of the back to the upper arm and are maximally loaded when the arms are overhead or angled away from the torso.`,
-      setup: `Sit with thighs under the pads, lean back very slightly (~10–15°). Grab the bar just wider than shoulder-width with an overhand grip.`,
-      movement: `Initiate by depressing your shoulders (push them down, away from your ears) before bending your elbows. Think "elbows to your back pockets."`,
-      feel: `You should feel the sides of your back engaging — the "wings" under your armpits. If you feel it mainly in your biceps or forearms, try a false grip or focus on leading with your elbows.`,
-      mistake: `Pulling with your arms instead of your back. If your biceps fatigue first, you're arm-pulling. Initiate with shoulder depression and think of your hands as hooks.`,
-    },
-    press_vertical: {
-      concentric: `Pressing overhead contracts the ${p} as you drive your arms upward and outward, extending the shoulder joint. The deltoids are the prime mover through the full arc.`,
-      eccentric: `Lowering the weight back to shoulder height stretches the deltoids and engages the rotator cuff as stabilizers. Control the descent.`,
-      why: `Vertical pressing loads the deltoid in its primary function — shoulder abduction and flexion. The overhead position removes chest involvement and forces the delts to handle the full load.`,
-      setup: `Stand tall or sit upright with core braced. Hold the ${equipment.toLowerCase()} at shoulder height with elbows at ~90°. Keep your lower back from arching.`,
-      movement: `Press straight up (or slightly forward for natural shoulder mechanics). At the top, shrug slightly to elevate the scapula — this full overhead position is important for shoulder health.`,
-      feel: `The outer and front of your shoulders should burn. If your traps dominate, you're shrugging too early. If lower back aches, reduce weight or improve core bracing.`,
-      mistake: `Letting the lower back hyperextend to compensate for poor shoulder mobility. Brace the core and keep the ribcage down throughout the press.`,
-    },
-    raise: {
-      concentric: `Raising the weight — whether to the side (lateral), front, or rear — abducts or flexes the shoulder, contracting the target portion of the deltoid.`,
-      eccentric: `Slowly lowering back down under control keeps the deltoid under tension through the full range. This controlled eccentric is key for shoulder cap development.`,
-      why: `Raises isolate specific heads of the deltoid by changing the plane of movement. Lateral raises hit the medial (middle) head; front raises target the anterior head; rear raises target the posterior head.`,
-      setup: `Use a lighter weight than you think. The deltoid is a relatively small muscle and raises are pure isolation — going heavy causes the traps and momentum to take over.`,
-      movement: `Lead with the elbow, not the hand. Keep a slight bend in the arm. Raise to parallel (not above shoulder height for lateral raises) in a smooth arc.`,
-      feel: `A burning sensation at the top and outer part of your shoulder. If your traps are cramping, you're shrugging. If your bicep works more than your delt, you're using too much elbow bend.`,
-      mistake: `Shrugging the traps to assist the raise. This shifts work away from the target delt head. Think "keep shoulders away from ears" throughout the movement.`,
-    },
-    squat: {
-      concentric: `Driving up from the bottom of the squat, the ${p} extend the knee and hip simultaneously, generating force against the floor. The quads are maximally active through knee extension.`,
-      eccentric: `Descending into the squat puts the ${p} and glutes under the highest load — the muscles lengthen under bodyweight and external load. A slow, controlled descent builds strength at the bottom.`,
-      why: `The squat's knee flexion and hip flexion angles load the ${p} exactly at the range they're designed to work — the knee extensors are under maximum stretch at the bottom position.`,
-      setup: `Feet shoulder-width or slightly wider, toes turned out 15–30°. Bar across the traps or front deltoids (depending on variation). Brace the core before descending.`,
-      movement: `Send hips back and down, not just down. Keep your chest up and knees tracking over your toes. Drive through your full foot — heels and toes — on the way up.`,
-      feel: `A deep burn in the front of the thighs (quads) and the glutes at the bottom. If your lower back is the main fatigue point, your hips may be rising too fast on the way up.`,
-      mistake: `Knees caving inward (valgus collapse) on the way up. Push your knees out to match your toe angle throughout the entire movement.`,
-    },
-    hinge: {
-      concentric: `Driving the hips forward to extend them, the ${p} (hamstrings and glutes) contract and shorten, pulling the torso back to upright. The spine maintains its neutral position throughout.`,
-      eccentric: `Hinging the hips back stretches the ${p} and hamstrings under load. This is the most important phase for posterior chain development — control it and feel the hamstrings pull.`,
-      why: `Hip hinges load the ${p} and hamstrings in hip extension — their primary function. The forward lean places the spine under a lever load, making the posterior chain work against significant resistance.`,
-      setup: `Stand with feet hip-width. With a barbell, grip just outside your legs. Keep the bar close to your body (it should drag up your shins for conventional deadlifts). Brace hard before lifting.`,
-      movement: `"Push the floor away" on the concentric rather than "pull the weight up." Maintain a neutral spine — don't round your lower back. Drive hips through at the top.`,
-      feel: `You should feel a deep stretch in the back of your thighs on the way down, and glute contraction at lockout. Rounding lower back means your erectors are compensating — reduce weight.`,
-      mistake: `Rounding the lumbar spine. This shifts load from the ${p} and glutes to the spinal erectors in a compromised position — a frequent injury mechanism. Brace the core and maintain a neutral spine.`,
-    },
-    lunge: {
-      concentric: `Pushing through the front heel to stand back up extends the hip and knee, contracting the ${p} and glutes together. The split position forces unilateral (single-leg) loading.`,
-      eccentric: `Stepping forward and lowering the back knee toward the ground stretches the ${p} and hip flexors under the body's full load. This controlled descent builds single-leg strength.`,
-      why: `Lunges expose and correct bilateral asymmetry — they train each leg independently, so a stronger side cannot compensate for a weaker one. They also train balance and hip stability alongside the ${p}.`,
-      setup: `Step far enough forward that your front shin stays roughly vertical at the bottom. Keep your torso upright and core braced.`,
-      movement: `Lower the back knee toward the floor with control. Drive through the front heel to return — don't push off your back foot or you'll shorten the range.`,
-      feel: `A deep stretch in the back hip (hip flexor) and a squeeze in the front quad and glute. If your front knee falls inward, focus on pressing it out over the second toe.`,
-      mistake: `Step too short, causing the front knee to shoot far past the toes. A small step also reduces hip and glute involvement and puts excess force on the knee.`,
-    },
-    hip_thrust: {
-      concentric: `Driving the hips upward from the bench creates maximal hip extension, squeezing the ${p} at the very top. The thrust pattern loads the glutes at a long muscle length through a full range.`,
-      eccentric: `Lowering the hips back toward the floor stretches the ${p} fibers under load. Full range hip thrusts (going all the way down) produce more hypertrophy than partial reps.`,
-      why: `Hip thrusts are uniquely effective for the ${p} because the resistance is highest at full hip extension (the top), where the ${p} are fully contracted — unlike squats where load drops off at lockout.`,
-      setup: `Upper back against a bench, bar over the hips with a pad. Feet planted flat, about hip-width, feet far enough forward that shins are vertical at the top.`,
-      movement: `Drive hips straight up, not forward. Squeeze the ${p} hard at the top and hold for a beat. Keep your chin tucked — don't hyperextend the neck.`,
-      feel: `An intense contraction in the ${p} at the top. If your lower back is working harder than your glutes, tuck your pelvis slightly at the top.`,
-      mistake: `Hyperextending the lower back at the top. This is actually lumbar extension, not hip extension — you've gone past the glute's peak contraction. Stop when your body forms a straight line from shoulders to knees.`,
-    },
-    calf_raise: {
-      concentric: `Rising onto your toes (plantarflexion) contracts the ${p} — pushing the heel away from the ground. The peak squeeze at the very top is where the ${p} is fully shortened.`,
-      eccentric: `Lowering the heel as far below the step as possible stretches the ${p} fibers under tension. The calf is notoriously stubborn and responds best to deep full-range eccentric work.`,
-      why: `The calf (gastrocnemius + soleus) is a postural muscle that fires constantly during walking — making it highly fatigue-resistant. Overloading with heavy weight and slow eccentrics are the main growth stimuli.`,
-      setup: `Stand on a step or platform so your heels can drop below it. Use the ${equipment.toLowerCase()} for load. Keep a slight bend in the knee for soleus work, or straight leg for gastrocnemius.`,
-      movement: `Full range every rep: heels drop all the way down, then rise all the way up. Partial calf raises are one of the most common wasted reps in the gym.`,
-      feel: `A burning stretch in the lower leg at the bottom and a tight squeeze at the top. Calves can tolerate very high rep ranges — 15–25 reps per set is often appropriate.`,
-      mistake: `Partial reps (never dropping the heel) or bouncing at the bottom. The calf needs to be fully stretched to get a strong reflex contraction — short-range reps don't provide this stimulus.`,
-    },
-    plank: {
-      concentric: `There is no movement — the ${p} contract isometrically (without changing length) to resist spinal extension, flexion, and rotation.`,
-      eccentric: `The challenge is sustaining tension throughout — as fatigue sets in, the core wants to collapse. Maintaining position is active work, not passive holding.`,
-      why: `The ${p} stabilizes the spine during virtually every compound lift. A strong plank position directly transfers to better form in deadlifts, squats, overhead press, and rows.`,
-      setup: `Forearms on the floor (elbows under shoulders), body in a straight line from head to heels. Squeeze your glutes and engage your core — don't let your hips rise or sag.`,
-      movement: `This is a static hold. Push your elbows into the floor, think about "pulling your elbows toward your feet" to activate the lats. Breathe steadily.`,
-      feel: `Tension throughout your entire mid-section — not just the front. If you only feel your lower back or shoulders, re-check alignment.`,
-      mistake: `Letting the hips rise or sag. A sagging hips plank loads the lower back instead of the core. A high-hipped plank is resting, not working.`,
-    },
-    crunch: {
-      concentric: `Shortening the distance between your ribcage and pelvis by curling the spine — the ${p} contract and shorten to flex the lumbar spine.`,
-      eccentric: `Lowering back down with control as the ${p} lengthen — don't let your head fall to the floor. Controlled eccentric keeps the abs under tension.`,
-      why: `The ${p} run vertically from the pelvis to the ribcage. Their primary function is spinal flexion — the exact motion in a crunch. Planks build stabilization endurance; crunches build flexion strength.`,
-      setup: `Lie flat, knees bent. Hands behind your head or crossed on your chest — don't pull on your neck. Press your lower back into the floor.`,
-      movement: `Curl your ribcage toward your pelvis, not your head toward your knees. The movement is short — your shoulder blades should only clear the floor by a few inches.`,
-      feel: `The burn should be directly in your abs — the center of your stomach. Neck or lower back pain means you're pulling with your neck or hyperextending.`,
-      mistake: `Pulling on your neck or using momentum to sit all the way up. True crunch range of motion is small — quality contraction beats large range here.`,
-    },
-    generic: {
-      concentric: `During the lifting/working phase of this movement, the ${p} shortens and contracts to produce force against the resistance.`,
-      eccentric: `During the lowering/returning phase, the ${p} lengthens under load — this phase is often undertrained but is critical for muscle growth. Control it for 2–3 seconds.`,
-      why: ex.is_compound
-        ? `This compound movement loads the ${p} while multiple joints move together, allowing heavier loads and greater total muscle recruitment${sec.length ? ` with support from ${joinParts(sec)}` : ''}.`
-        : `The single-joint isolation nature of this exercise keeps tension focused on the ${p} throughout the range, without other muscle groups sharing the load.`,
-      setup: `Set yourself up so your body feels balanced, brace your torso, and position the ${equipment.toLowerCase()} so the movement starts under control.`,
-      movement: `Move through a full, controlled range of motion. Think about driving the weight with ${p} rather than just swinging it. Avoid cutting the range short.`,
-      feel: `You should mostly feel this in the ${p}${sec.length ? `, with some support from ${joinParts(sec).toLowerCase()}` : ''}. Sharp or joint pain means stop — that's not the muscle working.`,
-      mistake: `Using too much momentum or shortening the range of motion. Both rob the ${p} of the stimulus you're there to provide.`,
-    },
-  };
-
-  const pd = phaseDescriptions[pattern];
-
-  return {
-    howTo: ex.description
-      ? ex.description
-      : `Use ${equipment.toLowerCase()} with full control through the entire range of motion. Move deliberately — the goal is to load the ${p}, not just move the weight.`,
-    hits: `Primarily targets the ${p}${supportText}. ${ex.is_compound ? `As a compound movement, multiple muscle groups contribute — but ${p} is the prime mover.` : `As an isolation movement, it keeps tension concentrated on the ${p}.`}`,
-    why: pd.why,
-    setup: pd.setup,
-    movement: pd.movement,
-    feel: pd.feel,
-    mistake: pd.mistake,
-    concentric: pd.concentric,
-    eccentric: pd.eccentric,
-  };
-}
-
-function getExerciseVideoUrl(exerciseName: string): string {
-  return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${exerciseName} proper form`)}`;
-}
-
+// humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
   userProfile: UserProfile,
@@ -1148,16 +975,24 @@ function compactGoalProgressText(
   return null;
 }
 
+// Exercise-name → muscle group classification. Used as a fallback when
+// exercises lack a structured `primary_muscle` field.
+const INFER_GROUP_KEYWORDS: [string[], string][] = [
+  [['bike', 'cycle', 'cycling', 'spin', 'run', 'running', 'jog', 'treadmill', 'cardio', 'conditioning', 'hiit'], 'Cardio'],
+  [['bench', 'chest', 'press', 'fly', 'push up', 'push-up', 'pushup'], 'Chest'],
+  [['row', 'pull', 'lat', 'back', 'deadlift', 'pull up', 'pull-up', 'pullup'], 'Back'],
+  [['squat', 'lunge', 'leg', 'quad', 'hamstring', 'calf'], 'Legs'],
+  [['shoulder', 'overhead', 'lateral raise', 'rear delt'], 'Shoulders'],
+  [['bicep', 'tricep', 'curl', 'extension'], 'Arms'],
+  [['core', 'ab', 'plank', 'crunch'], 'Core'],
+  [['glute', 'hip thrust'], 'Glutes'],
+];
+
 function inferGroup(text: string): string {
   const blob = text.toLowerCase();
-  if (/(bike|cycle|cycling|spin|run|running|jog|treadmill|cardio|conditioning|hiit)/.test(blob)) return 'Cardio';
-  if (/(bench|chest|press|fly|push[- ]?up)/.test(blob)) return 'Chest';
-  if (/(row|pull|lat|back|deadlift|pull[- ]?up)/.test(blob)) return 'Back';
-  if (/(squat|lunge|leg|quad|hamstring|calf)/.test(blob)) return 'Legs';
-  if (/(shoulder|overhead|lateral raise|rear delt)/.test(blob)) return 'Shoulders';
-  if (/(bicep|tricep|curl|extension)/.test(blob)) return 'Arms';
-  if (/(core|ab|plank|crunch)/.test(blob)) return 'Core';
-  if (/(glute|hip thrust)/.test(blob)) return 'Glutes';
+  for (const [keywords, group] of INFER_GROUP_KEYWORDS) {
+    if (keywords.some(kw => blob.includes(kw))) return group;
+  }
   return 'Other';
 }
 
@@ -2949,14 +2784,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             : undefined;
           // Family-key comparison so 'Pull' / 'Back & Biceps' / 'Pull
           // Day' all collapse to the same bucket.
+          const _NORM_FAM_MAP: [string[], string][] = [
+            [['legs', 'leg', 'quad', 'glute', 'hamstring', 'lower', 'squat', 'hinge', 'calves'], 'lower'],
+            [['push', 'chest', 'tricep', 'press'], 'push'],
+            [['pull', 'back', 'bicep', 'lat'], 'pull'],
+            [['upper', 'shoulder', 'arm'], 'upper'],
+            [['full body', 'full_body', 'total'], 'full'],
+            [['cardio', 'zone2', 'zone 2', 'interval'], 'cardio'],
+          ];
           const _normFam = (f?: string | null): string => {
             const s = String(f ?? '').toLowerCase();
-            if (/legs?|quad|glute|hamstring|lower|squat|hinge|calves/.test(s)) return 'lower';
-            if (/push|chest|tricep|press/.test(s)) return 'push';
-            if (/pull|back|bicep|lat/.test(s)) return 'pull';
-            if (/upper|shoulder|arm/.test(s)) return 'upper';
-            if (/full.?body|total/.test(s)) return 'full';
-            if (/cardio|zone.?2|interval/.test(s)) return 'cardio';
+            for (const [keywords, family] of _NORM_FAM_MAP) {
+              if (keywords.some(kw => s.includes(kw))) return family;
+            }
             return s || 'unknown';
           };
           const recentDoneFams: string[] = [];
@@ -5697,36 +5537,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
             {workoutSubTab === 'plan' && (() => {
               const splitRaw = (userProfile.preferredSplit || '').toLowerCase();
-              const collapseUpper = /upper.?lower|full.?body/.test(splitRaw)
-                || (!splitRaw && (workoutPlan?.days ?? []).some(d => /upper|lower/i.test(d?.focus || '')));
+              const collapseUpper = ['upper_lower', 'upper lower', 'full_body', 'full body'].some(kw => splitRaw.includes(kw))
+                || (!splitRaw && (workoutPlan?.days ?? []).some(d => {
+                  const f = (d?.focus || '').toLowerCase();
+                  return f.includes('upper') || f.includes('lower');
+                }));
               // Focus-family normalizer. For U/L and full-body splits we
               // collapse push/pull/arms/shoulders into a single "upper"
               // bucket so the adjacency filter doesn't show every card
               // wrapped in an unusable option set. For PPL we keep
               // push/pull distinct since those are the split's whole point.
+              const LOWER_KEYWORDS = ['legs', 'leg', 'quad', 'glute', 'hamstring', 'lower', 'squat', 'hinge', 'calves'];
+              const PUSH_KEYWORDS = ['push', 'chest', 'tricep', 'press'];
+              const PULL_KEYWORDS = ['pull', 'back', 'bicep', 'lat'];
+              const UPPER_BROAD_KEYWORDS = ['upper', 'push', 'chest', 'tricep', 'press', 'pull', 'back', 'bicep', 'lat', 'shoulder', 'arm'];
+              const UPPER_NARROW_KEYWORDS = ['upper', 'shoulder', 'arm'];
+              const FULL_KEYWORDS = ['full body', 'full_body', 'total'];
+              const CARDIO_KEYWORDS = ['cardio', 'zone 2', 'zone2', 'interval', 'run', 'bike', 'swim', 'row'];
+              const EASY_KEYWORDS = ['recover', 'rest', 'mobil', 'stretch', 'yoga', 'flow'];
+              const has = (s: string, kws: string[]) => kws.some(kw => s.includes(kw));
               const normFamily = (f?: string): string => {
                 const s = (f ?? '').toLowerCase();
-                if (/legs?|quad|glute|hamstring|lower|squat|hinge|calves/.test(s)) return 'lower';
+                if (has(s, LOWER_KEYWORDS)) return 'lower';
                 if (collapseUpper) {
-                  if (/upper|push|chest|tricep|press|pull|back|bicep|lat|shoulder|arm/.test(s)) return 'upper';
+                  if (has(s, UPPER_BROAD_KEYWORDS)) return 'upper';
                 } else {
-                  if (/push|chest|tricep|press/.test(s)) return 'push';
-                  if (/pull|back|bicep|lat/.test(s)) return 'pull';
-                  if (/upper|shoulder|arm/.test(s)) return 'upper';
+                  if (has(s, PUSH_KEYWORDS)) return 'push';
+                  if (has(s, PULL_KEYWORDS)) return 'pull';
+                  if (has(s, UPPER_NARROW_KEYWORDS)) return 'upper';
                 }
-                if (/full.?body|total/.test(s)) return 'full';
-                if (/cardio|zone.?2|interval|run|bike|swim|row/.test(s)) return 'cardio';
-                if (/recover|rest|mobil|stretch|yoga|flow/.test(s)) return 'easy';
+                if (has(s, FULL_KEYWORDS)) return 'full';
+                if (has(s, CARDIO_KEYWORDS)) return 'cardio';
+                if (has(s, EASY_KEYWORDS)) return 'easy';
                 return s || 'unknown';
               };
 
               const inferSplitFromPlan = (): string => {
                 const focuses = (workoutPlan?.days ?? []).map(d => (d?.focus || '').toLowerCase()).filter(Boolean);
-                if (focuses.some(f => /chest|back|shoulders|arms/.test(f))) return 'bro';
-                if (focuses.some(f => /upper/.test(f)) && focuses.some(f => /lower/.test(f))
-                    && focuses.some(f => /push|pull/.test(f))) return 'ppl_upper_lower';
-                if (focuses.some(f => /upper/.test(f)) && focuses.some(f => /lower/.test(f))) return 'upper_lower';
-                if (focuses.some(f => /full.?body/.test(f))) return 'full_body';
+                const hasKeyword = (keywords: string[]) => focuses.some(f => keywords.some(kw => f.includes(kw)));
+                if (hasKeyword(SPLIT_FOCUS_KEYWORDS.bro)) return 'bro';
+                const hasUpper = hasKeyword(['upper']);
+                const hasLower = hasKeyword(['lower']);
+                if (hasUpper && hasLower && hasKeyword(SPLIT_FOCUS_KEYWORDS.ppl)) return 'ppl_upper_lower';
+                if (hasUpper && hasLower) return 'upper_lower';
+                if (hasKeyword(SPLIT_FOCUS_KEYWORDS.full_body)) return 'full_body';
                 return 'ppl';
               };
               const knownSplits = new Set(['ppl', 'upper_lower', 'full_body', 'ppl_upper_lower', 'bro']);
@@ -5841,16 +5695,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const conflictFamilies = new Set<string>();
               if (isFixedNeighbor(i - 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i - 1)));
               if (isFixedNeighbor(i + 1)) conflictFamilies.add(normFamily(scheduleFocusAt(i + 1)));
-              const isEasyFocus = (f?: string) => {
-                const x = (f || '').toLowerCase();
-                return /recover|rest|mobil|stretch|yoga|flow|cardio|zone.?2|easy/.test(x);
+              // Check if a schedule slot is an "easy" day (mobility/recovery/cardio)
+              // via the structured stimulus field first, falling back to focus keywords
+              // for past days (from history) where stimulus isn't available.
+              const scheduleStimAt = (j: number): string | undefined => {
+                if (j < 0 || j >= schedule.length) return undefined;
+                return schedule[j]?.workout?.stimulus;
+              };
+              const isEasyDay = (j: number, focusStr?: string): boolean => {
+                const stim = scheduleStimAt(j);
+                if (stim) return EASY_STIMULUS.has(stim);
+                // Fallback for past days (negative index) where only focus string is available
+                const x = (focusStr || '').toLowerCase();
+                return has(x, [...EASY_KEYWORDS, ...CARDIO_KEYWORDS, 'easy']);
               };
               const between = scheduleFocusAt(i - 1);
-              if (isFixedNeighbor(i - 2) && (between == null || isEasyFocus(between))) {
+              if (isFixedNeighbor(i - 2) && (between == null || isEasyDay(i - 1, between))) {
                 conflictFamilies.add(normFamily(scheduleFocusAt(i - 2)));
               }
               const betweenAfter = scheduleFocusAt(i + 1);
-              if (isFixedNeighbor(i + 2) && (betweenAfter == null || isEasyFocus(betweenAfter))) {
+              if (isFixedNeighbor(i + 2) && (betweenAfter == null || isEasyDay(i + 1, betweenAfter))) {
                 conflictFamilies.add(normFamily(scheduleFocusAt(i + 2)));
               }
               conflictFamilies.delete('unknown'); conflictFamilies.delete('');
@@ -5873,17 +5737,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // cardio fatigue so a user who's already stacked a lot of
                 // cardio recently sees a lower readiness on "Push + Cardio"
                 // than on plain "Push".
-                const isPlusCardio = /\+\s*cardio/.test(lower);
-                let fatigue = 0;
-                if (/push|chest|pressing/.test(lower)) fatigue = avg(['chest', 'shoulders', 'triceps']);
-                else if (/pull|back|bicep|lat/.test(lower)) fatigue = avg(['back', 'biceps']);
-                else if (/legs|quad|hamstring|glute|lower/.test(lower)) fatigue = avg(['quads', 'hamstrings', 'glutes', 'calves']);
-                else if (/upper/.test(lower)) fatigue = avg(['chest', 'back', 'shoulders', 'biceps', 'triceps']);
-                else if (/full/.test(lower)) fatigue = avg(['chest', 'back', 'shoulders', 'quads', 'glutes', 'hamstrings']);
-                else if (/shoulders?/.test(lower)) fatigue = avg(['shoulders']);
-                else if (/arms?/.test(lower)) fatigue = avg(['biceps', 'triceps']);
-                else if (/cardio|zone|interval/.test(lower)) fatigue = mf['cardio'] ?? 0;
-                else return null; // no fatigue concept (mobility/recovery)
+                const isPlusCardio = lower.includes('+ cardio') || lower.includes('+cardio');
+                const muscleKey = resolveFocusMuscleKey(focus);
+                const muscles = muscleKey ? FOCUS_MUSCLE_MAP[muscleKey] : null;
+                if (!muscles) return null; // no fatigue concept (mobility/recovery)
+                let fatigue = avg(muscles);
                 if (isPlusCardio) {
                   // 70% lift + 30% cardio — the lift is the primary stress,
                   // the cardio finisher is lighter but still meaningful.
@@ -5935,7 +5793,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // Mobility/Recovery sit slightly below pure lifts when
                 // readiness is similar so users don't accidentally pick
                 // them as a first-instinct.
-                const easyTie = /recover|mobil/i.test(opt) ? 5 : 0;
+                const optLower = opt.toLowerCase();
+                const easyTie = (optLower.includes('recover') || optLower.includes('mobil')) ? 5 : 0;
                 return conflictPenalty + readinessPenalty + recentPenalty + easyTie;
               };
               const sortedOptions = [...allOptions].sort((a, b) => optionRank(a) - optionRank(b));
@@ -9679,14 +9538,19 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   // Infer stimulus from focus name for old cached plans
                   // that don't have the stimulus field yet.
                   const f = (item.workout?.focus ?? '').toLowerCase();
-                  if (f.includes('heavy') || f.includes('strength')) return 'strength';
-                  if (f.includes('volume')) return 'volume';
-                  if (f.includes('power')) return 'power';
-                  if (f.includes('cardio') || f.includes('zone') || f.includes('interval')) return 'conditioning';
-                  if (f.includes('mobility') || f.includes('stretch') || f.includes('yoga')) return 'mobility';
-                  if (f.includes('recovery') || f.includes('easy')) return 'recovery';
-                  // Default lifting days to hypertrophy
-                  if (f.includes('push') || f.includes('pull') || f.includes('upper') || f.includes('lower') || f.includes('legs') || f.includes('full body') || f.includes('chest') || f.includes('back') || f.includes('arms') || f.includes('shoulders')) return 'hypertrophy';
+                  const STIM_KEYWORDS: [string[], string][] = [
+                    [['heavy', 'strength'], 'strength'],
+                    [['volume'], 'volume'],
+                    [['power'], 'power'],
+                    [['cardio', 'zone', 'interval'], 'conditioning'],
+                    [['mobility', 'stretch', 'yoga'], 'mobility'],
+                    [['recovery', 'easy'], 'recovery'],
+                  ];
+                  for (const [keywords, stim] of STIM_KEYWORDS) {
+                    if (keywords.some(kw => f.includes(kw))) return stim;
+                  }
+                  // Default lifting days to hypertrophy if focus matches a lift family
+                  if (resolveFocusMuscleKey(f)) return 'hypertrophy';
                   return null;
                 })();
                 if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
@@ -9781,26 +9645,27 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           </View>
           {(() => {
             const focusLower = (item.workout!.focus || '').toLowerCase();
+            const stim = item.workout?.stimulus;
             const countText = `${item.workout!.exercises.length} exercises`;
             // Mobility / recovery / stretch / flow days get a single
             // collapsed label instead of a list of stretched muscles.
-            // The stretches target hip/hamstring/chest muscles but the
-            // user-facing summary is just "Mobility" or "Recovery".
-            if (/mobility|stretch|yoga|flow/.test(focusLower)) {
+            // Use the structured stimulus field when available, fall back
+            // to focus keywords for old cached plans.
+            if (stim === 'mobility' || (!stim && ['mobility', 'stretch', 'yoga', 'flow'].some(kw => focusLower.includes(kw)))) {
               return (
                 <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Mobility
                 </Text>
               );
             }
-            if (/recover|rest/.test(focusLower)) {
+            if (stim === 'recovery' || (!stim && ['recover', 'rest'].some(kw => focusLower.includes(kw)))) {
               return (
                 <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Recovery
                 </Text>
               );
             }
-            if (/cardio|zone.?2|interval/.test(focusLower)) {
+            if (stim === 'conditioning' || (!stim && ['cardio', 'zone2', 'zone 2', 'interval'].some(kw => focusLower.includes(kw)))) {
               return (
                 <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Cardio
@@ -9820,20 +9685,24 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
               glutes: 'Glutes', core: 'Core', cardio: 'Cardio',
               full_body: 'Full Body',
             };
-            const pushFamily  = new Set(['chest', 'shoulders', 'triceps']);
-            const pullFamily  = new Set(['back', 'biceps']);
-            const legsFamily  = new Set(['quads', 'hamstrings', 'glutes', 'calves']);
-            const upperFamily = new Set([...pushFamily, ...pullFamily]);
+            // Map for bro-split focuses that have slightly different muscle
+            // allowlists than FOCUS_MUSCLE_MAP (chest allows triceps but not shoulders for chip display)
+            const CHIP_ALLOWED_MUSCLES: Record<string, string[]> = {
+              push: ['chest', 'shoulders', 'triceps'],
+              chest: ['chest', 'triceps'],
+              pull: ['back', 'biceps'],
+              back: ['back', 'biceps'],
+              legs: ['quads', 'hamstrings', 'glutes', 'calves'],
+              lower: ['quads', 'hamstrings', 'glutes', 'calves'],
+              upper: ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
+              shoulders: ['shoulders'],
+              arms: ['biceps', 'triceps'],
+            };
+            const focusKey = resolveFocusMuscleKey(focusLower);
             const allowedForFocus: Set<string> | null =
-              /push/.test(focusLower) ? pushFamily :
-              /pull/.test(focusLower) ? pullFamily :
-              /legs|lower/.test(focusLower) ? legsFamily :
-              /upper/.test(focusLower) ? upperFamily :
-              /chest/.test(focusLower) ? new Set(['chest', 'triceps']) :
-              /back/.test(focusLower) ? new Set(['back', 'biceps']) :
-              /shoulder/.test(focusLower) ? new Set(['shoulders']) :
-              /arms?/.test(focusLower) ? new Set(['biceps', 'triceps']) :
-              null; // full body, unknown — allow everything
+              focusKey && CHIP_ALLOWED_MUSCLES[focusKey]
+                ? new Set(CHIP_ALLOWED_MUSCLES[focusKey])
+                : null; // full body, cardio, unknown — allow everything
             const labels: string[] = [];
             for (const ex of item.workout!.exercises) {
               const key = (ex.primary_muscle ?? '').toLowerCase().replace(/\s+/g, '_');

@@ -54,26 +54,27 @@ def _families(archetypes):
 
 
 # ===================================================================
-# PPL SPLIT — Push → Pull → Legs → Push
+# PPL SPLIT — history-based rotation (least recently done family)
 # ===================================================================
 
 def test_ppl_regen_after_legs_wed_pull_thu_push_sat_legs_sun():
     """Real scenario: Legs Wed, Pull Thu, Rest Fri, Push Sat, Legs Sun.
-    Regen on Monday. Expected day0 = Push."""
-    print("[test] PPL regen: Legs-Pull-Push-Legs history → day0=Push")
+    Regen on Monday. History-based rotation: recent_ppl=
+    [legs,push,pull,legs], last_two={legs,push} → next=pull."""
+    print("[test] PPL regen: Legs-Pull-Push-Legs history → day0=Pull (history-based)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH, A.LIFT_PULL, A.LIFT_LEGS]
     families = ("legs", "push", "pull", "legs")  # newest first
     result = _anchor(recipe, families, "ppl")
-    assert_eq(_family(result[0]), "push", "day0")
-    assert_eq(_family(result[1]), "pull", "day1")
+    assert_eq(_family(result[0]), "pull", "day0")
+    assert_eq(_family(result[1]), "push", "day1")
     assert_eq(_family(result[2]), "legs", "day2")
 
 
 def test_ppl_regen_after_push_only():
-    """Just did Push. Next should be Pull."""
-    print("[test] PPL regen: Push history → day0=Pull")
+    """Just did Push. Single-entry canonical fallback: push→pull."""
+    print("[test] PPL regen: Push history → day0=Pull (canonical)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH, A.LIFT_PULL, A.LIFT_LEGS]
@@ -164,8 +165,9 @@ def test_ppl_5day_switch_middle():
 
 def test_ppl_heavy_variant_history():
     """History has heavy variants. Anchor should still recognize the
-    lift family from the variant name."""
-    print("[test] PPL regen: heavy variant history → still anchors correctly")
+    lift family from the variant name. Single entry ('legs') →
+    canonical fallback: legs→push."""
+    print("[test] PPL regen: heavy variant history → still anchors correctly (canonical)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH_HEAVY, A.LIFT_PULL_HEAVY, A.LIFT_LEGS_HEAVY]
@@ -374,8 +376,9 @@ def test_full_body_switch_to_recovery():
 # ===================================================================
 
 def test_ppl_ul_regen_after_legs():
-    """PPL+UL hybrid still uses PPL rotation: after Legs → Push."""
-    print("[test] PPL+UL regen: after Legs → day0=Push")
+    """PPL+UL hybrid: single entry ('legs') → canonical fallback:
+    legs→push."""
+    print("[test] PPL+UL regen: after Legs → day0=Push (canonical)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH, A.LIFT_PULL, A.LIFT_LEGS, A.LIFT_UPPER, A.LIFT_LOWER]
@@ -384,8 +387,9 @@ def test_ppl_ul_regen_after_legs():
 
 
 def test_ppl_ul_regen_after_push():
-    """PPL+UL hybrid: after Push → Pull."""
-    print("[test] PPL+UL regen: after Push → day0=Pull")
+    """PPL+UL hybrid: single entry ('push') → canonical fallback:
+    push→pull."""
+    print("[test] PPL+UL regen: after Push → day0=Pull (canonical)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH, A.LIFT_PULL, A.LIFT_LEGS, A.LIFT_UPPER, A.LIFT_LOWER]
@@ -412,19 +416,18 @@ def test_ppl_skipped_day_in_history():
 
 def test_ppl_recovery_day_in_history():
     """History includes recovery/mobility. These are skipped by anchor
-    since they're not lift families."""
-    print("[test] PPL: recovery in history skipped by anchor")
+    since they're not lift families. History-based rotation:
+    recent_ppl=[push,pull], last_two={push,pull} → next=legs."""
+    print("[test] PPL: recovery in history skipped by anchor (history-based)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH, A.LIFT_PULL, A.LIFT_LEGS]
     # Recovery, then Push, then Pull (newest first)
     families = ("recovery", "push", "pull")
     result = _anchor(recipe, families, "ppl")
-    # recovery is skipped, first lift family is push → next = pull
-    # BUT anchor finds first family in lift_families, which is "push"
-    # Wait — recovery isn't in lift_families, so it's skipped
-    # First lift family = push → next = pull
-    assert_eq(_family(result[0]), "pull", "day0=pull (recovery skipped)")
+    # recovery is skipped, recent_ppl=[push,pull], last_two={push,pull}
+    # remaining={legs} → next=legs
+    assert_eq(_family(result[0]), "legs", "day0=legs (recovery skipped, history-based)")
 
 
 def test_ul_mobility_in_history():
@@ -714,13 +717,14 @@ def test_bro_chest_mon_back_tue_switch_tue_to_legs():
 # ===================================================================
 
 def test_ppl_plus_cardio_anchor():
-    """Plus-cardio variants should anchor the same as base variants."""
-    print("[test] PPL: plus-cardio variants anchor correctly")
+    """Plus-cardio variants should anchor the same as base variants.
+    Single entry ('legs') → canonical fallback: legs→push."""
+    print("[test] PPL: plus-cardio variants anchor correctly (canonical)")
     from app.services.workout.archetypes import DayArchetype as A
 
     recipe = [A.LIFT_PUSH_PLUS_CARDIO, A.LIFT_PULL_PLUS_CARDIO, A.LIFT_LEGS]
     result = _anchor(recipe, ("legs",), "ppl")
-    assert_eq(_family(result[0]), "push", "push+cardio follows legs in PPL")
+    assert_eq(_family(result[0]), "push", "push+cardio follows legs in PPL (canonical)")
 
 
 def test_ul_plus_cardio_anchor():

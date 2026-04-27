@@ -109,19 +109,23 @@ export function shouldHideWeight(ex: any): boolean {
   // Loaded carry is an exception — it's timed but IS weighted
   if (/farmer|suitcase carry|loaded carry/.test(name)) return false;
 
+  // ── Structured-field fast path (avoids regex when planner data is present) ──
+  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
+  if (primaryMuscle === 'cardio') return true;
+  if (primaryMuscle === 'mobility') return true;
+
+  const trainingType = String(ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
+  if (trainingType && BODYWEIGHT_TRAINING_TYPES.has(trainingType)) return true;
+  if (trainingType === 'cardio' || trainingType === 'conditioning') return true;
+
+  // ── Regex fallback (for old cached data without structured fields) ──
   if (_equipmentIsBodyweight(ex.equipment)) return true;
   if (BODYWEIGHT_NAME_RE.test(name)) return true;
   if (CARDIO_NAME_RE.test(name)) return true;
   if (HOLD_NAME_RE.test(name) && !/farmer|suitcase|loaded/.test(name)) return true;
 
-  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
-  if (primaryMuscle === 'mobility') return true;
-
   const archetype = String(ex._archetype ?? ex.archetype ?? '').toLowerCase();
   if (archetype && TIME_BASED_ARCHETYPES.has(archetype)) return true;
-
-  const trainingType = String(ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
-  if (trainingType && BODYWEIGHT_TRAINING_TYPES.has(trainingType)) return true;
 
   // If the reps string looks like a pure duration/flow AND it's not a
   // carry, weight is almost never meaningful.
@@ -139,18 +143,22 @@ export function shouldHideReps(ex: any): boolean {
   if (!ex) return false;
   const name = String(ex.name ?? '').toLowerCase();
 
-  if (isTimeBasedReps(ex.reps ?? ex.targetReps)) return true;
-
-  const archetype = String(ex._archetype ?? ex.archetype ?? '').toLowerCase();
-  if (archetype && TIME_BASED_ARCHETYPES.has(archetype)) return true;
+  // ── Structured-field fast path ──
+  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
+  if (primaryMuscle === 'cardio') return true;
+  if (primaryMuscle === 'mobility') return true;
 
   const trainingType = String(ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
   if (trainingType && TIME_TRAINING_TYPES.has(trainingType)) return true;
 
-  if (CARDIO_NAME_RE.test(name)) return true;
+  const archetype = String(ex._archetype ?? ex.archetype ?? '').toLowerCase();
+  if (archetype && TIME_BASED_ARCHETYPES.has(archetype)) return true;
 
-  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
-  if (primaryMuscle === 'mobility') return true;
+  // Reps string that is actually a time target
+  if (isTimeBasedReps(ex.reps ?? ex.targetReps)) return true;
+
+  // ── Regex fallback (old cached data without structured fields) ──
+  if (CARDIO_NAME_RE.test(name)) return true;
 
   return false;
 }

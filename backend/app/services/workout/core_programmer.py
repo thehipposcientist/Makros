@@ -30,7 +30,7 @@ from typing import Optional
 import random
 
 from .slots import Slot
-from .archetypes import DayArchetype
+from .archetypes import DayArchetype, ARCHETYPE_META, ARCHETYPE_TO_FOCUS_FAMILY
 
 # ─── Categories ──────────────────────────────────────────────────────
 # These map 1:1 to movement_patterns already seeded in
@@ -218,24 +218,34 @@ _NEVER_CORE_ARCHETYPES: set[DayArchetype] = {
 }
 
 
+# Map focus_family → day-type key for _DAY_CATEGORY_PREFERENCE.
+# Explicit mapping avoids fragile substring scanning of archetype names.
+_FOCUS_FAMILY_TO_DAY_TYPE: dict[str, Optional[str]] = {
+    "push": "push",
+    "pull": "pull",
+    "upper": "upper",
+    "lower": "legs_light_only",
+    "legs": "legs_light_only",
+    "full_body": "full_body",
+    "cardio": None,
+    "mobility": None,
+    "recovery": None,
+}
+
+
 def _day_type_for_archetype(archetype: DayArchetype) -> Optional[str]:
     """Map archetype → day-type key used by _DAY_CATEGORY_PREFERENCE.
     Returns None for archetypes where direct core shouldn't appear at
     all (cardio, mobility, heavy lower — caller should skip)."""
-    a = archetype
-    if a in _NEVER_CORE_ARCHETYPES:
+    if archetype in _NEVER_CORE_ARCHETYPES:
         return None
-    name = a.value
-    if "push" in name:  return "push"
-    if "pull" in name:  return "pull"
-    if "upper" in name: return "upper"
-    if "full_body" in name: return "full_body"
-    if "legs" in name or "lower" in name: return "legs_light_only"
-    if "bro" in name:
-        # Bro split days all have a single-muscle focus — treat like
-        # upper for category-preference purposes (arms/chest/shoulders
-        # all work well with anti-rotation + anti-extension).
-        return "upper"
+    meta = ARCHETYPE_META.get(archetype)
+    if meta and meta.category in ("cond", "mobility", "recovery"):
+        return None
+    family = ARCHETYPE_TO_FOCUS_FAMILY.get(archetype)
+    if family:
+        return _FOCUS_FAMILY_TO_DAY_TYPE.get(family)
+    # Fallback: shouldn't happen if ARCHETYPE_TO_FOCUS_FAMILY is complete
     return None
 
 

@@ -174,15 +174,36 @@ def validate_region_exposure(
 
     Returns an audit dict with lower/upper day counts and a pass/fail
     flag. The planner attaches this to the plan output."""
+    from .archetypes import DayArchetype, ARCHETYPE_TO_FOCUS_BUCKET
+
+    # Map focus buckets to body region categories
+    _LOWER_BUCKETS = {"lower_body"}
+    _UPPER_BUCKETS = {"upper_body"}
+    # full_body, cardio, mobility, recovery are neither strictly upper nor lower
+
     lower_days = 0
     upper_days = 0
     for day in days:
-        arch = (day.get("archetype") or "").lower()
-        focus = (day.get("focus") or "").lower()
-        if any(k in arch or k in focus for k in ("lower", "legs", "leg", "glute", "hamstring", "quad")):
-            lower_days += 1
-        elif any(k in arch or k in focus for k in ("upper", "push", "pull", "chest", "back", "shoulder", "arm")):
-            upper_days += 1
+        arch_str = day.get("archetype") or ""
+        bucket = None
+        # Prefer structured lookup via archetype enum
+        try:
+            archetype_enum = DayArchetype(arch_str)
+            bucket = ARCHETYPE_TO_FOCUS_BUCKET.get(archetype_enum)
+        except ValueError:
+            pass
+        if bucket:
+            if bucket in _LOWER_BUCKETS:
+                lower_days += 1
+            elif bucket in _UPPER_BUCKETS:
+                upper_days += 1
+        else:
+            # Fallback for unrecognized archetypes: check focus label
+            focus = (day.get("focus") or "").lower()
+            if any(k in focus for k in ("lower", "legs", "leg", "glute", "hamstring", "quad")):
+                lower_days += 1
+            elif any(k in focus for k in ("upper", "push", "pull", "chest", "back", "shoulder", "arm")):
+                upper_days += 1
 
     ok = True
     message = ""

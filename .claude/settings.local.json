@@ -199,7 +199,8 @@
       "Bash(./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
       "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\")",
       "Bash(./node_modules/.bin/tsc --noEmit)",
-      "Bash(/usr/libexec/PlistBuddy *)"
+      "Bash(/usr/libexec/PlistBuddy *)",
+      "Bash(pip show *)"
     ]
   }
 }

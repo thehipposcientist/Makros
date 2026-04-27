@@ -122,10 +122,18 @@ def derive_all_readiness(fatigue: MuscleFatigue) -> dict[str, float]:
 
 
 def recompute_readiness(mf: MuscleFatigue) -> tuple[int, dict[str, float]]:
-    """Recompute readiness score and focus readiness from current fatigue state."""
+    """Recompute readiness score and focus readiness from current fatigue state.
+
+    Same blend formula as compute_rolling_fatigue minus the density penalty
+    (which requires full training history context).
+    """
     focus_readiness = derive_all_readiness(mf)
-    muscle_avg = sum(getattr(mf, m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
-    overall = max(0.0, 1.0 - (muscle_avg * 0.6 + mf.systemic * 0.4))
+    _names = [m for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")]
+    _vals = [getattr(mf, m) for m in _names]
+    muscle_avg = sum(_vals) / len(_vals)
+    muscle_peak = max(_vals) if _vals else 0.0
+    muscle_blend = muscle_avg * 0.7 + muscle_peak * 0.3
+    overall = max(0.0, 1.0 - (muscle_blend * 0.55 + mf.systemic * 0.35))
     score = int(round(overall * 100))
     return score, focus_readiness
 
@@ -208,6 +216,37 @@ def _set_stimulus_multipliers(avg_reps: float, avg_rir: float | None) -> tuple[f
             sys_m *= 0.90
             mus_m *= 0.95
     return sys_m, mus_m
+
+
+def _hr_intensity_factor(avg_hr: float, user_age: int | None) -> float:
+    """Convert average heart rate into an intensity multiplier (0.9–1.3).
+
+    Uses HR as % of estimated max (220 − age). When HR data is available,
+    it modulates fatigue so a high-effort set (near-max HR) costs more
+    than a casual set at the same reps/weight.
+
+    Zones (% max HR):
+      <55%  → 0.90 (very easy — barely taxing)
+      55-70 → 1.00 (baseline — moderate cardio / light lifting)
+      70-80 → 1.10 (tempo work / moderately hard lifting)
+      80-90 → 1.20 (threshold / hard lifting)
+      >90%  → 1.30 (near max — sprints, failure sets, heavy singles)
+
+    Returns 1.0 when HR data is unavailable (no change to existing calc).
+    """
+    if not avg_hr or avg_hr <= 0:
+        return 1.0
+    max_hr = 220 - (user_age or 30)
+    pct = avg_hr / max_hr
+    if pct < 0.55:
+        return 0.90
+    if pct < 0.70:
+        return 1.00
+    if pct < 0.80:
+        return 1.10
+    if pct < 0.90:
+        return 1.20
+    return 1.30
 
 
 def resolve_exercise_fatigue(
@@ -293,15 +332,27 @@ def resolve_exercise_fatigue(
             avg_weight = sum(weights) / max(1, len(weights)) if weights else 0.0
         load_factor = 1.0 + 0.12 * math.log2(max(1.0, avg_weight / 50.0)) if avg_weight > 0 else 1.0
 
+        # HR intensity factor: when per-set heart rate is available,
+        # high HR during an exercise signals genuine cardiovascular stress
+        # that reps/weight alone can't capture (e.g. supersets, short rest).
+        hr_factor = 1.0
+        if has_structured:
+            hr_vals = [float(s.get("heart_rate_avg") or 0) for s in structured_sets if isinstance(s, dict) and s.get("heart_rate_avg")]
+            if hr_vals:
+                hr_factor = _hr_intensity_factor(sum(hr_vals) / len(hr_vals), user_age)
+
+        effort = load_factor * hr_factor
+
         if primary:
-            fatigue[primary] = fatigue.get(primary, 0.0) + per_rep * total_reps * mus_mult * load_factor
+            fatigue[primary] = fatigue.get(primary, 0.0) + per_rep * total_reps * mus_mult * effort
         for sec in secondaries:
-            fatigue[sec] = fatigue.get(sec, 0.0) + per_rep * total_reps * 0.3 * mus_mult * load_factor
+            fatigue[sec] = fatigue.get(sec, 0.0) + per_rep * total_reps * 0.3 * mus_mult * effort
 
         # Systemic: compound lifts cost more CNS than isolation, but also
-        # scale by the heavy/volume stimulus multiplier.
+        # scale by the heavy/volume stimulus multiplier. HR factor has
+        # outsized impact on systemic cost — high HR = high cardio demand.
         sys_base = 0.4 if is_compound else 0.15
-        fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult * load_factor
+        fatigue["systemic"] = fatigue.get("systemic", 0.0) + per_rep * total_reps * sys_base * sys_mult * effort
 
     # Apply age multiplier to ALL accumulated fatigue (muscular + systemic).
     # Older athletes recover slower, so a 10-set session fatigues them more
@@ -529,9 +580,26 @@ def compute_rolling_fatigue(
             reduction = min(0.15, current * 0.15) * decay
             mf.add(muscle, -reduction)
 
-    # Overall readiness from systemic + average muscle fatigue
-    muscle_avg = sum(getattr(mf, m) for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")) / 10.0
-    overall = max(0.0, 1.0 - (muscle_avg * 0.6 + mf.systemic * 0.4))
+    # Overall readiness: blend average + peak muscle fatigue + systemic.
+    # Pure average dilutes concentrated fatigue (7 hard days across varied
+    # focuses reads as "Moderate" because each muscle individually is okay).
+    # Blending in peak catches the case where a few muscles are hammered.
+    _muscle_names = [m for m in FATIGUE_MUSCLES if m not in ("cardio", "systemic")]
+    _muscle_vals = [getattr(mf, m) for m in _muscle_names]
+    muscle_avg = sum(_muscle_vals) / len(_muscle_vals)
+    muscle_peak = max(_muscle_vals) if _muscle_vals else 0.0
+    # Blend: 70% average + 30% peak — peak prevents dilution when
+    # many muscle groups are moderately fatigued but avg stays low
+    muscle_blend = muscle_avg * 0.7 + muscle_peak * 0.3
+
+    # Training density penalty: many consecutive training days without rest
+    # accumulate systemic stress the per-muscle model doesn't capture.
+    training_days = sum(1 for a in activities if a["kind"] == "training")
+    density_penalty = 0.0
+    if training_days >= 5:
+        density_penalty = 0.06 * (training_days - 4)
+
+    overall = max(0.0, 1.0 - (muscle_blend * 0.55 + mf.systemic * 0.35 + density_penalty))
     readiness_score = int(round(overall * 100))
 
     if readiness_score >= 85:   label = "Fresh"

@@ -211,8 +211,24 @@ export function computeTrainingScore(input: TrainingScoreInput): TrainingScore {
   };
 }
 
-/** Convenience: derive focusKind from a workout focus string. */
-export function focusKindFromName(focus: string | null | undefined): TrainingScoreFocusKind {
+/** Convenience: derive focusKind from a workout focus string.
+ *  When `stimulus` (the backend's training_type field, available on
+ *  WorkoutDay.stimulus) is provided, it takes precedence over regex
+ *  matching for accurate classification. Falls back to regex for old
+ *  cached data that lacks the stimulus field. */
+export function focusKindFromName(focus: string | null | undefined, stimulus?: string | null): TrainingScoreFocusKind {
+  // ── Structured-field fast path (stimulus from planner archetype) ──
+  if (stimulus) {
+    const s = stimulus.toLowerCase();
+    if (s === 'recovery') return 'recovery';
+    if (s === 'mobility' || s === 'stretch') return 'mobility';
+    if (s === 'conditioning' || s === 'cardio') return 'cardio';
+    if (s === 'mixed') return 'mixed';
+    // strength / hypertrophy / volume / power all map to 'lift'
+    if (s === 'strength' || s === 'hypertrophy' || s === 'volume' || s === 'power') return 'lift';
+  }
+
+  // ── Regex fallback (old cached data without stimulus field) ──
   const f = (focus || '').toLowerCase();
   if (/recover|rest/.test(f)) return 'recovery';
   if (/mobil|stretch|yoga|flow/.test(f)) return 'mobility';

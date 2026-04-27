@@ -15,6 +15,7 @@
 
 import Foundation
 import HealthKit
+import WatchKit
 
 final class HeartRateStore: NSObject, ObservableObject {
     @Published var heartRate: Int? = nil
@@ -27,12 +28,12 @@ final class HeartRateStore: NSObject, ObservableObject {
     private var builder: HKLiveWorkoutBuilder?
     private var userAge: Int = 30
 
-    // When end()/discard() is called explicitly, we set this so the
-    // delegate callback knows not to auto-restart the session.
+    // Explicit extended runtime session — belt-and-suspenders with the
+    // HK workout session. If the HK session's automatic extended runtime
+    // doesn't kick in (provisioning/signing issue), this keeps the app alive.
+    private var extSession: WKExtendedRuntimeSession?
+
     private var intentionalEnd: Bool = false
-    // watchOS sometimes kills the HK session within the first second
-    // (before extended runtime fully establishes). We auto-restart up
-    // to 3 times to keep the runtime claim alive.
     private var autoRestartCount: Int = 0
     private static let maxAutoRestarts = 3
 
@@ -74,29 +75,38 @@ final class HeartRateStore: NSObject, ObservableObject {
         }
     }
 
-    func start() {
+    /// Start the workout session. The optional `onReady` fires on
+    /// main thread once `beginCollection` confirms data is flowing —
+    /// callers should wait for this before transitioning the UI.
+    func start(onReady: (() -> Void)? = nil) {
         Self.saveDiag("start called")
         guard HKHealthStore.isHealthDataAvailable() else {
             Self.saveDiag("ERR:HK unavailable")
             errorMessage = "HealthKit unavailable on this device."
             return
         }
-        if session != nil && running {
-            Self.saveDiag("start: already running")
+        if session != nil {
+            Self.saveDiag("start: session exists (running=\(running))")
+            if running { onReady?() }
             return
+        }
+        // Start an explicit extended runtime session BEFORE the HK session.
+        // HKWorkoutSession is supposed to grant this automatically, but if
+        // the provisioning profile strips the entitlement, the explicit
+        // session keeps the app alive.
+        if extSession == nil {
+            let ext = WKExtendedRuntimeSession()
+            ext.delegate = self
+            ext.start()
+            self.extSession = ext
+            Self.saveDiag("ext session started")
         }
         intentionalEnd = false
         autoRestartCount = 0
-        if session != nil {
-            session?.end()
-            builder?.discardWorkout()
-            session = nil
-            builder = nil
-        }
         let status = store.authorizationStatus(for: HKObjectType.workoutType())
         Self.saveDiag("auth=\(status.rawValue)")
         if status != .notDetermined {
-            beginSession()
+            beginSession(onReady: onReady)
         } else {
             Self.saveDiag("requesting auth…")
             let read: Set<HKObjectType> = [
@@ -106,12 +116,12 @@ final class HeartRateStore: NSObject, ObservableObject {
             let write: Set<HKSampleType> = [ HKObjectType.workoutType() ]
             store.requestAuthorization(toShare: write, read: read) { [weak self] ok, err in
                 Self.saveDiag("auth cb ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
-                DispatchQueue.main.async { self?.beginSession() }
+                DispatchQueue.main.async { self?.beginSession(onReady: onReady) }
             }
         }
     }
 
-    private func beginSession() {
+    private func beginSession(onReady: (() -> Void)? = nil) {
         Self.saveDiag("beginSession")
         let config = HKWorkoutConfiguration()
         config.activityType = .traditionalStrengthTraining
@@ -130,7 +140,17 @@ final class HeartRateStore: NSObject, ObservableObject {
             Self.saveDiag("startActivity OK")
             bld.beginCollection(withStart: start) { [weak self] ok, err in
                 Self.saveDiag("collecting ok=\(ok) err=\(err?.localizedDescription ?? "nil")")
-                DispatchQueue.main.async { self?.running = true }
+                DispatchQueue.main.async {
+                    if ok {
+                        self?.running = true
+                        onReady?()
+                    } else {
+                        self?.errorMessage = err?.localizedDescription ?? "Failed to start collection"
+                        self?.session?.end()
+                        self?.session = nil
+                        self?.builder = nil
+                    }
+                }
             }
         } catch {
             Self.saveDiag("ERR:\(error.localizedDescription)")
@@ -141,6 +161,8 @@ final class HeartRateStore: NSObject, ObservableObject {
     func end() {
         intentionalEnd = true
         Self.saveDiag("end() called")
+        extSession?.invalidate()
+        extSession = nil
         guard let sess = session, let bld = builder else {
             running = false
             return
@@ -164,6 +186,8 @@ final class HeartRateStore: NSObject, ObservableObject {
     func discard() {
         intentionalEnd = true
         Self.saveDiag("discard() called")
+        extSession?.invalidate()
+        extSession = nil
         session?.end()
         builder?.discardWorkout()
         heartRate = nil
@@ -180,6 +204,18 @@ final class HeartRateStore: NSObject, ObservableObject {
         if pct < 0.80 { return 3 }
         if pct < 0.90 { return 4 }
         return 5
+    }
+}
+
+extension HeartRateStore: WKExtendedRuntimeSessionDelegate {
+    func extendedRuntimeSessionDidStart(_ session: WKExtendedRuntimeSession) {
+        Self.saveDiag("EXT:started")
+    }
+    func extendedRuntimeSession(_ session: WKExtendedRuntimeSession, didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason, error: Error?) {
+        Self.saveDiag("EXT:invalid \(reason.rawValue) \(error?.localizedDescription ?? "")")
+    }
+    func extendedRuntimeSessionWillExpire(_ session: WKExtendedRuntimeSession) {
+        Self.saveDiag("EXT:expiring")
     }
 }
 

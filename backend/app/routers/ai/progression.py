@@ -925,6 +925,56 @@ def fitness_composite_score(
     return score.to_dict()
 
 
+# ── MET classification for calorie estimation ────────────────────────
+# Explicit mapping from known focus labels (archetype default_name values)
+# to MET categories. Avoids fragile substring matching.
+_CARDIO_FOCUS_LABELS: frozenset[str] = frozenset({
+    "zone 2 cardio", "short intervals", "long intervals",
+    "tempo / threshold", "metabolic circuit", "mixed conditioning",
+    "sprint + power",
+})
+_STRENGTH_FOCUS_LABELS: frozenset[str] = frozenset({
+    "full body — strength",
+})
+# training_type keywords for archetype-derived labels
+_CARDIO_TRAINING_TYPES: frozenset[str] = frozenset({
+    "conditioning", "cardio",
+})
+_STRENGTH_TRAINING_TYPES: frozenset[str] = frozenset({
+    "strength", "power",
+})
+
+
+def _met_for_focus(focus: str) -> float:
+    """Classify workout focus → MET value for calorie estimation.
+    Uses explicit label lookup first, falls back to keyword scan."""
+    from app.services.workout.archetypes import DayArchetype, ARCHETYPE_META
+
+    focus_l = focus.lower().strip()
+
+    # 1. Try exact match against known archetype default_name values
+    if focus_l in _CARDIO_FOCUS_LABELS:
+        return 8.0
+    if focus_l in _STRENGTH_FOCUS_LABELS:
+        return 6.5
+
+    # 2. Try to resolve via archetype enum → training_type
+    for arch, meta in ARCHETYPE_META.items():
+        if meta.default_name.lower() == focus_l:
+            if meta.training_type in _CARDIO_TRAINING_TYPES:
+                return 8.0
+            if meta.training_type in _STRENGTH_TRAINING_TYPES:
+                return 6.5
+            return 5.5
+
+    # 3. Fallback for free-text focus labels not matching any archetype
+    if any(kw in focus_l for kw in ("cardio", "run", "cycle", "hiit", "conditioning")):
+        return 8.0
+    if any(kw in focus_l for kw in ("strength", "power", "heavy")):
+        return 6.5
+    return 5.5
+
+
 @router.post("/workout-summary")
 def generate_workout_summary(
     body: WorkoutSummaryRequest,
@@ -935,13 +985,7 @@ def generate_workout_summary(
     weight_kg      = body.weightLbs / 2.205
     duration_hours = body.durationSeconds / 3600
 
-    focus_lower = body.focus.lower()
-    if any(kw in focus_lower for kw in ["cardio", "run", "cycle", "hiit", "conditioning"]):
-        met = 8.0
-    elif any(kw in focus_lower for kw in ["strength", "power", "heavy"]):
-        met = 6.5
-    else:
-        met = 5.5
+    met = _met_for_focus(body.focus)
 
     calories_burned = max(1, round(met * weight_kg * duration_hours))
 
@@ -1133,12 +1177,64 @@ _WARMUP_SCHEMA = {
 }
 
 
+# ── Warmup body-region classification ─────────────────────────────────
+# Maps known focus labels to warmup body regions via archetype metadata.
+# Avoids fragile substring scanning of focus strings.
+_WARMUP_REGION_LOWER: frozenset[str] = frozenset({
+    "legs", "lower",
+})
+_WARMUP_REGION_PULL: frozenset[str] = frozenset({
+    "pull",
+})
+_WARMUP_REGION_PUSH_UPPER: frozenset[str] = frozenset({
+    "push", "upper",
+})
+_WARMUP_REGION_RECOVERY: frozenset[str] = frozenset({
+    "recovery", "mobility",
+})
+
+
+def _classify_warmup_region(focus: str) -> str:
+    """Classify focus label → warmup body region category.
+    Returns one of: 'lower', 'pull', 'push_upper', 'recovery', 'general'."""
+    from app.services.workout.archetypes import DayArchetype, ARCHETYPE_META, ARCHETYPE_TO_FOCUS_FAMILY
+
+    focus_l = (focus or "").lower().strip()
+
+    # 1. Try to resolve via archetype metadata (match default_name)
+    for arch, meta in ARCHETYPE_META.items():
+        if meta.default_name.lower() == focus_l:
+            # Check category first for recovery/mobility
+            if meta.category in ("recovery", "mobility"):
+                return "recovery"
+            family = ARCHETYPE_TO_FOCUS_FAMILY.get(arch, "")
+            if family in _WARMUP_REGION_LOWER:
+                return "lower"
+            if family in _WARMUP_REGION_PULL:
+                return "pull"
+            if family in _WARMUP_REGION_PUSH_UPPER:
+                return "push_upper"
+            if meta.category == "cond":
+                return "general"
+            return "general"
+
+    # 2. Fallback for labels that don't match any archetype default_name
+    if any(k in focus_l for k in ("recovery", "mobility", "stretch")):
+        return "recovery"
+    if any(k in focus_l for k in ("leg", "lower", "squat", "glute", "hinge")):
+        return "lower"
+    if any(k in focus_l for k in ("pull", "back", "row")):
+        return "pull"
+    if any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
+        return "push_upper"
+    return "general"
+
+
 def _deterministic_warmup(focus: str, first: str | None, second: str | None,
                             exercise_count: int = 0) -> list[str]:
     """Vary 1-4 steps based on focus + session size + first lift type.
     Recovery/mobility days get a single prep line. Short sessions get
     a tighter warmup. Heavy compounds always get a ramp-up."""
-    focus_l = (focus or "").lower()
     first_l = (first or "").lower()
     is_heavy_compound = any(k in first_l for k in (
         "squat", "deadlift", "bench", "overhead press", "ohp",
@@ -1149,14 +1245,16 @@ def _deterministic_warmup(focus: str, first: str | None, second: str | None,
         else (f"1 light set of {first}" if first else "2 ramp-up sets at 50%")
     )
 
-    if any(k in focus_l for k in ("recovery", "mobility", "stretch")):
+    region = _classify_warmup_region(focus)
+
+    if region == "recovery":
         return ["Move slowly through the first round to warm up."]
 
-    if any(k in focus_l for k in ("leg", "lower", "squat", "glute", "hinge")):
+    if region == "lower":
         pool = ["3 min easy bike or walk", "Hip circles + ankle rocks (10 each)", "Bodyweight squats × 10"]
-    elif any(k in focus_l for k in ("pull", "back", "row")):
+    elif region == "pull":
         pool = ["3 min light cardio", "Band pull-aparts × 15", "Scap push-ups × 10"]
-    elif any(k in focus_l for k in ("push", "chest", "shoulder", "upper")):
+    elif region == "push_upper":
         pool = ["3 min light cardio", "Arm circles + band dislocates × 10", "Push-ups × 10"]
     else:
         pool = ["2 min light cardio", "Dynamic stretches for major joints"]

@@ -637,6 +637,9 @@ export interface SessionExercise {
   /** Primary muscle slug from the exercise library. Used to bias weight
    *  recs when the exact exercise has no direct history. */
   primaryMuscle?: string | null;
+  /** Whether this is a compound (multi-joint) movement. Propagated from
+   *  the planner's exercise library — used for 1RM estimation eligibility. */
+  isCompound?: boolean | null;
   /** Where targetWeightLbs came from. 'default' means the planner
    *  fell through to the dumb category-default table — ActiveWorkoutScreen
    *  refreshes those with the AI helper before showing the user. */

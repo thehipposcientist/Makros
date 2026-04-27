@@ -5,6 +5,7 @@
 
 import ExpoModulesCore
 import WatchConnectivity
+import HealthKit
 import os.log
 
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
@@ -84,6 +85,19 @@ public class ThalloWatchBridgeModule: Module {
             var payload = progress
             payload["kind"] = "progress"
             return self.sessionHolder.sendMessage(payload)
+        }
+
+        AsyncFunction("startWatchWorkout") { () -> Bool in
+            guard HKHealthStore.isHealthDataAvailable() else { return false }
+            let store = HKHealthStore()
+            let config = HKWorkoutConfiguration()
+            config.activityType = .traditionalStrengthTraining
+            config.locationType = .indoor
+            return await withCheckedContinuation { cont in
+                store.startWatchApp(with: config) { success, _ in
+                    cont.resume(returning: success)
+                }
+            }
         }
     }
 }

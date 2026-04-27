@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
   TextInput, Alert, Image, Linking, Modal, Animated,
@@ -205,6 +205,33 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
   const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
   const paceLoadedRef = useRef(false);
+
+  // ─── Exercise property lookup maps ────────────────────────────────────────
+  // Built from workout history — prefers structured fields from the planner
+  // (primaryMuscle, isCompound) over regex heuristics.
+  const exerciseMuscleMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const s of history) {
+      for (const e of (s.exercises ?? [])) {
+        const nm = e.name?.toLowerCase();
+        const pm = e.primaryMuscle ?? (e as any).primary_muscle;
+        if (nm && pm && !map[nm]) map[nm] = String(pm).toLowerCase();
+      }
+    }
+    return map;
+  }, [history]);
+
+  const exerciseCompoundMap = useMemo(() => {
+    const map: Record<string, boolean> = {};
+    for (const s of history) {
+      for (const e of (s.exercises ?? [])) {
+        const nm = e.name?.toLowerCase();
+        const compound = e.isCompound ?? (e as any).is_compound;
+        if (nm && compound != null && !(nm in map)) map[nm] = Boolean(compound);
+      }
+    }
+    return map;
+  }, [history]);
 
   useEffect(() => {
     if (tab === 'charts' && authToken && !paceLoadedRef.current) {
@@ -523,13 +550,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
   useEffect(() => {
     if (!authToken || !selectedExercise) { setE1rmHistory([]); return; }
-    if (_CARDIO_EXERCISE_RE.test(selectedExercise)) { setE1rmHistory([]); return; }
+    // Prefer structured primaryMuscle field; fall back to regex heuristic
+    const _selMuscle = exerciseMuscleMap[selectedExercise.toLowerCase()];
+    if (_selMuscle === 'cardio' || (!_selMuscle && _CARDIO_EXERCISE_RE.test(selectedExercise))) { setE1rmHistory([]); return; }
     import('../services/api').then(({ getE1RMHistory }) =>
       getE1RMHistory(authToken, selectedExercise)
         .then(res => setE1rmHistory(res.history ?? []))
         .catch(() => setE1rmHistory([]))
     );
-  }, [authToken, selectedExercise]);
+  }, [authToken, selectedExercise, exerciseMuscleMap]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -590,27 +619,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {/* Build a map of exerciseName → primary_muscle from
-                  history so we can filter the PR list by muscle.
-                  Falls back to 'unknown' bucket when the exercise
-                  has no muscle tag (e.g. AI-generated entries before
-                  the muscle plumbing landed). */}
+              {/* Filter the chart exercise list by muscle bucket.
+                  Uses exerciseMuscleMap (built at component level from
+                  structured primaryMuscle fields in history) with a
+                  regex fallback for older sessions that lack the field. */}
               {(() => {
-                // Build muscle lookup from history. This map is SPARSE —
-                // older sessions and AI-generated exercises don't carry
-                // `primaryMuscle`, so a lot of PRs miss the lookup.
-                const _exMuscle: Record<string, string> = {};
-                for (const s of history) {
-                  for (const e of (s.exercises ?? [])) {
-                    const nm = e.name?.toLowerCase();
-                    const pm = (e as any).primaryMuscle ?? (e as any).primary_muscle;
-                    if (nm && pm && !_exMuscle[nm]) _exMuscle[nm] = String(pm).toLowerCase();
-                  }
-                }
                 // Name-based inference fallback. Order matters: more-
                 // specific patterns must come first so e.g. "leg
                 // extension" maps to quads instead of triceps, "shoulder
                 // press" maps to shoulders instead of chest.
+                // Only used when the exercise has no structured primaryMuscle field.
                 const inferMuscleFromName = (name: string): string => {
                   const n = name.toLowerCase();
                   if (/calf/.test(n)) return 'calves';
@@ -626,8 +644,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   if (/\babs?\b|crunch|plank|\bcore\b|russian twist|leg raise|sit.?up|hollow|knee raise|woodchopper/.test(n)) return 'core';
                   return '';
                 };
+                // Prefer the structured primaryMuscle from history (via
+                // exerciseMuscleMap built at component level); only fall
+                // back to regex heuristic when the field is missing.
                 const muscleFor = (name: string): string =>
-                  _exMuscle[name.toLowerCase()] || inferMuscleFromName(name);
+                  exerciseMuscleMap[name.toLowerCase()] || inferMuscleFromName(name);
 
                 // Coarse muscle buckets shown as filter chips. Order
                 // is the most-likely-tapped muscles first.
@@ -713,7 +734,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   );
                 }
-                const isCardioExercise = _CARDIO_EXERCISE_RE.test(selectedExercise);
+                const _selMuscleChart = exerciseMuscleMap[selectedExercise.toLowerCase()];
+                const isCardioExercise = _selMuscleChart === 'cardio' || (!_selMuscleChart && _CARDIO_EXERCISE_RE.test(selectedExercise));
                 const hasDuration = trend.some(p => p.totalDuration > 0);
                 const hasWeight = trend.some(p => p.bestWeight > 0);
                 const hasE1rm = e1rmHistory.length >= 2;
@@ -1147,13 +1169,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   // 12 lb cable curl is misleading — Epley breaks
                   // down badly above 10 reps and isolation work
                   // doesn't really map to a "1RM" in any meaningful
-                  // way. Pattern-match the exercise name against a
-                  // compound vocabulary and skip everything else.
+                  // way. Prefer the structured isCompound field from
+                  // history; fall back to regex heuristic for older
+                  // sessions that predate the field.
                   const lower = pr.exerciseName.toLowerCase();
-                  const isCompound = (
-                    /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
-                    && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
-                  );
+                  const _compoundField = exerciseCompoundMap[lower];
+                  const isCompound = _compoundField != null
+                    ? _compoundField
+                    : (
+                      /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
+                      && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
+                    );
                   const est1rm = isCompound && pr.weightLbs > 0 && pr.reps > 0 && pr.reps <= 12
                     ? Math.round(pr.weightLbs * (1 + pr.reps / 30))
                     : null;

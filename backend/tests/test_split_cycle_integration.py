@@ -54,12 +54,13 @@ def _gen(goal, days, split, families=(), buckets=(), fatigue=None):
 # ===================================================================
 
 def test_ppl_continue_cycle_after_legs():
-    """History ends with Legs → regen day0 = Push."""
+    """History (legs, push, pull, legs) has 3 unique PPL entries.
+    last_two={legs, push}, missing={pull} → day0 = Pull."""
     print("[integration] PPL: continue cycle after Legs")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("legs", "push", "pull", "legs"),
                 buckets=("lower_body", "upper_body", "upper_body", "lower_body"))
-    assert_eq(fams[0], "push", "day0=push after legs")
+    assert_eq(fams[0], "pull", "day0=pull after (legs,push,pull,legs) history-based")
 
 
 def test_ppl_continue_cycle_after_push():
@@ -71,11 +72,12 @@ def test_ppl_continue_cycle_after_push():
 
 
 def test_ppl_continue_cycle_after_pull():
-    """History ends with Pull → regen day0 = Legs."""
+    """History ends with Pull → single-entry canonical fallback:
+    pull→legs. Day0 = Legs."""
     print("[integration] PPL: continue cycle after Pull")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("pull",), buckets=("upper_body",))
-    assert_eq(fams[0], "legs", "day0=legs after pull")
+    assert_eq(fams[0], "legs", "day0=legs after pull (canonical fallback)")
 
 
 def test_ppl_3day_cycle_integrity():
@@ -132,12 +134,13 @@ def test_ppl_mobility_between_lifts():
 
 def test_ppl_multiple_cardio_rest_days():
     """History: Cardio, Rest-skip, Cardio, Pull (newest first).
-    Anchor digs through all the non-lift days to find Pull."""
+    Anchor digs through all the non-lift days to find Pull.
+    Single PPL entry → canonical fallback: pull→legs."""
     print("[integration] PPL: multiple non-lift days in history")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("cardio", "cardio", "pull"),
                 buckets=("cardio", "cardio", "upper_body"))
-    assert_eq(fams[0], "legs", "day0=legs (skips two cardio, finds pull)")
+    assert_eq(fams[0], "legs", "day0=legs (canonical pull→legs)")
 
 
 # ===================================================================
@@ -456,13 +459,14 @@ def test_fat_loss_ppl_continues_cycle():
 
 
 def test_strength_ppl_continues_cycle():
-    """Strength mode PPL. Anchor should still work."""
+    """Strength mode PPL. With only ('legs',) in history,
+    canonical fallback: legs→push."""
     print("[integration] Strength PPL: continues cycle")
     fams = _gen("strength", 5, "ppl",
                 families=("legs",), buckets=("lower_body",))
     lift_fams = [f for f in fams if f in ("push", "pull", "legs")]
     if lift_fams:
-        assert_eq(lift_fams[0], "push", "first lift=push after legs")
+        assert_eq(lift_fams[0], "push", "first lift=push after legs (canonical fallback)")
 
 
 def test_general_health_ul_continues():

@@ -441,7 +441,94 @@ def test_partial_workout_less_fatigue():
     assert partial["chest"] < full["chest"]
 
 
-# ─── Runner ────────��──────────────────────────────────────────────────────────
+# ─── Heart rate intensity factor ──────────────────────────────────────────────
+
+
+def test_hr_no_data_factor_one():
+    """No HR data → hr_factor = 1.0 (no change to fatigue)."""
+    no_hr = resolve_exercise_fatigue([{
+        "name": "Squat",
+        "primary_muscle": "quads",
+        "secondary_muscles": [],
+        "is_compound": True,
+        "sets": [{"reps": 8, "weight_lbs": 225, "rir": 2}] * 3,
+    }])
+    with_zero_hr = resolve_exercise_fatigue([{
+        "name": "Squat",
+        "primary_muscle": "quads",
+        "secondary_muscles": [],
+        "is_compound": True,
+        "sets": [{"reps": 8, "weight_lbs": 225, "rir": 2, "heart_rate_avg": 0}] * 3,
+    }])
+    assert abs(no_hr["quads"] - with_zero_hr["quads"]) < 0.001
+
+
+def test_hr_high_more_fatigue():
+    """High HR (170bpm @ age 30) produces more fatigue than low HR (100bpm)."""
+    low_hr = resolve_exercise_fatigue([{
+        "name": "Bench Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": [],
+        "is_compound": True,
+        "sets": [{"reps": 8, "weight_lbs": 185, "rir": 2, "heart_rate_avg": 100}] * 3,
+    }], user_age=30)
+    high_hr = resolve_exercise_fatigue([{
+        "name": "Bench Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": [],
+        "is_compound": True,
+        "sets": [{"reps": 8, "weight_lbs": 185, "rir": 2, "heart_rate_avg": 170}] * 3,
+    }], user_age=30)
+    assert high_hr["chest"] > low_hr["chest"], (
+        f"High HR ({high_hr['chest']}) should > low HR ({low_hr['chest']})"
+    )
+    assert high_hr["systemic"] > low_hr["systemic"]
+
+
+def test_hr_moderate_zone():
+    """HR in 70-80% max (zone 3) → 1.10× factor."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    # Age 30 → max HR 190. 70% = 133, 80% = 152.
+    assert _hr_intensity_factor(140, 30) == 1.10
+
+
+def test_hr_threshold_zone():
+    """HR in 80-90% max (zone 4) → 1.20× factor."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    # Age 30 → max HR 190. 80% = 152, 90% = 171.
+    assert _hr_intensity_factor(160, 30) == 1.20
+
+
+def test_hr_near_max_zone():
+    """HR >90% max (zone 5) → 1.30× factor."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    # Age 30 → max HR 190. 90% = 171.
+    assert _hr_intensity_factor(175, 30) == 1.30
+
+
+def test_hr_easy_zone():
+    """HR <55% max → 0.90× factor (barely taxing)."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    # Age 30 → max HR 190. 55% = 104.5. So 90 bpm is <55%.
+    assert _hr_intensity_factor(90, 30) == 0.90
+
+
+def test_hr_uses_age_for_max():
+    """Older user (age 60, max HR 160) — 140bpm is 87.5% (zone 4)."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    # Age 60 → max HR 160. 140/160 = 87.5% → zone 4 (1.20)
+    assert _hr_intensity_factor(140, 60) == 1.20
+    # Same 140bpm for age 25 → max HR 195, 140/195 = 71.8% → zone 3 (1.10)
+    assert _hr_intensity_factor(140, 25) == 1.10
+
+
+def test_hr_defaults_age_30():
+    """When age is None, defaults to age 30 (max HR 190)."""
+    from app.services.workout.activity_impact import _hr_intensity_factor
+    assert _hr_intensity_factor(140, None) == _hr_intensity_factor(140, 30)
+
+
+# ─── Runner ───────────────────────────────────────────────────────────────────
 
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 

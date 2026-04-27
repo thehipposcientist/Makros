@@ -47,9 +47,10 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: conn.workout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        heartRate.start()
-                        active = true
-                        conn.sendCommand("start_workout")
+                        heartRate.start {
+                            active = true
+                            conn.sendCommand("start_workout")
+                        }
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
@@ -58,7 +59,16 @@ struct ContentView: View {
                     SupplementsView()
                     SleepView()
                     ReadinessView()
-                    QuickStartView()
+                    QuickStartView(onStartCustom: { category, subtype, label in
+                        heartRate.start {
+                            active = true
+                            conn.sendCommand("start_custom_workout", payload: [
+                                "category": category,
+                                "subtype": subtype,
+                                "label": label,
+                            ])
+                        }
+                    })
                     WeightView()
                 }
                 .tabViewStyle(.page)
@@ -97,6 +107,16 @@ struct ContentView: View {
         }
         .onAppear {
             heartRate.prewarmAuth()
+            if let w = conn.workout, w.status == .active, !active {
+                HeartRateStore.saveDiag("onAppear reconcile→start")
+                heartRate.start { active = true }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchWorkoutLaunch)) { _ in
+            if !active {
+                HeartRateStore.saveDiag("HK launch→start")
+                heartRate.start { active = true }
+            }
         }
         .onReceive(conn.$theme) { palette in theme.palette = palette }
         .onReceive(conn.$workout) { w in
@@ -105,8 +125,9 @@ struct ContentView: View {
             case .active:
                 if !active {
                     HeartRateStore.saveDiag("rcv active→start")
-                    active = true
-                    heartRate.start()
+                    heartRate.start {
+                        active = true
+                    }
                 }
             case .completed, .skipped:
                 if active {
@@ -871,14 +892,9 @@ private struct SleepView: View {
 // ─── Quick-start tab — start a custom workout from the watch ────────
 
 private struct QuickStartView: View {
+    let onStartCustom: (_ category: String, _ subtype: String, _ label: String) -> Void
     @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var conn: ConnectivityStore
 
-    // Same activity menu as the phone's LiveActivityTracker so the
-    // two surfaces feel consistent. Tapping any of these fires a
-    // `start_custom_workout` command to the phone, which mounts its
-    // ActiveWorkoutScreen / live tracker. Watch HR session begins
-    // locally so the user sees the live BPM regardless.
     private static let activities: [(category: String, subtype: String, label: String, icon: String)] = [
         ("cardio", "run",     "Run",        "figure.run"),
         ("cardio", "walk",    "Walk",       "figure.walk"),
@@ -917,11 +933,7 @@ private struct QuickStartView: View {
                         let a = Self.activities[i]
                         Button {
                             WKInterfaceDevice.current().play(.start)
-                            conn.sendCommand("start_custom_workout", payload: [
-                                "category": a.category,
-                                "subtype": a.subtype,
-                                "label": a.label,
-                            ])
+                            onStartCustom(a.category, a.subtype, a.label)
                         } label: {
                             HStack(spacing: 10) {
                                 Image(systemName: a.icon)

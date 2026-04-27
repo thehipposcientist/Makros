@@ -1,10 +1,16 @@
 """Pure-function tests for switch-day pin/rotation and split-anchor logic.
 
+Uses history-based rotation: the next PPL family is whichever of
+{push, pull, legs} the user did LEAST recently. Given recent history
+(most recent first), extract PPL families, take the first two, and the
+NEXT is whichever of {push, pull, legs} is NOT in those two. When only
+1 entry exists, the missing set has 2 items — pick alphabetically first.
+
 Covers the user-reported scenario: Legs Wed → Pull Thu → Rest Fri →
-Push Sat → Legs Sun.  Monday regen should show Push (next in PPL after
-Legs).  Switching Monday to Pull should NOT make Tuesday Legs when
-Legs was just done Sunday — the existing plan should be minimally
-swapped, not canonically rebuilt.
+Push Sat → Legs Sun.  Monday regen should show Pull (history last_two
+= {legs, push}, missing = {pull}).  Switching Monday to Pull should NOT
+make Tuesday Legs when Legs was just done Sunday — the existing plan
+should be minimally swapped, not canonically rebuilt.
 
 Run manually:
     docker exec -it thallo-backend python -m tests.test_switch_day_rotation
@@ -22,14 +28,16 @@ def assert_eq(actual, expected, label):
 # ---------------------------------------------------------------------------
 
 def test_ppl_rotation():
-    """PPL cycle: push → pull → legs → push."""
-    print("[test] PPL rotation cycle")
+    """PPL rotation without history: canonical fallback applies.
+    push→pull, pull→legs, legs→push."""
+    print("[test] PPL rotation cycle (no history, canonical fallback)")
     from app.services.workout.weekly_recipe import _next_in_split_rotation
     from app.services.workout.day_templates import SPLIT_PPL
 
-    assert_eq(_next_in_split_rotation("push", SPLIT_PPL), "pull", "push → pull")
-    assert_eq(_next_in_split_rotation("pull", SPLIT_PPL), "legs", "pull → legs")
-    assert_eq(_next_in_split_rotation("legs", SPLIT_PPL), "push", "legs → push")
+    # 0 unique PPL entries in history → canonical fallback
+    assert_eq(_next_in_split_rotation("push", SPLIT_PPL), "pull", "push → pull (canonical)")
+    assert_eq(_next_in_split_rotation("pull", SPLIT_PPL), "legs", "pull → legs (canonical)")
+    assert_eq(_next_in_split_rotation("legs", SPLIT_PPL), "push", "legs → push (canonical)")
 
 
 def test_ul_rotation():
@@ -57,9 +65,10 @@ def test_rotation_none_for_non_lift():
 # 2. _anchor_recipe_to_split_next
 # ---------------------------------------------------------------------------
 
-def test_anchor_legs_history_gives_push_day0():
-    """After completing Legs, recipe day 0 should be Push (PPL cycle)."""
-    print("[test] Anchor: last=legs → day0=push")
+def test_anchor_legs_history_gives_pull_day0():
+    """After history (legs, push, pull, legs), the last two PPL families
+    are {legs, push}, so the missing family is pull → day 0 = pull."""
+    print("[test] Anchor: history=(legs,push,pull,legs) → day0=pull")
     from app.services.workout.weekly_recipe import _anchor_recipe_to_split_next
     from app.services.workout.day_templates import SPLIT_PPL
     from app.services.workout.archetypes import DayArchetype, archetype_to_focus_family
@@ -68,12 +77,13 @@ def test_anchor_legs_history_gives_push_day0():
     families = ("legs", "push", "pull", "legs")
     result = _anchor_recipe_to_split_next(recipe, families, SPLIT_PPL)
     day0_fam = archetype_to_focus_family(result[0])
-    assert_eq(day0_fam, "push", "day 0 family after legs history")
+    assert_eq(day0_fam, "pull", "day 0 family after (legs,push,pull,legs) history")
 
 
 def test_anchor_push_history_gives_pull_day0():
-    """After completing Push, recipe day 0 should be Pull."""
-    print("[test] Anchor: last=push → day0=pull")
+    """After history (push,), single entry → canonical fallback:
+    push→pull. Day 0 = pull."""
+    print("[test] Anchor: history=(push,) → day0=pull (canonical)")
     from app.services.workout.weekly_recipe import _anchor_recipe_to_split_next
     from app.services.workout.day_templates import SPLIT_PPL
     from app.services.workout.archetypes import DayArchetype, archetype_to_focus_family
@@ -82,13 +92,13 @@ def test_anchor_push_history_gives_pull_day0():
     families = ("push",)
     result = _anchor_recipe_to_split_next(recipe, families, SPLIT_PPL)
     day0_fam = archetype_to_focus_family(result[0])
-    assert_eq(day0_fam, "pull", "day 0 family after push history")
+    assert_eq(day0_fam, "pull", "day 0 family after (push,) history")
 
 
 def test_anchor_no_pin_injection_corruption():
     """Pin injection previously prepended pin_focus into families,
     corrupting the anchor. Verify that with correct families (no pin),
-    the anchor picks the right start."""
+    the anchor picks the right start using history-based rotation."""
     print("[test] Anchor: no pin injection corruption")
     from app.services.workout.weekly_recipe import _anchor_recipe_to_split_next
     from app.services.workout.day_templates import SPLIT_PPL
@@ -96,18 +106,19 @@ def test_anchor_no_pin_injection_corruption():
 
     recipe = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
 
-    # Correct families from history (no pin prepended): last was legs
+    # Correct families from history (no pin prepended): (legs, push, pull, legs)
+    # last_two PPL = {legs, push}, missing = {pull} → day0 = pull
     correct_families = ("legs", "push", "pull", "legs")
     result = _anchor_recipe_to_split_next(recipe, correct_families, SPLIT_PPL)
     day0_fam = archetype_to_focus_family(result[0])
-    assert_eq(day0_fam, "push", "correct families → day0=push")
+    assert_eq(day0_fam, "pull", "correct families → day0=pull")
 
-    # OLD BUG: pin injection prepended "pull" — this would make anchor
-    # think last lift was "pull" → expect "legs" → recipe starts with Legs
+    # OLD BUG: pin injection prepended "pull" — corrupted to (pull, legs, push, pull, legs)
+    # last_two PPL = {pull, legs}, missing = {push} → day0 = push
     corrupted_families = ("pull",) + correct_families
     result_bad = _anchor_recipe_to_split_next(recipe, corrupted_families, SPLIT_PPL)
     bad_day0_fam = archetype_to_focus_family(result_bad[0])
-    assert_eq(bad_day0_fam, "legs", "corrupted families → day0=legs (demonstrating the old bug)")
+    assert_eq(bad_day0_fam, "push", "corrupted families → day0=push (demonstrating the old bug)")
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +300,9 @@ def test_user_scenario_legs_sun_switch_to_pull():
 
 
 def test_user_scenario_regen_after_legs():
-    """After Legs (most recent), PPL anchor should start at Push."""
-    print("[test] user scenario: regen after Legs → day0 = Push")
+    """After history (legs, push, pull, legs), last_two PPL = {legs, push},
+    missing = {pull} → day 0 = pull."""
+    print("[test] user scenario: regen after Legs → day0 = Pull")
     from app.services.workout.weekly_recipe import (
         _anchor_recipe_to_split_next,
     )
@@ -299,10 +311,11 @@ def test_user_scenario_regen_after_legs():
 
     recipe = [DayArchetype.LIFT_LEGS, DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL]
     # History: Legs Sun, Push Sat, Pull Thu, Legs Wed (newest first)
+    # last_two PPL = {legs, push}, missing = {pull}
     families = ("legs", "push", "pull", "legs")
     result = _anchor_recipe_to_split_next(recipe, families, SPLIT_PPL)
     day0_fam = archetype_to_focus_family(result[0])
-    assert_eq(day0_fam, "push", "regen after Legs → Push on Monday")
+    assert_eq(day0_fam, "pull", "regen after (legs,push,pull,legs) → Pull on Monday")
 
 
 def test_user_scenario_without_prefer_swap_shows_old_bug():
@@ -430,8 +443,9 @@ def test_prefer_swap_last_position():
 # ---------------------------------------------------------------------------
 
 def test_ppl_cycle_across_week():
-    """Verify that consecutive days follow PPL cycle when anchored
-    correctly from history."""
+    """Verify that consecutive days follow canonical rotation
+    when anchored from a single-entry history.
+    Canonical: push→pull, pull→legs, legs→push."""
     print("[test] PPL cycle across a full week from history")
     from app.services.workout.weekly_recipe import _anchor_recipe_to_split_next
     from app.services.workout.day_templates import SPLIT_PPL
@@ -439,7 +453,9 @@ def test_ppl_cycle_across_week():
 
     recipe = [DayArchetype.LIFT_PUSH, DayArchetype.LIFT_PULL, DayArchetype.LIFT_LEGS]
 
-    # After Pull → next should be Legs
+    # After Pull: history=(pull,), canonical pull→legs.
+    # Day0=legs. augmented=(legs,pull), last_two={legs,pull}, missing={push}.
+    # Day1=push. Day2=pull (remaining).
     families_after_pull = ("pull",)
     result = _anchor_recipe_to_split_next(recipe, families_after_pull, SPLIT_PPL)
     fams = [archetype_to_focus_family(a) for a in result]
@@ -447,7 +463,9 @@ def test_ppl_cycle_across_week():
     assert_eq(fams[1], "push", "after pull → day1=push")
     assert_eq(fams[2], "pull", "after pull → day2=pull")
 
-    # After Push → next should be Pull
+    # After Push: history=(push,), canonical push→pull.
+    # Day0=pull. augmented=(pull,push), last_two={pull,push}, missing={legs}.
+    # Day1=legs. Day2=push (remaining).
     families_after_push = ("push",)
     result = _anchor_recipe_to_split_next(recipe, families_after_push, SPLIT_PPL)
     fams = [archetype_to_focus_family(a) for a in result]
@@ -505,7 +523,7 @@ ALL_TESTS = [
     test_ppl_rotation,
     test_ul_rotation,
     test_rotation_none_for_non_lift,
-    test_anchor_legs_history_gives_push_day0,
+    test_anchor_legs_history_gives_pull_day0,
     test_anchor_push_history_gives_pull_day0,
     test_anchor_no_pin_injection_corruption,
     test_prefer_swap_pull_on_push_slot,

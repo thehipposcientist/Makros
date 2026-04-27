@@ -66,7 +66,7 @@ def test_ppl_5d_push_today():
 
 
 def test_ppl_6d_push_today():
-    """6-day PPL after Push today."""
+    """6-day PPL after Push today (history-based rotation)."""
     print("[overlay] PPL 6d: Push completed today")
     fams = _gen("muscle_gain", 6, "ppl",
                 families=("push", "pull", "legs"),
@@ -74,12 +74,12 @@ def test_ppl_6d_push_today():
                 completed_today="push")
     assert_eq(fams[0], "push", "day0=push")
     after = _overlay(fams, "push")
-    assert_eq(after[1], "pull", "day1=pull")
-    assert_eq(after[2], "legs", "day2=legs")
+    assert_eq(after[1], "legs", "day1=legs")
+    assert_eq(after[2], "pull", "day2=pull")
 
 
 def test_ppl_7d_push_today():
-    """7-day PPL after Push today."""
+    """7-day PPL after Push today (history-based rotation)."""
     print("[overlay] PPL 7d: Push completed today")
     fams = _gen("muscle_gain", 7, "ppl",
                 families=("push", "pull", "legs"),
@@ -87,8 +87,8 @@ def test_ppl_7d_push_today():
                 completed_today="push")
     assert_eq(fams[0], "push", "day0=push")
     after = _overlay(fams, "push")
-    assert_eq(after[1], "pull", "day1=pull")
-    assert_eq(after[2], "legs", "day2=legs")
+    assert_eq(after[1], "legs", "day1=legs")
+    assert_eq(after[2], "pull", "day2=pull")
 
 
 def test_ppl_5d_pull_today():

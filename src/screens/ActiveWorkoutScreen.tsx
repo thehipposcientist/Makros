@@ -202,7 +202,14 @@ function isTimedExercise(name: string, targetReps?: string | number): boolean {
  *  for the full time. Short holds (plank, dead hang, wall sit, carry)
  *  are better served by the timer. Used to decide which control to
  *  emphasize; both are always shown. */
-function isLongCardioExercise(name: string, targetReps?: string | number): boolean {
+function isLongCardioExercise(name: string, targetReps?: string | number, opts?: { primaryMuscle?: string | null }): boolean {
+  // Structured-field fast path: exercises with primary_muscle "cardio" are
+  // always long-duration, and "mobility" exercises (yoga, stretching) are
+  // duration-based too.
+  const muscle = (opts?.primaryMuscle ?? '').toLowerCase();
+  if (muscle === 'cardio' || muscle === 'mobility') return true;
+
+  // Regex fallback for old cached plans without structured fields
   const lowered = (name || '').toLowerCase();
   if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/.test(lowered)) {
     return true;
@@ -355,9 +362,11 @@ function formatDurationForInput(totalSeconds: number): string {
   return `${mm}:${ss.toString().padStart(2, '0')}`;
 }
 
-function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string | null {
+function getExerciseWarmupNote(exerciseName: string, isFirst: boolean, opts?: { isCompound?: boolean }): string | null {
   const name = exerciseName.toLowerCase();
-  const isCompound = /squat|deadlift|bench press|overhead press|ohp|barbell press|pull.up|row|lunge|hip thrust|clean|snatch/.test(name);
+  // Prefer structured is_compound field; fall back to name-based regex for old cached plans
+  const isCompound = opts?.isCompound ??
+    /squat|deadlift|bench press|overhead press|ohp|barbell press|pull.up|row|lunge|hip thrust|clean|snatch/.test(name);
   if (!isCompound && !isFirst) return null;
   if (/squat/.test(name)) return 'Warm-up: 2–3 ramp-up sets — e.g. bar × 10, 50% × 8, 70% × 5 before working weight';
   if (/deadlift/.test(name)) return 'Warm-up: 2–3 light singles — e.g. 40% × 5, 60% × 3, 80% × 1 before working sets';
@@ -367,47 +376,51 @@ function getExerciseWarmupNote(exerciseName: string, isFirst: boolean): string |
   return null;
 }
 
+// Focus keyword → warmup step pool mapping for buildWarmupPlan.
+// Avoids a regex chain; keys are checked with simple string inclusion.
+const WARMUP_POOLS: Record<string, string[]> = {
+  lower: ['3 min easy bike or walk', 'Hip circles + ankle rocks (10 each)', 'Bodyweight squats × 10'],
+  leg:   ['3 min easy bike or walk', 'Hip circles + ankle rocks (10 each)', 'Bodyweight squats × 10'],
+  glute: ['3 min easy bike or walk', 'Hip circles + ankle rocks (10 each)', 'Bodyweight squats × 10'],
+  hinge: ['3 min easy bike or walk', 'Hip circles + ankle rocks (10 each)', 'Bodyweight squats × 10'],
+  pull:  ['3 min light cardio', 'Band pull-aparts × 15', 'Scap push-ups × 10'],
+  back:  ['3 min light cardio', 'Band pull-aparts × 15', 'Scap push-ups × 10'],
+  push:  ['3 min light cardio', 'Arm circles + band dislocates × 10', 'Push-ups × 10'],
+  chest: ['3 min light cardio', 'Arm circles + band dislocates × 10', 'Push-ups × 10'],
+  shoulder: ['3 min light cardio', 'Arm circles + band dislocates × 10', 'Push-ups × 10'],
+  upper: ['3 min light cardio', 'Arm circles + band dislocates × 10', 'Push-ups × 10'],
+};
+const WARMUP_DEFAULT_POOL = ['2 min light cardio', 'Dynamic stretches for major joints'];
+
 function buildWarmupPlan(workout: WorkoutDay): string[] {
   const focus = (workout.focus || '').toLowerCase();
+  const stimulus = (workout.stimulus || '').toLowerCase();
   const exCount = workout.exercises.length;
-  const firstEx = workout.exercises[0]?.name;
-  const firstLo = (firstEx || '').toLowerCase();
-  const isHeavyCompound = /squat|deadlift|bench|overhead press|ohp|barbell press|clean|snatch|hip thrust/.test(firstLo);
+  const firstEx = workout.exercises[0];
+  const firstExName = firstEx?.name || '';
+  const firstLo = firstExName.toLowerCase();
+  // Use the structured is_compound field from the first exercise when available
+  const firstIsCompound = (firstEx as any)?.is_compound ?? (firstEx as any)?.isCompound;
+  const isHeavyCompound = firstIsCompound === true ||
+    (firstIsCompound == null && /squat|deadlift|bench|overhead press|ohp|barbell press|clean|snatch|hip thrust/.test(firstLo));
 
   // Recovery / mobility days don't need a warmup at all — the session
   // IS the warmup. Show one prep line and move on.
-  if (/recovery|mobility|stretch/.test(focus)) {
+  // Check stimulus field first, then focus keywords.
+  if (stimulus === 'recovery' || stimulus === 'mobility' || /recovery|mobility|stretch/.test(focus)) {
     return ['Move slowly through the first round to warm up.'];
   }
 
-  // Step pool per focus, drawn from in priority order. Total step
-  // count varies 2-4 by session length, with the ramp-up always last
-  // when there's a known first exercise to ramp into.
-  let pool: string[];
-  if (/leg|lower|glute|hinge/.test(focus)) {
-    pool = [
-      '3 min easy bike or walk',
-      'Hip circles + ankle rocks (10 each)',
-      'Bodyweight squats × 10',
-    ];
-  } else if (/pull|back/.test(focus)) {
-    pool = [
-      '3 min light cardio',
-      'Band pull-aparts × 15',
-      'Scap push-ups × 10',
-    ];
-  } else if (/push|chest|shoulder|upper/.test(focus)) {
-    pool = [
-      '3 min light cardio',
-      'Arm circles + band dislocates × 10',
-      'Push-ups × 10',
-    ];
-  } else {
-    pool = [
-      '2 min light cardio',
-      'Dynamic stretches for major joints',
-    ];
+  // Step pool per focus — match against the mapping keys.
+  // The first matching key wins.
+  let pool: string[] | undefined;
+  for (const key of Object.keys(WARMUP_POOLS)) {
+    if (focus.includes(key)) {
+      pool = WARMUP_POOLS[key];
+      break;
+    }
   }
+  if (!pool) pool = WARMUP_DEFAULT_POOL;
 
   // Session-length scaling: short sessions get a tighter warmup so we
   // don't burn 8 of 30 minutes on prep. Heavy compound first lift
@@ -418,8 +431,8 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
   else prepCount = pool.length;
 
   const steps = pool.slice(0, prepCount);
-  if (firstEx) {
-    steps.push(isHeavyCompound ? `2-3 ramp-up sets of ${firstEx}` : `1 light set of ${firstEx}`);
+  if (firstExName) {
+    steps.push(isHeavyCompound ? `2-3 ramp-up sets of ${firstExName}` : `1 light set of ${firstExName}`);
   }
   return steps;
 }
@@ -571,6 +584,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }).catch(() => {});
         // Initial push on mount.
         pushActive();
+        // Launch the watch app via HealthKit so it opens directly
+        // into workout mode with extended runtime. Falls back to
+        // the reachability re-push below if HealthKit launch fails.
+        try {
+          WatchBridge.startWatchWorkout().catch(() => {});
+        } catch { /* bridge optional */ }
         // If the watch is paired but not reachable right now, the
         // Thallo watch app isn't open — show the nudge. Suppress if
         // there's no watch at all (isPaired=false) so users without
@@ -726,6 +745,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       targetWeightLbs: (ex as any).targetWeightLbs ?? null,
       slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
       primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? null,
+      isCompound: (ex as any).is_compound ?? (ex as any).isCompound ?? null,
       weightRecommendationSource: (ex as any).weightRecommendationSource ?? null,
     }));
   });
@@ -1461,7 +1481,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
       // Plain numbers default to minutes for long cardio (treadmill,
       // bike, etc.) and seconds for short holds (plank, dead hang).
-      const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps);
+      const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps, { primaryMuscle: ex?.primaryMuscle });
       const durationSeconds = parseDurationInput(durText, preferMinutes);
       if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
         if (!silent) Alert.alert('Enter duration', 'Enter a valid duration like "25:00", "25 min", or "45s".');
@@ -1703,6 +1723,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       equipment: item.equipment ? String(item.equipment) : 'bodyweight',
       sets: [],
       aiRecommendation: undefined,
+      primaryMuscle: item.primary_muscle ?? null,
+      isCompound: item.is_compound ?? null,
     };
     setExercises(prev => {
       // Swap mode: replace the exercise at swapTargetIdx instead of appending.
@@ -2548,7 +2570,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             ? Number((workout as any).estimatedDurationMinutes) * 60
             : null;
           const ts = computeTrainingScore({
-            focusKind: focusKindFromName(workout.focus),
+            focusKind: focusKindFromName(workout.focus, (workout as any).stimulus),
             actualDurationSec: session.durationSeconds,
             estimatedDurationSec: estimatedSec,
             setsCompleted, setsPlanned: setsPlanned > 0 ? setsPlanned : null,
@@ -3244,7 +3266,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                   {/* ── Exercise-specific warm-up note — hidden once first set is logged ── */}
                   {ex.sets.length === 0 && (() => {
-                    const note = getExerciseWarmupNote(ex.name, i === 0);
+                    const note = getExerciseWarmupNote(ex.name, i === 0, {
+                      isCompound: ex.isCompound ?? undefined,
+                    });
                     return note ? (
                       <View style={styles.warmupNoteCard}>
                         <Text style={styles.warmupNoteText}>{note}</Text>
@@ -3463,7 +3487,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                       const inputKey = `${i}-${currentSlot}`;
                                       setSetInputs(prev => ({ ...prev, [inputKey]: { ...prev[inputKey] ?? { weight: '', reps: '', duration: '' }, duration: v } }));
                                     }}
-                                    placeholder={isLongCardioExercise(ex.name, ex.targetReps) ? '25 min' : '45s'}
+                                    placeholder={isLongCardioExercise(ex.name, ex.targetReps, { primaryMuscle: ex.primaryMuscle }) ? '25 min' : '45s'}
                                     placeholderTextColor={themeColors.textMuted}
                                     keyboardType="default"
                                   />

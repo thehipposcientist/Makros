@@ -157,57 +157,54 @@ def _ppl_stimulus_mix(goal: str, days: int) -> list[DayArchetype]:
 
     # Explicit sequences per day-count AND goal. Keeping the Push → Pull
     # → Legs rotation inside each three-day block so the rotation-avoidance
-    # pass has a clean base. 5-day sequences deliberately DROP the duplicate
-    # Pull (not Legs) — legs is easier to under-train naturally and the
-    # plan reviewer repeatedly flagged single-Legs weeks as imbalanced.
+    # pass has a clean base. 5-day sequences give 2P + 2Pu + 1L — pull
+    # (back/biceps) needs higher frequency since per-session volume is
+    # lower than legs (which get heavy compound loading in fewer sessions).
     goal_lower = (goal or "").lower()
 
-    # 6-day sequences (each goal gets 2 Push + 2 Pull + 2 Legs, varying
-    # the stimulus intensity). 5-day sequences give 2P + 1Pu + 2L.
-    # 4-day sequences give 1P + 1Pu + 2L (still prioritizing legs).
+    # 6-day: 2P + 2Pu + 2L. 5-day: 2P + 2Pu + 1L. 4-day: 1P + 1Pu + 2L.
     if goal_lower == "strength":
         # 4H + 2M, interleaved so at most 2 adjacent heavies.
-        # Strength goal permits adjacent heavy on different muscles (P/Pu)
-        # but never 3 in a row. Day-4 M[1] (Pull hypertrophy) gives the
-        # CNS a break before the second heavy-Push cycle.
         six_day = [H[0], H[1], H[2], H[0], M[1], M[2]]        # 4H + 2M (P/Pu adj OK for strength)
-        five_day = [H[0], H[1], H[2], M[0], M[2]]             # 3H + 2M, 2/1/2
-        four_day = [H[0], H[1], M[0], M[2]]                   # 2H + 2M (was 3H+1M — too CNS-heavy at 4d)
+        five_day = [H[0], H[1], H[2], M[0], M[1]]             # 3H + 2M, 2/2/1
+        four_day = [H[0], H[1], M[0], M[2]]                   # 2H + 2M
     elif goal_lower == "muscle_gain":
         # 3H + 3V — alternated so no two heavies are adjacent.
-        # Previous [H,H,H,V,V,V] yielded 3 consecutive heavies,
-        # which the intensity-spacing pass tried to break but was
-        # reverted by split-identity preservation (Push→Pull→Legs
-        # block). Interleaving satisfies both invariants.
         six_day = [H[0], V[1], H[2], V[0], H[1], V[2]]        # 3H + 3V (HVHVHV)
-        five_day = [H[0], V[1], H[2], V[0], V[2]]             # 2H + 3V, 2/1/2 (was 3H+2V)
-        four_day = [H[0], V[1], H[2], V[2]]                   # 2H + 2V (was 3H+1V)
+        five_day = [H[0], V[1], H[2], V[0], V[1]]             # 2H + 3V, 2/2/1
+        four_day = [H[0], V[1], H[2], V[2]]                   # 2H + 2V
     elif goal_lower == "body_recomp":
         six_day = [H[0], M[1], H[2], V[0], M[1], V[2]]        # balanced 2+2+2
-        five_day = [H[0], M[1], H[2], V[0], V[2]]             # 2/1/2
+        # body_recomp 5d goes through _promote_same_day_cardio which adds a
+        # 6th lift from the rotation pool. Keep 2P/1Pu/2L so the promoted
+        # result lands at 2P/2Pu/2L (the replacement fill is Pull).
+        five_day = [H[0], M[1], H[2], V[0], V[2]]             # 2/1/2 (→ 2/2/2 after promote)
         four_day = [H[0], M[1], H[2], V[2]]                   # 1/1/2
     elif goal_lower == "athletic_performance":
         # 3H + 3M, interleaved (no 3 adjacent heavies).
         six_day = [H[0], M[1], H[2], M[0], H[1], M[2]]        # 3H + 3M (HMHMHM)
-        five_day = [H[0], M[1], H[2], M[0], M[2]]             # 2H + 3M, 2/1/2
+        five_day = [H[0], M[1], H[2], M[0], M[1]]             # 2H + 3M, 2/2/1
         four_day = [H[0], M[1], H[2], M[2]]                   # 2H + 2M
     elif goal_lower == "hyrox":
         six_day = [H[0], M[1], H[2], M[0], M[1], M[2]]        # 2H + 4M
-        five_day = [H[0], M[1], H[2], M[0], M[2]]             # 2H + 3M, 2/1/2
+        five_day = [H[0], M[1], H[2], M[0], M[1]]             # 2H + 3M, 2/2/1
         four_day = [H[0], M[1], H[2], M[2]]                   # 2H + 2M, 1/1/2
     elif goal_lower == "toning":
         six_day = [M[0], M[1], M[2], V[0], V[1], V[2]]        # 3M + 3V, no heavy
-        five_day = [M[0], M[1], M[2], V[0], V[2]]             # 3M + 2V, 2/1/2
+        # toning uses lifting_plus_cardio mode — keep 2/1/2 so promotion balances
+        five_day = [M[0], M[1], M[2], V[0], V[2]]             # 3M + 2V, 2/1/2 (→2/2/2 after promote)
         four_day = [M[0], M[1], M[2], V[2]]                   # 3M + 1V, 1/1/2
     elif goal_lower == "fat_loss":
         six_day = [M[0], V[1], M[2], V[0], V[1], V[2]]        # 2M + 4V
-        five_day = [M[0], V[1], M[2], V[0], V[2]]             # 2M + 3V, 2/1/2
+        # fat_loss uses lifting_plus_cardio mode — _promote_same_day_cardio
+        # adds replacement lifts. Keep 2P/1Pu/2L so promoted result balances.
+        five_day = [M[0], V[1], M[2], V[0], V[2]]             # 2M + 3V, 2/1/2 (→2/2/2 after promote)
         four_day = [M[0], V[1], M[2], V[2]]                   # 2M + 2V, 1/1/2
     else:
         # Unknown / general_health / maintain / endurance lifting day:
         # default to 3H + 3V, interleaved to avoid 3 adjacent heavies.
         six_day = [H[0], V[1], H[2], V[0], H[1], V[2]]
-        five_day = [H[0], V[1], H[2], V[0], V[2]]
+        five_day = [H[0], V[1], H[2], V[0], V[1]]
         four_day = [H[0], V[1], H[2], V[2]]
 
     if days >= 6:
@@ -2029,36 +2026,70 @@ def _lift_tokens_of(recipe: list[DayArchetype]) -> list[str]:
 
 
 def _ppl_cycle_breaks(lift_tokens: list[str], hybrid: bool) -> int:
-    """Count transitions in `lift_tokens` that violate the PPL cycle
-    (push→pull→legs→push…). Compared CIRCULARLY — the last token's
-    successor must match the first — so a rotation of a valid cycle
-    also scores 0. For PPL_UL (`hybrid=True`), also accept legs→upper,
-    upper→lower, lower→push."""
-    strict = {"push": "pull", "pull": "legs", "legs": "push"}
-    hybrid_map = {
-        "push": {"pull"},
-        "pull": {"legs"},
-        "legs": {"push", "upper"},
-        "upper": {"lower"},
-        "lower": {"push"},
-    }
+    """Count transitions in `lift_tokens` that violate a consistent PPL
+    rotation. Accepts ANY rotation of {push, pull, legs} — not just the
+    canonical push→pull→legs. The user's history determines which
+    rotation they've established; this guard only checks that the
+    rotation is CONSISTENT (no adjacent duplicates, no mid-week order
+    flip).
+
+    For PPL_UL (`hybrid=True`), also accept legs→upper, upper→lower,
+    lower→push (plus reverse equivalents)."""
     if not lift_tokens:
         return 0
+    ppl_set = {"push", "pull", "legs"}
+    ppl_only = [t for t in lift_tokens if t in ppl_set]
+    if len(ppl_only) < 2:
+        return 0
+
+    # Detect the rotation from the first 3 distinct PPL tokens. Build
+    # a successor map from that observed pattern.
+    observed_cycle: dict[str, str] = {}
+    for i in range(len(ppl_only) - 1):
+        cur, nxt = ppl_only[i], ppl_only[i + 1]
+        if cur != nxt and cur not in observed_cycle:
+            observed_cycle[cur] = nxt
+        if len(observed_cycle) >= 3:
+            break
+    # Fallback: if we couldn't infer a full cycle (e.g. short sequence),
+    # just check for adjacent duplicates.
+    if len(observed_cycle) < 2:
+        breaks = 0
+        for i in range(len(lift_tokens) - 1):
+            if lift_tokens[i] == lift_tokens[i + 1]:
+                breaks += 1
+        return breaks
+
+    if hybrid:
+        # PPL_UL: also accept UL transitions as valid
+        hybrid_extra: dict[str, set[str]] = {}
+        for t in lift_tokens:
+            if t in ("upper", "lower"):
+                hybrid_extra.setdefault("legs", set()).add("upper")
+                hybrid_extra.setdefault("upper", set()).add("lower")
+                hybrid_extra.setdefault("lower", set())
+                # lower→ should go to the family that follows legs in
+                # the user's observed PPL cycle
+                if "legs" in observed_cycle:
+                    hybrid_extra["lower"].add(observed_cycle["legs"])
+                else:
+                    hybrid_extra["lower"].add("push")
+                break
+
     breaks = 0
     n = len(lift_tokens)
-    # Circular: i pairs with (i+1) mod n. Means a simple rotation of a
-    # well-formed cycle scores the same as the original — rotation
-    # passes don't trip the guard by construction.
     for i in range(n):
         cur = lift_tokens[i]
         nxt = lift_tokens[(i + 1) % n]
-        if hybrid:
-            expected = hybrid_map.get(cur)
-            if expected is None or nxt not in expected:
-                breaks += 1
-        else:
-            expected = strict.get(cur)
-            if expected is None or nxt != expected:
+        if cur == nxt:
+            breaks += 1
+            continue
+        expected = observed_cycle.get(cur)
+        if expected is not None and nxt != expected:
+            if hybrid and cur in hybrid_extra:
+                if nxt not in hybrid_extra[cur] and nxt != expected:
+                    breaks += 1
+            else:
                 breaks += 1
     return breaks
 
@@ -2147,17 +2178,20 @@ def _preserves_split_identity(
 def _next_in_split_rotation(
     last_family: str | None,
     lifting_split: str | None,
+    recent_focus_families: tuple[str, ...] | list[str] = (),
 ) -> str | None:
-    """Return the family that SHOULD be day 0 given the user's last
-    completed lift family and the active split.
+    """Return the family that SHOULD come next based on the user's
+    actual training history — NOT a hardcoded canonical order.
 
-    - PPL / PPL_UL: Push → Pull → Legs → Push. Upper/Lower (hybrid
-      residuals) fall through to None so the caller defers to the
-      broader rotation pass.
-    - Upper/Lower: strict alternation.
-    - Full Body / Bro / None / unknown: no anchor.
-    - Non-lift last families (cardio / mobility / recovery / None) also
-      return None so cardio/mobility days don't force a rotation."""
+    PPL / PPL_UL: the next family is whichever of {push, pull, legs}
+    the user did LEAST recently. This respects whatever rotation
+    pattern the user has established (P→L→Pu, P→Pu→L, etc.) instead
+    of forcing a canonical Push→Pull→Legs order.
+
+    Upper/Lower: strict alternation (only two options).
+    Full Body / Bro / None / unknown: no anchor.
+    Non-lift last families (cardio / mobility / recovery / None)
+    return None so cardio/mobility days don't force a rotation."""
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL_NXT,
         SPLIT_PPL_UL as _SPLIT_PPL_UL_NXT,
@@ -2166,8 +2200,33 @@ def _next_in_split_rotation(
     if not last_family:
         return None
     if lifting_split in (_SPLIT_PPL_NXT, _SPLIT_PPL_UL_NXT):
-        ppl_next = {"push": "pull", "pull": "legs", "legs": "push"}
-        return ppl_next.get(last_family)
+        ppl_set = {"push", "pull", "legs"}
+        if last_family not in ppl_set:
+            return None
+        recent_ppl = [f for f in recent_focus_families if f in ppl_set]
+        # Need 2+ UNIQUE recent PPL entries to determine the user's
+        # rotation pattern. With 2 unique entries, the missing one is
+        # unambiguously "next". With 3, the oldest is "next".
+        unique_recent = []
+        seen_set: set[str] = set()
+        for f in recent_ppl:
+            if f not in seen_set:
+                unique_recent.append(f)
+                seen_set.add(f)
+            if len(unique_recent) >= 3:
+                break
+        if len(unique_recent) >= 2:
+            last_two = set(unique_recent[:2])
+            remaining = ppl_set - last_two
+            if len(remaining) == 1:
+                return remaining.pop()
+        if len(unique_recent) >= 3:
+            return unique_recent[2]
+        # Not enough history to determine a pattern — fall back to
+        # canonical PPL order so cold starts and single-entry histories
+        # produce a predictable rotation.
+        _canonical = {"push": "pull", "pull": "legs", "legs": "push"}
+        return _canonical.get(last_family)
     if lifting_split == _SPLIT_UL_NXT:
         ul_next = {"upper": "lower", "lower": "upper"}
         return ul_next.get(last_family)
@@ -2181,10 +2240,8 @@ def _anchor_recipe_to_split_next(
     completed_today_family: str | None = None,
 ) -> list[DayArchetype]:
     """Rotate `recipe` so day 0 is the EXPECTED next family in the
-    split rotation from the user's last completed lift. If no anchor
-    can be determined (non-PPL/UL split, no recent lift family, or the
-    recipe offers no matching day 0), return the recipe unchanged so
-    downstream rotation passes still run.
+    split rotation from the user's last completed lift, and the
+    internal cycle order matches the user's historical pattern.
 
     When ``completed_today_family`` is set, the user has already
     finished today's workout. Day 0 of the plan maps to today and will
@@ -2205,9 +2262,15 @@ def _anchor_recipe_to_split_next(
     if completed_today_family and completed_today_family in lift_families:
         target = completed_today_family
     else:
-        target = _next_in_split_rotation(last_lift_family, lifting_split)
+        target = _next_in_split_rotation(
+            last_lift_family, lifting_split,
+            recent_focus_families=recent_focus_families,
+        )
     if target is None:
         return recipe
+
+    # Find the shift that places target at day 0.
+    best_cand = None
     for shift in range(len(recipe)):
         cand = recipe[shift:] + recipe[:shift]
         try:
@@ -2215,6 +2278,7 @@ def _anchor_recipe_to_split_next(
         except KeyError:
             continue
         if fam == target:
+            best_cand = cand
             if shift != 0:
                 logger.info(
                     f"[weekly_recipe] split-anchor: last_lift={last_lift_family} "
@@ -2222,8 +2286,62 @@ def _anchor_recipe_to_split_next(
                     f"completed_today={completed_today_family} "
                     f"shift={shift}"
                 )
-            return cand
-    return recipe
+            break
+    if best_cand is None:
+        return recipe
+
+    # For PPL: reorder the internal cycle to match the user's
+    # historical pattern. The base recipe always uses canonical P→Pu→L
+    # order, but the user may have established a different rotation
+    # (e.g. P→L→Pu). Derive the expected day-1 family from history
+    # and swap within each 3-day block if needed.
+    from .day_templates import (
+        SPLIT_PPL as _SPLIT_PPL_ANC,
+        SPLIT_PPL_UL as _SPLIT_PPL_UL_ANC,
+    )
+    ppl_set = {"push", "pull", "legs"}
+    if lifting_split in (_SPLIT_PPL_ANC, _SPLIT_PPL_UL_ANC) and target in ppl_set:
+        # Prepend the target (day 0 family) to history so the
+        # rotation knows day 0 is "taken" and picks the correct day 1.
+        augmented_history = (target,) + tuple(recent_focus_families)
+        expected_day1 = _next_in_split_rotation(
+            target, lifting_split,
+            recent_focus_families=augmented_history,
+        )
+        if expected_day1 and expected_day1 in ppl_set:
+            # Check what day 1 actually is in the anchored recipe.
+            lift_indices = []
+            for i, a in enumerate(best_cand):
+                try:
+                    f = archetype_to_focus_family(a)
+                except KeyError:
+                    continue
+                if f in ppl_set:
+                    lift_indices.append(i)
+            # Swap within each 3-day block: if the 2nd lift family
+            # doesn't match expected_day1, swap it with the 3rd.
+            if len(lift_indices) >= 3:
+                i1, i2 = lift_indices[1], lift_indices[2]
+                try:
+                    fam1 = archetype_to_focus_family(best_cand[i1])
+                except KeyError:
+                    fam1 = None
+                if fam1 != expected_day1:
+                    out = list(best_cand)
+                    # Swap pairs: each (block_pos_1, block_pos_2) in
+                    # both halves of the recipe.
+                    for block_start in range(0, len(lift_indices) - 2, 3):
+                        a_idx = lift_indices[block_start + 1]
+                        b_idx = lift_indices[block_start + 2]
+                        out[a_idx], out[b_idx] = out[b_idx], out[a_idx]
+                    logger.info(
+                        f"[weekly_recipe] ppl-cycle-reorder: "
+                        f"expected_day1={expected_day1} actual={fam1} "
+                        f"swapped within blocks"
+                    )
+                    best_cand = out
+
+    return best_cand
 
 
 def _rotate_recipe_to_avoid_recent(
@@ -2332,8 +2450,17 @@ def _rotate_recipe_to_avoid_recent(
 def _rotate_recipe_for_fatigue(
     recipe: list[DayArchetype],
     muscle_fatigue: dict[str, float],
+    *,
+    ppl_cycle_aware: bool = False,
 ) -> list[DayArchetype]:
-    """Prefer rotations where day 0 targets the freshest muscles."""
+    """Prefer rotations where day 0 targets the freshest muscles.
+
+    When `ppl_cycle_aware=True`, only rotations at PPL family boundaries
+    are considered — this preserves the Push→Pull→Legs ordering within
+    each triplet while still allowing the week to start with whichever
+    family is freshest (e.g. Legs→Push→Pull instead of Push→Pull→Legs
+    when push muscles are fatigued).
+    """
     if not muscle_fatigue or len(recipe) < 2:
         return recipe
 
@@ -2346,13 +2473,28 @@ def _rotate_recipe_for_fatigue(
     best_rotation = recipe
     best_score = -1.0
 
-    for shift in range(len(recipe)):
+    if ppl_cycle_aware:
+        # Only allow shifts at PPL family boundaries. Detect where each
+        # new family cycle starts by tracking family transitions.
+        valid_shifts = [0]
+        families = [archetype_to_focus_family(a) for a in recipe]
+        ppl_set = {"push", "pull", "legs"}
+        for i in range(1, len(recipe)):
+            if families[i] in ppl_set and families[i] != families[i - 1]:
+                # Family changed — this is a valid cycle boundary
+                # Only count it if the previous family was also PPL
+                if families[i - 1] in ppl_set:
+                    valid_shifts.append(i)
+        shifts_to_try = valid_shifts
+    else:
+        shifts_to_try = list(range(len(recipe)))
+
+    for shift in shifts_to_try:
         candidate = recipe[shift:] + recipe[:shift]
         fam = archetype_to_focus_family(candidate[0])
         if not fam:
             continue
         readiness = derive_focus_readiness(mf, fam)
-        # Slight preference for keeping original order (shift=0 gets +0.01 bonus)
         bonus = 0.01 if shift == 0 else 0.0
         if readiness + bonus > best_score:
             best_score = readiness + bonus
@@ -2553,6 +2695,7 @@ def generate_weekly_recipe(
         recipe, recent_focus_families, lifting_split,
         completed_today_family=completed_today_family,
     )
+    _anchor_acted = (recipe != _pre_anchor)
     if not _preserves_split_identity(
         recipe, lifting_split, user_chose_split, baseline=_pre_anchor
     ):
@@ -2560,54 +2703,47 @@ def generate_weekly_recipe(
             f"[weekly_recipe] split-anchor broke split identity — reverting"
         )
         recipe = _pre_anchor
+        _anchor_acted = False
 
     # Avoid scheduling the same focus the user just completed on day 1
-    # of the new week. Runs before the allowed-archetype filter so a
-    # rotated day still passes through the safety check.
-    # Split-identity guard: for PPL / strict-UL users, revert the
-    # rotation if it scrambled the Push→Pull→Legs (or U↔L) cycle. The
-    # rotation pass is cycle-preserving in the common case (it just
-    # picks a shift), but active-recovery inserts or odd day-counts
-    # can make a shift break the cycle — in that case we keep the
-    # original layout rather than ship a scrambled split.
+    # of the new week. Skip when the split-aware anchor already placed
+    # the correct day 0 based on full history — running avoid-recent on
+    # top of an anchored PPL/UL recipe just fights the anchor (all PPL
+    # families appear in the recent list, so avoid-recent rotates day 0
+    # to a non-lift archetype and everything cascades).
     _pre_rotate_recent = list(recipe)
-    # When the user already completed today, today's family is pinned at
-    # day 0 by the anchor. Strip it from the avoidance list so
-    # avoid-recent doesn't try to rotate day 0 away from today's focus.
-    _avoid_recent = rotation_recent
-    if completed_today_family and _avoid_recent:
-        if _avoid_recent[0] == completed_today_family:
-            _avoid_recent = _avoid_recent[1:]
-        elif _avoid_recent[0] in (completed_today_family + "_plus_cardio",
-                                   completed_today_family.replace("_plus_cardio", "")):
-            _avoid_recent = _avoid_recent[1:]
-    recipe = _rotate_recipe_to_avoid_recent(
-        recipe, _avoid_recent, mode=mode,
-    )
-    if not _preserves_split_identity(
-        recipe, lifting_split, user_chose_split, baseline=_pre_rotate_recent
-    ):
-        logger.info(
-            f"[weekly_recipe] rotation broke split identity "
-            f"(split={lifting_split} user_chose_split={user_chose_split}) "
-            f"— reverting {[a.value for a in recipe]} → "
-            f"{[a.value for a in _pre_rotate_recent]}"
+    if not _anchor_acted:
+        _avoid_recent = rotation_recent
+        if completed_today_family and _avoid_recent:
+            if _avoid_recent[0] == completed_today_family:
+                _avoid_recent = _avoid_recent[1:]
+            elif _avoid_recent[0] in (completed_today_family + "_plus_cardio",
+                                       completed_today_family.replace("_plus_cardio", "")):
+                _avoid_recent = _avoid_recent[1:]
+        recipe = _rotate_recipe_to_avoid_recent(
+            recipe, _avoid_recent, mode=mode,
         )
-        recipe = _pre_rotate_recent
+        if not _preserves_split_identity(
+            recipe, lifting_split, user_chose_split, baseline=_pre_rotate_recent
+        ):
+            logger.info(
+                f"[weekly_recipe] rotation broke split identity "
+                f"(split={lifting_split} user_chose_split={user_chose_split}) "
+                f"— reverting {[a.value for a in recipe]} → "
+                f"{[a.value for a in _pre_rotate_recent]}"
+            )
+            recipe = _pre_rotate_recent
     # Fatigue-aware rotation: if user has real muscle fatigue data,
     # prefer starting the week with the freshest focus.
-    #
-    # BUT — skip for PPL splits. PPL has a built-in rotation where each
-    # day pattern targets different muscles, so the recent-focus rotation
-    # above already handles freshness correctly. Running fatigue rotation
-    # on top of a PPL recipe can shift day 0 to a fresh muscle but
-    # scramble the Push→Pull→Legs rotation integrity (e.g. producing
-    # Push→Pull→Push→Pull→Legs instead of the clean P→Pu→L→P→Pu).
+    # For PPL splits, use cycle-aware rotation that only shifts at family
+    # boundaries (preserves P→Pu→L order within each triplet).
     from .day_templates import SPLIT_PPL, SPLIT_PPL_UL
-    skip_fatigue_rotation = lifting_split in (SPLIT_PPL, SPLIT_PPL_UL)
-    if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain") and not skip_fatigue_rotation:
+    _is_ppl_split = lifting_split in (SPLIT_PPL, SPLIT_PPL_UL)
+    if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
         _pre_fatigue = list(recipe)
-        recipe = _rotate_recipe_for_fatigue(recipe, muscle_fatigue)
+        recipe = _rotate_recipe_for_fatigue(
+            recipe, muscle_fatigue, ppl_cycle_aware=_is_ppl_split,
+        )
         if not _preserves_split_identity(
             recipe, lifting_split, user_chose_split, baseline=_pre_fatigue
         ):

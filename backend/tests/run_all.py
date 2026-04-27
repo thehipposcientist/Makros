@@ -71,6 +71,9 @@ _TEST_MODULES = (
     # Completed-today overlay: full-regen day-0 pinning, +Cardio normalization,
     # client overlay simulation across all splits × goals × day counts.
     "tests.test_completed_today_overlay",
+    # User-scenario regression: each test encodes a real user-reported bug
+    # with full history → generate → client overlay → assert correct plan.
+    "tests.test_user_scenario_regression",
     # Switch Day per-split comprehensive — ~20 tests × 5 splits + edge cases.
     "tests.test_switch_day_splits",
     # Switch Day INTEGRATION — pin every position × every focus on
@@ -131,6 +134,18 @@ _TEST_MODULES = (
     # Exercise fatigue: resolve_exercise_fatigue + resolve_focus_fatigue
     # — skipped sets, load factor, stimulus multipliers, PLUS_CARDIO merge.
     "tests.test_exercise_fatigue",
+    # Multi-day fatigue/recovery scenarios — PPL week, back-to-back focus,
+    # recovery day reduction, mixed activity types, injury boost.
+    "tests.test_fatigue_scenarios",
+    # Goal × split × days matrix — all 13 goals, all 5 splits, density
+    # trim scaling, injury/equipment/dislike filtering, focus rotation.
+    "tests.test_planner_matrix",
+    # Nutrition scoring scenarios — adherence, quality sub-scores, recovery
+    # flags, goal-aware weighting, confidence scaling, trend detection.
+    "tests.test_nutrition_scenarios",
+    # Multi-week adaptation + edge cases — overtraining detection, deload
+    # recovery, impossible users, every injury, minimal equipment.
+    "tests.test_adaptation_scenarios",
     # End-to-end HTTP smoke — requires backend running at localhost:8000.
     # Skipped automatically when the server isn't up; see test_api_smoke.py.
     "tests.test_api_smoke",

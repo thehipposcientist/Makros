@@ -294,6 +294,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
 extension Notification.Name {
     static let watchProgressUpdate = Notification.Name("watchProgressUpdate")
+    static let watchWorkoutLaunch = Notification.Name("thallo.watchWorkoutLaunch")
 }
 
 /// Watch-side logger. Prints to the unified log (visible in Mac
