@@ -38,7 +38,8 @@ struct ContentView: View {
             readinessLabel: nil,
             exercises: [],
             warmupSteps: nil,
-            syncedAtMs: Date().timeIntervalSince1970 * 1000
+            syncedAtMs: Date().timeIntervalSince1970 * 1000,
+            userId: nil
         )
     }
 
@@ -53,7 +54,7 @@ struct ContentView: View {
                 dateISO: w.dateISO, status: .scheduled, sessionId: w.sessionId,
                 readiness: w.readiness, readinessLabel: w.readinessLabel,
                 exercises: w.exercises, warmupSteps: w.warmupSteps,
-                syncedAtMs: w.syncedAtMs
+                syncedAtMs: w.syncedAtMs, userId: w.userId
             )
         }
         return w
