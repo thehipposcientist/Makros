@@ -181,6 +181,31 @@ def apply_action(
             changed_fields={"calorie_adjustment": state.calorie_adjustment},
         )
 
+    # ── adjust_calorie_target (signed delta — nutrition review path) ──
+    # Unified alternative to raise_calories / lower_calories: takes a
+    # signed `delta` field so callers don't need to pick the verb.
+    if action_type == "adjust_calorie_target":
+        delta = int(action.get("delta") or 0)
+        if delta == 0:
+            return ApplyResult(applied=True, summary="No calorie change needed.", needs_regen=False, changed_fields={})
+        delta = max(-_MAX_KCAL_DELTA, min(_MAX_KCAL_DELTA, delta))
+        state = _coaching_state(db, user_id)
+        old = state.calorie_adjustment
+        state.calorie_adjustment = old + delta
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply",
+            f"Calorie adjustment {old:+d} → {state.calorie_adjustment:+d} via nutrition review",
+            {"action": action, "delta": delta})
+        db.commit()
+        verb = "Raised" if delta > 0 else "Lowered"
+        return ApplyResult(
+            applied=True,
+            summary=f"{verb} daily calorie target by {abs(delta)} kcal. Takes effect on next plan check.",
+            needs_regen=False,
+            changed_fields={"calorie_adjustment": state.calorie_adjustment},
+        )
+
     # ── hold_calorie_adjustment ─────────────────────────────────────
     if action_type == "hold_calorie_adjustment":
         # No state mutation — the adaptive_macros pass already respects
@@ -252,6 +277,11 @@ def apply_action(
         "rebalance_week": "Acknowledged — the planner will reshuffle remaining days.",
         "strength_preservation": "Logged. We'll protect strength while you adjust calories + volume.",
         "swap_to_recovery_or_reduce": "Pick: swap to recovery (use Switch Day → Recovery) or just go lighter.",
+        # Nutrition review advisory actions — no persistent state yet.
+        "increase_meal_logging": "Logged. Tracking 4+ days/week gives you the most accurate nutrition coaching.",
+        "adjust_meal_timing": "Logged. Spreading meals evenly through the day can help with energy and satiety.",
+        "improve_protein_consistency": "Logged. Try anchoring protein at breakfast — it makes hitting targets easier.",
+        "adjust_protein_target": "Logged. Your protein preference has been noted for next week's plan.",
     }
     if action_type in descriptive:
         _record_memory(db, user_id, "recommendation_acked",

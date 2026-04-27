@@ -56,7 +56,7 @@ export default function PlanSwapExerciseModal({
 
   const candidates = useMemo(() => {
     if (!base || library.length === 0) return [];
-    return rankSwapCandidates(base, library, ownedEquipment, 15);
+    return rankSwapCandidates(base, library, ownedEquipment, 10);
   }, [base, library, ownedEquipment]);
 
   const overlapColor = (pct: number) => {

@@ -27,6 +27,6 @@ struct ThalloWatchApp: App {
 final class AppDelegate: NSObject, WKApplicationDelegate {
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         UserDefaults.standard.set(true, forKey: "thallo.pendingWorkoutLaunch")
-        NotificationCenter.default.post(name: .watchWorkoutLaunch, object: nil)
+        NotificationCenter.default.post(name: .watchWorkoutLaunch, object: workoutConfiguration)
     }
 }

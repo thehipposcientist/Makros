@@ -1207,6 +1207,10 @@ def mark_workout_complete(
             feedback_notes=body.feedback_notes,
         ))
 
+    # Commit the lightweight completion row immediately so that a rollback
+    # in the structured-persistence block below cannot undo it.
+    db.commit()
+
     # Also persist structured per-exercise data if the client sent it.
     # Best-effort: failures here must NOT block the lightweight
     # completion — the user has finished their workout and expects

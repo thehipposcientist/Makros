@@ -395,6 +395,10 @@ def test_recomp_with_gym_no_bodyweight_in_primary_or_secondary() -> None:
             continue
         for ex in d["exercises"]:
             role = ex.get("_role")
+            # Cardio Finisher slot on PLUS_CARDIO days: bodyweight cardio
+            # (HIIT circuit, hill sprints) is correct output — not a violation.
+            if ex.get("_slot") == "Cardio Finisher":
+                continue
             if role in ("primary", "secondary") and _is_bodyweight_pick(ex.get("_slug", "")):
                 bw_violations.append(f"{d['day']}/{ex['_slot']}: {ex['name']}")
 

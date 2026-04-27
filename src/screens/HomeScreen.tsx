@@ -4738,7 +4738,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : schedule;
   const mealDays = getNextMealDays(7);
 
-  const isLightTheme = ['sunrise', 'arctic', 'rose', 'parchment', 'meadow', 'steel', 'sand', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'cloud'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'arctic', 'parchment', 'steel', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'paper', 'frost', 'clay', 'sage'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -6910,39 +6910,49 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
         const allThemes: ThemeEntry[] = [
           // Dark themes (bg is dark, most ink is light)
-          { key: 'midnight', label: 'Midnight', swatch: '#15C7B8', mode: 'dark' },
-          { key: 'ocean',    label: 'Ocean',    swatch: '#00CCE8', mode: 'dark' },
-          { key: 'amethyst', label: 'Amethyst', swatch: '#A060FF', mode: 'dark' },
-          { key: 'ember',    label: 'Ember',    swatch: '#FF6018', mode: 'dark' },
-          { key: 'forest',   label: 'Forest',   swatch: '#3AA860', mode: 'dark' },
-          { key: 'wine',     label: 'Wine',     swatch: '#C82848', mode: 'dark' },
-          { key: 'obsidian', label: 'Obsidian', swatch: '#888888', mode: 'dark' },
-          { key: 'neon',     label: 'Neon',     swatch: '#00FF88', mode: 'dark' },
-          { key: 'citrus',   label: 'Citrus',   swatch: '#FFD700', mode: 'dark' },
-          { key: 'scarlet',  label: 'Scarlet',  swatch: '#DC143C', mode: 'dark' },
-          { key: 'cocoa',    label: 'Cocoa',    swatch: '#8B4513', mode: 'dark' },
-          { key: 'slate',    label: 'Slate',    swatch: '#F07848', mode: 'dark' },
-          { key: 'blossom',  label: 'Blossom',  swatch: '#FF1890', mode: 'dark' },
-          { key: 'void',     label: 'Void',     swatch: '#6A0DAD', mode: 'dark' },
-          { key: 'dusk',     label: 'Dusk',     swatch: '#FF6F61', mode: 'dark' },
-          { key: 'lavender', label: 'Lavender', swatch: '#B57EDC', mode: 'dark' },
-          { key: 'aurora',   label: 'Aurora',   swatch: '#00CED1', mode: 'dark' },
-          { key: 'copper',   label: 'Copper',   swatch: '#B87333', mode: 'dark' },
-          { key: 'storm',    label: 'Storm',    swatch: '#4F5D75', mode: 'dark' },
-          // Light themes (bg is light, most ink is dark)
+          // Dark themes
+          { key: 'midnight',  label: 'Midnight',  swatch: '#15C7B8', mode: 'dark' },
+          { key: 'ocean',     label: 'Ocean',     swatch: '#00CCE8', mode: 'dark' },
+          { key: 'amethyst',  label: 'Amethyst',  swatch: '#9838F8', mode: 'dark' },
+          { key: 'ember',     label: 'Ember',     swatch: '#FF6018', mode: 'dark' },
+          { key: 'wine',      label: 'Wine',      swatch: '#C82848', mode: 'dark' },
+          { key: 'obsidian',  label: 'Obsidian',  swatch: '#C09428', mode: 'dark' },
+          { key: 'neon',      label: 'Neon',      swatch: '#FF18CC', mode: 'dark' },
+          { key: 'citrus',    label: 'Citrus',    swatch: '#AADD00', mode: 'dark' },
+          { key: 'scarlet',   label: 'Scarlet',   swatch: '#FF2020', mode: 'dark' },
+          { key: 'cocoa',     label: 'Cocoa',     swatch: '#C04828', mode: 'dark' },
+          { key: 'blossom',   label: 'Blossom',   swatch: '#FF1890', mode: 'dark' },
+          { key: 'void',      label: 'Void',      swatch: '#4C9EFF', mode: 'dark' },
+          { key: 'dusk',      label: 'Dusk',      swatch: '#E8A878', mode: 'dark' },
+          { key: 'lavender',  label: 'Lavender',  swatch: '#B898E0', mode: 'dark' },
+          { key: 'aurora',    label: 'Aurora',    swatch: '#40E8A0', mode: 'dark' },
+          // Slate-formula: tinted bg + cross-hue primary
+          { key: 'slate',     label: 'Slate',     swatch: '#F07848', mode: 'dark' },
+          { key: 'ash',       label: 'Ash',       swatch: '#48A8FF', mode: 'dark' },
+          { key: 'jade',      label: 'Jade',      swatch: '#F0B030', mode: 'dark' },
+          { key: 'cosmos',    label: 'Cosmos',    swatch: '#FF8C30', mode: 'dark' },
+          { key: 'iron',      label: 'Iron',      swatch: '#F0A030', mode: 'dark' },
+          { key: 'driftwood', label: 'Driftwood', swatch: '#3890FF', mode: 'dark' },
+          { key: 'pine',      label: 'Pine',      swatch: '#FF7848', mode: 'dark' },
+          { key: 'bronze',    label: 'Bronze',    swatch: '#8060F8', mode: 'dark' },
+          { key: 'plum',      label: 'Plum',      swatch: '#90D818', mode: 'dark' },
+          { key: 'rust',      label: 'Rust',      swatch: '#38C0F0', mode: 'dark' },
+          // Light themes
           { key: 'arctic',    label: 'Arctic',    swatch: '#2474C8', mode: 'light' },
           { key: 'sunrise',   label: 'Sunrise',   swatch: '#F28C28', mode: 'light' },
           { key: 'parchment', label: 'Parchment', swatch: '#7C4F2A', mode: 'light' },
-          { key: 'meadow',    label: 'Meadow',    swatch: '#2A8048', mode: 'light' },
-          { key: 'rose',      label: 'Rose',      swatch: '#A83860', mode: 'light' },
           { key: 'steel',     label: 'Steel',     swatch: '#3A5BC8', mode: 'light' },
-          { key: 'sand',      label: 'Sand',      swatch: '#C06030', mode: 'light' },
           { key: 'linen',     label: 'Linen',     swatch: '#6A8030', mode: 'light' },
           { key: 'mint',      label: 'Mint',      swatch: '#0E8078', mode: 'light' },
           { key: 'butter',    label: 'Butter',    swatch: '#C07608', mode: 'light' },
-          { key: 'seaglass',  label: 'Seaglass',  swatch: '#137A78', mode: 'light' },
+          { key: 'seaglass',  label: 'Seaglass',  swatch: '#B5202A', mode: 'light' },
           { key: 'lilac',     label: 'Lilac',     swatch: '#6B3AA8', mode: 'light' },
-          { key: 'cloud',     label: 'Cloud',     swatch: '#3068A8', mode: 'light' },
+          { key: 'sky',       label: 'Sky',       swatch: '#0E7AB8', mode: 'light' },
+          { key: 'paper',     label: 'Paper',     swatch: '#1F2933', mode: 'light' },
+          // Light combo: tinted bg + cross-hue primary
+          { key: 'frost',     label: 'Frost',     swatch: '#E06830', mode: 'light' },
+          { key: 'clay',      label: 'Clay',      swatch: '#2870CC', mode: 'light' },
+          { key: 'sage',      label: 'Sage',      swatch: '#C87820', mode: 'light' },
         ];
         const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
         const darkThemes = visibleThemes.filter(t => t.mode === 'dark');

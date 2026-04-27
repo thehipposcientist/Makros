@@ -1,14 +1,16 @@
 export type AppThemeName =
-  | 'midnight' | 'neon'    | 'ocean'   | 'forest'
+  | 'midnight' | 'neon'    | 'ocean'   | 'scarlet'
   | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
-  | 'citrus'              | 'cocoa'   | 'slate'
-  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
-  | 'parchment'| 'meadow'
-  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
-  | 'aurora'   | 'copper'  | 'storm'
-  | 'linen'    | 'mint'
-  | 'butter'   | 'seaglass' | 'lilac' | 'cloud'
-  | 'paper'    | 'sky'      | 'sage';
+  | 'citrus'   | 'cocoa'   | 'blossom'
+  | 'void'     | 'dusk'    | 'lavender'| 'aurora'
+  | 'sunrise'  | 'arctic'  | 'steel'
+  | 'parchment'| 'linen'   | 'mint'
+  | 'butter'   | 'seaglass' | 'lilac'
+  | 'paper'    | 'sky'
+  | 'slate'    | 'ash'     | 'jade'    | 'cosmos'
+  | 'iron'     | 'driftwood'| 'pine'   | 'bronze'
+  | 'plum'     | 'rust'
+  | 'frost'    | 'clay'    | 'sage';
 
 export interface ThemeColors {
   background: string;
@@ -340,35 +342,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
 
   // ── MEDIUM DARK ──────────────────────────────────────────────────────────────
 
-  forest: {
-    // UNCHANGED. Dark woodland-green bg, emerald primary, clay accent.
-    name: 'forest',
-    label: 'Forest Run',
-    description: 'Deep woodland-green background with emerald primary and earthy amber.',
-    colors: {
-      background:    '#081008',
-      surface:       '#101A10',
-      surfaceRaised: '#182818',
-      border:        '#283E28',
-      primary:       '#2ECC60',
-      primaryDark:   '#1E9840',
-      primaryLight:  '#88E8A8',
-      accent:        '#E8B848',
-      textPrimary:   '#F0F8F0',
-      textSecondary: '#A8C8A8',
-      textMuted:     '#70906A',
-      error:         '#FF6060',
-      warning:       '#F6C453',
-      success:       '#2ECC60',
-    },
-    sections: {
-      workout: { soft: '#102030', strong: '#4898D8', text: '#A0C8F0' },  // sky blue
-      meals:   { soft: '#143018', strong: '#2ECC60', text: '#A0F0B8' },  // EMERALD
-      ai:      { soft: '#141828', strong: '#5060C8', text: '#A0A8F0' },  // forest violet
-      planner: { soft: '#202A10', strong: '#E8B848', text: '#F8DCA0' },
-      account: { soft: '#1E1A08', strong: '#D0A030', text: '#F0D070' },
-    },
-  },
 
   cocoa: {
     // CHANGED: primary shifted from golden-caramel to terracotta-sienna (#C04828).
@@ -495,36 +468,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  rose: {
-    // MINOR CHANGE: primary shifted to a slightly more dusty/muted tone (#A83860 vs #B83462).
-    // Stays light blush — soft, romantic, elegant. Blossom now handles the bold/dark pink lane.
-    name: 'rose',
-    label: 'Rose Quartz',
-    description: 'Soft blush with dusty rose primary and gold — delicate, romantic, understated.',
-    colors: {
-      background:    '#FFF2F6',
-      surface:       '#FFFFFF',
-      surfaceRaised: '#FDE8F0',
-      border:        '#EDB8CC',
-      primary:       '#A83860',  // dusty rose (slightly more muted than before)
-      primaryDark:   '#802040',
-      primaryLight:  '#D88AAC',
-      accent:        '#B87840',  // warm sand-gold
-      textPrimary:   '#280818',
-      textSecondary: '#682440',
-      textMuted:     '#A06880',
-      error:         '#CC2244',
-      warning:       '#B07000',
-      success:       '#207840',
-    },
-    sections: {
-      workout: { soft: '#E0E4FF', strong: '#5058C8', text: '#181888' },  // periwinkle
-      meals:   { soft: '#D4F0E0', strong: '#207840', text: '#0A4018' },  // sage green
-      ai:      { soft: '#FFE0EC', strong: '#A83860', text: '#660030' },  // ROSE
-      planner: { soft: '#FFF0E0', strong: '#B87840', text: '#684818' },
-      account: { soft: '#FFDCE8', strong: '#902050', text: '#560020' },
-    },
-  },
 
   blossom: {
     // REDESIGNED: was light pink-white (too similar to Rose).
@@ -590,36 +533,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  meadow: {
-    name: 'meadow',
-    label: 'Meadow Fresh',
-    description: 'Crisp white background with vibrant grass-green primary — fresh, clean, outdoorsy.',
-    colors: {
-      // Greener tints across the board — user wanted "more green" instead
-      // of the old slightly-washed-out off-white feel.
-      background:    '#EBF7EE',
-      surface:       '#FFFFFF',
-      surfaceRaised: '#D6EFDD',
-      border:        '#9CC8A6',
-      primary:       '#1F7A3C',  // deeper grass-green
-      primaryDark:   '#0F5024',
-      primaryLight:  '#5CC480',
-      accent:        '#E07830',  // warm terracotta contrast
-      textPrimary:   '#06200C',
-      textSecondary: '#1F5230',
-      textMuted:     '#558C66',
-      error:         '#CC2E28',
-      warning:       '#AC6800',
-      success:       '#1F7A3C',
-    },
-    sections: {
-      workout: { soft: '#CFEAD8', strong: '#1F7A3C', text: '#06200C' },  // GRASS GREEN
-      meals:   { soft: '#DDF1D4', strong: '#2E9450', text: '#0F5024' },  // EMERALD
-      ai:      { soft: '#E4EEFF', strong: '#3858C8', text: '#102080' },  // blue
-      planner: { soft: '#FFF0E4', strong: '#E07830', text: '#6A2E08' },
-      account: { soft: '#E6F5EA', strong: '#1F7A3C', text: '#06200C' },
-    },
-  },
 
   // ── NEW THEMES ───────────────────────────────────────────────────────────────
 
@@ -713,36 +626,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  sand: {
-    // Warm neutral light — desert sand tones with terracotta and sage.
-    name: 'sand',
-    label: 'Desert Sand',
-    description: 'Warm sandy beige with terracotta primary and sage green — earthy, warm, inviting.',
-    colors: {
-      background:    '#F8F2EA',
-      surface:       '#FFFCF8',
-      surfaceRaised: '#F0E6D8',
-      border:        '#D8C8B0',
-      primary:       '#C06030',  // terracotta
-      primaryDark:   '#984018',
-      primaryLight:  '#E09060',
-      accent:        '#608050',  // sage green
-      textPrimary:   '#2A2018',
-      textSecondary: '#6A5440',
-      textMuted:     '#A08868',
-      error:         '#C03030',
-      warning:       '#B87800',
-      success:       '#408840',
-    },
-    sections: {
-      workout: { soft: '#F0E0D0', strong: '#C06030', text: '#702808' },   // TERRACOTTA
-      meals:   { soft: '#DCE8D4', strong: '#608050', text: '#2A4020' },   // SAGE
-      ai:      { soft: '#E8E0F0', strong: '#7858A8', text: '#382068' },   // dusty violet
-      planner: { soft: '#F8ECD4', strong: '#C08830', text: '#684010' },
-      account: { soft: '#F0E4D4', strong: '#A06838', text: '#583010' },
-    },
-  },
-
   lavender: {
     // Soft pastel dark — dark with muted lavender, mint, and rose. Cozy and calming.
     name: 'lavender',
@@ -805,65 +688,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  copper: {
-    // Warm industrial — charcoal-brown base with rich copper, burnished gold, and warm cream.
-    name: 'copper',
-    label: 'Burnished Copper',
-    description: 'Charcoal-brown with rich copper and burnished gold — warm, industrial, bold.',
-    colors: {
-      background:    '#0E0C0A',
-      surface:       '#181410',
-      surfaceRaised: '#24201A',
-      border:        '#383028',
-      primary:       '#D88040',  // copper
-      primaryDark:   '#B06028',
-      primaryLight:  '#F0A868',
-      accent:        '#E8C048',  // burnished gold
-      textPrimary:   '#F0E8E0',
-      textSecondary: '#B8A898',
-      textMuted:     '#786858',
-      error:         '#E85848',
-      warning:       '#E8A830',
-      success:       '#68B860',
-    },
-    sections: {
-      workout: { soft: '#201810', strong: '#D88040', text: '#F0B078' },   // COPPER
-      meals:   { soft: '#141C10', strong: '#88B848', text: '#B8D878' },   // OLIVE GREEN
-      ai:      { soft: '#201418', strong: '#C86070', text: '#E89098' },   // DUSTY ROSE
-      planner: { soft: '#201C10', strong: '#E8C048', text: '#F0D888' },   // GOLD
-      account: { soft: '#181410', strong: '#C89060', text: '#E0B888' },
-    },
-  },
-
-  storm: {
-    // Electric storm — dark slate with electric blue-white lightning, cool grays, and sharp cyan.
-    name: 'storm',
-    label: 'Thunderstorm',
-    description: 'Dark slate with electric blue-white highlights — charged, sharp, powerful.',
-    colors: {
-      background:    '#0A0C10',
-      surface:       '#12151C',
-      surfaceRaised: '#1C2028',
-      border:        '#2C3040',
-      primary:       '#70A8F8',  // lightning blue
-      primaryDark:   '#4880D0',
-      primaryLight:  '#A0C8F8',
-      accent:        '#E0E8F8',  // bright white-blue
-      textPrimary:   '#E8ECF4',
-      textSecondary: '#98A4B8',
-      textMuted:     '#586474',
-      error:         '#F06068',
-      warning:       '#E8B040',
-      success:       '#50C878',
-    },
-    sections: {
-      workout: { soft: '#101828', strong: '#70A8F8', text: '#A0C8F8' },   // LIGHTNING BLUE
-      meals:   { soft: '#0C1818', strong: '#48B8B8', text: '#88D8D8' },   // STORM TEAL
-      ai:      { soft: '#181020', strong: '#9880D8', text: '#C0A8F0' },   // ELECTRIC PURPLE
-      planner: { soft: '#101418', strong: '#6890C0', text: '#98B8E0' },   // SLATE BLUE
-      account: { soft: '#181418', strong: '#A888C0', text: '#C8B0D8' },
-    },
-  },
 
   // ── LIGHT / NEW ──────────────────────────────────────────────────────────────
 
@@ -1023,43 +847,10 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  cloud: {
-    // Replaced 'cloud' (cool blue-gray) with a deep, warm orange theme.
-    // The 'cloud' key is preserved so existing user themePreference
-    // values still load — only the colors and label changed.
-    name: 'cloud',
-    label: 'Ember',
-    description: 'Warm cream background with deep ember orange and amber accents — bold, vibrant, energetic.',
-    colors: {
-      background:    '#FFF4E8',
-      surface:       '#FFFFFF',
-      surfaceRaised: '#FCE0C8',
-      border:        '#E8B080',
-      primary:       '#C24A0A',  // deep ember orange
-      primaryDark:   '#8C2C00',
-      primaryLight:  '#F0894A',
-      accent:        '#7A4810',  // rich amber contrast
-      textPrimary:   '#2A1006',
-      textSecondary: '#5C2C10',
-      textMuted:     '#9A6840',
-      error:         '#A82820',
-      warning:       '#B07820',
-      success:       '#1C7850',
-    },
-    sections: {
-      workout: { soft: '#FBD2B0', strong: '#C24A0A', text: '#2A1006' },
-      meals:   { soft: '#FCE6BC', strong: '#A86810', text: '#3A1E04' },
-      ai:      { soft: '#E8E0F0', strong: '#7040B0', text: '#2A0858' },
-      planner: { soft: '#FFE0CC', strong: '#D45820', text: '#4A1A04' },
-      account: { soft: '#FCE2D0', strong: '#C24A0A', text: '#2A1006' },
-    },
-  },
-
-  // ── LIGHT / NEW (paper, sky, sage) ──────────────────────────────────────────
-  // Three additions that fill genuine hue gaps in the light catalog:
+  // ── LIGHT / NEW (paper, sky) ────────────────────────────────────────────────
+  // Two additions that fill genuine hue gaps in the light catalog:
   //   • paper — the only true monochrome / minimalist light theme
   //   • sky   — vivid sky-blue (arctic is navy, steel is steel-blue)
-  //   • sage  — muted eucalyptus (meadow is grass-green, mint is teal)
 
   paper: {
     name: 'paper',
@@ -1119,32 +910,367 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  sage: {
-    name: 'sage',
-    label: 'Sage Garden',
-    description: 'Pale eucalyptus background with deep sage primary and warm clay accent — calm, grounded, herbal.',
+  // ── LIGHT COMBO (tinted background × contrasting cross-hue primary) ──────────
+
+  frost: {
+    name: 'frost',
+    label: 'Frost & Coral',
+    description: 'Silver-blue tinted background with warm coral-orange primary — the light-mode Slate.',
     colors: {
-      background:    '#EEF3EB',
-      surface:       '#FFFFFF',
-      surfaceRaised: '#DDE8D8',
-      border:        '#B0C4A8',
-      primary:       '#3F6E48',  // deep sage-forest
-      primaryDark:   '#224830',
-      primaryLight:  '#78A082',
-      accent:        '#C4683A',  // warm clay
-      textPrimary:   '#142010',
-      textSecondary: '#38503C',
-      textMuted:     '#6A8068',
-      error:         '#C43030',
-      warning:       '#B07000',
-      success:       '#3F6E48',
+      background:    '#E4EBF4',
+      surface:       '#F4F8FF',
+      surfaceRaised: '#D8E4F0',
+      border:        '#B0C4DC',
+      primary:       '#E06830',  // warm coral-orange
+      primaryDark:   '#B84818',
+      primaryLight:  '#F09870',
+      accent:        '#2878CC',  // cool cobalt complement
+      textPrimary:   '#1C2030',
+      textSecondary: '#3A5068',
+      textMuted:     '#6080A0',
+      error:         '#CC2E3C',
+      warning:       '#B07800',
+      success:       '#1A8A54',
     },
     sections: {
-      workout: { soft: '#D0E0CC', strong: '#3F6E48', text: '#142010' },  // sage
-      meals:   { soft: '#F0DCC8', strong: '#C4683A', text: '#4A1E08' },  // clay
-      ai:      { soft: '#E4DFEE', strong: '#6A4A98', text: '#28104A' },  // dusty violet
-      planner: { soft: '#F0E0C0', strong: '#A07020', text: '#503010' },  // amber
-      account: { soft: '#F0DCDC', strong: '#B05058', text: '#48181C' },  // muted rose
+      workout: { soft: '#CCE0F0', strong: '#2878CC', text: '#0A2850' },  // cobalt blue
+      meals:   { soft: '#FFE4D0', strong: '#E06830', text: '#5A1808' },  // CORAL
+      ai:      { soft: '#E4E0F4', strong: '#5848A8', text: '#1C0860' },  // slate-violet
+      planner: { soft: '#F8ECD0', strong: '#C07820', text: '#5A3808' },  // amber
+      account: { soft: '#D8ECE0', strong: '#1A7860', text: '#063028' },  // teal
+    },
+  },
+
+  clay: {
+    name: 'clay',
+    label: 'Clay & Cobalt',
+    description: 'Warm terracotta-tinted background with cobalt-blue primary — earthy warm panels, cool header.',
+    colors: {
+      background:    '#F5EAE0',
+      surface:       '#FEF8F0',
+      surfaceRaised: '#EEE0D0',
+      border:        '#D4BEA4',
+      primary:       '#2870CC',  // cobalt blue
+      primaryDark:   '#1A4898',
+      primaryLight:  '#68A0E8',
+      accent:        '#D06830',  // warm coral
+      textPrimary:   '#1C1408',
+      textSecondary: '#4A3820',
+      textMuted:     '#806040',
+      error:         '#CC2E30',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#D0E4F8', strong: '#2870CC', text: '#0A2858' },  // COBALT
+      meals:   { soft: '#FFE4D0', strong: '#D06830', text: '#5A2008' },  // clay coral
+      ai:      { soft: '#EAE0F4', strong: '#6848B8', text: '#2A1068' },  // violet
+      planner: { soft: '#F4E8D0', strong: '#A87830', text: '#5A3C08' },  // warm amber
+      account: { soft: '#D4E8F0', strong: '#1A6898', text: '#063048' },  // ocean blue
+    },
+  },
+
+  sage: {
+    name: 'sage',
+    label: 'Sage & Amber',
+    description: 'Sage-green tinted background with warm amber-gold primary — cool green panels, golden header.',
+    colors: {
+      background:    '#E4EFE8',
+      surface:       '#F4FBF6',
+      surfaceRaised: '#D4E8DC',
+      border:        '#A8CCBC',
+      primary:       '#C87820',  // warm amber-gold
+      primaryDark:   '#9A5808',
+      primaryLight:  '#E8A850',
+      accent:        '#D03848',  // crimson contrast
+      textPrimary:   '#0C1E10',
+      textSecondary: '#2C5238',
+      textMuted:     '#5A7860',
+      error:         '#CC2830',
+      warning:       '#B07800',
+      success:       '#1A8A54',
+    },
+    sections: {
+      workout: { soft: '#CCE8D8', strong: '#1A7848', text: '#063020' },  // deep sage
+      meals:   { soft: '#FBE8C0', strong: '#C87820', text: '#5A3008' },  // AMBER
+      ai:      { soft: '#E0E4F0', strong: '#3858A8', text: '#102058' },  // blue-slate
+      planner: { soft: '#FAE8C8', strong: '#B87018', text: '#522808' },  // gold
+      account: { soft: '#F8DCD8', strong: '#C03040', text: '#4A0818' },  // crimson
+    },
+  },
+
+  // ── SLATE-STYLE (medium-dark colored background × contrasting primary) ────────
+
+  ash: {
+    // Warm charcoal background with electric sky-blue primary — inverted Slate
+    // logic. Every other warm dark (Ember, Copper, Cocoa) has a warm primary;
+    // Ash flips it: warm ash bg × vivid cool primary.
+    name: 'ash',
+    label: 'Ash & Sky',
+    description: 'Warm charcoal panels with electric sky-blue primary — clean, modern, two-color contrast.',
+    colors: {
+      background:    '#1C1916',  // warm charcoal — brown-tinged dark
+      surface:       '#252018',
+      surfaceRaised: '#302C24',
+      border:        '#453E34',
+      primary:       '#48A8FF',  // electric sky blue
+      primaryDark:   '#2880D8',
+      primaryLight:  '#88C8FF',
+      accent:        '#FF9840',  // warm amber pop
+      textPrimary:   '#F4F0E8',
+      textSecondary: '#B8A890',
+      textMuted:     '#786858',
+      error:         '#FF4848',
+      warning:       '#F0A820',
+      success:       '#50C070',
+    },
+    sections: {
+      workout: { soft: '#141C2A', strong: '#48A8FF', text: '#A0CCFF' },  // SKY BLUE
+      meals:   { soft: '#1C2C18', strong: '#60B858', text: '#98D888' },  // olive green
+      ai:      { soft: '#181228', strong: '#9870E8', text: '#C8A8FF' },  // soft violet
+      planner: { soft: '#241C08', strong: '#F0A820', text: '#F8CE78' },  // amber
+      account: { soft: '#1C1410', strong: '#D07840', text: '#F0A878' },
+    },
+  },
+
+  jade: {
+    // Deep jungle-green background with warm gold primary — same dark-green
+    // territory as Forest but with a cross-hue contrast instead of matching
+    // greens. The gold-on-jade story is immediately distinct.
+    name: 'jade',
+    label: 'Jade & Gold',
+    description: 'Deep jungle-green panels with warm gold primary — lush, rich, two-color contrast.',
+    colors: {
+      background:    '#0C1E16',  // deep jade-forest
+      surface:       '#142C20',
+      surfaceRaised: '#1E3A2A',
+      border:        '#2C5038',
+      primary:       '#F0B030',  // warm gold
+      primaryDark:   '#C08810',
+      primaryLight:  '#F8D880',
+      accent:        '#50D8A0',  // jade mint
+      textPrimary:   '#E8F8F0',
+      textSecondary: '#90C0A8',
+      textMuted:     '#508070',
+      error:         '#F06060',
+      warning:       '#E8A830',
+      success:       '#40D888',
+    },
+    sections: {
+      workout: { soft: '#0E2818', strong: '#50D8A0', text: '#90F0C8' },  // jade mint
+      meals:   { soft: '#201A08', strong: '#F0B030', text: '#F8D880' },  // GOLD
+      ai:      { soft: '#100C28', strong: '#8060E0', text: '#C0A0FF' },  // violet
+      planner: { soft: '#181E10', strong: '#78C040', text: '#B0E078' },  // lime
+      account: { soft: '#1C100C', strong: '#E06050', text: '#F8A090' },
+    },
+  },
+
+  cosmos: {
+    // Deep indigo background — visibly blue-purple, not near-black — with warm
+    // amber primary. True complementary contrast (indigo + orange).
+    // Different from Amethyst (violet-black + grape primary) and Dusk
+    // (navy-purple + warm peach). Cosmos has the most saturated bg color.
+    name: 'cosmos',
+    label: 'Cosmos',
+    description: 'Deep indigo panels with warm amber primary — complementary contrast, space-depth atmosphere.',
+    colors: {
+      background:    '#0E1228',  // deep indigo — clearly blue-purple
+      surface:       '#141A38',
+      surfaceRaised: '#1E2448',
+      border:        '#2C3860',
+      primary:       '#FF8C30',  // warm amber-orange
+      primaryDark:   '#CC6010',
+      primaryLight:  '#FFB870',
+      accent:        '#90B8FF',  // cool periwinkle
+      textPrimary:   '#E8ECFF',
+      textSecondary: '#98A8D0',
+      textMuted:     '#5060A0',
+      error:         '#F05870',
+      warning:       '#E8B040',
+      success:       '#48C878',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#70A0F8', text: '#A8C8FF' },  // periwinkle blue
+      meals:   { soft: '#1A1408', strong: '#FF8C30', text: '#FFB870' },  // AMBER
+      ai:      { soft: '#160C30', strong: '#A070E8', text: '#D0A8FF' },  // cosmos violet
+      planner: { soft: '#141828', strong: '#90B8FF', text: '#C8D8FF' },  // ice blue
+      account: { soft: '#181028', strong: '#C880FF', text: '#E8B8FF' },  // lilac
+    },
+  },
+
+  // ── SLATE-FORMULA: medium-dark tinted bg + cross-hue primary ─────────────────
+
+  iron: {
+    name: 'iron',
+    label: 'Iron & Amber',
+    description: 'Purple-grey panels with warm amber primary — cool-toned base, golden header glow.',
+    colors: {
+      background:    '#1C1A28',
+      surface:       '#26243A',
+      surfaceRaised: '#303050',
+      border:        '#424068',
+      primary:       '#F0A030',
+      primaryDark:   '#C07818',
+      primaryLight:  '#F8C870',
+      accent:        '#786AE8',
+      textPrimary:   '#EEE8FF',
+      textSecondary: '#A89CC8',
+      textMuted:     '#6860A0',
+      error:         '#F05870',
+      warning:       '#F0A030',
+      success:       '#40C878',
+    },
+    sections: {
+      workout: { soft: '#181428', strong: '#786AE8', text: '#C0B8FF' },  // violet
+      meals:   { soft: '#201408', strong: '#F0A030', text: '#F8C870' },  // AMBER
+      ai:      { soft: '#1E1408', strong: '#F0A030', text: '#F8C870' },  // amber
+      planner: { soft: '#141028', strong: '#786AE8', text: '#C0B8FF' },  // violet
+      account: { soft: '#1A1030', strong: '#A090F8', text: '#D0C8FF' },  // periwinkle
+    },
+  },
+
+  driftwood: {
+    name: 'driftwood',
+    label: 'Driftwood & Blue',
+    description: 'Warm taupe-grey panels with electric blue primary — earthy base, cool header tint.',
+    colors: {
+      background:    '#201C18',
+      surface:       '#2C2822',
+      surfaceRaised: '#38322C',
+      border:        '#504840',
+      primary:       '#3890FF',
+      primaryDark:   '#1060D0',
+      primaryLight:  '#80BCFF',
+      accent:        '#FF8840',
+      textPrimary:   '#FFF4EC',
+      textSecondary: '#C8B8A8',
+      textMuted:     '#907868',
+      error:         '#F05858',
+      warning:       '#F0A030',
+      success:       '#40C878',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#3890FF', text: '#90C8FF' },  // BLUE
+      meals:   { soft: '#201408', strong: '#FF8840', text: '#FFBB80' },  // ORANGE
+      ai:      { soft: '#101828', strong: '#3890FF', text: '#90C8FF' },  // blue
+      planner: { soft: '#182028', strong: '#60A8FF', text: '#A8D0FF' },  // sky
+      account: { soft: '#1A1208', strong: '#FF8840', text: '#FFBB80' },  // orange
+    },
+  },
+
+  pine: {
+    name: 'pine',
+    label: 'Pine & Coral',
+    description: 'Deep forest green-grey panels with warm coral-orange primary — cool-green base, sunset header.',
+    colors: {
+      background:    '#122018',
+      surface:       '#1C2E22',
+      surfaceRaised: '#263A2C',
+      border:        '#385040',
+      primary:       '#FF7848',
+      primaryDark:   '#C84E28',
+      primaryLight:  '#FFB090',
+      accent:        '#30D880',
+      textPrimary:   '#ECFFF4',
+      textSecondary: '#98C8A8',
+      textMuted:     '#508060',
+      error:         '#F05870',
+      warning:       '#F0A830',
+      success:       '#30D880',
+    },
+    sections: {
+      workout: { soft: '#0E2018', strong: '#30D880', text: '#90ECC0' },  // MINT
+      meals:   { soft: '#221208', strong: '#FF7848', text: '#FFB090' },  // CORAL
+      ai:      { soft: '#221208', strong: '#FF7848', text: '#FFB090' },  // coral
+      planner: { soft: '#101E18', strong: '#30D880', text: '#90ECC0' },  // mint
+      account: { soft: '#0E2018', strong: '#40D890', text: '#A0EEC8' },  // seafoam
+    },
+  },
+
+  plum: {
+    name: 'plum',
+    label: 'Plum & Lime',
+    description: 'Medium deep-plum panels with electric acid-lime primary — rich purple base, neon header pop.',
+    colors: {
+      background:    '#1E1028',
+      surface:       '#281438',
+      surfaceRaised: '#342050',
+      border:        '#4A2E70',
+      primary:       '#90D818',  // electric acid-lime
+      primaryDark:   '#60A808',
+      primaryLight:  '#C0F050',
+      accent:        '#FF5888',  // vivid pink
+      textPrimary:   '#F8F0FF',
+      textSecondary: '#B890D0',
+      textMuted:     '#786098',
+      error:         '#F05870',
+      warning:       '#E8B030',
+      success:       '#48C870',
+    },
+    sections: {
+      workout: { soft: '#181030', strong: '#786AE8', text: '#C0B8FF' },  // violet
+      meals:   { soft: '#1A2808', strong: '#90D818', text: '#C8F060' },  // ACID LIME
+      ai:      { soft: '#2A0830', strong: '#FF5888', text: '#FFB0D0' },  // pink
+      planner: { soft: '#1A0A28', strong: '#B068F0', text: '#E0B8FF' },  // purple
+      account: { soft: '#1C1030', strong: '#A080E8', text: '#D0C0FF' },  // lavender
+    },
+  },
+
+  rust: {
+    name: 'rust',
+    label: 'Rust & Ice',
+    description: 'Medium rust-brown panels with ice-blue primary — earthy warm base, cool header tint.',
+    colors: {
+      background:    '#221610',
+      surface:       '#2E1E16',
+      surfaceRaised: '#3A2820',
+      border:        '#584030',
+      primary:       '#38C0F0',  // ice electric blue
+      primaryDark:   '#1890C8',
+      primaryLight:  '#78D8F8',
+      accent:        '#FF8030',  // warm orange pop
+      textPrimary:   '#F8F0EC',
+      textSecondary: '#C0A890',
+      textMuted:     '#886858',
+      error:         '#F05050',
+      warning:       '#F0A030',
+      success:       '#50C070',
+    },
+    sections: {
+      workout: { soft: '#101828', strong: '#38C0F0', text: '#90E0F8' },  // ICE BLUE
+      meals:   { soft: '#281408', strong: '#FF8030', text: '#FFBA80' },  // ORANGE
+      ai:      { soft: '#101828', strong: '#5098D8', text: '#A0C8F0' },  // sky
+      planner: { soft: '#182028', strong: '#60B0F0', text: '#A8D8FF' },  // azure
+      account: { soft: '#221608', strong: '#E07030', text: '#F0A870' },  // rust-orange
+    },
+  },
+
+  bronze: {
+    name: 'bronze',
+    label: 'Bronze & Violet',
+    description: 'Olive-grey panels with electric violet primary — military-green base, purple header glow.',
+    colors: {
+      background:    '#1A1C12',
+      surface:       '#26281A',
+      surfaceRaised: '#303420',
+      border:        '#484C30',
+      primary:       '#8060F8',
+      primaryDark:   '#5838D0',
+      primaryLight:  '#B090FF',
+      accent:        '#D8B030',
+      textPrimary:   '#F4F0E8',
+      textSecondary: '#B8B898',
+      textMuted:     '#787860',
+      error:         '#F05870',
+      warning:       '#D8B030',
+      success:       '#48C878',
+    },
+    sections: {
+      workout: { soft: '#100C28', strong: '#8060F8', text: '#C0A8FF' },  // VIOLET
+      meals:   { soft: '#201808', strong: '#D8B030', text: '#F0D880' },  // GOLD
+      ai:      { soft: '#100C28', strong: '#8060F8', text: '#C0A8FF' },  // violet
+      planner: { soft: '#181028', strong: '#A080FF', text: '#D0C0FF' },  // lavender
+      account: { soft: '#1A1808', strong: '#D8B030', text: '#F0D880' },  // gold
     },
   },
 

@@ -56,6 +56,10 @@ struct WatchWorkout: Codable, Equatable {
     /// warmup (recovery / cardio / cold-start days).
     let warmupSteps: [String]?
     let syncedAtMs: Double
+    /// Owning user id. Optional for back-compat — when present and
+    /// non-empty, ConnectivityStore rejects workouts that don't match
+    /// the currently stored userId, preventing cross-account leakage.
+    let userId: String?
 }
 
 // ─── Meals ───────────────────────────────────────────────────────────

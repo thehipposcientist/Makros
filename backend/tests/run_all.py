@@ -131,8 +131,13 @@ _TEST_MODULES = (
     # Weekly recipe unit tests — pure-function coverage of lifting_recipe,
     # inject_hybrid_cardio, repair_adjacent_duplicates, predicates.
     "tests.test_weekly_recipe_unit",
+    # Weekly nutrition review + feedback loop (planned vs actual, recs, apply_action).
+    "tests.test_nutrition_review",
     # Density trimming + prescription dispatch + core programmer.
     "tests.test_density_and_prescriptions",
+    # Session-duration slot injection — bonus isolations at 75/90 min,
+    # PLUS_CARDIO/non-lift exclusions, density interaction, integration.
+    "tests.test_session_duration_slots",
     # Nutrition score pipeline + allergen filter edge cases + solver.
     "tests.test_nutrition_score_unit",
     # Plan generation integration — full pipeline, equipment/injury/dislike

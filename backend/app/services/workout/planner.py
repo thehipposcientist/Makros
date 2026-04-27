@@ -1038,6 +1038,10 @@ def build_planner_exercise(
         "equipment": _equipment_label(exercise),
         "image_url": exercise.get("image_url") or None,
         "video_id": exercise.get("video_id") or None,
+        # Prescription type + cardio guidance for the client to render
+        # the correct tracking UI (duration/speed/HR vs sets/reps).
+        "prescriptionType": prescription.prescription_type,
+        "cardioGuidance": prescription.cardio_guidance,
         # Internal metadata the canonicalizer + progression engine read.
         "_slug": exercise.get("slug"),
         "_slot": slot_label,
@@ -1284,6 +1288,7 @@ def generate_workout_plan(
         slots = archetype_to_slots(
             archetype, idx, inputs.days_per_week,
             focused_muscle=inputs.focused_muscle,
+            session_minutes=inputs.session_minutes,
         )
         name = archetype_display_name(archetype, idx, recipe)
         slots = density_adjust_slots(
@@ -1478,7 +1483,9 @@ def generate_workout_plan(
             exercises = day.get("exercises", [])
             # Skip if this day already has core from its template
             already_has_core = any(
-                ex.get("_primary_muscle") == "core" or ex.get("_slot") == "Core"
+                ex.get("_role") == "core"
+                or ex.get("_primary_muscle") == "core"
+                or ex.get("_slot") == "Core"
                 or "core" in (ex.get("name", "") or "").lower()
                 for ex in exercises
             )

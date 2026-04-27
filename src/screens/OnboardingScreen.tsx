@@ -1104,11 +1104,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   );
 
   const DURATION_OPTIONS = [
-    { value: 30,  label: '30 min', desc: 'Express' },
-    { value: 45,  label: '45 min', desc: 'Standard' },
-    { value: 60,  label: '60 min', desc: 'Full' },
-    { value: 75,  label: '75 min', desc: 'Extended' },
-    { value: 90,  label: '90 min', desc: 'Deep' },
+    { value: 30,  label: '20–30 min', desc: 'Express' },
+    { value: 45,  label: '30–45 min', desc: 'Standard' },
+    { value: 60,  label: '45–60 min', desc: 'Full' },
+    { value: 75,  label: '60–75 min', desc: 'Extended' },
+    { value: 90,  label: '75–90 min', desc: 'Deep' },
   ];
 
   const renderTrainingDaysStep = () => (

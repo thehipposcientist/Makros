@@ -329,8 +329,11 @@ export async function pushWeightToWatch(opts: {
  *  show your wife's meal plan when YOU sign in. */
 export async function clearWatchData(): Promise<void> {
   if (!canPush()) return;
-  WatchBridge.setUserId(null);
   const now = Date.now();
+  // clearWorkoutMs tells the watch to discard its stored workout before absorbing
+  // this payload, bypassing the syncedAtMs ordering guard. Safe to leave in
+  // applicationContext — the watch tracks the last processed timestamp and
+  // ignores repeated delivers of the same value.
   await WatchBridge.syncWorkout({
     focus: 'Rest',
     durationMinutes: 0,
@@ -341,6 +344,7 @@ export async function clearWatchData(): Promise<void> {
     readinessLabel: null,
     exercises: [],
     syncedAtMs: now,
+    clearWorkoutMs: now,
   } as any).catch(() => {});
   await WatchBridge.syncMeals({
     dateISO: new Date().toISOString().slice(0, 10),

@@ -56,12 +56,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // Explicit sign-out / clear.
             if stored != nil {
                 print("[watch] userId cleared — wiping state")
+                HeartRateStore.saveDiag("userId cleared → wiping state")
                 wipeUserState()
                 UserDefaults.standard.removeObject(forKey: Self.userIdKey)
             }
         } else {
             if let prev = stored, prev != incoming {
                 print("[watch] userId changed \(prev) → \(incoming) — wiping state")
+                HeartRateStore.saveDiag("userId changed \(prev.prefix(4))→\(incoming.prefix(4)) → wiping state")
                 wipeUserState()
             }
             UserDefaults.standard.set(incoming, forKey: Self.userIdKey)
@@ -82,6 +84,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: "thallo.lastEndedSessionId")
         UserDefaults.standard.removeObject(forKey: "thallo.activeWorkoutState")
         UserDefaults.standard.removeObject(forKey: "thallo.hrDiag")
+        UserDefaults.standard.removeObject(forKey: "thallo.lastClearWorkoutMs")
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -147,11 +150,33 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         }
 
         if let w = ctx["workout"] as? [String: Any] {
+            // clearWorkoutMs: phone embeds this on account-switch clears so the
+            // watch discards the old workout before absorbing the new payload,
+            // bypassing the syncedAtMs ordering guard. Idempotent — the timestamp
+            // tracks the last processed clear so re-delivers are no-ops.
+            if let clearMs = w["clearWorkoutMs"] as? Double {
+                let lastCleared = UserDefaults.standard.double(forKey: "thallo.lastClearWorkoutMs")
+                if clearMs > lastCleared {
+                    HeartRateStore.saveDiag("rcv clearWorkoutMs → nil workout")
+                    workout = nil
+                    UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
+                }
+            }
             if let data = try? JSONSerialization.data(withJSONObject: w),
                let decoded = try? JSONDecoder().decode(WatchWorkout.self, from: data) {
-                // Ignore out-of-order: keep the newer syncedAtMs.
-                if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
+                // userId mismatch: if the workout payload carries a userId that
+                // doesn't match the stored user, reject it. Prevents a stale
+                // workout from a previous account from surfacing when the phone
+                // sends the payload without the top-level userId change signal.
+                if let wUserId = decoded.userId, !wUserId.isEmpty,
+                   let stored = currentUserId, !stored.isEmpty,
+                   wUserId != stored {
+                    HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
+                } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
+                    HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil")")
                     self.workout = decoded
+                } else {
+                    HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
                 }
             }
         }

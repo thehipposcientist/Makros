@@ -571,15 +571,43 @@ def archetype_to_slots(
 _inner_archetype_to_slots = archetype_to_slots
 
 
+def _inject_bonus_slots(
+    slots: list[Slot],
+    archetype,
+    session_minutes: int,
+) -> list[Slot]:
+    """Append bonus isolation slots for long lift sessions.
+
+    Only fires for lift-category archetypes (not PLUS_CARDIO variants,
+    which already have a Cardio Finisher as their bonus).
+    """
+    from .archetypes import ARCHETYPE_META
+    meta = ARCHETYPE_META[archetype]
+    if meta.category != "lift":
+        return slots
+    if "plus_cardio" in archetype.value:
+        return slots
+    if session_minutes >= 90:
+        slots = list(slots)
+        slots.append(Slot("Bonus Isolation", "isolation", None, "isolation"))
+        slots.append(Slot("Bonus Isolation 2", "isolation", None, "isolation"))
+    elif session_minutes >= 75:
+        slots = list(slots)
+        slots.append(Slot("Bonus Isolation", "isolation", None, "isolation"))
+    return slots
+
+
 def archetype_to_slots(  # noqa: F811 — intentional wrap
     archetype,
     day_index: int,
     days_per_week: int,
     *,
     focused_muscle: Optional[str] = None,
+    session_minutes: int = 60,
 ) -> list[Slot]:
     raw = _inner_archetype_to_slots(archetype, day_index, days_per_week, focused_muscle=focused_muscle)
-    return _strip_warmup_slots(raw, archetype)
+    result = _strip_warmup_slots(raw, archetype)
+    return _inject_bonus_slots(result, archetype, session_minutes)
 
 
 def archetype_display_name(archetype, day_index: int, recipe: list) -> str:

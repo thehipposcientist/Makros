@@ -118,7 +118,12 @@ struct ContentView: View {
                 theme.background.ignoresSafeArea()
                 TabView {
                     TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
-                        HeartRateStore.saveDiag("Start tapped → sending to phone")
+                        HeartRateStore.saveDiag("Watch Start tapped → starting local HealthKit")
+                        heartRate.start {
+                            HeartRateStore.saveDiag("local HK collecting → active")
+                            active = true
+                        }
+                        HeartRateStore.saveDiag("sent start_workout to phone")
                         conn.sendCommand("start_workout", payload: ["source": "watch"])
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
@@ -129,7 +134,11 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        HeartRateStore.saveDiag("Custom start → sending to phone")
+                        HeartRateStore.saveDiag("Custom Watch Start → starting local HealthKit")
+                        heartRate.start {
+                            HeartRateStore.saveDiag("local HK collecting (custom) → active")
+                            active = true
+                        }
                         conn.sendCommand("start_custom_workout", payload: [
                             "category": category,
                             "subtype": subtype,
@@ -194,11 +203,12 @@ struct ContentView: View {
         .onReceive(conn.$theme) { palette in theme.palette = palette }
         .onReceive(conn.$workout) { w in
             guard let w = w else { return }
+            HeartRateStore.saveDiag("rcv workout sync status=\(w.status) sid=\(w.sessionId?.prefix(8) ?? "nil")")
             switch w.status {
             case .active:
                 if !active {
                     if shouldResumeWorkout(w) {
-                        HeartRateStore.saveDiag("rcv active sid=\(w.sessionId?.prefix(8) ?? "nil") → starting HK")
+                        HeartRateStore.saveDiag("rcv active → starting HK (passive resume)")
                         heartRate.start { active = true }
                     }
                 }

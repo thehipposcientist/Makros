@@ -995,7 +995,12 @@ export default function Index() {
     }
     try {
       const { clearWatchData } = await import('../src/utils/watchSync');
+      const { WatchBridge } = await import('../modules/thallo-watch-bridge');
       await raceTimeout(clearWatchData(), 500);
+      // Clear bridge userId AFTER the clear payloads are queued so they
+      // arrive on the watch stamped with the outgoing user's id (triggering
+      // a proper wipe) rather than arriving without a userId key at all.
+      WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();

@@ -372,6 +372,25 @@ def post_checkin(
     }
 
 
+@router.get("/nutrition-review")
+def get_nutrition_review(
+    week_start: date | None = Query(default=None, description="Monday of the week to review (defaults to current week)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Deterministic weekly nutrition review.
+
+    Returns planned targets vs actual intake, adherence metrics,
+    meal-type breakdown, weight trend, and 3–5 coaching recommendations.
+
+    Parallel to the workout review embedded in /coach/checkin — exposed
+    as a standalone GET so the weekly nutrition card can render it
+    without triggering an AI check-in."""
+    from app.services.nutrition.weekly_review import compute_weekly_nutrition_review
+    review = compute_weekly_nutrition_review(db, current_user.id, week_start=week_start)
+    return review.to_dict()
+
+
 @router.get("/history")
 def get_history(
     limit: int = Query(default=10, ge=1, le=50),

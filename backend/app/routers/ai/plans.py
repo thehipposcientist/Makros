@@ -2672,6 +2672,39 @@ def get_active_nutrition_plan(
         # crashing on an unparseable payload.
         print(f"[nutrition-plan] malformed plans_json for user={current_user.id}: {exc}")
         raise HTTPException(status_code=404, detail="nutrition plan unreadable")
+
+    # Lazy enrichment: classify any items missing protein_source so the
+    # plant-vs-animal protein tile in NutritionCard has data to render.
+    # Runs once per plan (the `not it.get` guard is a no-op on subsequent
+    # loads). Writes back to DB only when at least one item was updated.
+    try:
+        from app.services.nutrition.food_classifier import classify_food
+        enriched = False
+        for day in plans_parsed:
+            if not isinstance(day, dict):
+                continue
+            for meal in (day.get("meals") or []):
+                if not isinstance(meal, dict):
+                    continue
+                for it in (meal.get("items") or []):
+                    if not isinstance(it, dict):
+                        continue
+                    name = it.get("name") or ""
+                    if name and not it.get("protein_source"):
+                        cls = classify_food(name)
+                        it["protein_source"] = cls.protein_source
+                        it["fermented"]      = cls.fermented_flag
+                        it["probiotic"]      = cls.probiotic_flag
+                        it["omega3_rich"]    = cls.omega3_flag
+                        it["plant_count"]    = cls.plant_count_value
+                        enriched = True
+        if enriched:
+            row.plans_json = json.dumps(plans_parsed)
+            db.add(row)
+            db.commit()
+    except Exception:
+        pass  # classifier failure must never break plan delivery
+
     return {
         "id":               row.id,
         "planner_version":  row.planner_version,
