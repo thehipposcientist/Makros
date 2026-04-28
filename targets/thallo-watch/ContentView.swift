@@ -278,21 +278,31 @@ private struct TodayView: View {
         }
     }
 
-    // Small Thallo wordmark at the top — anchors the view and
-    // matches the phone's brand. Simple text treatment with the
-    // theme primary color so it tints per palette.
+    // Small Thallo wordmark at the top — anchors the view and matches
+    // the phone's brand. Tapping or long-pressing the logo sends
+    // `pull_state` to the phone, giving the user a manual force-sync
+    // escape hatch when the auto-push didn't land for any reason.
     private var logoHeader: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(theme.primary)
-            Text("THALLO")
-                .font(.system(size: 11, weight: .heavy))
-                .tracking(2.2)
-                .foregroundColor(theme.primary)
-            Spacer()
+        Button {
+            WKInterfaceDevice.current().play(.click)
+            conn.requestPull()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(theme.primary)
+                Text("THALLO")
+                    .font(.system(size: 11, weight: .heavy))
+                    .tracking(2.2)
+                    .foregroundColor(theme.primary)
+                Spacer()
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 9))
+                    .foregroundColor(theme.textMuted)
+            }
+            .padding(.bottom, 2)
         }
-        .padding(.bottom, 2)
+        .buttonStyle(.plain)
     }
 
     private var emptyPrompt: some View {
@@ -308,6 +318,27 @@ private struct TodayView: View {
                 .foregroundColor(theme.textMuted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 10)
+            // Manual force-sync button — sends pull_state to the phone
+            // so the user has an escape hatch when the auto-push didn't
+            // land (transient WC drop, phone was backgrounded, etc).
+            Button {
+                WKInterfaceDevice.current().play(.click)
+                conn.requestPull()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                    Text("Sync from phone")
+                        .font(.system(size: 11, weight: .heavy))
+                }
+                .foregroundColor(theme.background)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(theme.primary)
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
         }
         .padding(.vertical, 20)
     }
@@ -473,7 +504,27 @@ private struct TodayView: View {
 
     private func actionButtons(_ workout: WatchWorkout) -> some View {
         VStack(spacing: 6) {
-            if workout.status == .scheduled {
+            // Empty exercises = phone pushed a placeholder (Loading…) because
+            // its schedule[0]/workoutPlan didn't have a real workout when the
+            // last push fired. Hide Start (would do nothing) and show a Sync
+            // button that re-pulls from the phone.
+            if workout.exercises.isEmpty && workout.status == .scheduled {
+                Button {
+                    WKInterfaceDevice.current().play(.click)
+                    conn.requestPull()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Sync from phone").fontWeight(.bold)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 9)
+                .background(theme.primary)
+                .foregroundColor(theme.background)
+                .cornerRadius(10)
+            } else if workout.status == .scheduled {
                 Button(action: onStart) {
                     HStack {
                         Image(systemName: "play.circle.fill")

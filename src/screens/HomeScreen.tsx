@@ -2131,7 +2131,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (!info.reachable) return;
           const s = rePushStateRef.current;
           const todayISO = new Date().toISOString().slice(0, 10);
-          const todayItem = (s.schedule as any[])?.[0] ?? null;
+          // Find today by date — with the dated PlanWeek the today card
+          // is no longer guaranteed to live at index 0 (e.g. it sits at
+          // index 1 when the week started Monday and today is Tuesday).
+          const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
           const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
 
           // Workout payload waits on the AsyncStorage in-progress check

@@ -58,21 +58,23 @@ export function buildWatchWorkoutPayload(
   },
 ): WatchWorkoutPayload | null {
   if (!day) {
-    if (opts.status === 'rest') {
-      return {
-        focus: 'Rest',
-        durationMinutes: 0,
-        dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
-        status: 'rest',
-        sessionId: opts.sessionId ?? null,
-        readiness: opts.readiness ?? null,
-        readinessLabel: opts.readinessLabel ?? null,
-        exercises: [],
-        userId: opts.userId ?? null,
-        syncedAtMs: Date.now(),
-      };
-    }
-    return null;
+    // ALWAYS return a payload, even when day is null. Previously this
+    // returned null for non-rest statuses, which silently skipped the
+    // push and left the watch on "Open Thallo" forever. Now the watch
+    // gets a placeholder so it knows the phone is connected; if the
+    // schedule resolves a real workout later, the next push overwrites.
+    return {
+      focus: opts.status === 'rest' ? 'Rest' : 'Loading…',
+      durationMinutes: 0,
+      dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
+      status: opts.status,
+      sessionId: opts.sessionId ?? null,
+      readiness: opts.readiness ?? null,
+      readinessLabel: opts.readinessLabel ?? null,
+      exercises: [],
+      userId: opts.userId ?? null,
+      syncedAtMs: Date.now(),
+    };
   }
   // Every exercise is shipped (including warmup slots — the watch's
   // active-workout view treats warmup as its own sequence step and
