@@ -62,6 +62,7 @@ def list_exercises(
                 "slug": eq.slug,
                 "name": eq.name,
                 "category": eq.category,
+                "required": link.required,
             })
 
     out: list[dict] = []

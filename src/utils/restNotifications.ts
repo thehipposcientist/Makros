@@ -70,6 +70,17 @@ export async function scheduleRestNotifications(params: {
   const granted = await ensureWorkoutNotificationPermission();
   if (!granted) return {};
 
+  // Music-friendly mode: when restNotificationSoundEnabled is off, send
+  // the notification with no sound so iOS doesn't duck Spotify/podcasts.
+  // The user still gets a visible banner + vibration; the in-app chime
+  // (feedback.ts) plays mixed-with-others when the app is foregrounded.
+  let useSound: 'default' | undefined = 'default';
+  try {
+    const { loadSettings } = await import('./feedback');
+    const s = await loadSettings();
+    if (!s.restNotificationSoundEnabled) useSound = undefined;
+  } catch { /* settings read flake — keep default behavior */ }
+
   const aiLine = params.aiCue ? `\n${params.aiCue}` : '';
   const endTime = new Date(Date.now() + params.seconds * 1000);
   const endClock = endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -80,7 +91,7 @@ export async function scheduleRestNotifications(params: {
       content: {
         title: `Rest — ${params.seconds}s  ·  ends ${endClock}`,
         body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
-        sound: 'default',
+        sound: useSound,
         ...(Platform.OS === 'android' ? { sticky: false, ongoing: false } : {}),
       },
       trigger: null,
@@ -93,7 +104,7 @@ export async function scheduleRestNotifications(params: {
       content: {
         title: '10 seconds left — get ready',
         body: `${params.exerciseName}\n${params.nextSetLabel}`,
-        sound: 'default',
+        sound: useSound,
       },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
@@ -106,7 +117,7 @@ export async function scheduleRestNotifications(params: {
     content: {
       title: 'Go! Next set ready',
       body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
-      sound: 'default',
+      sound: useSound,
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,

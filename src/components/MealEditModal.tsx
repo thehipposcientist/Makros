@@ -173,15 +173,20 @@ function calcMacrosFromItems(items: MealItem[], fallback?: MealSuggestion): Macr
       fat:      Math.round(fallback.fat      ?? 0),
     };
   }
-  return totals;
+  return {
+    calories: Math.round(totals.calories),
+    protein:  Math.round(totals.protein),
+    carbs:    Math.round(totals.carbs),
+    fat:      Math.round(totals.fat),
+  };
 }
 
 function addMacros(a: Macros, b: Macros): Macros {
   return {
-    calories: a.calories + b.calories,
-    protein:  a.protein  + b.protein,
-    carbs:    a.carbs    + b.carbs,
-    fat:      a.fat      + b.fat,
+    calories: Math.round(a.calories + b.calories),
+    protein:  Math.round(a.protein  + b.protein),
+    carbs:    Math.round(a.carbs    + b.carbs),
+    fat:      Math.round(a.fat      + b.fat),
   };
 }
 
@@ -1373,7 +1378,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                         </View>
                         <Text style={s.aiResultServing}>{item.serving}</Text>
                         <Text style={s.aiResultMacros}>
-                          {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
+                          {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
                         </Text>
                       </View>
                       <Text style={s.aiResultAdd}>+ Add</Text>

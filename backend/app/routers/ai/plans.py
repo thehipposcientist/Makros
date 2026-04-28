@@ -407,14 +407,16 @@ def _persist_active_workout_plan(
         # Dual-write: also create a PlanWeek so the new weekly model stays in sync.
         try:
             from app.services.workout.week_manager import create_plan_week, default_training_pattern
-            from datetime import date as _date2
+            from datetime import date as _date2, timedelta as _td2
             wp_data = plan_json.get("workout_plan", plan_json) if isinstance(plan_json, dict) else {}
             workout_days = wp_data.get("days", [])
             dpw = int(getattr(req, "daysPerWeek", 0) or 0) or len(workout_days)
             if workout_days and dpw:
+                today = _date2.today()
+                week_start = today - _td2(days=today.weekday())
                 create_plan_week(
                     db, user_id,
-                    start_date=_date2.today(),
+                    start_date=week_start,
                     workout_days=workout_days,
                     nutrition_templates=[],
                     training_day_pattern=default_training_pattern(dpw),
@@ -422,10 +424,15 @@ def _persist_active_workout_plan(
                     days_per_week=dpw,
                     preferred_split=getattr(req, "preferredSplit", None) or None,
                     planner_version=PLANNER_VERSION,
+                    generation_source="regen",
                 )
-                print(f"[workout-plan] dual-write PlanWeek for user={user_id}")
+                print(f"[workout-plan] dual-write PlanWeek for user={user_id} start={week_start}")
+            else:
+                print(f"[workout-plan] dual-write skipped: workout_days={len(workout_days)} dpw={dpw}")
         except Exception as pw_exc:
-            print(f"[workout-plan] PlanWeek dual-write failed (non-fatal): {pw_exc}")
+            import traceback
+            print(f"[workout-plan] PlanWeek dual-write FAILED: {pw_exc}")
+            traceback.print_exc()
             try:
                 db.rollback()
             except Exception:

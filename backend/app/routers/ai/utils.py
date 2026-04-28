@@ -159,7 +159,7 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
                 if isinstance(extras, dict):
                     for k, v in extras.items():
                         try:
-                            out[k] = round(float(v or 0) * ratio, 3)
+                            out[k] = round(float(v or 0) * ratio, 1)
                         except (TypeError, ValueError):
                             continue
                 return out

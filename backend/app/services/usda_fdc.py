@@ -204,14 +204,29 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             "source": "usda",
         }
 
+        # Remap USDA internal keys to canonical names the meal assembler
+        # and NutritionCard expect (no _mg / _mcg suffixes on micro fields).
+        _USDA_KEY_MAP = {
+            "fiber": "fiber",
+            "sugar": "sugar",
+            "added_sugar_g": "added_sugar",
+            "sodium_mg": "sodium",
+            "calcium_mg": "calcium",
+            "iron_mg": "iron",
+            "magnesium_mg": "magnesium",
+            "potassium_mg": "potassium",
+            "vitamin_d_mcg": "vitamin_d",
+            "vitamin_b12_mcg": "vitamin_b12",
+            "vitamin_c_mg": "vitamin_c",
+            "vitamin_e_mg": "vitamin_e",
+            "vitamin_a_mcg": "vitamin_a",
+            "saturated_fat": "saturated_fat",
+            "cholesterol_mg": "cholesterol",
+        }
         micros = {}
-        for nid_key in ("fiber", "sugar", "added_sugar_g", "sodium_mg",
-                         "calcium_mg", "iron_mg",
-                         "magnesium_mg", "potassium_mg", "vitamin_d_mcg",
-                         "vitamin_b12_mcg", "vitamin_c_mg", "vitamin_e_mg",
-                         "vitamin_a_mcg", "saturated_fat", "cholesterol_mg"):
-            if nid_key in nutrients:
-                micros[nid_key] = nutrients[nid_key]
+        for usda_key, canonical_key in _USDA_KEY_MAP.items():
+            if usda_key in nutrients:
+                micros[canonical_key] = nutrients[usda_key]
         if micros:
             entry["micronutrients"] = micros
 

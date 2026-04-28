@@ -293,12 +293,14 @@ def seed_foods(session: Session) -> None:
                 fn.fiber = fiber_v
                 fn.sugar = sugar_v
                 fn.sodium_mg = sodium_v
-                # Only overwrite extra_nutrients if the seed has data AND
-                # the existing value is empty. AI enrichment populates
-                # this with Layer 2 micros (omega-3, calcium, etc.) and
-                # we must NOT wipe it on every container restart.
-                if extras_v and not fn.extra_nutrients:
-                    fn.extra_nutrients = extras_v
+                # Merge seed extras on top of any existing AI-backfilled
+                # extras so authoritative seed values always win for the
+                # fields they cover, while AI-enriched fields the seed
+                # doesn't cover (omega_3, vitamins, etc.) are preserved.
+                if extras_v:
+                    merged = dict(fn.extra_nutrients or {})
+                    merged.update(extras_v)
+                    fn.extra_nutrients = merged
                 session.add(fn)
             else:
                 session.add(FoodNutrition(

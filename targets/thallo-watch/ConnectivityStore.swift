@@ -26,6 +26,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var theme: WatchPalette = .midnight
     @Published var isReachable: Bool = false
     @Published var lastError: String?
+    /// AI-parsed meal items awaiting user review on the watch speech-to-meal flow.
+    /// Set when the phone calls syncMealParsePreview; consumed (set nil) after the
+    /// user confirms or cancels the review sheet.
+    @Published var pendingMealItems: [WatchMealParseItem]?
 
     private let session: WCSession?
     private static let userIdKey = "thallo.watchUserId"
@@ -79,6 +83,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         sleep = nil
         readiness = nil
         weight = nil
+        pendingMealItems = nil
         theme = .midnight
         // Clear persisted watch state so stale flags from a previous
         // account can't auto-start HealthKit on the next app open.
@@ -256,6 +261,19 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // ActiveWorkoutStore — nothing to persist on ConnectivityStore.
             if let uid = userId { handleUserSwitch(uid as? String) }
             NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
+        case "mealParsePreview":
+            // Phone pushed AI-parsed meal items after processing the watch's
+            // speech transcription. Set pendingMealItems so SpeechMealView can
+            // transition from the "Parsing..." spinner to the review screen.
+            if let rawItems = msg["payload"] as? [[String: Any]] {
+                let parsed = rawItems.compactMap { dict -> WatchMealParseItem? in
+                    guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                          let item = try? JSONDecoder().decode(WatchMealParseItem.self, from: data)
+                    else { return nil }
+                    return item
+                }
+                if !parsed.isEmpty { self.pendingMealItems = parsed }
+            }
         default:
             break
         }

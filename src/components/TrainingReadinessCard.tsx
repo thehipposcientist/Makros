@@ -242,12 +242,24 @@ export default function TrainingReadinessCard({
           : serverResp.label === 'Moderate' ? 'Moderate'
           : 'Fatigued'
         );
+        const pillarFromFactors = (factors: typeof serverResp.factors) => {
+          const get = (lbl: string, max: number) => {
+            const f = factors.find(f => f.label === lbl);
+            return f ? Math.round((f.value / 100) * max) : 0;
+          };
+          return {
+            sleep: get('Sleep', 30),
+            hrv: get('HRV', 20),
+            fatigue: get('Recovery', 20),
+            nutrition: get('Nutrition', 15),
+            restingHr: get('RHR', 10),
+            yesterdayStrain: get('Yesterday', 5),
+          };
+        };
         displayResult = {
           score: displayScore,
           label: displayLabel,
-          // Pillars are no longer locally computed — leave a thin
-          // shape so existing render paths keep working.
-          pillars: { sleep: 0, hrv: 0, fatigue: 0, nutrition: 0, restingHr: 0, yesterdayStrain: 0 },
+          pillars: pillarFromFactors(serverResp.factors),
           insights: [],
           missing: serverResp.missing,
           signalsPresent: serverResp.signals_present,

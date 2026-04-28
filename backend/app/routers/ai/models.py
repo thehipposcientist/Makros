@@ -328,3 +328,9 @@ class PreSetRecommendRequest(BaseModel):
     feelFromLastSet: str | None = None      # easy|good|hard|failure|pain
     equipment: str | None = None
     weightLbs: float = 150.0
+
+
+class ParseMealTextRequest(BaseModel):
+    """Parse a natural-language meal description (e.g. from watch speech-to-text)
+    into structured food items with macros."""
+    text: str   # e.g. "I ate two cups of rice with 8 oz of chicken breast"

@@ -65,9 +65,12 @@ def prescribe_for_slot(
         # never return a bogus prescription.
         return _prescribe_lifting(slot, exercise, inputs)
 
-    # Warmup-role slots get a fixed light prescription regardless of
-    # the archetype's training_type.
+    # Warmup-role slots dispatch based on the archetype's training type:
+    # conditioning days get an easy-pace ramp, everything else gets a
+    # dynamic movement-prep block before heavy lifts.
     if hasattr(slot, "role") and slot.role == "warmup":
+        if meta.training_type == "conditioning":
+            return _prescribe_cardio_warmup(slot, exercise)
         return _prescribe_warmup(slot, exercise)
 
     # Core-role slots always get a circuit-style prescription regardless
@@ -432,6 +435,13 @@ def _prescribe_warmup(slot, exercise: dict) -> Prescription:
     """
     return Prescription(sets=2, reps="6-8 reps flow", rest_seconds=0,
                         rir_target=1.0, prescription_type="warmup")
+
+
+def _prescribe_cardio_warmup(slot, exercise: dict) -> Prescription:
+    """Cardio warmup: 3-5 min progressive ramp from easy to moderate pace."""
+    return Prescription(sets=1, reps="3-5 min easy ramp", rest_seconds=0,
+                        rir_target=1.0, prescription_type="warmup")
+
 
 
 # ── Recovery ───────────────────────────────────────────────────────

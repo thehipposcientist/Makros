@@ -596,6 +596,7 @@ export default function Index() {
     } catch {}
     if (aiPlans?.workout_plan) {
       await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
+      await AsyncStorage.setItem('_skipNextPlanHydration', '1');
       // A fresh plan replaces today's slot too. Clear the once-per-day
       // freshDay marker so HomeScreen's loadPlans regenerates today's
       // exercises against the new plan + recent history. Without this,

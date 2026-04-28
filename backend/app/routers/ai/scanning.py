@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 
 import openai
 from openai import OpenAI
@@ -80,7 +81,7 @@ from .router import router
 from .models import (
     FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
     SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
-    MealInstructionsRequest,
+    MealInstructionsRequest, ParseMealTextRequest,
 )
 from .utils import (
     get_openai_api_key, model_meal_parsing, model_chat, model_image,
@@ -753,6 +754,146 @@ def classify_foods_batch(
     return {"classifications": results}
 
 
+# ─── Wger result normalization helpers ──────────────────────────────────────
+# Wger's vocabulary doesn't match our app's canonical equipment slugs or rep
+# conventions, so we normalize on import. Without this, e.g. a bodyweight
+# core exercise comes through with equipment="" and a default 8-12 rep range
+# that the weight-recommendation flow then misreads as "needs weight."
+
+# Maps a lowercase wger equipment label to our canonical slug. Anything not
+# in the map falls back to lowercase + underscore-separated.
+_WGER_EQUIPMENT_MAP: dict[str, str] = {
+    "":                "bodyweight",
+    "none":            "bodyweight",
+    "no equipment":    "bodyweight",
+    "barbell":         "barbell",
+    "dumbbell":        "dumbbells",
+    "kettlebell":      "kettlebell",
+    "bench":           "bench",
+    "incline bench":   "bench",
+    "pull-up bar":     "pullup_bar",
+    "ez-curl bar":     "ez_bar",
+    "swiss ball":      "stability_ball",
+    "ab wheel":        "ab_wheel",
+    "cable":           "cable_machine",
+    "bands":           "bands",
+    "resistance band": "bands",
+    "machine":         "machine",
+    "trx":             "trx",
+}
+
+
+def _normalize_wger_equipment(wger_equipment: list[str]) -> str:
+    """Coerce wger equipment list → canonical slug. Empty / "none" → bodyweight."""
+    if not wger_equipment:
+        return "bodyweight"
+    first = (wger_equipment[0] or "").strip().lower()
+    if first in _WGER_EQUIPMENT_MAP:
+        return _WGER_EQUIPMENT_MAP[first]
+    return first.replace(" ", "_") or "bodyweight"
+
+
+def _default_reps_for_wger(w: dict) -> str:
+    """Pick a sensible default rep range based on the exercise's nature.
+
+    Wger doesn't ship rep prescriptions, so we infer:
+    - Bodyweight core/abs → 12-15 (higher rep ranges feel right)
+    - Bodyweight upper/lower → 8-12
+    - Loaded → 8-12
+    Time-based exercises (planks, holds) get a duration string.
+    """
+    name = (w.get("name") or "").lower()
+    muscles = [(m or "").lower() for m in (w.get("muscles") or [])]
+    eq_slug = _normalize_wger_equipment(w.get("equipment") or [])
+
+    if any(kw in name for kw in ["plank", "hold", "wall sit", "dead hang", "l-sit", "hollow hold"]):
+        return "30s"
+    if any(kw in name for kw in ["mountain climb", "bear crawl", "burpee"]):
+        return "30s"
+    if eq_slug == "bodyweight" and any(m in {"abs", "core", "obliques"} for m in muscles):
+        return "12-15"
+    if eq_slug == "bodyweight" and any(kw in name for kw in [
+        "leg raise", "crunch", "sit-up", "sit up", "bicycle", "v-up", "flutter",
+    ]):
+        return "12-15"
+    return "8-12"
+
+
+# Bodyweight-friendly word stripping so "Lying Leg Raise" can match a
+# curated "leg_raise" or "hanging_leg_raise" video, etc.
+_SLUG_STRIP_PREFIXES = (
+    "lying_", "standing_", "seated_", "kneeling_", "single_arm_", "single_leg_",
+    "machine_", "cable_", "barbell_", "dumbbell_", "kettlebell_", "smith_",
+    "incline_", "decline_", "flat_", "wide_grip_", "narrow_grip_", "close_grip_",
+    "alternating_", "reverse_", "weighted_",
+)
+
+
+def _slugify_exercise_name(name: str) -> str:
+    """Lowercase + underscore-separated slug. Mirrors how curated keys
+    in seed_exercise_videos.py are written."""
+    if not name:
+        return ""
+    s = name.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    return s
+
+
+def _video_id_for_wger_name(name: str) -> str | None:
+    """Look up a curated YouTube video for a wger exercise name. Tries
+    the direct slug first, then peels common prefix qualifiers so e.g.
+    'Lying Leg Raise' → 'leg_raise' → falls back to anything containing
+    'leg_raise' (e.g. 'hanging_leg_raise')."""
+    try:
+        from app.seed_exercise_videos import EXERCISE_VIDEOS, video_id_for_slug
+    except Exception:
+        return None
+    slug = _slugify_exercise_name(name)
+    if not slug:
+        return None
+    direct = video_id_for_slug(slug)
+    if direct:
+        return direct
+    # Strip leading qualifier words and try again (e.g. lying_leg_raise → leg_raise)
+    stripped = slug
+    for prefix in _SLUG_STRIP_PREFIXES:
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):]
+            break
+    if stripped != slug:
+        v = video_id_for_slug(stripped)
+        if v:
+            return v
+    # Last resort: pick any curated key whose slug *contains* the stripped
+    # form (e.g. "leg_raise" matches "hanging_leg_raise"). Only borrow
+    # when the key is at least somewhat specific (>4 chars) so we don't
+    # match overly generic stems.
+    if len(stripped) >= 5:
+        for key, vid in EXERCISE_VIDEOS.items():
+            if stripped in key:
+                return vid
+    return None
+
+
+def _is_compound_from_wger(w: dict) -> bool:
+    """Heuristic: more than one primary muscle worked, or a name that
+    matches our compound-exercise patterns. Keeps the imported exercise's
+    `is_compound` field aligned with the rest of the catalog so swap
+    scoring + progression logic treat it correctly."""
+    muscles_p = w.get("muscles") or []
+    muscles_s = w.get("muscles_secondary") or []
+    if len(muscles_p) >= 2 or (len(muscles_p) >= 1 and len(muscles_s) >= 2):
+        return True
+    name = (w.get("name") or "").lower()
+    return bool(re.search(
+        r"\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|"
+        r"clean|snatch|hip\s*thrust|lunge|good\s*morning)\b", name,
+    )) and not bool(re.search(
+        r"\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|"
+        r"crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b", name,
+    ))
+
+
 @router.post("/exercise-search")
 def exercise_ai_search(
     body: ExerciseSearchRequest,
@@ -770,16 +911,34 @@ def exercise_ai_search(
         if wger_results:
             mapped = []
             for w in wger_results:
+                muscles_p = w.get("muscles") or []
+                muscles_s = w.get("muscles_secondary") or []
+                primary_muscle = (
+                    muscles_p[0].lower().replace(" ", "_")
+                    if muscles_p else "full_body"
+                )
+                secondary_muscles = [m.lower().replace(" ", "_") for m in muscles_s]
+                # Bodyweight core / abs heuristic: wger sometimes returns
+                # "abs" as the primary muscle which doesn't match our
+                # canonical "core" slug used everywhere else in the app.
+                if primary_muscle in {"abs", "obliques"}:
+                    primary_muscle = "core"
                 mapped.append({
                     "name": w["name"],
-                    "primary_muscle": (w.get("muscles") or [""])[0].lower().replace(" ", "_") if w.get("muscles") else "full_body",
-                    "equipment": (w.get("equipment") or ["bodyweight"])[0].lower() if w.get("equipment") else "bodyweight",
+                    "primary_muscle": primary_muscle,
+                    "secondary_muscles": secondary_muscles,
+                    "equipment": _normalize_wger_equipment(w.get("equipment") or []),
                     "sets": 3,
-                    "reps": "8-12",
+                    "reps": _default_reps_for_wger(w),
                     "rest_seconds": 90,
                     "why": f"From wger.de exercise database",
                     "form_cues": [],
                     "image_url": w.get("image_url"),
+                    # Curated YouTube ID via slug + prefix-stripping fallback,
+                    # so freshly added exercises still get a form video card
+                    # if anything close lives in our curated map.
+                    "video_id": _video_id_for_wger_name(w["name"]),
+                    "is_compound": _is_compound_from_wger(w),
                     "source": "wger",
                 })
             print(f"[exercise-search] wger hit: {len(mapped)} results for '{body.query}'")
@@ -856,6 +1015,33 @@ def exercise_ai_search(
         resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
+        # Enrich AI-fallback results with the same metadata wger results
+        # carry: video_id (curated lookup), is_compound (heuristic),
+        # source tag, and equipment-slug normalization. Without this,
+        # AI-imported exercises silently bypass the swap-scoring +
+        # bodyweight-aware logic that the rest of the catalog uses.
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            name = r.get("name") or ""
+            if not r.get("video_id"):
+                r["video_id"] = _video_id_for_wger_name(name)
+            if "is_compound" not in r:
+                # Same heuristic but feed it AI's flat shape ({primary_muscle: str}).
+                r["is_compound"] = _is_compound_from_wger({
+                    "name": name,
+                    "muscles": [r.get("primary_muscle") or ""],
+                })
+            # AI sometimes emits "abs" / "obliques" — coerce to canonical "core".
+            pm = (r.get("primary_muscle") or "").lower()
+            if pm in {"abs", "obliques"}:
+                r["primary_muscle"] = "core"
+            # Equipment slug — if AI emitted "bodyweight" / "none" / empty,
+            # normalize. Otherwise pass-through (AI typically uses our slugs).
+            eq = (r.get("equipment") or "").lower().strip()
+            if not eq or eq in {"none", "no equipment", "bodyweight"}:
+                r["equipment"] = "bodyweight"
+            r.setdefault("source", "ai")
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Exercise search failed: {str(e)}")
@@ -1472,3 +1658,72 @@ def match_goal(
     except Exception as e:
         print(f"[match-goal] failed: {e}")
         return {"goal_id": "body_recomp", "reason": "Default recommendation"}
+
+
+@router.post("/parse-meal-text")
+def parse_meal_text(
+    body: ParseMealTextRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Parse a natural-language meal description into structured food items with macros.
+
+    Used by the Apple Watch speech-to-meal feature: watch transcribes speech,
+    sends text to phone, phone calls this endpoint, sends structured preview
+    back to the watch for user review before logging.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    client = OpenAI(api_key=api_key)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a nutrition assistant. Parse meal descriptions into structured "
+                "food items with realistic USDA-level macros. Return valid JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'Parse this meal into individual food items with macros:\n\n"{text}"\n\n'
+                "Return JSON in EXACTLY this shape:\n"
+                '{"items": [\n'
+                '  {"name": "White rice", "serving": "2 cups cooked", "calories": 412, "protein": 8, "carbs": 90, "fat": 1},\n'
+                '  {"name": "Chicken breast", "serving": "8 oz grilled", "calories": 370, "protein": 69, "carbs": 0, "fat": 8}\n'
+                "]}\n\n"
+                "Rules:\n"
+                "- One entry per food — never merge multiple foods into one\n"
+                "- Use realistic USDA-reference macro values\n"
+                "- serving = the quantity the user described (e.g. '2 cups', '8 oz')\n"
+                "- Round all macro numbers to integers\n"
+                "- Return only the JSON object, no explanation"
+            ),
+        },
+    ]
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=600, timeout_secs=20)
+        response = _chat_create(client, **kwargs)
+        result = _extract_json(response.choices[0].message.content)
+        raw_items = result.get("items") or []
+        items = []
+        for it in raw_items:
+            if not isinstance(it, dict) or not it.get("name"):
+                continue
+            items.append({
+                "name": str(it.get("name", "")),
+                "serving": str(it.get("serving", "1 serving")),
+                "calories": int(round(float(it.get("calories", 0)))),
+                "protein": int(round(float(it.get("protein", 0)))),
+                "carbs": int(round(float(it.get("carbs", 0)))),
+                "fat": int(round(float(it.get("fat", 0)))),
+            })
+        return {"items": items}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Meal text parsing failed: {str(e)}")

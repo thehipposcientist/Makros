@@ -624,6 +624,7 @@ private struct MealsView: View {
     let meals: WatchMealsDay?
     @EnvironmentObject var theme: ThemeStore
     @EnvironmentObject var conn: ConnectivityStore
+    @State private var showSpeechMeal = false
 
     var body: some View {
         ScrollView {
@@ -637,6 +638,18 @@ private struct MealsView: View {
                         .tracking(1.8)
                         .foregroundColor(theme.primary)
                     Spacer()
+                    Button {
+                        WKInterfaceDevice.current().play(.click)
+                        showSpeechMeal = true
+                    } label: {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(theme.primary)
+                            .padding(5)
+                            .background(theme.primary.opacity(0.15))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 if let meals = meals {
                     macroSummary(meals)
@@ -650,6 +663,11 @@ private struct MealsView: View {
                 }
             }
             .padding(10)
+        }
+        .sheet(isPresented: $showSpeechMeal) {
+            SpeechMealView(isPresented: $showSpeechMeal)
+                .environmentObject(conn)
+                .environmentObject(theme)
         }
     }
 
@@ -758,10 +776,30 @@ private struct MealsView: View {
     }
 
     private var emptyMeals: some View {
-        Text("No meals logged yet today")
-            .font(.system(size: 11))
-            .foregroundColor(theme.textMuted)
-            .padding(.vertical, 14)
+        VStack(spacing: 8) {
+            Text("No meals logged yet today")
+                .font(.system(size: 11))
+                .foregroundColor(theme.textMuted)
+                .padding(.vertical, 4)
+            Button {
+                WKInterfaceDevice.current().play(.click)
+                showSpeechMeal = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 10))
+                    Text("Log with speech")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundColor(theme.background)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(theme.primary)
+                .cornerRadius(9)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 10)
     }
 
     private var emptyPrompt: some View {
@@ -772,7 +810,6 @@ private struct MealsView: View {
             .padding(.vertical, 24)
     }
 }
-
 // ─── Swipe hint pill ────────────────────────────────────────────────
 
 /// Small primary-tinted hint that appears once per install at the top
@@ -1341,6 +1378,196 @@ private struct WeightView: View {
                 pendingLbs = latest
                 seeded = true
             }
+        }
+    }
+}
+
+// ─── Speech-to-meal ─────────────────────────────────────────────────
+//
+// Flow:
+//  1. User taps mic button on MealsView → sheet presents SpeechMealView
+//  2. User types / dictates a description (watchOS TextField opens dictation)
+//  3. Taps "Parse" → watch sends parse_meal_speech command to phone
+//  4. Phone calls /ai/parse-meal-text → pushes mealParsePreview via WCSession
+//  5. conn.pendingMealItems updates → view transitions to review list
+//  6. User confirms → watch sends confirm_meal_speech with items to phone
+//  7. Phone logs the meal and re-pushes meals; sheet auto-dismisses
+
+private struct SpeechMealView: View {
+    @Binding var isPresented: Bool
+    @EnvironmentObject var conn: ConnectivityStore
+    @EnvironmentObject var theme: ThemeStore
+
+    @State private var transcript: String = ""
+    @State private var isParsing: Bool = false
+    @State private var didLog: Bool = false
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            Group {
+                if didLog {
+                    doneView
+                } else if isParsing && (conn.pendingMealItems ?? []).isEmpty {
+                    parsingView
+                } else if let items = conn.pendingMealItems, !items.isEmpty {
+                    reviewView(items)
+                } else {
+                    inputView
+                }
+            }
+        }
+        .onReceive(conn.$pendingMealItems) { items in
+            if let items = items, !items.isEmpty, isParsing {
+                isParsing = false
+            }
+        }
+    }
+
+    private var inputView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 22))
+                .foregroundColor(theme.primary)
+            Text("Describe your meal")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(theme.textPrimary)
+            TextField("e.g. 2 cups rice, 6 oz chicken", text: $transcript, axis: .vertical)
+                .font(.system(size: 12))
+                .foregroundColor(theme.textPrimary)
+                .lineLimit(3...5)
+                .padding(8)
+                .background(theme.surface)
+                .cornerRadius(8)
+            Button {
+                let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return }
+                WKInterfaceDevice.current().play(.click)
+                isParsing = true
+                conn.pendingMealItems = nil
+                conn.sendCommand("parse_meal_speech", payload: ["text": text])
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 11))
+                    Text("Parse").fontWeight(.bold)
+                }
+                .foregroundColor(transcript.isEmpty ? theme.textMuted : theme.background)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(transcript.isEmpty ? theme.surface : theme.primary)
+                .cornerRadius(9)
+            }
+            .buttonStyle(.plain)
+            .disabled(transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(12)
+    }
+
+    private var parsingView: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .tint(theme.primary)
+            Text("Parsing…")
+                .font(.system(size: 12))
+                .foregroundColor(theme.textSecondary)
+            if !transcript.isEmpty {
+                Text(transcript)
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.textMuted)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private func reviewView(_ items: [WatchMealParseItem]) -> some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                Text("REVIEW MEAL")
+                    .font(.system(size: 10, weight: .heavy))
+                    .tracking(1.2)
+                    .foregroundColor(theme.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(items) { item in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(theme.textPrimary)
+                            .lineLimit(2)
+                        Text(item.serving)
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.textMuted)
+                        HStack(spacing: 6) {
+                            Text("\(item.calories) cal")
+                            Text("P \(item.protein)g")
+                            Text("C \(item.carbs)g")
+                            Text("F \(item.fat)g")
+                        }
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(theme.surface)
+                    .cornerRadius(8)
+                }
+                Button {
+                    WKInterfaceDevice.current().play(.success)
+                    conn.sendCommand("confirm_meal_speech", payload: [
+                        "items": items.map { item in
+                            [
+                                "name": item.name,
+                                "serving": item.serving,
+                                "calories": item.calories,
+                                "protein": item.protein,
+                                "carbs": item.carbs,
+                                "fat": item.fat,
+                            ] as [String: Any]
+                        },
+                    ])
+                    conn.pendingMealItems = nil
+                    didLog = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        isPresented = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                        Text("Log Meal").fontWeight(.bold)
+                    }
+                    .foregroundColor(theme.background)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(theme.success)
+                    .cornerRadius(9)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    conn.pendingMealItems = nil
+                    isPresented = false
+                } label: {
+                    Text("Cancel")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(12)
+        }
+    }
+
+    private var doneView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 32))
+                .foregroundColor(theme.success)
+            Text("Logged!")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(theme.textPrimary)
         }
     }
 }

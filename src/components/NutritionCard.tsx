@@ -155,7 +155,7 @@ export default function NutritionCard({
     { out: 'fiber',              keys: ['fiber'] },
     { out: 'sugar',              keys: ['sugar'] },
     { out: 'sodium',             keys: ['sodium'] },
-    { out: 'cholesterol',        keys: ['cholesterol'] },
+    { out: 'cholesterol',        keys: ['cholesterol', 'cholesterol_mg'] },
     { out: 'saturatedFat',       keys: ['saturated_fat', 'saturatedFat'] },
     { out: 'monounsaturatedFat', keys: ['monounsaturated_fat', 'monounsaturatedFat'] },
     { out: 'polyunsaturatedFat', keys: ['polyunsaturated_fat', 'polyunsaturatedFat'] },

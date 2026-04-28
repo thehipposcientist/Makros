@@ -58,6 +58,17 @@ export type WatchMealItem = {
   checked: boolean;
 };
 
+/** A single food item returned by the AI meal-text parser and shown on the
+ *  watch review screen before the user confirms logging. */
+export type WatchMealParseItem = {
+  name: string;
+  serving: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+};
+
 export type WatchMealsPayload = {
   dateISO: string;
   targets: { calories: number; proteinG: number; carbsG: number; fatG: number };
@@ -188,6 +199,14 @@ export const WatchBridge = {
   async syncWeight(payload: WatchWeightPayload): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncWeight(payload); } catch { return false; }
+  },
+
+  /** Push AI-parsed meal items to the watch so the user can review before
+   *  confirming. Uses sendMessage (real-time) so the watch review screen
+   *  receives the result immediately while the user is waiting. */
+  async syncMealParsePreview(items: WatchMealParseItem[]): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncMealParsePreview({ payload: items }); } catch { return false; }
   },
 
   async updateProgress(progress: WatchProgress): Promise<boolean> {

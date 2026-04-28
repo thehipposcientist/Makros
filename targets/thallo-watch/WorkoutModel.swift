@@ -64,6 +64,18 @@ struct WatchWorkout: Codable, Equatable {
 
 // ─── Meals ───────────────────────────────────────────────────────────
 
+/// A single AI-parsed food item pushed back to the watch for review
+/// before the user confirms logging via speech-to-meal.
+struct WatchMealParseItem: Codable, Identifiable, Equatable {
+    var id: String { name + serving }
+    let name: String
+    let serving: String
+    let calories: Int
+    let protein: Int
+    let carbs: Int
+    let fat: Int
+}
+
 struct WatchMealItem: Codable, Identifiable, Equatable {
     var id: String { mealType }
     let mealType: String

@@ -36,5 +36,11 @@
   <string>Thallo reads your heart rate during workouts so you can see your live rate and zone on the watch.</string>
   <key>NSHealthUpdateUsageDescription</key>
   <string>Thallo writes your completed workouts to Apple Health so they appear in the Fitness app.</string>
+  <!-- Speech recognition + microphone — used by the speech-to-meal feature
+       so users can dictate what they ate and log it from the watch. -->
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Thallo uses speech recognition to let you describe meals by voice so you can log food directly from your watch.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Thallo uses the microphone to transcribe meals you describe by voice on your Apple Watch.</string>
 </dict>
 </plist>

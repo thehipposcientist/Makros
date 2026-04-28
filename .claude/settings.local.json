@@ -207,7 +207,10 @@
       "Bash(wait *)",
       "Bash(rg -n \"start_workout|start_custom_workout|pull_state|watchCmdHandlersRef|setActiveWorkout|activeWorkoutStartTime|activeWatchSessionId\" --include=\"*.ts\" --include=\"*.tsx\" .)",
       "Bash(/Users/sawyerhannel/.nvm/versions/node/v22.14.0/bin/npx tsc *)",
-      "Bash(command -v node tsc /opt/homebrew/bin/npx /usr/local/bin/npx)"
+      "Bash(command -v node tsc /opt/homebrew/bin/npx /usr/local/bin/npx)",
+      "Bash(]\" | head -30)",
+      "Bash(xxd)",
+      "Bash(export PATH=\"/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")"
     ]
   }
 }

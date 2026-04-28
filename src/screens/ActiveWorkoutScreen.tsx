@@ -96,6 +96,7 @@ interface ExerciseLibraryItem {
   id?: number;
   name: string;
   equipment?: string;
+  gear?: Array<{ slug: string; name: string; category?: string }>;
   primary_muscle?: string;
   secondary_muscles?: string[];
   is_compound?: boolean;
@@ -939,6 +940,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // modal but have it REPLACE instead of append. Non-null means we're in
   // swap mode for that exercise index.
   const [swapTargetIdx, setSwapTargetIdx] = useState<number | null>(null);
+  // Owned-equipment list pulled from the profile on mount. Used to
+  // filter swap candidates so users only see exercises they can
+  // actually perform with their gear. Bodyweight is always available.
+  const [ownedEquipment, setOwnedEquipment] = useState<string[]>([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        if (!raw) return;
+        const prof = JSON.parse(raw);
+        const eq: string[] = Array.isArray(prof?.equipment) ? prof.equipment : [];
+        setOwnedEquipment(eq);
+      } catch { /* best-effort — fall back to empty list = bodyweight only */ }
+    })();
+  }, []);
 
   // Pre-set coach hints keyed by exercise index. Populated lazily when
   // an exercise becomes active with no sets logged yet. Each entry is
@@ -1273,6 +1289,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [summaryVisible, setSummaryVisible] = useState(false);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryData, setSummaryData] = useState<WorkoutSummary | null>(null);
+  // Tap the training-score row to reveal the per-pillar breakdown +
+  // pillar-specific "what would max this" tips. Collapsed by default
+  // so the summary stays compact.
+  const [showTrainingDetails, setShowTrainingDetails] = useState(false);
   const [finishedSession, setFinishedSession] = useState<WorkoutSession | null>(null);
   // PR celebration modal — populated after handleFinish when the backend
   // returns one or more PRs. Null = no modal shown.
@@ -1847,6 +1867,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       aiRecommendation: undefined,
       primaryMuscle: item.primary_muscle ?? null,
       isCompound: item.is_compound ?? null,
+      // Carry through enrichment metadata so a freshly-added exercise
+      // (wger / AI / custom) renders with the same form-video card and
+      // hero thumbnail as a planner-generated one.
+      video_id: (item as any).video_id ?? null,
+      image_url: (item as any).image_url ?? null,
     };
     setExercises(prev => {
       // Swap mode: replace the exercise at swapTargetIdx instead of appending.
@@ -1922,10 +1947,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       id: `ai_${Date.now()}` as any,
       name: ex.name,
       primary_muscle: ex.primary_muscle as any,
-      secondary_muscles: [] as any,
+      secondary_muscles: (ex.secondary_muscles ?? []) as any,
       equipment: ex.equipment as any,
       description: ex.why,
       is_custom: true,
+      // Carry the enrichment fields the backend just normalized so the
+      // active session sees the same metadata the seed catalog ships
+      // with: form-video card via video_id, swap-scoring via
+      // is_compound, hero thumbnail via image_url.
+      video_id: ex.video_id ?? undefined,
+      image_url: ex.image_url ?? undefined,
+      is_compound: ex.is_compound ?? undefined,
     } as unknown as ExerciseLibraryItem);
   }, [handleAddExercise]);
 
@@ -1949,13 +1981,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           id: `custom_${Date.now()}`,
           name: ex.name,
           primary_muscle: ex.primary_muscle,
+          secondary_muscles: ex.secondary_muscles ?? [],
           equipment: ex.equipment,
           sets: ex.sets,
           reps: ex.reps,
           rest_seconds: ex.rest_seconds,
           description: ex.why,
           form_cues: ex.form_cues,
-          source: 'ai',
+          // Persist enrichment so re-adding from the local library hits
+          // the same form-video / image / compound metadata.
+          video_id: ex.video_id ?? null,
+          image_url: ex.image_url ?? null,
+          is_compound: ex.is_compound ?? null,
+          source: ex.source ?? 'ai',
           createdAt: new Date().toISOString(),
         },
       ];
@@ -2341,6 +2379,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return;
     }
 
+    // Bodyweight exercises don't have a meaningful weight recommendation
+    // (lying leg raise, crunches, planks, push-ups…). Skip the API call
+    // and emit a rep-focused tip instead so the UI doesn't display a
+    // misleading "try X lbs" line on a bodyweight movement.
+    if (shouldHideWeight({
+      name: ex.name,
+      equipment: ex.equipment,
+      reps: ex.targetReps,
+      primary_muscle: ex.primaryMuscle ?? undefined,
+    })) {
+      const setN = setsForExercise.length + 1;
+      const lastReps = setsForExercise[setsForExercise.length - 1]?.reps;
+      const baseTip = lastReps
+        ? `Set ${setN}: aim for ${lastReps}+ reps — match or beat your last set.`
+        : `Set ${setN}: hit ${ex.targetReps} clean reps.`;
+      setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
+      setRestCue(baseTip);
+      setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: baseTip } : item));
+      return;
+    }
+
     setAiLoadingIdx(exIdx);
     try {
       const bests = await getExerciseBests(ex.name).catch(() => null);
@@ -2691,7 +2750,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // the summary view + persisted on StoredWorkoutSummary so the
         // Progress chart can plot it against the day's readiness.
         try {
-          const { computeTrainingScore, focusKindFromName } = await import('../services/trainingScore');
+          const { computeTrainingScore, archetypeFromWorkout } = await import('../services/trainingScore');
           const setsCompleted = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
           const setsPlanned = session.exercises.reduce((sum, ex) => sum + (typeof ex.targetSets === 'number' ? ex.targetSets : 0), 0);
           const exercisesCompleted = session.exercises.filter(ex => (ex.sets?.length ?? 0) > 0).length;
@@ -2699,8 +2758,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const estimatedSec = (workout as any)?.estimatedDurationMinutes
             ? Number((workout as any).estimatedDurationMinutes) * 60
             : null;
+          // Archetype-aware scoring — different formula per workout type
+          // (strength vs hypertrophy vs Z2 vs HIIT vs mobility) so a heavy
+          // 5x3 squat session isn't penalized for low HR like the old
+          // single-formula approach did.
+          const archetype = archetypeFromWorkout(workout.focus, (workout as any).stimulus);
+          // Profile.goal flows through so the goal modifier (e.g.
+          // muscle_gain → +volume, strength → +progression) can lightly
+          // tune the score in the user's favor.
+          let userGoal: string | null = null;
+          try {
+            const raw = await AsyncStorage.getItem('userProfile');
+            if (raw) userGoal = JSON.parse(raw)?.goal ?? null;
+          } catch { /* best-effort */ }
           const ts = computeTrainingScore({
-            focusKind: focusKindFromName(workout.focus, (workout as any).stimulus),
+            archetype,
+            goal: userGoal,
             actualDurationSec: session.durationSeconds,
             estimatedDurationSec: estimatedSec,
             setsCompleted, setsPlanned: setsPlanned > 0 ? setsPlanned : null,
@@ -2998,30 +3071,66 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const targetName = exercises[swapTargetIdx]?.name;
       const base = targetName ? exerciseLibrary.find(li => li.name === targetName) : undefined;
       const q = exerciseSearch.trim().toLowerCase();
+      // Equipment filter: check the concrete gear list first (slug or
+      // name match), fall back to legacy bucket. Bodyweight is always ok.
+      const owned = new Set(ownedEquipment.map(e => e.toLowerCase()));
+      owned.add('bodyweight');
+      owned.add('none');
+      const isUsable = (item: ExerciseLibraryItem): boolean => {
+        if (item.gear && item.gear.length > 0) {
+          const required = item.gear.filter((g: any) => g.required !== false);
+          if (required.length === 0) return true;
+          return required.every((g: any) =>
+            owned.has(g.slug?.toLowerCase?.() ?? '') || owned.has(g.name?.toLowerCase?.() ?? ''),
+          );
+        }
+        const eq = (item.equipment ?? '').toLowerCase();
+        if (!eq) return true;
+        if (eq.includes('bodyweight')) return true;
+        return owned.has(eq);
+      };
       if (!base) {
-        return exerciseLibrary.filter(item => {
-          if (!q) return true;
-          return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
-            .join(' ')
-            .toLowerCase()
-            .includes(q);
-        });
+        return exerciseLibrary
+          .filter(isUsable)
+          .filter(item => {
+            if (!q) return true;
+            return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
+              .join(' ')
+              .toLowerCase()
+              .includes(q);
+          })
+          .slice(0, 10);
       }
       const scored: Array<{ item: ExerciseLibraryItem; score: number }> = [];
       for (const item of exerciseLibrary) {
         if (item.name === targetName) continue;
+        if (!isUsable(item)) continue;
         if (q && ![item.name, item.primary_muscle ?? '', item.equipment ?? ''].join(' ').toLowerCase().includes(q)) continue;
         const s = _scoreSwapCandidate(base, item);
         if (s <= 0) continue;
         scored.push({ item, score: s });
       }
       scored.sort((a, b) => b.score - a.score);
-      return scored.slice(0, 20).map(s => ({
+      return scored.slice(0, 10).map(s => ({
         ...s.item,
         _overlap: Math.min(100, Math.round((s.score / MAX_SWAP_SCORE) * 100)),
       }));
     }
+    // Add-exercise branch (no swap target). Same equipment gate so
+    // unreachable exercises stay hidden.
+    const owned = new Set(ownedEquipment.map(e => e.toLowerCase()));
+    owned.add('bodyweight');
+    owned.add('none');
     return exerciseLibrary.filter(item => {
+      if (item.gear && item.gear.length > 0) {
+        const required = item.gear.filter((g: any) => g.required !== false);
+        if (required.length > 0 && !required.every((g: any) =>
+          owned.has(g.slug?.toLowerCase?.() ?? '') || owned.has(g.name?.toLowerCase?.() ?? ''),
+        )) return false;
+      } else {
+        const eq = (item.equipment ?? '').toLowerCase();
+        if (eq && !eq.includes('bodyweight') && !owned.has(eq)) return false;
+      }
       const q = exerciseSearch.trim().toLowerCase();
       if (!q) return true;
       return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
@@ -3292,9 +3401,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </TouchableOpacity>
                   ) : null;
                 })()}
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.exerciseName, isDone && styles.exerciseNameDone]}>{ex.name}</Text>
-                  <Text style={styles.exerciseMeta}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text
+                    style={[styles.exerciseName, isDone && styles.exerciseNameDone]}
+                    numberOfLines={isActive ? 2 : 1}
+                    ellipsizeMode="tail"
+                  >
+                    {ex.name}
+                  </Text>
+                  <Text
+                    style={styles.exerciseMeta}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
                     {targetSetCount} × {ex.targetReps}  ·  {restLabel}
                     {formatEquipmentLabel(ex.equipment) ? `  ·  ${formatEquipmentLabel(ex.equipment)}` : ''}
                   </Text>
@@ -3311,7 +3430,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     );
                   })()}
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
-                    <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '600', marginTop: 1 }}>
+                    <Text style={{ fontSize: 13, color: themeColors.primary, fontWeight: '700', marginTop: 1 }}>
                       Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
                     </Text>
                   )}
@@ -3519,27 +3638,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                   )}
 
-                  {/* ── AI tip — shown prominently above set rows ── */}
-                  {isAiLoading && (
-                    <View style={styles.aiBubble}>
-                      <ActivityIndicator size="small" color={themeColors.accent} />
-                      <Text style={styles.aiLoadingText}>  Getting AI tip...</Text>
-                    </View>
-                  )}
-                  {!isAiLoading && isAiError && (
-                    <View style={[styles.aiBubble, styles.aiBubbleError]}>
-                      <Ionicons name="alert-circle-outline" size={14} color={themeColors.error} />
-                      <Text style={[styles.aiText, { color: themeColors.textMuted, marginLeft: 6 }]}>Couldn't load tip</Text>
-                    </View>
-                  )}
-                  {!isAiLoading && !isAiError && ex.aiRecommendation && ex.sets.length > 0 && (
-                    <View style={styles.aiBubble}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.aiLabel}>AI TIP</Text>
-                        <Text style={styles.aiText}>{ex.aiRecommendation}</Text>
-                      </View>
-                    </View>
-                  )}
+                  {/* AI tip block removed from the exercise card — the
+                      same `ex.aiRecommendation` is now surfaced inside
+                      the rest-timer modal so the user only sees it
+                      between sets when it's actionable, instead of
+                      duplicated here. The state + fetch logic stays
+                      intact (aiLoadingIdx / aiErrorIdx / aiRecommendation)
+                      so the rest timer can keep reading it. */}
 
                   {/* ── Inline set rows ── */}
                   {(() => {
@@ -4269,69 +4374,156 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         </View>
                       ) : null}
                     </View>
-                    {summaryData?.trainingScore != null && (
-                      <View style={{
-                        flexDirection: 'row', alignItems: 'center',
-                        backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
-                        borderRadius: 10, padding: 12, marginTop: 10, marginBottom: 4, gap: 12,
-                      }}>
-                        <View style={{ alignItems: 'flex-start' }}>
-                          <AnimatedNumber
-                            value={summaryData.trainingScore}
-                            duration={900}
+                    {summaryData?.trainingScore != null && (() => {
+                      const score = summaryData.trainingScore!;
+                      const scoreColor = score >= 85 ? themeColors.success
+                        : score >= 65 ? themeColors.primary
+                        : score >= 45 ? themeColors.warning
+                        : themeColors.error;
+                      const p = summaryData.trainingPillars ?? { effort: 0, volume: 0, duration: 0, consistency: 0 };
+                      // Per-pillar maxima from `services/trainingScore.ts`.
+                      // Used to compute the "+N to max" delta + actionable
+                      // tip shown when the user taps to expand.
+                      const PILLAR_MAX = { effort: 40, volume: 25, duration: 20, consistency: 15 };
+                      const tipFor = (key: 'effort' | 'volume' | 'duration' | 'consistency'): string => {
+                        if (key === 'effort') return 'More time in Z3+ heart rate (or higher self-rated intensity).';
+                        if (key === 'volume') return 'Complete all planned sets.';
+                        if (key === 'duration') return 'Train 85–120% of the estimated session duration.';
+                        return 'Complete every planned exercise.';
+                      };
+                      return (
+                        <View>
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => setShowTrainingDetails(v => !v)}
                             style={{
-                              fontSize: 38, fontWeight: '900', lineHeight: 42,
-                              color: summaryData.trainingScore >= 85 ? themeColors.success
-                                : summaryData.trainingScore >= 65 ? themeColors.primary
-                                : summaryData.trainingScore >= 45 ? themeColors.warning
-                                : themeColors.error,
+                              flexDirection: 'row', alignItems: 'center',
+                              backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
+                              borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+                              marginTop: 8, marginBottom: 4, gap: 12,
+                              borderWidth: 1, borderColor: themeColors.border,
                             }}
-                          />
-                          <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginTop: 1 }}>
-                            TRAINING SCORE
-                          </Text>
+                          >
+                            <View style={{ alignItems: 'flex-start' }}>
+                              <AnimatedNumber
+                                value={score}
+                                duration={900}
+                                style={{ fontSize: 32, fontWeight: '900', lineHeight: 36, color: scoreColor }}
+                              />
+                              <Text style={{ fontSize: 8, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginTop: 1 }}>
+                                TRAINING SCORE
+                              </Text>
+                            </View>
+                            <View style={{ width: 1, height: 32, backgroundColor: themeColors.border }} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 2 }}>
+                                {summaryData.trainingRating ?? '—'}
+                              </Text>
+                              <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 13 }}>
+                                E {p.effort}/40 · V {p.volume}/25 · T {p.duration}/20 · C {p.consistency}/15
+                              </Text>
+                            </View>
+                            <Ionicons
+                              name={showTrainingDetails ? 'chevron-up' : 'chevron-down'}
+                              size={14}
+                              color={themeColors.textMuted}
+                            />
+                          </TouchableOpacity>
+
+                          {showTrainingDetails && (
+                            <View style={{
+                              backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
+                              borderRadius: 10, padding: 12, marginTop: -2, marginBottom: 6, gap: 8,
+                              borderWidth: 1, borderColor: themeColors.border,
+                            }}>
+                              <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.textMuted, letterSpacing: 0.5 }}>
+                                HOW THIS IS SCORED
+                              </Text>
+                              {(['effort', 'volume', 'duration', 'consistency'] as const).map(key => {
+                                const value = p[key];
+                                const max = PILLAR_MAX[key];
+                                const deficit = Math.max(0, max - value);
+                                const pct = Math.round((value / max) * 100);
+                                const label = key === 'duration' ? 'Time' : key.charAt(0).toUpperCase() + key.slice(1);
+                                const barColor = pct >= 90 ? themeColors.success : pct >= 60 ? themeColors.primary : themeColors.warning;
+                                return (
+                                  <View key={key} style={{ gap: 3 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6 }}>
+                                      <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary, flex: 1 }}>
+                                        {label}
+                                      </Text>
+                                      <Text style={{ fontSize: 12, fontWeight: '800', color: barColor }}>
+                                        {value}/{max}
+                                      </Text>
+                                      {deficit > 0 && (
+                                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted }}>
+                                          (+{deficit} to max)
+                                        </Text>
+                                      )}
+                                    </View>
+                                    <View style={{ height: 4, backgroundColor: themeColors.border, borderRadius: 2, overflow: 'hidden' }}>
+                                      <View style={{ width: `${pct}%`, height: 4, backgroundColor: barColor, borderRadius: 2 }} />
+                                    </View>
+                                    {deficit > 0 && (
+                                      <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 13 }}>
+                                        {tipFor(key)}
+                                      </Text>
+                                    )}
+                                  </View>
+                                );
+                              })}
+                              <Text style={{ fontSize: 9, color: themeColors.textMuted, fontStyle: 'italic', marginTop: 2, lineHeight: 12 }}>
+                                Effort favors Z3+ heart rate. Mobility / recovery sessions count as full credit even when easy.
+                              </Text>
+                            </View>
+                          )}
                         </View>
-                        <View style={{ width: 1, height: 40, backgroundColor: themeColors.border }} />
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 3 }}>
-                            {summaryData.trainingRating ?? '—'}
-                          </Text>
-                          <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 15 }}>
-                            Effort {summaryData.trainingPillars?.effort ?? 0}/40 · Volume {summaryData.trainingPillars?.volume ?? 0}/25 · Time {summaryData.trainingPillars?.duration ?? 0}/20
-                          </Text>
-                        </View>
-                      </View>
-                    )}
+                      );
+                    })()}
 
                     {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
-                      <View style={{ marginTop: 8, marginBottom: 8, paddingHorizontal: 2 }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>
-                          TIME IN ZONES
-                        </Text>
-                        {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
-                          const min = summaryData.hrZoneMinutes![i];
-                          const peak = Math.max(...summaryData.hrZoneMinutes!, 1);
-                          const pct = Math.round((min / peak) * 100);
-                          const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
-                          const isEmpty = min < 0.5;
+                      <View style={{ marginTop: 4, marginBottom: 6, paddingHorizontal: 2 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: themeColors.textMuted, letterSpacing: 0.5 }}>
+                            TIME IN ZONES
+                          </Text>
+                          <Text style={{ fontSize: 9, color: themeColors.textMuted }}>
+                            {Math.round(summaryData.hrZoneMinutes!.reduce((a, b) => a + b, 0))}m total
+                          </Text>
+                        </View>
+                        {/* Single horizontal stack bar — proportional segments
+                            per zone. Replaces the 5-row stack to save ~80px
+                            of vertical space without losing information. */}
+                        {(() => {
+                          const zones = summaryData.hrZoneMinutes!;
+                          const total = zones.reduce((a, b) => a + b, 0);
+                          if (total <= 0) return null;
+                          const colors = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'];
                           return (
-                            <FadeInView key={label} delay={i * 80} duration={300} slideDistance={0}>
-                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 5, gap: 8 }}>
-                                <Text style={{ fontSize: 10, fontWeight: '700', color: isEmpty ? themeColors.textMuted : zoneColor, width: 18 }}>
-                                  {label}
-                                </Text>
-                                <View style={{ flex: 1, height: 6, backgroundColor: themeColors.border, borderRadius: 3, overflow: 'hidden' }}>
-                                  {!isEmpty && (
-                                    <AnimatedBarFill pct={pct} color={zoneColor} delay={i * 80 + 150} />
-                                  )}
-                                </View>
-                                <Text style={{ fontSize: 10, fontWeight: '600', color: isEmpty ? themeColors.textMuted : themeColors.textSecondary, width: 28, textAlign: 'right' }}>
-                                  {isEmpty ? '—' : `${Math.round(min)}m`}
+                            <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: themeColors.border, marginBottom: 6 }}>
+                              {zones.map((m, i) => {
+                                if (m <= 0) return null;
+                                const flex = m / total;
+                                return <View key={i} style={{ flex, backgroundColor: colors[i] }} />;
+                              })}
+                            </View>
+                          );
+                        })()}
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                          {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
+                            const min = summaryData.hrZoneMinutes![i];
+                            const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
+                            const isEmpty = min < 0.5;
+                            return (
+                              <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isEmpty ? themeColors.textMuted + '40' : zoneColor }} />
+                                <Text style={{ fontSize: 10, fontWeight: '600', color: isEmpty ? themeColors.textMuted : themeColors.textSecondary }}>
+                                  {label} {isEmpty ? '—' : `${Math.round(min)}m`}
                                 </Text>
                               </View>
-                            </FadeInView>
-                          );
-                        })}
+                            );
+                          })}
+                        </View>
                       </View>
                     ) : null}
 
@@ -5156,7 +5348,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     color: tc.textPrimary, backgroundColor: tc.surfaceRaised, textAlign: 'center',
   },
   inlineInputDone: { borderColor: tc.primary + '60', backgroundColor: tc.primary + '14', color: tc.primary },
-  inlineLastResult: { flex: 1, fontSize: 11, color: tc.textMuted, textAlign: 'center' },
+  inlineLastResult: { flex: 1, fontSize: 13, color: tc.textMuted, textAlign: 'center', fontWeight: '600' },
   inlineLogBtn: {
     width: 40, paddingVertical: 8, borderRadius: radius.sm,
     backgroundColor: tc.primary, alignItems: 'center',
@@ -5274,11 +5466,11 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   feedbackChipTextActive: { color: tc.primary },
   feedbackChipTextPain:   { color: tc.error },
 
+  // `aiBubble` is reused by the RIR prompt — keep it. The other AI-tip
+  // style entries (label/text/loading/error variant) were dropped along
+  // with the in-card AI tip block; the rest-timer surface now owns the
+  // recommendation display.
   aiBubble:      { flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: radius.md, padding: 12, borderLeftWidth: 3, borderLeftColor: tc.accent },
-  aiBubbleError: { borderLeftColor: tc.error },
-  aiLabel:       { fontSize: 10, fontWeight: '700', color: tc.accent, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 3 },
-  aiText:        { fontSize: 13, color: tc.textPrimary },
-  aiLoadingText: { fontSize: 13, color: tc.textSecondary },
   aiErrorText:   { fontSize: 12, color: tc.error, flex: 1 },
 
   logSetBtn:     { backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center' },
@@ -5322,11 +5514,11 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   },
   lastTimeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   lastTimeTitle: { fontSize: 12, fontWeight: '800', color: tc.accent, textTransform: 'uppercase', letterSpacing: 0.7 },
-  lastTimeBest: { fontSize: 11, color: tc.textPrimary, fontWeight: '700' },
-  lastTimeRow:      { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
-  lastTimeSetNum:   { fontSize: 11, color: tc.textMuted, width: 36 },
-  lastTimeData:     { flex: 1, fontSize: 12, color: tc.textPrimary, fontWeight: '700' },
-  lastTimeFeedback: { fontSize: 11, color: tc.accent, fontWeight: '700' },
+  lastTimeBest: { fontSize: 13, color: tc.textPrimary, fontWeight: '700' },
+  lastTimeRow:      { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 },
+  lastTimeSetNum:   { fontSize: 12, color: tc.textMuted, width: 40, fontWeight: '600' },
+  lastTimeData:     { flex: 1, fontSize: 14, color: tc.textPrimary, fontWeight: '700' },
+  lastTimeFeedback: { fontSize: 12, color: tc.accent, fontWeight: '700' },
 
   finishBackdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   finishModal:       { backgroundColor: tc.surface, borderRadius: radius.xl, padding: 28, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: tc.border, width: '85%' },
@@ -5435,24 +5627,27 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   shareStatsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 6,
   },
+  // Tighter stat tile — 3-up packing instead of 2-up so the summary
+  // doesn't push the training-score panel below the fold.
   shareStatTile: {
     flex: 1,
-    minWidth: '42%' as any,
+    minWidth: '30%' as any,
     backgroundColor: tc.surfaceRaised,
-    borderRadius: radius.md,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: tc.border,
-    paddingVertical: 12,
+    paddingVertical: 7,
+    paddingHorizontal: 6,
     alignItems: 'center',
-    gap: 2,
+    gap: 0,
   },
-  shareStatIcon: { fontSize: 18, marginBottom: 2 },
-  shareStatValue: { fontSize: 22, fontWeight: '800', color: tc.textPrimary },
-  shareStatLabel: { fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  shareStatIcon:  { fontSize: 13, marginBottom: 1 },
+  shareStatValue: { fontSize: 16, fontWeight: '800', color: tc.textPrimary, lineHeight: 20 },
+  shareStatLabel: { fontSize: 9, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 },
   shareAchievements: {
     marginHorizontal: 14,
     marginBottom: 6,

@@ -81,6 +81,15 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendContext(["weight": payload])
         }
 
+        // Push parsed meal items to the watch for review after speech transcription.
+        // Uses sendMessage (real-time) rather than applicationContext so the watch
+        // gets the result while the user is waiting on the review screen.
+        AsyncFunction("syncMealParsePreview") { (payload: [String: Any]) -> Bool in
+            var msg = payload
+            msg["kind"] = "mealParsePreview"
+            return self.sessionHolder.sendMessage(msg)
+        }
+
         // Live progress messages during an active session. We use
         // sendMessage (not applicationContext) so the watch sees each
         // tick when reachable; transferUserInfo is the fallback so

@@ -1166,7 +1166,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
-  const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true });
+  const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false });
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -2651,6 +2651,78 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 watchCmdHandlersRef.current.skip(focus);
               } catch { /* non-fatal */ }
             })();
+          } else if (command === 'parse_meal_speech') {
+            // Watch spoke a meal description — parse it with AI and push
+            // the structured preview back to the watch for review.
+            (async () => {
+              try {
+                const text = String(payload?.text || '').trim();
+                if (!text || !authToken) return;
+                const { parseMealText } = await import('../services/api');
+                const { WatchBridge } = await import('../../../modules/thallo-watch-bridge');
+                const result = await parseMealText(authToken, text).catch(() => null);
+                if (!result?.items?.length) return;
+                await WatchBridge.syncMealParsePreview(result.items);
+              } catch { /* non-fatal */ }
+            })();
+          } else if (command === 'confirm_meal_speech') {
+            // User reviewed parsed items on watch and confirmed — log the
+            // meal to the backend and re-push meals so the watch tally updates.
+            (async () => {
+              try {
+                if (!authToken) return;
+                const items = (payload?.items as any[]) ?? [];
+                if (!items.length) return;
+                const todayISO = new Date().toISOString().slice(0, 10);
+                const totalCal  = items.reduce((s: number, it: any) => s + Number(it.calories), 0);
+                const totalPro  = items.reduce((s: number, it: any) => s + Number(it.protein),  0);
+                const totalCarb = items.reduce((s: number, it: any) => s + Number(it.carbs),    0);
+                const totalFat  = items.reduce((s: number, it: any) => s + Number(it.fat),      0);
+                const mealObj = {
+                  meal: items.length === 1
+                    ? String(items[0].name)
+                    : `${items[0].name} + ${items.length - 1} more`,
+                  foods: items.map((it: any) => String(it.name)),
+                  amounts: items.map((it: any) => String(it.serving)),
+                  items: items.map((it: any) => ({
+                    name: String(it.name),
+                    quantity: 1,
+                    unit: 'serving',
+                    calories: Number(it.calories),
+                    protein: Number(it.protein),
+                    carbs: Number(it.carbs),
+                    fat: Number(it.fat),
+                    baseQuantity: 1,
+                    baseCalories: Number(it.calories),
+                    baseProtein: Number(it.protein),
+                    baseCarbs: Number(it.carbs),
+                    baseFat: Number(it.fat),
+                  })),
+                  calories: totalCal,
+                  protein: totalPro,
+                  carbs: totalCarb,
+                  fat: totalFat,
+                };
+                const { logMealChecked } = await import('../services/api');
+                await logMealChecked(authToken, {
+                  meal_date: todayISO,
+                  meal_type: 'extra',
+                  meal: mealObj,
+                  source: 'watch_speech',
+                }).catch(() => null);
+                // Re-push updated meals to the watch.
+                const s = rePushStateRef.current;
+                const todayPlan = s.nutritionPlansByDate[todayISO]
+                  ?? (Object.values(s.nutritionPlansByDate)[0] as any);
+                const { pushMealsToWatch } = await import('../utils/watchSync');
+                await pushMealsToWatch(
+                  todayPlan,
+                  s.checkedMealsByDate[todayISO],
+                  todayISO,
+                  s.nutritionScoreData?.score ?? null,
+                ).catch(() => {});
+              } catch { /* non-fatal */ }
+            })();
           }
           // Rest / set / end commands only fire inside an active
           // workout; ActiveWorkoutScreen owns those handlers.
@@ -2847,6 +2919,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // focus_override to the fresh-day generator below so a PPL plan can't
     // get a foreign day spliced in.
     let aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
+
+    // If applyPlanResult just wrote a fresh plan, skip the backend
+    // PlanWeek fetch — it may still be stale and would overwrite
+    // the freshly-generated plan sitting in AsyncStorage.
+    const skipFlag = await AsyncStorage.getItem('_skipNextPlanHydration');
+    if (skipFlag) {
+      await AsyncStorage.removeItem('_skipNextPlanHydration');
+      skipBackendHydrationOnceRef.current = true;
+      console.log('[loadPlans] skip-hydration flag consumed — trusting AsyncStorage');
+    }
 
     // Backend is the source of truth. Fetch the persisted 7-day PlanWeek;
     // if none exists yet (first run or pre-migration user), generate one
@@ -7308,13 +7390,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             {([
               { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
-              { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends' },
+              { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends (in-app, mixes with music)' },
+              { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound on the rest-end notification when the app is closed. iOS briefly ducks music — leave OFF if you listen to Spotify mid-workout.' },
               { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
             ]).map(opt => (
               <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
                   <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>{opt.label}</Text>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{opt.desc}</Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>{opt.desc}</Text>
                 </View>
                 <Switch
                   value={feedbackSettings[opt.key]}
@@ -7328,6 +7411,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             ))}
+            {/* Test button — fires the same code path as a real rest-end
+                so users can verify volume / mixing / vibration works
+                without waiting for an actual workout. */}
+            <TouchableOpacity
+              style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}
+              activeOpacity={0.75}
+              onPress={async () => {
+                const { playRestTimerDone } = await import('../utils/feedback');
+                playRestTimerDone();
+              }}
+            >
+              <View style={{ flex: 1, paddingRight: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Test Rest Timer Sound</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
+                  Plays the chime + vibration so you can confirm volume + that music keeps playing.
+                </Text>
+              </View>
+              <Ionicons name="play-circle-outline" size={22} color={themeColors.primary} />
+            </TouchableOpacity>
             <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
           </View>
 

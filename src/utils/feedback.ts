@@ -14,12 +14,20 @@ export interface AppSettings {
   hapticsEnabled: boolean;
   soundsEnabled: boolean;
   vibrationEnabled: boolean;
+  /** Whether the local notification scheduled for the rest timer's
+   *  end plays a sound when the app is backgrounded. iOS notification
+   *  sounds DUCK other audio (music / podcasts) for ~1-2s, which the
+   *  user feels as "Spotify pauses for too long". Default OFF — the
+   *  in-app chime mixes with music; the background notification still
+   *  vibrates + shows a banner, just silently. */
+  restNotificationSoundEnabled: boolean;
 }
 
 const DEFAULTS: AppSettings = {
   hapticsEnabled: true,
   soundsEnabled: true,
   vibrationEnabled: true,
+  restNotificationSoundEnabled: false,
 };
 
 let _cached: AppSettings = { ...DEFAULTS };

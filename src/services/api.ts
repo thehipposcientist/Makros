@@ -1486,6 +1486,14 @@ export type AIExerciseResult = {
   form_cues: string[];
   image_url?: string;
   source?: string;
+  // Enrichment fields populated by the backend so freshly imported
+  // exercises (wger / AI fallback) line up with the seed catalog:
+  // `video_id` drives the form-video card, `is_compound` is consumed
+  // by swap scoring + progression logic, `secondary_muscles` feeds
+  // the exercise-info modal.
+  video_id?: string | null;
+  is_compound?: boolean;
+  secondary_muscles?: string[];
 };
 
 /** Resolve an exercise name to a YouTube video ID for the top form
@@ -3489,5 +3497,16 @@ export async function toggleFeedLike(token: string, itemId: number): Promise<{ l
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
+}
+
+export async function parseMealText(
+  token: string,
+  text: string,
+): Promise<{ items: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }> }> {
+  return request('/ai/parse-meal-text', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+  }, 25000, true);
 }
 

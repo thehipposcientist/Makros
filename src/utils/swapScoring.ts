@@ -15,6 +15,7 @@ export interface ExerciseLibraryItem {
   primary_muscle?: string | null;
   secondary_muscles?: string[] | null;
   equipment?: string | null;
+  gear?: Array<{ slug: string; name: string; category?: string; required?: boolean }> | null;
   movement_pattern?: string | null;
   is_compound?: boolean | null;
   description?: string | null;
@@ -86,9 +87,16 @@ export function rankSwapCandidates(
   const ranked: Array<{ ex: ExerciseLibraryItem; score: number }> = [];
   for (const ex of library) {
     if (ex.name === base.name) continue;
-    // Equipment filter — skip candidates that need gear the user doesn't own.
-    const eq = (ex.equipment ?? '').toLowerCase();
-    if (eq && !owned.has(eq) && !eq.includes('bodyweight')) continue;
+    // Equipment filter: prefer concrete gear list, fall back to legacy bucket.
+    if (ex.gear && ex.gear.length > 0) {
+      const required = ex.gear.filter(g => g.required !== false);
+      if (required.length > 0 && !required.every(g =>
+        owned.has(g.slug?.toLowerCase() ?? '') || owned.has(g.name?.toLowerCase() ?? ''),
+      )) continue;
+    } else {
+      const eq = (ex.equipment ?? '').toLowerCase();
+      if (eq && !owned.has(eq) && !eq.includes('bodyweight')) continue;
+    }
     const score = scoreSwapCandidate(base, ex);
     if (score > 0) ranked.push({ ex, score });
   }
