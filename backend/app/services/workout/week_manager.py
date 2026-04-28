@@ -451,7 +451,14 @@ def auto_renew_week(
     if not profile:
         return {"error": "no_profile"}
 
-    goal = str(getattr(profile, "goal", "body_recomp") or "body_recomp")
+    from app.models import UserGoal
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == user_id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    goal = active_goal.goal_type.value if active_goal else "body_recomp"
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")

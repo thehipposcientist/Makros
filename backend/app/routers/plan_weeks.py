@@ -198,7 +198,14 @@ def start_new_week(
     if not profile:
         raise HTTPException(status_code=400, detail="No profile found — complete onboarding first")
 
-    goal = str(getattr(profile, "goal", "body_recomp") or "body_recomp")
+    from app.models import UserGoal
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    goal = active_goal.goal_type.value if active_goal else "body_recomp"
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
@@ -751,8 +758,17 @@ def regenerate_remaining(
     except Exception:
         recent_muscle_exercises = {}
 
+    from app.models import UserGoal
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = active_goal.goal_type.value if active_goal else pw.goal
+
     inputs = PlannerInputs(
-        goal=pw.goal,
+        goal=current_goal,
         days_per_week=new_dpw,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
         experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
@@ -779,8 +795,17 @@ def regenerate_remaining(
         new_days_per_week=new_dpw,
     )
 
+    dirty = False
     if new_split != pw.preferred_split:
         pw.preferred_split = new_split
+        dirty = True
+    if current_goal != pw.goal:
+        pw.goal = current_goal
+        dirty = True
+    if new_dpw != pw.days_per_week:
+        pw.days_per_week = new_dpw
+        dirty = True
+    if dirty:
         db.add(pw)
         db.commit()
 

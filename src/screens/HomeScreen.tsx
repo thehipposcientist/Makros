@@ -2999,7 +2999,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     } else if (skipBackendHydrationOnceRef.current) {
       skipBackendHydrationOnceRef.current = false;
-      console.log('[loadPlans] skipping backend hydration (switch-day pin in AsyncStorage)');
+      planWeekRef.current = null;
+      setPlanWeek(null);
+      console.log('[loadPlans] skipping backend hydration — cleared planWeek so schedule uses fresh workoutPlan');
     }
 
     if (!aiWorkoutRaw) {
