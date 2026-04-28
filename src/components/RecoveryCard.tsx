@@ -112,12 +112,10 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
   const titleSize = compact ? 13 : 17;
   const titleWeight: '700' | '800' = compact ? '700' : '800';
 
-  // Show every tracked muscle group regardless of fatigue level — even 100%
-  // recovered ones render (useful for "nothing is fatigued right now" read).
-  // Canonical order matches MuscleGroup enum so the list is stable run-to-run.
-  const MUSCLE_ORDER = ['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes', 'calves', 'core'];
+  // Per-muscle map drives the heat map fill colors below. The numeric
+  // list that used to render under the figure was removed — the visual
+  // alone is enough.
   const fatigueMap = data.muscleFatigue ?? {};
-  const muscleEntries: [string, number][] = MUSCLE_ORDER.map(m => [m, fatigueMap[m] ?? 0]);
 
   return (
     <TouchableOpacity
@@ -188,57 +186,11 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
             return <BodyHeatMap recovery={heatRecovery} themeName={themeName} height={240} />;
           })()}
 
-          {/* Compact exact-value list — two columns.
-              The % column is given a fixed width + right-align so values
-              like "5%", "85%", "100%" line up in a clean vertical column
-              instead of floating around at the end of variable-length
-              muscle names. Same fix on the dot column for symmetry. */}
-          <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap' }}>
-            {muscleEntries.map(([muscle, fatigue], idx) => {
-              const pct = Math.round(fatigue * 100);
-              const recovery = Math.max(0, Math.min(100, 100 - pct));
-              const color = recovery >= 70 ? tc.success : recovery >= 40 ? tc.warning : tc.error;
-              return (
-                <FadeInView key={muscle} delay={120 + idx * 30} duration={220} slideDistance={0}>
-                <View
-                  style={{
-                    width: '50%',
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    paddingVertical: 4,
-                    paddingRight: 12,
-                  }}
-                >
-                  <View style={{ width: 8, alignItems: 'center', marginRight: 8 }}>
-                    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: color }} />
-                  </View>
-                  <Text
-                    style={{ flex: 1, fontSize: 12, color: tc.textSecondary, textTransform: 'capitalize' }}
-                    numberOfLines={1}
-                  >
-                    {muscle.replace('_', ' ')}
-                  </Text>
-                  {/* Fixed-width, right-aligned, tabular numerals so the
-                      percentages form a clean vertical column. */}
-                  <Text
-                    style={{
-                      width: 38,
-                      textAlign: 'right',
-                      fontSize: 12,
-                      fontWeight: '700',
-                      color: tc.textPrimary,
-                      fontVariant: ['tabular-nums'],
-                    }}
-                  >
-                    {recovery}%
-                  </Text>
-                </View>
-                </FadeInView>
-              );
-            })}
-          </View>
-          {/* The animated bar helper is unused here now but kept exported for
-              other consumers that still want per-muscle bars. */}
+          {/* Per-muscle percentage list removed — the heat map above
+              already conveys recovery state visually via color, and the
+              numeric grid added redundant noise without new information.
+              The animated bar helper is kept exported for consumers
+              that still want a bar surface elsewhere. */}
           {false && <AnimatedRecoveryBar recovery={0} color={tc.primary} borderColor={tc.border} delay={0} />}
           {/* Overall Load / systemic bar removed per request — the per-muscle
               bars above cover the useful signal. Users found the aggregate

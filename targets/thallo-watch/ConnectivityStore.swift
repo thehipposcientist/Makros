@@ -355,6 +355,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         // in Console.app — just not forwarded to the phone.
         guard let session, session.activationState == .activated else {
             print("[watch] sendCommand(\(command)) FAILED — session not activated")
+            HeartRateStore.saveDiag("→ \(command) FAIL: not activated")
             lastError = "Watch session not active — open the iPhone app once to pair."
             return
         }
@@ -367,16 +368,21 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // commands so the unified log doesn't double-up every line.
             if command != "watch_log" {
                 print("[watch] sendCommand(\(command)) — reachable, sendMessage")
+                HeartRateStore.saveDiag("→ \(command) reach=Y")
             }
             session.sendMessage(body, replyHandler: nil) { [weak self] err in
                 print("[watch] sendMessage(\(command)) error: \(err.localizedDescription)")
-                DispatchQueue.main.async { self?.lastError = err.localizedDescription }
+                DispatchQueue.main.async {
+                    self?.lastError = err.localizedDescription
+                    HeartRateStore.saveDiag("→ \(command) ERR: \(err.localizedDescription.prefix(40))")
+                }
             }
         } else {
             // Queue for later delivery via transferUserInfo when phone
             // isn't reachable (locked / app backgrounded).
             if command != "watch_log" {
                 print("[watch] sendCommand(\(command)) — NOT reachable, queuing via transferUserInfo")
+                HeartRateStore.saveDiag("→ \(command) reach=N (queued)")
             }
             session.transferUserInfo(body)
         }

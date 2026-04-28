@@ -738,7 +738,22 @@ export interface SleepScorePillars {
   efficiency: number;
   hrv: number;
   regularity?: number;
+  /** Legacy combined stage pillar — kept on the type so older
+   *  consumers don't break, but new code should read `deepSleep` and
+   *  `remSleep` separately. Populated as `deepSleep + remSleep` for
+   *  back-compat when both new pillars are available. */
   stageComposite: number;
+  /** Deep-sleep pillar — the higher-weight half of the old
+   *  stage composite, with an absolute-minutes floor for full-length
+   *  nights (recovery requires real deep, not just a high deep ratio
+   *  on a short sleep). */
+  deepSleep?: number;
+  /** REM-sleep pillar — half-weight of deepSleep. Soft penalties for
+   *  out-of-band REM ratios. */
+  remSleep?: number;
+  /** Awake/fragmentation pillar — penalizes >30 minutes of awake time
+   *  mid-sleep on top of what efficiency already captures. */
+  awakeFragmentation?: number;
   healthFlags: number;
 }
 

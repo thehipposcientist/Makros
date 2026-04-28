@@ -944,9 +944,16 @@ function getNextMealDays(count: number): MealDay[] {
   return out;
 }
 
-function mealDayLabel(date: Date, index: number): string {
-  if (index === 0) return 'Today';
-  if (index === 1) return 'Tomorrow';
+function mealDayLabel(date: Date, _index: number): string {
+  // With the PlanWeek-dated meal strip, "today" is determined by the
+  // date matching todayKey() — not by position. Past/future days fall
+  // back to the weekday name + date (the date strip disambiguates).
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const sameDay = date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth()
+    && date.getDate() === today.getDate();
+  if (sameDay) return 'Today';
   return `${DAY_NAMES[date.getDay()]} · ${MONTH_NAMES[date.getMonth()]} ${date.getDate()}`;
 }
 
@@ -1119,7 +1126,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // the front-page schedule: each PlanDay carries its own date + status,
   // so yesterday's completed workout stays visible if it falls within
   // the active week. Null while loading or for legacy users with no row.
+  // The ref mirrors the state for async functions (loadPlans, etc.) that
+  // need the freshest value before React commits the state update.
   const [planWeek, setPlanWeek] = useState<import('../services/api').PlanWeekResponse | null>(null);
+  const planWeekRef = useRef<import('../services/api').PlanWeekResponse | null>(null);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
@@ -1496,6 +1506,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [currentDate, setCurrentDate] = useState(todayKey());
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
+
+  // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
+  // (Mon-Sun anchor). Past days, today, and forward days are rendered
+  // in date order — same model as the workout strip, no rolling window.
+  // Reads from `planWeekRef.current` so async callers (loadPlans) see
+  // the latest fetched plan_week even before React commits the
+  // setPlanWeek state update.
+  const _activeWeekMealDays = (): MealDay[] => {
+    const pw = planWeekRef.current ?? planWeek;
+    if (pw?.days?.length) {
+      return pw.days.map(d => {
+        const [y, m, dd] = d.day_date.split('-').map(Number);
+        const date = new Date(y, (m ?? 1) - 1, dd ?? 1);
+        return { key: d.day_date, date };
+      });
+    }
+    return getNextMealDays(7);
+  };
 
   // Supplement stack (from props — managed by Index so it survives remounts)
   const supplementStack = supplementStackProp;
@@ -2679,7 +2707,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const loadDayStatus = async () => {
     const today = todayKey();
-    const mealDays = getNextMealDays(7);
+    // Use the active PlanWeek's dates so we fetch state for past days
+    // inside the visible strip (yesterday's meal checks etc.) — falls
+    // back to today→+6 only when no PlanWeek exists yet.
+    const mealDays = _activeWeekMealDays();
     const checkMap: Record<string, MealChecks> = {};
     const skipped = new Set<string>();
 
@@ -2852,6 +2883,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
         }
         if (pw?.days?.length) {
+          planWeekRef.current = pw;
           setPlanWeek(pw);
           // Project the PlanWeek into a legacy WorkoutPlan shape so the
           // existing rendering code (DayCard, get7DaySchedule consumers,
@@ -3001,7 +3033,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       ].filter(Boolean) as DailyNutritionPlan[];
     }
 
-    const mealDays = getNextMealDays(7);
+    // Use the active PlanWeek's dates (Mon-Sun anchor) so meal-plan
+    // hydration covers past days inside the visible strip too.
+    const mealDays = _activeWeekMealDays();
 
     /** Returns true if the plan has at least one meal with real calorie data. */
     const hasMealMacros = (plan: DailyNutritionPlan | null | undefined): boolean => {
@@ -4805,7 +4839,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         };
       })
     : schedule;
-  const mealDays = getNextMealDays(7);
+  // Render-side meal day list — derives from the active PlanWeek so it
+  // matches the workout strip dimension-for-dimension.
+  const mealDays: MealDay[] = _activeWeekMealDays();
 
   const isLightTheme = ['sunrise', 'arctic', 'parchment', 'steel', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'paper', 'frost', 'clay', 'sage', 'mist', 'dune', 'blush', 'canary', 'petal'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
@@ -6692,7 +6728,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
             {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
+              // Prefer the locally-loaded plan (which has rich client-side
+              // overlays — preserved meals, gut data, etc.). Fall back to
+              // the PlanDay's persisted nutrition_json when the rolling
+              // fetch didn't cover this date (e.g. yesterday).
               let plan = nutritionPlansByDate[d.key];
+              if (!plan && planWeek?.days?.length) {
+                const pd = planWeek.days.find(pdi => pdi.day_date === d.key);
+                if (pd?.nutrition) plan = pd.nutrition as any;
+              }
               // Free tier: synthesize an empty plan frame so the user
               // sees a day card they can add meals to manually. Pro
               // users get a proper plan here; free users get an empty
@@ -6712,7 +6756,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </FadeInView>
               );
               const isExpanded = expandedMealDays.has(d.key);
-              const isToday = idx === 0;
+              // Date-based today check — with the dated PlanWeek, today is
+              // no longer guaranteed to live at index 0 (e.g., Tue when the
+              // week started Mon).
+              const isToday = d.key === todayKey();
+              const isPast = d.date < new Date(new Date().setHours(0, 0, 0, 0));
+              // "Logged" past day: any meal checked on that date (or all checked).
+              const dayChecks = checkedMealsByDate[d.key] ?? {};
+              const checkedCount = Object.values(dayChecks).filter(Boolean).length;
+              const isPastLogged = isPast && checkedCount > 0;
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
               const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
@@ -6723,15 +6775,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // Today highlight uses the hardcoded MEALS_ACCENT (green)
               // so it's guaranteed distinct from the workout side's
               // hardcoded WORKOUT_ACCENT (blue) regardless of which
-              // theme the user has selected. Some themes had nearly
-              // identical palettes for the two sections which made the
-              // two cards look like siblings of the same color.
+              // theme the user has selected. Past days dim + dash to
+              // visually recede, mirroring the workout-side treatment.
               const cardBg = isToday ? themeColors.surfaceRaised : themeColors.surface;
-              const cardBorder = isToday ? MEALS_ACCENT + '88' : themeColors.border;
+              const cardBorder = isToday
+                ? MEALS_ACCENT
+                : isPastLogged
+                  ? MEALS_ACCENT + '55'
+                  : themeColors.border;
+              const cardBorderWidth = isToday ? 2 : 1;
+              const cardBorderStyle: 'solid' | 'dashed' = isPast && !isToday ? 'dashed' : 'solid';
+              const cardOpacity = isPast && !isToday ? 0.78 : 1;
               return (
                 <FadeInView key={d.key} delay={idx * 70}>
-                <View style={[styles.mealAccordionCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
-                  {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: MEALS_ACCENT, marginBottom: 0 }]} />}
+                <View style={[
+                  styles.mealAccordionCard,
+                  {
+                    backgroundColor: cardBg,
+                    borderColor: cardBorder,
+                    borderWidth: cardBorderWidth,
+                    borderStyle: cardBorderStyle,
+                    opacity: cardOpacity,
+                  },
+                ]}>
+                  {(isToday || isPastLogged) && (
+                    <View style={[
+                      styles.dayCardTopAccent,
+                      {
+                        backgroundColor: MEALS_ACCENT,
+                        marginBottom: 0,
+                        height: isToday ? 4 : 3,
+                        opacity: isPastLogged && !isToday ? 0.55 : 1,
+                      },
+                    ]} />
+                  )}
                   <TouchableOpacity
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
                     onPress={() => {
@@ -6745,9 +6822,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     activeOpacity={0.8}
                   >
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.mealAccordionTitle, { color: isToday ? MEALS_ACCENT : themeColors.textPrimary }]}>
-                        {mealDayLabel(d.date, idx)}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[
+                          styles.mealAccordionTitle,
+                          {
+                            color: isToday ? MEALS_ACCENT : themeColors.textPrimary,
+                            fontWeight: isToday ? '800' : '700',
+                            textDecorationLine: isPast && !isToday ? 'line-through' : 'none',
+                          },
+                        ]}>
+                          {mealDayLabel(d.date, idx)}
+                        </Text>
+                        {isPastLogged && (
+                          <View style={{
+                            backgroundColor: MEALS_ACCENT + '22',
+                            borderRadius: 4,
+                            paddingHorizontal: 5,
+                            paddingVertical: 1,
+                          }}>
+                            <Text style={{ fontSize: 9, fontWeight: '800', color: MEALS_ACCENT, letterSpacing: 0.4 }}>
+                              ✓ {checkedCount} LOGGED
+                            </Text>
+                          </View>
+                        )}
+                      </View>
                       {/* Compact macro readout under the day label. */}
                       <Text style={[styles.mealAccordionMeta, { color: themeColors.textSecondary }]}>
                         <Text style={{ fontWeight: '700', color: mealPalette.strong }}>{Math.round(totalCalories)}</Text>
