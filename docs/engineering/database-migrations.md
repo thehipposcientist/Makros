@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last synced from CLAUDE.md: 2026-04-27
+Last updated: 2026-04-28
 
 ## Pattern
 
@@ -24,6 +24,26 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_social_tables` | `friendships` canonical pair index + `weekly_digest_cache` per-user-per-week index. Tables built by `create_all`; this helper guarantees the indexes on legacy DBs. |
 | `_ensure_exercise_set_actual_rir_column` | `ExerciseSet.actual_rir DOUBLE PRECISION`. |
 | `_backfill_custom_food_micronutrients` | One-shot backfill on startup. |
+
+## PlanWeek + PlanDay Tables
+
+Created via `SQLModel.create_all` (no `ADD COLUMN` migration needed —
+they were introduced as new tables).
+
+- **`plan_weeks`** — one active row per user. Columns: `id`, `user_id`,
+  `start_date`, `end_date`, `status` (`active` | `expired`),
+  `planner_version`, `goal`, `days_per_week`, `preferred_split`,
+  `training_day_pattern` (JSONB list), `created_at`.
+- **`plan_days`** — 7 rows per `plan_weeks.id`. Columns: `id`,
+  `plan_week_id` (FK, indexed), `day_index` (0-6), `day_date` (indexed),
+  `status` (`pending` | `in_progress` | `completed` | `skipped`),
+  `is_rest`, `locked`, `lock_reason`, `workout_json`, `nutrition_json`,
+  `generation_source`.
+
+Lifecycle managed by `backend/app/services/workout/week_manager.py`:
+`create_plan_week` / `get_active_week` / `get_week_days` / `lock_day` /
+`complete_day` / `skip_day` / `patch_day_workout` / `patch_day_nutrition`
+/ `auto_renew_week` / `week_needs_renewal`.
 
 ## Adding a New Migration
 

@@ -1,8 +1,19 @@
 # Roadmap + Next Improvements
 
-Last synced: 2026-04-27
+Last updated: 2026-04-28
 
 > See `docs/product/backlog-review.md` for items whose shipped status is ambiguous.
+
+---
+
+## Recently Shipped
+
+- **PlanWeek migration (Apr 28, 2026)** — front-page schedule moved from
+  the legacy rolling-from-today cycling-array model to a fixed 7-day
+  PlanWeek with dated `PlanDay` rows. Daily fresh-day regen on app open
+  removed. Auto-renew at week end. Past days render as done / skipped
+  from history; today highlighted by date match. See
+  `docs/architecture/plan-persistence.md`.
 
 ---
 
@@ -11,9 +22,8 @@ Last synced: 2026-04-27
 - **Backend log structuring**: `KeyError("Attempt to overwrite 'created'")` from `gut_backfill` startup pollutes Sentry. Move to `extra={...}` keys that don't collide with `LogRecord` reserved names.
 - **Per-route latency budgets**: `/workouts/weekly-review` and `/meals/score` are hot paths. Add `time.perf_counter()` log line with route + duration.
 - **AI cost tracking**: `ai_classify.estimate_amounts` runs once per unique food forever. Add counter so "AI calls per week per user" is auditable.
-- **DB query budget**: `compute_weekly_volume` runs 4 queries. Consider aggregated SQL rollup at 28-day windows on heavy users.
-- **Watch sync batching**: `syncInProgressWorkout` fires after every set. Batch to every 3 sets or on rest-start to reduce network churn during high-volume sessions. Low-risk change, measurable latency win.
-- **Animation ref pruning in ActiveWorkoutScreen**: `setBadgeScales`, `exerciseCompleteScales`, `setPulseValues`, `inputFocusValues` are lazily allocated and never freed. On sessions with 6+ exercises and 20+ sets these accumulate significant refs. Prune on exercise complete or cap with a LRU map.
+- **Watch sync batching**: `syncInProgressWorkout` batched to every 3 sets via `lastSyncedSetCountRef` (Apr 28). Verify on next high-volume session that watch updates still feel responsive at the 3-set cadence.
+- **Animation ref pruning in ActiveWorkoutScreen**: pruning hooked into `playExerciseCompleteStamp` (Apr 28); confirms refs for 20 slots cleared on exercise complete. Long sessions should no longer accumulate hundreds of stale `Animated.Value` refs.
 
 ---
 
@@ -86,7 +96,8 @@ These are built on the backend or partially built on the frontend but not connec
 | **Plateau detection response** | Detection done, modal state tracked | Wire to check-in recommendation instead of "Got it" alert |
 | **Quick-intent action auto-apply** | Coach returns structured action | Apply on confirm instead of showing "Got it" |
 | **Readiness-based auto-deload** | Readiness computed, deload logic exists | Trigger when readiness < threshold for 3+ consecutive days |
-| **Weekly check-in → planner** | Writes to `UserCoachingState` / `UserPreferences` | Verify `volume_adjustment_pct` is read in all `create_plan_week` code paths |
+| **Weekly check-in → planner** | Writes to `UserCoachingState` / `UserPreferences`; `auto_renew_week` reads `volume_adjustment_pct` and applies a -20 deload trigger when readiness < 40 | Verify the deload propagates into the next PlanWeek's prescribed sets (sanity-check on a real low-readiness account) |
+| **PlanWeek migration cleanup** | New PlanWeek path is live and the daily regen block removed | Retire the legacy `get7DaySchedule` fallback once telemetry shows zero callers; same for the legacy `generateWorkoutDay` API client. Migrate Switch Day to call `PATCH /plans/days/{day_date}/workout` instead of the old `generateWorkoutWeek`. |
 | **Social workout sharing** | `ShareWorkoutModal` component exists but disabled | Re-enable when social feed launches |
 
 ---

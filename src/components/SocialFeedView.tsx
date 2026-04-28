@@ -1,17 +1,23 @@
-// Activity feed for friends. Renders the cross-friends feed
-// (`/social/feed`) backed by the `ActivityFeedItem` table that's already
-// fully implemented server-side. Each item is a workout post with
-// optional caption, photo, and a structured `workout_summary` (focus,
-// duration, exercises, sets/reps).
+// Recent Activity digest — bounded "what's new from your friends since
+// you last checked" rather than an open scrolling Strava-style feed.
 //
-// Privacy rule: this view never reads or displays kcal/macros/weight.
-// The feed payload only contains workout data — same boundary the
-// digest enforces. Items from soft-deleted users render as "unknown"
-// (the backend filter drops them from the user_cache lookup).
+// Why this isn't a feed: at pilot scale (5–10 friends, ~1 post/wk
+// each) an aggregated feed is empty most of the time, which gives the
+// worst possible first impression. Bounded recent-activity also
+// sidesteps the comparison/anxiety problem fitness feeds are notorious
+// for. Users who want deeper history tap a friend → see their detail
+// view (which is the primary social surface).
+//
+// Backed by `/social/feed` (kept the endpoint name; same payload).
+// Each item is a workout share with optional caption, photo, and a
+// structured `workout_summary` (focus, duration, exercises, sets/reps).
+//
+// Privacy rule: never reads or displays kcal/macros/weight. Items
+// from soft-deleted users render as "unknown" (backend filter).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator, Alert, FlatList, Image, RefreshControl,
+  ActivityIndicator, FlatList, Image, RefreshControl,
   StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,7 +27,6 @@ import {
   FeedItem,
   getSocialFeed,
   toggleFeedLike,
-  deleteSocialPost,
 } from '../services/api';
 
 interface Props {
@@ -29,17 +34,20 @@ interface Props {
   themeName?: AppThemeName;
   /** When set, tapping the author name calls this with their user_id.
    *  Parent typically opens the same friend detail surface used from
-   *  the Friends list so feed → detail navigation feels consistent. */
+   *  the Friends list so activity → detail navigation feels consistent. */
   onViewAuthor?: (userId: number, displayName: string) => void;
-  /** Called when the user taps the "Share Workout" CTA. Parent surfaces
-   *  the actual post-create modal (caption, optional photo). */
-  onComposePost?: () => void;
-  /** Bumped by the parent every time it wants the feed to refetch
-   *  (e.g., after a successful post). Re-fires `loadInitial`. */
+  /** Bumped by the parent every time it wants activity to refetch
+   *  (e.g., after a successful share). Re-fires `loadInitial`. */
   refreshKey?: number;
+  /** Hard cap on items rendered. Keeps the digest from drifting into
+   *  Instagram-style infinite scroll. Default 10 — enough to feel
+   *  alive at pilot scale without becoming a doom-scroll surface. */
+  maxItems?: number;
 }
 
-const PAGE_SIZE = 30;
+// One bounded fetch — no pagination by design. The view is an "is
+// anything new?" check, not a content destination.
+const DEFAULT_MAX_ITEMS = 10;
 
 function formatRelative(iso: string): string {
   if (!iso) return '';
@@ -64,38 +72,32 @@ function formatDuration(sec: number | undefined | null): string {
 }
 
 export default function SocialFeedView({
-  authToken, themeName, onViewAuthor, onComposePost, refreshKey,
+  authToken, themeName, onViewAuthor, refreshKey, maxItems,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const cap = maxItems ?? DEFAULT_MAX_ITEMS;
 
   const [items, setItems] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [paging, setPaging] = useState(false);
-  // Optimistic like state — keyed by feed item id. Lets the heart
+  // Optimistic like state — keyed by item id. Lets the heart
   // animate instantly while the network call is in flight; rolls back
   // on failure.
   const [pendingLikes, setPendingLikes] = useState<Record<number, boolean>>({});
-  // Load-more guards: track the last `before_id` we requested so a
-  // user scrolling fast doesn't hammer the backend on every onEndReached.
-  const lastBeforeIdRef = useRef<number | null>(null);
-  const exhaustedRef = useRef(false);
 
   const loadInitial = useCallback(async () => {
     setLoading(true);
     try {
       const r = await getSocialFeed(authToken);
-      setItems(r.items);
-      lastBeforeIdRef.current = r.items.length ? r.items[r.items.length - 1].id : null;
-      exhaustedRef.current = r.items.length < PAGE_SIZE;
+      setItems(r.items.slice(0, cap));
     } catch {
       // Silent — empty-state handles "couldn't load" via UI signal.
     } finally {
       setLoading(false);
     }
-  }, [authToken]);
+  }, [authToken, cap]);
 
   useEffect(() => { loadInitial(); }, [loadInitial, refreshKey]);
 
@@ -103,30 +105,10 @@ export default function SocialFeedView({
     setRefreshing(true);
     try {
       const r = await getSocialFeed(authToken);
-      setItems(r.items);
-      lastBeforeIdRef.current = r.items.length ? r.items[r.items.length - 1].id : null;
-      exhaustedRef.current = r.items.length < PAGE_SIZE;
+      setItems(r.items.slice(0, cap));
     } catch { /* keep current items on transient failure */ }
     finally { setRefreshing(false); }
-  }, [authToken]);
-
-  const loadMore = useCallback(async () => {
-    if (paging || exhaustedRef.current) return;
-    const beforeId = lastBeforeIdRef.current;
-    if (beforeId == null) return;
-    setPaging(true);
-    try {
-      const r = await getSocialFeed(authToken, beforeId);
-      if (r.items.length === 0) {
-        exhaustedRef.current = true;
-      } else {
-        setItems(prev => [...prev, ...r.items]);
-        lastBeforeIdRef.current = r.items[r.items.length - 1].id;
-        if (r.items.length < PAGE_SIZE) exhaustedRef.current = true;
-      }
-    } catch { /* swallow — user can scroll again to retry */ }
-    finally { setPaging(false); }
-  }, [authToken, paging]);
+  }, [authToken, cap]);
 
   const handleLike = useCallback(async (item: FeedItem) => {
     // Optimistic flip.
@@ -152,26 +134,6 @@ export default function SocialFeedView({
         return rest;
       });
     }
-  }, [authToken]);
-
-  const handleDelete = useCallback((item: FeedItem) => {
-    Alert.alert(
-      'Delete this post?',
-      'It will disappear from your friends\' feeds.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete', style: 'destructive', onPress: async () => {
-            try {
-              await deleteSocialPost(authToken, item.id);
-              setItems(curr => curr.filter(it => it.id !== item.id));
-            } catch (e: any) {
-              Alert.alert('Could not delete', e?.message ?? 'Try again');
-            }
-          },
-        },
-      ],
-    );
   }, [authToken]);
 
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
@@ -295,27 +257,27 @@ export default function SocialFeedView({
           tintColor={colors.primary}
         />
       }
-      onEndReached={loadMore}
-      onEndReachedThreshold={0.4}
       ListEmptyComponent={
+        // Calmer empty state — no "be the first?" performative prompt.
+        // Recent Activity is "what's new since you checked," not a
+        // content destination, so emptiness is normal, not a fail state.
         <View style={styles.empty}>
-          <Ionicons name="people-outline" size={32} color={colors.textMuted} />
-          <Text style={styles.emptyTitle}>Quiet feed</Text>
+          <Ionicons name="checkmark-circle-outline" size={28} color={colors.textMuted} />
+          <Text style={styles.emptyTitle}>You're all caught up</Text>
           <Text style={styles.emptyBody}>
-            When friends share their workouts, they'll show up here. Be the first?
+            Nothing new from your friends right now. Pull to refresh.
           </Text>
-          {onComposePost ? (
-            <TouchableOpacity style={styles.shareBtn} onPress={onComposePost}>
-              <Ionicons name="share-outline" size={16} color={colors.background} />
-              <Text style={styles.shareBtnText}>Share a workout</Text>
-            </TouchableOpacity>
-          ) : null}
         </View>
       }
       ListFooterComponent={
-        paging ? (
-          <View style={{ paddingVertical: 16, alignItems: 'center' }}>
-            <ActivityIndicator size="small" color={colors.textMuted} />
+        // Soft "you're caught up" footer at the end of a non-empty
+        // list, so the bounded view doesn't read as "broken" or
+        // "incomplete." Only shown when at the cap.
+        items.length >= cap ? (
+          <View style={{ paddingVertical: 14, alignItems: 'center' }}>
+            <Text style={{ fontSize: 11, color: colors.textMuted }}>
+              Showing latest {cap}. Older activity lives on each friend's profile.
+            </Text>
           </View>
         ) : null
       }
@@ -330,13 +292,6 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     empty: { paddingVertical: 60, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 28 },
     emptyTitle: { fontSize: 16, fontWeight: '700', color: c.textPrimary, marginTop: 8 },
     emptyBody: { fontSize: 13, color: c.textSecondary, textAlign: 'center', lineHeight: 18 },
-    shareBtn: {
-      marginTop: 14, flexDirection: 'row', gap: 6,
-      paddingVertical: 9, paddingHorizontal: 16,
-      backgroundColor: c.primary, borderRadius: radius.md,
-      alignItems: 'center',
-    },
-    shareBtnText: { color: c.background, fontSize: 13, fontWeight: '700' },
     card: {
       backgroundColor: c.surfaceRaised,
       borderRadius: radius.lg,

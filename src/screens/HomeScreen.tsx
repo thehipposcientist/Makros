@@ -9886,18 +9886,10 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const workoutPalette = theme.sections.workout;
-  // Friendly day labels for the PlanWeek strip. "Today", "Yesterday",
-  // and "Tomorrow" beat the bare day-of-week name when the user is
-  // glancing at adjacent days; further-out days fall back to "Mon",
-  // "Tue", etc.
-  const _yesterdayDate = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })();
-  const _tomorrowDate  = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d; })();
-  const _itemKey = dateKey(item.date);
-  const dow = isToday
-    ? 'Today'
-    : _itemKey === dateKey(_yesterdayDate) ? 'Yesterday'
-    : _itemKey === dateKey(_tomorrowDate)  ? 'Tomorrow'
-    : DAY_NAMES[item.date.getDay()];
+  // Day-of-week label. Only "Today" gets a special name — for all
+  // other days the date strip already disambiguates (e.g. "Mon · Apr 27"),
+  // so adding "Yesterday" / "Tomorrow" reads as redundant noise.
+  const dow = isToday ? 'Today' : DAY_NAMES[item.date.getDay()];
   const dateStr = `${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`;
 
   // Rest day — uses `workoutPalette.strong` so the today highlight
@@ -9906,11 +9898,21 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   // stay distinct even when a theme's workout/meal palettes are similar.)
   if (item.isRest) {
     return (
-      <View style={[styles.dayCard, { backgroundColor: isToday ? tc.surfaceRaised : tc.surface, borderColor: isToday ? workoutPalette.strong + '88' : tc.border }]}>
-        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong }]} />}
+      <View style={[
+        styles.dayCard,
+        {
+          backgroundColor: isToday ? tc.surfaceRaised : tc.surface,
+          borderColor: isToday ? workoutPalette.strong : tc.border,
+          borderWidth: isToday ? 2 : 1,
+        },
+      ]}>
+        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong, height: 4 }]} />}
         <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 14 }]}>
           <View style={styles.dayCardLeft}>
-            <Text style={[styles.dayCardDow, { color: isToday ? workoutPalette.strong : tc.textSecondary }]}>{dow}</Text>
+            <Text style={[
+              styles.dayCardDow,
+              { color: isToday ? workoutPalette.strong : tc.textSecondary, fontSize: isToday ? 14 : 13, fontWeight: isToday ? '800' : '700' },
+            ]}>{dow}</Text>
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
           </View>
           <View style={[styles.restBadge, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
@@ -9983,25 +9985,37 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
     );
   }
 
-  // Today AND completed both highlight in the workout palette so the
-  // entire workout tab uses one consistent accent color. The "Done" state
-  // is communicated by the green ✓ Done badge inside the card, not by
-  // the card border itself — that way users in any theme see their
-  // workout color light up regardless of whether the day is finished.
+  // Today gets the strongest treatment: solid full-strength border, raised
+  // background, and a 4px accent strip up top. Completed-but-not-today gets
+  // a dashed border + reduced opacity so finished days visually recede,
+  // letting the user's eye land on today first.
   const accentColor = workoutPalette.strong;
-  const borderColor = (isToday || isCompleted) ? workoutPalette.strong + '88' : tc.border;
+  const borderColor = isToday
+    ? workoutPalette.strong
+    : isCompleted
+      ? workoutPalette.strong + '55'
+      : tc.border;
+  const cardBg = isToday ? tc.surfaceRaised : tc.surface;
+  const todayAccentHeight = isToday ? 4 : 3;
+  const completedDashed = isCompleted && !isToday;
 
   return (
     <TouchableOpacity
       style={[
         styles.dayCard,
-        { backgroundColor: isToday ? tc.surfaceRaised : tc.surface, borderColor },
+        {
+          backgroundColor: cardBg,
+          borderColor,
+          borderWidth: isToday ? 2 : 1,
+          borderStyle: completedDashed ? 'dashed' : 'solid',
+          opacity: completedDashed ? 0.78 : 1,
+        },
       ]}
       onPress={onPress}
       activeOpacity={0.8}
       disabled={isRegenerating}>
       {(isToday || isCompleted) && (
-        <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor }]} />
+        <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor, height: todayAccentHeight, opacity: completedDashed ? 0.55 : 1 }]} />
       )}
       {/* Regen overlay while the deterministic planner swaps this day's
           exercises. Translucent so the card structure stays visible. */}
@@ -10021,12 +10035,18 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
       )}
       <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 14 }]}>
         <View style={styles.dayCardLeft}>
-          <Text style={[styles.dayCardDow, { color: isToday ? accentColor : tc.textSecondary }]}>{dow}</Text>
-          <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
+          <Text style={[
+            styles.dayCardDow,
+            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 14 : 13, fontWeight: isToday ? '800' : '700' },
+          ]}>{dow}</Text>
+          <Text style={[styles.dayCardDate, { color: tc.textMuted, textDecorationLine: completedDashed ? 'line-through' : 'none' }]}>{dateStr}</Text>
         </View>
         <View style={styles.dayCardRight}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <FocusLabelCrossfade focus={item.workout!.focus} style={[styles.focusLabel, { color: tc.textPrimary }]} />
+            <FocusLabelCrossfade focus={item.workout!.focus} style={[
+              styles.focusLabel,
+              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none' },
+            ]} />
             {(() => {
               const stim = item.workout?.stimulus;
               if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
@@ -10149,7 +10169,11 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           {isCompleted ? (
             <View style={{ gap: 10 }}>
               <View style={[styles.completedBanner, { backgroundColor: tc.success + '1A', borderColor: tc.success }]}>
-                <Text style={[styles.completedBannerText, { color: tc.success }]}>Workout completed today!</Text>
+                <Text style={[styles.completedBannerText, { color: tc.success }]}>
+                  {isToday
+                    ? 'Workout completed today!'
+                    : `Workout completed ${DAY_NAMES[item.date.getDay()]}, ${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`}
+                </Text>
               </View>
               {/* Undo affordance for phantom completions — no real
                   history entry, but the day still shows as done. Tap

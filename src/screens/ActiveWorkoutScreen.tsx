@@ -1356,7 +1356,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const f = await import('../utils/feedback');
           f.hapticSuccess?.();
         } catch {}
-        Alert.alert('Posted', 'Your workout is on your friends feed.');
+        Alert.alert('Shared', 'Your friends will see this in their Activity tab.');
       } catch (e: any) {
         Alert.alert('Could not post', e?.message ?? 'Try again later.');
       } finally {
@@ -1369,11 +1369,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // the headline data).
     if (Platform.OS === 'ios' && (Alert as any).prompt) {
       (Alert as any).prompt(
-        'Share to Friends Feed',
-        'Optional caption — your friends see the workout summary either way.',
+        'Share with friends',
+        'Optional caption — your friends see the workout summary either way. (No calories, macros, or weight are ever shared.)',
         [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Post', onPress: submitPost },
+          { text: 'Share', onPress: submitPost },
         ],
         'plain-text',
         '',
@@ -4403,10 +4403,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                 ) : null}
 
-                {/* Share image + Post-to-Friends-Feed + Feedback buttons.
-                    "Share" exports an image; "Post" sends the structured
-                    workout summary to the friends activity feed (no
-                    kcal/macros/weight ever — privacy boundary). */}
+                {/* Share image + Share-to-friends + Feedback buttons.
+                    "Share" exports an image; "Friends" sends the
+                    structured workout summary to the friends Activity
+                    digest (no kcal/macros/weight ever — privacy boundary). */}
                 <View style={{ flexDirection: 'row', gap: 10 }}>
                   <TouchableOpacity
                     style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
@@ -4423,7 +4423,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     disabled={postingToFeed || summaryLoading}
                     activeOpacity={0.85}>
                     <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                      {postingToFeed ? 'Posting…' : '👥 Post'}
+                      {postingToFeed ? 'Sharing…' : '👥 Friends'}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity

@@ -1,6 +1,6 @@
 # Backlog Review — Contradictions & Stale Notes
 
-Last reviewed: 2026-04-27
+Last reviewed: 2026-04-28
 
 Items where the old CLAUDE.md had conflicting or ambiguous information. Verify current code state before acting.
 
@@ -74,3 +74,29 @@ Items where the old CLAUDE.md had conflicting or ambiguous information. Verify c
 **Why it's suspect**: Looks like an aspirational placeholder (`gpt-5`) that was added speculatively. The actual runtime model is whatever `MODEL_CHAT` is set to in `.env`.
 
 **Recommended follow-up**: Verify the actual MODEL_CHAT value in your `.env`. The architecture doc now just says "env var, default gpt-4o-mini" without the `gpt-5` reference.
+
+---
+
+## 6. Cycling-array `WorkoutPlan.days` — Now legacy
+
+**Topic**: The "weekly workout plan" data shape used by `HomeScreen`.
+
+**Conflicting notes**:
+- Older docs described a 3-7 day `WorkoutPlan.days[]` cycling array
+  indexed by `completedDates.size % totalDays` (the rolling-from-today
+  schedule produced by `get7DaySchedule`).
+- As of 2026-04-28 the front-page schedule comes from a fixed dated
+  `PlanWeek` with 7 `PlanDay` rows, and the daily fresh-day regen on
+  app open has been removed.
+
+**Why this matters**: New code should consume the `PlanWeek` model
+(`getActivePlanWeek` / `startNewPlanWeek` / `autoRenewPlanWeek` from
+`services/api.ts`) — not pretend `WorkoutPlan.days[]` is still rolled
+through `% totalDays`. The legacy `get7DaySchedule` is retained only as
+a fallback when no PlanWeek exists.
+
+**Recommended follow-up**: Once telemetry shows zero callers using the
+legacy fallback, retire `get7DaySchedule` and the
+`POST /workouts/generate-day` API client. Migrate Switch Day to call
+`PATCH /plans/days/{day_date}/workout` instead of the legacy week
+regen path.

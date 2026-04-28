@@ -1,12 +1,25 @@
 # Workout System — Architecture
 
-Last synced from CLAUDE.md: 2026-04-27
+Last updated: 2026-04-28
 
 ## Pipeline
 
 ```
 User Profile → GoalProfile → WeeklyRecipe → DayArchetype → Slots → ExerciseSelection → Prescription
 ```
+
+## Persistence Model: PlanWeek (NEW)
+
+The front-page schedule is driven by a fixed 7-day **PlanWeek** with dated
+`PlanDay` rows. The 7 days are generated together and **never regenerated
+mid-week** — past days accumulate as done / skipped, today is highlighted,
+forward days remain queued. A new PlanWeek only generates when the
+current one's `end_date < today`. See
+[`plan-persistence.md`](./plan-persistence.md) for the full model.
+
+The deterministic planner (this doc) runs at PlanWeek creation /
+auto-renew time and at per-day patch time. The legacy "fresh day on app
+open" regen is **removed**.
 
 ## Key Service Files (`backend/app/services/workout/`)
 
@@ -66,13 +79,24 @@ Groups: `chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, cal
 
 Upsert key: `(user, date, focus)` — legs morning + sauna evening = 2 rows. Prevents second activity from overwriting first.
 
-## Generation Consistency (single-day, full regen, change-focus)
+## Generation Consistency (PlanWeek create, auto-renew, change-focus, single-day patch)
 
-All three entry points must pass the same shape of inputs. Audited Apr 2026:
-- All three query `most_recent_completed_focus(hours=240, limit=10)` and pass `recent_focus_buckets` + `recent_focus_families`.
-- All three compute `muscle_fatigue` via `compute_rolling_fatigue` + `injury_muscle_fatigue_boost`.
-- All three route through `generate_workout_plan` → `generate_weekly_recipe` → `_repair_adjacent_duplicates`.
-- **Focus mismatch fallback**: when requested focus isn't in recipe, both endpoints regenerate with `preferred_split` forced to the family containing that focus. Old behavior was label-only.
+All entry points must pass the same shape of inputs. Audited Apr 2026:
+- All query `most_recent_completed_focus(hours=240, limit=10)` and pass `recent_focus_buckets` + `recent_focus_families`.
+- All compute `muscle_fatigue` via `compute_rolling_fatigue` + `injury_muscle_fatigue_boost`.
+- All route through `generate_workout_plan` → `generate_weekly_recipe` → `_repair_adjacent_duplicates`.
+- **Focus mismatch fallback**: when requested focus isn't in recipe, the endpoint regenerates with `preferred_split` forced to the family containing that focus. Old behavior was label-only.
+
+**Entry points (post-PlanWeek migration):**
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /plans/start-new-week` | Generates a fresh 7-day PlanWeek anchored on the most recent Monday. First-run setup. |
+| `POST /plans/week/auto-renew` | When the active PlanWeek's `end_date` has passed, generates the next 7 days. Idempotent while still active. |
+| `PATCH /plans/days/{day_date}/workout` | Per-day workout swap (Switch Day, manual edits, AI swaps). |
+| `POST /plans/week/review-and-apply` | Applies user-selected weekly check-in recommendations and regenerates remaining days. |
+| `POST /workouts/generate-day` | **Legacy** — used by the now-removed daily fresh-day regen. Still defined; no active caller on the front page. |
+| `POST /workouts/generate-week` | **Legacy** — used by the legacy Switch Day flow before the PlanWeek model. Active for the migration tail. |
 
 ## Recovery/Mobility Day Scaling
 

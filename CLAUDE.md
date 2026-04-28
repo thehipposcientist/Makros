@@ -13,15 +13,16 @@ Thallo is a premium fitness + nutrition app. React Native (Expo) frontend, FastA
 These rules apply to every change:
 
 1. **Workout planner is deterministic.** No AI in exercise selection, split logic, or weekly recipe. AI plan review is PERMANENTLY DISABLED (`PLAN_REVIEW_ENABLED=0` is a no-op).
-2. **DB is source of truth.** One `is_active=True` `WorkoutPlan` + `NutritionPlan` row per user. AsyncStorage is a hot cache; on conflict, DB wins.
-3. **AI can only do what the user can do.** Recommendations mutate `UserPreferences` / `UserCoachingState` / `UserDayState` — never the active `WorkoutPlan` directly. All AI actions route through `POST /coach/apply-action`.
-4. **Nutrition scoring is server-authoritative.** `/meals/score` is the source of truth for logged meals. Client `nutritionScore.ts` is plan-preview only.
-5. **Plan cache clear is scoped.** Use `clearWorkoutCache()` / `clearMealCache()` / `clearAllPlanCache()`. Never wipe unrelated domains.
-6. **Preserve API contracts or update all callers.** Backend + frontend + watch changes must stay in sync.
-7. **Social data boundary.** Calorie/macro/weight data NEVER crosses the social boundary — digest reads `WorkoutCompletion` only.
-8. **Fatigue system**: 12 muscle groups, decay-based, recovery/mobility days have NEGATIVE fatigue.
-9. **Warmup prescription is always short + dynamic.** Never long yoga/stretch blocks before heavy lifts.
-10. **PLUS_CARDIO archetypes are injected AFTER adjacency repair** — they share `focus_family` with base lift so adjacency is always preserved.
+2. **DB is source of truth.** Front-page schedule = active `PlanWeek` + 7 `PlanDay` rows. Legacy `WorkoutPlan` / `NutritionPlan` tables remain for the AI artifact + nutrition templates. AsyncStorage is a hot cache only used when backend is unreachable; on conflict, DB wins.
+3. **PlanWeek is fixed for 7 days.** No mid-week regeneration. Past days accumulate as done / skipped, today is highlighted, forward days remain queued. New PlanWeek auto-generates only when `end_date < today` (auto-renew). The legacy daily fresh-day regen on app open is **removed**.
+4. **AI can only do what the user can do.** Recommendations mutate `UserPreferences` / `UserCoachingState` / `UserDayState` — never the active `PlanWeek` directly. All AI actions route through `POST /coach/apply-action`.
+5. **Nutrition scoring is server-authoritative.** `/meals/score` is the source of truth for logged meals. Client `nutritionScore.ts` is plan-preview only.
+6. **Plan cache clear is scoped.** Use `clearWorkoutCache()` / `clearMealCache()` / `clearAllPlanCache()`. Never wipe unrelated domains.
+7. **Preserve API contracts or update all callers.** Backend + frontend + watch changes must stay in sync.
+8. **Social data boundary.** Calorie/macro/weight data NEVER crosses the social boundary — digest reads `WorkoutCompletion` only.
+9. **Fatigue system**: 12 muscle groups, decay-based, recovery/mobility days have NEGATIVE fatigue.
+10. **Warmup prescription is always short + dynamic.** Never long yoga/stretch blocks before heavy lifts.
+11. **PLUS_CARDIO archetypes are injected AFTER adjacency repair** — they share `focus_family` with base lift so adjacency is always preserved.
 
 ## Dev Commands
 ```bash

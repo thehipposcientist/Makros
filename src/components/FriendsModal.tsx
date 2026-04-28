@@ -66,12 +66,17 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const [searching, setSearching] = useState(false);
   const [requestPending, setRequestPending] = useState<string | null>(null);
   const [showOptIn, setShowOptIn] = useState(false);
-  // Friends/Feed tab. Default to "friends" because it surfaces the
-  // already-loaded digest immediately; the feed lazy-loads on first
-  // tab tap so we don't pay for the round-trip when nobody opens it.
-  const [activeTab, setActiveTab] = useState<'friends' | 'feed'>('friends');
-  // Bumped to force the feed to re-fetch (e.g., after the user posts).
+  // Friends / Activity tab. Default to "friends" because it surfaces
+  // the already-loaded digest immediately; activity lazy-loads on
+  // first tab tap so we don't pay for the round-trip when nobody opens
+  // it. We dropped the open-feed framing in favor of a bounded "Recent
+  // Activity" digest — the friend detail page is the primary surface
+  // for browsing a specific person's training; activity is just the
+  // "anything new since I last looked?" check.
+  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>('friends');
+  // Bumped to force the activity view to re-fetch (e.g., after share).
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
+  void setFeedRefreshKey;
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -265,9 +270,10 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         </View>
       )}
 
-      {/* Friends / Feed tab strip. The Feed tab renders the activity
-          feed (post-workout shares from friends) backed by the
-          /social/feed endpoint that's been live but unused for months. */}
+      {/* Friends / Activity tab strip. "Activity" is a bounded digest
+          (latest 10 shares from friends), not an open scrolling feed —
+          the friend detail surface is where users go to dig into a
+          specific person's training. */}
       <View style={styles.tabStrip}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
@@ -278,16 +284,16 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'feed' && styles.tabActive]}
-          onPress={() => setActiveTab('feed')}
+          style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
+          onPress={() => setActiveTab('activity')}
         >
-          <Text style={[styles.tabText, activeTab === 'feed' && styles.tabTextActive]}>
-            Feed
+          <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
+            Activity
           </Text>
         </TouchableOpacity>
       </View>
 
-      {activeTab === 'feed' ? (
+      {activeTab === 'activity' ? (
         <SocialFeedView
           authToken={authToken}
           themeName={themeName}

@@ -1,11 +1,16 @@
 # UI Layout
 
-Last synced from CLAUDE.md: 2026-04-27
+Last updated: 2026-04-28
 
 ## Tab Structure
 
 ### Workout Tab
-- **Plan** — weekly workout plan cards. Each day card has per-exercise Swap chip → `PlanSwapExerciseModal`.
+- **Plan** — fixed 7-day **PlanWeek** schedule (Mon-Sun, anchored on the
+  most recent Monday). Renders all 7 dated `PlanDay` rows in chronological
+  order: past days show as completed / skipped from history, today is
+  highlighted, forward days remain queued. The 7 days are stable for the
+  full week — no mid-week regeneration. Each day card has per-exercise
+  Swap chip → `PlanSwapExerciseModal`.
 - **Library** — merged Exercises + Muscles browser.
 - **Settings** — equipment, injuries, preferences.
 
@@ -37,6 +42,23 @@ Last synced from CLAUDE.md: 2026-04-27
 - Target weight required for weight-change goals (fat_loss / muscle_gain / body_recomp / toning).
 - `FadeInView` keyed on `currentStepKey` for step transitions (220ms).
 - Horizontal template scrollers use `decelerationRate="fast"`.
+
+## Day Card Behavior (PlanWeek)
+
+- `isToday` is **date-based** (`dateKey(item.date) === todayKey()`) — with
+  the dated PlanWeek, today may be at any index (e.g., index 1 if the
+  week started Monday and today is Tuesday).
+- `isCompleted` derives from `completedDates.has(key)` so any past day's
+  completed workout shows as done (yesterday rendering as ✓ done is the
+  user-visible signal that the schedule reflects history).
+- `completedSummary` is looked up per-date in `workoutHistorySummaries`,
+  not from a single `todaySummary` value, so each past day shows its own
+  stored summary card.
+- Day-of-week label resolves to "Yesterday" / "Today" / "Tomorrow" for
+  adjacent days, weekday name otherwise.
+- Auto-renew: when the active PlanWeek's `end_date < today`, `loadPlans`
+  calls `POST /plans/week/auto-renew` and renders the freshly generated
+  next 7 days.
 
 ## Key UI Features
 

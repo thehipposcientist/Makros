@@ -1,6 +1,18 @@
 # Thallo — Recommendations & Roadmap
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
+
+## 2026-04-28 — Social pivot: from "feed" to bounded "Recent Activity"
+
+The open scrolling feed was over-engineered for pilot scale and risked
+the comparison/anxiety problem fitness feeds are notorious for. We
+pivoted: the friend detail view is the primary social surface; the
+former Feed tab is now an "Activity" digest capped at the latest 10
+shares with no infinite-scroll. Empty state is calm ("You're all caught
+up"), not performative ("be the first to post"). Same backend
+endpoints, same `ActivityFeedItem` schema — only the frontend framing
+changed. See `SocialFeedView.tsx`, `FriendsModal.tsx`,
+`ActiveWorkoutScreen.tsx` workout-share button.
 
 ---
 
