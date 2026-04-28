@@ -188,7 +188,11 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
             return <BodyHeatMap recovery={heatRecovery} themeName={themeName} height={240} />;
           })()}
 
-          {/* Compact exact-value list — two columns */}
+          {/* Compact exact-value list — two columns.
+              The % column is given a fixed width + right-align so values
+              like "5%", "85%", "100%" line up in a clean vertical column
+              instead of floating around at the end of variable-length
+              muscle names. Same fix on the dot column for symmetry. */}
           <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap' }}>
             {muscleEntries.map(([muscle, fatigue], idx) => {
               const pct = Math.round(fatigue * 100);
@@ -201,15 +205,33 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
                     width: '50%',
                     flexDirection: 'row',
                     alignItems: 'center',
-                    paddingVertical: 3,
-                    paddingRight: 8,
+                    paddingVertical: 4,
+                    paddingRight: 12,
                   }}
                 >
-                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color, marginRight: 6 }} />
-                  <Text style={{ flex: 1, fontSize: 11, color: tc.textSecondary, textTransform: 'capitalize' }} numberOfLines={1}>
+                  <View style={{ width: 8, alignItems: 'center', marginRight: 8 }}>
+                    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: color }} />
+                  </View>
+                  <Text
+                    style={{ flex: 1, fontSize: 12, color: tc.textSecondary, textTransform: 'capitalize' }}
+                    numberOfLines={1}
+                  >
                     {muscle.replace('_', ' ')}
                   </Text>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{recovery}%</Text>
+                  {/* Fixed-width, right-aligned, tabular numerals so the
+                      percentages form a clean vertical column. */}
+                  <Text
+                    style={{
+                      width: 38,
+                      textAlign: 'right',
+                      fontSize: 12,
+                      fontWeight: '700',
+                      color: tc.textPrimary,
+                      fontVariant: ['tabular-nums'],
+                    }}
+                  >
+                    {recovery}%
+                  </Text>
                 </View>
                 </FadeInView>
               );

@@ -275,12 +275,20 @@ def start_new_week(
         pass
 
     today = date.today()
+    # Anchor the week on the most recent Monday so the front-page schedule
+    # is a stable Mon-Sun calendar week. This keeps yesterday's completed
+    # workout visible (still inside the active week) and lines auto-renewal
+    # up with the natural week boundary instead of a rolling 7-day window
+    # that drifts every time the user reinstalls.
+    weekday = today.weekday()  # Mon=0 .. Sun=6
+    from datetime import timedelta
+    week_start = today - timedelta(days=weekday)
     training_pattern = default_training_pattern(days_per_week)
 
     pw = create_plan_week(
         db,
         current_user.id,
-        start_date=today,
+        start_date=week_start,
         workout_days=workout_days,
         nutrition_templates=nutrition_templates,
         training_day_pattern=training_pattern,
@@ -291,7 +299,7 @@ def start_new_week(
     )
 
     days = get_week_days(db, pw.id)
-    logger.info(f"[plan-week] started new week for user={current_user.id} start={today}")
+    logger.info(f"[plan-week] started new week for user={current_user.id} start={week_start} (today={today}, weekday={weekday})")
     return _plan_week_to_response(pw, days)
 
 

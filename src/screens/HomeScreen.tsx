@@ -17,6 +17,8 @@ import FriendsModal from '../components/FriendsModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
+import CollapsibleSection from '../components/CollapsibleSection';
+import BodyHeatMap, { HeatMuscleKey } from '../components/BodyHeatMap';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
@@ -948,6 +950,30 @@ function mealDayLabel(date: Date, index: number): string {
   return `${DAY_NAMES[date.getDay()]} · ${MONTH_NAMES[date.getMonth()]} ${date.getDate()}`;
 }
 
+/** Build the front-page schedule directly from a persisted PlanWeek's
+ *  dated days. Each PlanDay already carries its own date + workout JSON,
+ *  so we surface them in chronological order — yesterday's completed
+ *  session stays visible if it falls within `[start_date, end_date]`.
+ *  This is the new source of truth; the legacy `get7DaySchedule` is
+ *  retained only as a fallback for users who don't have a PlanWeek row
+ *  yet. */
+function getScheduleFromPlanWeek(
+  planWeek: import('../services/api').PlanWeekResponse,
+): ScheduleItem[] {
+  return planWeek.days.map(d => {
+    // day_date is a YYYY-MM-DD string. Construct a local-midnight Date
+    // so day-of-week math + dateKey comparisons match the rest of the
+    // app (which all use local-time keys).
+    const [y, m, dd] = d.day_date.split('-').map(Number);
+    const date = new Date(y, (m ?? 1) - 1, dd ?? 1);
+    return {
+      date,
+      workout: (d.workout ?? null) as WorkoutDay | null,
+      isRest: !!d.is_rest,
+    };
+  });
+}
+
 // humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
@@ -1089,6 +1115,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const aiPalette = theme.sections.ai;
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
+  // The persisted 7-day plan from /plans/week/active. Source of truth for
+  // the front-page schedule: each PlanDay carries its own date + status,
+  // so yesterday's completed workout stays visible if it falls within
+  // the active week. Null while loading or for legacy users with no row.
+  const [planWeek, setPlanWeek] = useState<import('../services/api').PlanWeekResponse | null>(null);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
@@ -1671,15 +1702,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           setResumeInfo(null);
           return;
         }
-        // Infer focus from today's plan — `schedule[0].workout.focus`.
-        const todayFocus = workoutPlan?.days?.[0]?.focus ?? 'workout';
+        // Infer focus from today's PlanDay (looked up by date), falling
+        // back to position 0 of the legacy plan when no PlanWeek exists.
+        const todayDayDate = todayKey();
+        const planDayToday = planWeek?.days?.find(d => d.day_date === todayDayDate);
+        const todayFocus = planDayToday?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? 'workout';
         setResumeInfo({ focus: todayFocus, setsLogged, startedAt });
       } catch {
         setResumeInfo(null);
       }
     })();
     return () => { cancelled = true; };
-  }, [workoutPlan, planRefreshKey]);
+  }, [workoutPlan, planWeek, planRefreshKey]);
 
   // Defensive re-schedule of the 9pm meal-log reminder. Cheap: if the
   // settings say disabled, the helper no-ops. If already scheduled,
@@ -1762,8 +1796,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     if (prevWorkoutSettings.current !== current) {
       prevWorkoutSettings.current = current;
-      AsyncStorage.removeItem(`freshDayGenerated_${todayKey()}`).catch(() => {});
-      console.log('[loadPlans] workout settings changed — fresh day flag cleared');
+      // Daily fresh-day flag removed — plan now stable for the full week.
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userProfile?.goal, userProfile?.daysPerWeek, userProfile?.workoutDurationMinutes, userProfile?.preferredSplit]);
@@ -1793,8 +1826,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
         } = await import('../utils/watchSync');
         const todayISO = new Date().toISOString().slice(0, 10);
-        const todayItem = (schedule as any[])?.[0] ?? null;
-        const todayWorkout = todayItem?.workout ?? null;
+        // Find today by date in the schedule — with the PlanWeek model,
+        // today may be at any index (e.g., index 1 if the week started
+        // yesterday). Falls back to position 0 only if no date match.
+        const todayItem = (schedule as any[])?.find((s: any) => dateKey(s.date) === todayISO) ?? (schedule as any[])?.[0] ?? null;
+        // Fall back to workoutPlan.days[0] when schedule[0].workout is null —
+        // happens when the schedule mapping hasn't fully resolved yet but the
+        // raw plan exists. Without this fallback the watch shows "Open Thallo"
+        // forever even though the user has a workout plan loaded.
+        const todayWorkout = todayItem?.workout ?? workoutPlan?.days?.[0] ?? null;
         // Detect in-progress workout — ActiveWorkoutScreen writes
         // `activeWorkoutStartTime` on mount and clears it on
         // end/cancel. While that key is present (and recent), the
@@ -2092,7 +2132,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const s = rePushStateRef.current;
           const todayISO = new Date().toISOString().slice(0, 10);
           const todayItem = (s.schedule as any[])?.[0] ?? null;
-          const todayWorkout = todayItem?.workout ?? null;
+          const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
 
           // Workout payload waits on the AsyncStorage in-progress check
           // so `status` reflects the correct lifecycle bucket — earlier
@@ -2394,7 +2434,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const s = rePushStateRef.current;
                 const todayISO = new Date().toISOString().slice(0, 10);
                 const todayItem = (s.schedule as any[])?.[0] ?? null;
-                const todayWorkout = todayItem?.workout ?? null;
+                const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
                 // Detect in-progress workout BEFORE computing status —
                 // ActiveWorkoutScreen writes activeWorkoutStartTime on
                 // mount and clears it on end/cancel. Without this check
@@ -2567,7 +2607,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               try {
                 const { pushWorkoutToWatch } = await import('../utils/watchSync');
                 const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
-                const todayWorkout = todayItem?.workout ?? null;
+                const todayWorkout = todayItem?.workout ?? rePushStateRef.current.workoutPlan?.days?.[0] ?? null;
                 await pushWorkoutToWatch(todayWorkout, {
                   dateISO: new Date().toISOString().slice(0, 10),
                   status: 'skipped',
@@ -2774,34 +2814,71 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // get a foreign day spliced in.
     let aiWorkoutRaw = await AsyncStorage.getItem('aiWorkoutPlan');
 
-    // Backend is the source of truth — ask it for the active WorkoutPlan
-    // row and compare its `planner_version` to what we have cached. When
-    // they match AND a cache exists, we keep the cache for zero-flicker
-    // render. When they differ (or cache is missing), we overwrite from
-    // the backend. On 404 or any network hiccup we silently fall back to
-    // the AsyncStorage-only path — legacy users with no persisted plan
-    // row still get served their cached plan.
-    // Backend is ALWAYS the source of truth. On every load we fetch the
-    // active plan and overwrite the cache if the backend has one. The
-    // cache is a zero-flicker write-through only — we never prefer it
-    // over a live backend read, even on version match. The only time
-    // cache is used is when the backend is unreachable (network hiccup
-    // / offline / 404 legacy user with no DB row).
+    // Backend is the source of truth. Fetch the persisted 7-day PlanWeek;
+    // if none exists yet (first run or pre-migration user), generate one
+    // immediately via /plans/start-new-week. The PlanWeek's days are
+    // dated and individually tracked, so the schedule below renders
+    // exactly what's persisted — no daily regeneration, no rolling
+    // index. On network failure we fall back to the AsyncStorage cache
+    // so offline users still see their last-known plan.
     if (authToken && !skipBackendHydrationOnceRef.current) {
       try {
-        const { getActiveWorkoutPlan } = await import('../services/api');
-        const active = await getActiveWorkoutPlan(authToken);
-        if (active?.plan_json) {
-          const backendVersion = active.plan_json?._plannerVersion ?? active.planner_version ?? 'unknown';
-          const serialized = JSON.stringify(active.plan_json);
+        const { getActivePlanWeek, startNewPlanWeek, autoRenewPlanWeek } = await import('../services/api');
+        let pw = await getActivePlanWeek(authToken);
+        if (!pw) {
+          console.log('[loadPlans] no active PlanWeek — generating a fresh 7-day plan');
+          try {
+            pw = await startNewPlanWeek(authToken, false);
+          } catch (e) {
+            console.log('[loadPlans] startNewPlanWeek failed (will fall back to legacy cache):', e);
+          }
+        } else if (pw.needs_new_week) {
+          // The active week's end_date has passed — auto-generate the
+          // next 7 days. The backend persists the new PlanWeek and
+          // returns it in `plan_week`. Swap the local reference so the
+          // rest of loadPlans renders the fresh week.
+          console.log(`[loadPlans] PlanWeek expired (ended ${pw.end_date}) — auto-renewing`);
+          try {
+            const renewed = await autoRenewPlanWeek(authToken);
+            if (renewed?.plan_week) {
+              pw = renewed.plan_week;
+              console.log(`[loadPlans] auto-renewed: new week ${pw.start_date} → ${pw.end_date}`);
+            }
+          } catch (e) {
+            console.log('[loadPlans] autoRenewPlanWeek failed (using stale week):', e);
+          }
+        }
+        if (pw?.days?.length) {
+          setPlanWeek(pw);
+          // Project the PlanWeek into a legacy WorkoutPlan shape so the
+          // existing rendering code (DayCard, get7DaySchedule consumers,
+          // etc.) keeps working while we migrate them off the cycling
+          // model. Each PlanDay's `workout` is already WorkoutDay-shaped.
+          const projected: WorkoutPlan = {
+            name: 'Active Week',
+            totalDays: pw.days.length,
+            days: pw.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as any),
+          };
+          const serialized = JSON.stringify(projected);
           await AsyncStorage.setItem('aiWorkoutPlan', serialized).catch(() => {});
           aiWorkoutRaw = serialized;
-          console.log(`[loadPlans] hydrated from backend (version=${backendVersion}) — cache overwritten`);
+          console.log(`[loadPlans] hydrated PlanWeek ${pw.start_date} → ${pw.end_date} (${pw.days.length} days, needs_new_week=${pw.needs_new_week})`);
         } else {
-          console.log('[loadPlans] backend returned no active plan — using AsyncStorage cache fallback');
+          // Legacy fallback: try the old WorkoutPlan endpoint so users
+          // mid-migration don't lose their cached plan.
+          const { getActiveWorkoutPlan } = await import('../services/api');
+          const active = await getActiveWorkoutPlan(authToken);
+          if (active?.plan_json) {
+            const serialized = JSON.stringify(active.plan_json);
+            await AsyncStorage.setItem('aiWorkoutPlan', serialized).catch(() => {});
+            aiWorkoutRaw = serialized;
+            console.log('[loadPlans] hydrated from legacy WorkoutPlan endpoint');
+          } else {
+            console.log('[loadPlans] no PlanWeek and no legacy plan — using cache');
+          }
         }
       } catch (e) {
-        console.log('[loadPlans] active-plan fetch failed (using cache):', e);
+        console.log('[loadPlans] PlanWeek fetch failed (using cache):', e);
       }
     } else if (skipBackendHydrationOnceRef.current) {
       skipBackendHydrationOnceRef.current = false;
@@ -2843,106 +2920,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(baseWorkout)).catch(() => {});
     }
 
-    // Generate a fresh workout for today — but only once per day.
-    // Without this guard, every app open regenerates today's workout
-    // with different exercise variation, which is confusing.
-    if (authToken && baseWorkout?.days?.length) {
-      const freshDayKey = `freshDayGenerated_${todayKey()}`;
-      const alreadyGenerated = await AsyncStorage.getItem(freshDayKey).catch(() => null);
-      // Also write the key immediately to prevent concurrent calls
-      if (!alreadyGenerated) {
-        await AsyncStorage.setItem(freshDayKey, 'pending').catch(() => {});
-        try {
-          const { generateWorkoutDay } = await import('../services/api');
-          const todayIdx = completedDates.size % baseWorkout.days.length;
-          // Pass focus_override = today's cached focus to STABILIZE
-          // the daily auto-refresh against recipe drift (the day-7
-          // PPL bug: forced-multiple-of-3 rule rebuilt the recipe and
-          // changed day 7 from Lift to Cardio on every regen).
-          //
-          // BUT skip the pin when the cached focus would repeat what
-          // the user just completed in the last 2 days. Pinning Pull
-          // for today after a Pull yesterday would override the
-          // planner's history-aware rotation and silently re-suggest
-          // a recently-done focus. Without override → planner rotates
-          // away naturally.
-          const cachedFocus = baseWorkout.days[todayIdx]?.focus
-            ? String(baseWorkout.days[todayIdx].focus)
-            : undefined;
-          // Family-key comparison so 'Pull' / 'Back & Biceps' / 'Pull
-          // Day' all collapse to the same bucket.
-          const _NORM_FAM_MAP: [string[], string][] = [
-            [['legs', 'leg', 'quad', 'glute', 'hamstring', 'lower', 'squat', 'hinge', 'calves'], 'lower'],
-            [['push', 'chest', 'tricep', 'press'], 'push'],
-            [['pull', 'back', 'bicep', 'lat'], 'pull'],
-            [['upper', 'shoulder', 'arm'], 'upper'],
-            [['full body', 'full_body', 'total'], 'full'],
-            [['cardio', 'zone2', 'zone 2', 'interval'], 'cardio'],
-          ];
-          const _normFam = (f?: string | null): string => {
-            const s = String(f ?? '').toLowerCase();
-            for (const [keywords, family] of _NORM_FAM_MAP) {
-              if (keywords.some(kw => s.includes(kw))) return family;
-            }
-            return s || 'unknown';
-          };
-          const recentDoneFams: string[] = [];
-          try {
-            const { loadWorkoutHistory } = await import('../utils/workoutHistory');
-            const recent = (await loadWorkoutHistory()).slice(0, 3);
-            for (const r of recent) {
-              if (r?.focus && !r.skipped) recentDoneFams.push(_normFam(r.focus));
-            }
-          } catch { /* history read flake — fall through to normal pin */ }
-          const cachedConflictsRecent = !!cachedFocus
-            && recentDoneFams.includes(_normFam(cachedFocus));
-          const safePin = cachedConflictsRecent ? undefined : cachedFocus;
-          // Pass preceding plan-day focuses so the backend's split
-          // rotation respects what the user has already queued up
-          // (Switch Day picks, manual edits) even before those days
-          // are completed in history. Newest-last (natural order).
-          const prevFocuses: string[] = [];
-          for (let k = 0; k < todayIdx; k += 1) {
-            const f = baseWorkout.days[k]?.focus;
-            if (f) prevFocuses.push(String(f));
-          }
-          const freshDay = await generateWorkoutDay(authToken, {
-            goal: profile.goal,
-            day_index: todayIdx,
-            days_per_week: profile.daysPerWeek,
-            session_minutes: profile.workoutDurationMinutes ?? 60,
-            experience: profile.experienceLevel ?? 'intermediate',
-            equipment: profile.equipment ?? [],
-            preferred_split: profile.preferredSplit,
-            priority_region: profile.priorityRegion ?? 'balanced',
-            injuries: (profile.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(i => `${i.bodyPart || i.description} (status: ${i.status})`),
-            disliked_exercises: profile.dislikedExercises ?? [],
-            prev_focuses: prevFocuses,
-            focus_override: safePin,
-          });
-          if (freshDay?.day) {
-            const updatedDays = [...baseWorkout.days];
-            updatedDays[todayIdx % updatedDays.length] = freshDay.day;
-            const updatedPlan = { ...baseWorkout, days: updatedDays };
-            setWorkoutPlan(updatedPlan);
-            await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
-            await AsyncStorage.setItem(freshDayKey, '1').catch(() => {});
-            console.log(`[loadPlans] fresh day generated & saved: ${freshDay.day.focus} (idx ${todayIdx})`);
-            // Surface backend's fatigue notice so the user knows WHY
-            // sets shrunk today instead of it happening silently. The
-            // notice only fires when fatigue >0.6 on a planned muscle
-            // and no explicit focus override is in play.
-            if (freshDay.fatigue_notice) {
-              setFatigueNotice(freshDay.fatigue_notice);
-            }
-          }
-        } catch (e) {
-          console.log('[loadPlans] fresh day generation failed (using cached):', e);
-        }
-      } else {
-        console.log('[loadPlans] fresh day already generated today, using cached plan');
-      }
-    }
+    // Daily fresh-day regeneration removed (2026-04-28). The plan now
+    // comes from the persisted PlanWeek (`/plans/week/active`) and stays
+    // stable for the full 7 days; renewal happens explicitly via
+    // `/plans/week/auto-renew` when `needs_new_week === true`. Single-day
+    // regeneration on app open caused today's workout to silently change,
+    // and conflicted with the dated-day model.
 
     // Load nutrition templates. The canonical storage is now a JSON
     // array under `aiNutritionPlans` (dynamic length, matches the user's
@@ -4766,7 +4749,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
     ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
     ?? userProfile.goal;
-  const scheduleRaw = workoutPlan?.days?.length ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays) : [];
+  // Prefer the persisted PlanWeek (dated, stable for 7 days). Fall back
+  // to the legacy rolling-from-today schedule only for users who don't
+  // have a PlanWeek row yet (network failure on first run, mid-migration).
+  const scheduleRaw = planWeek?.days?.length
+    ? getScheduleFromPlanWeek(planWeek)
+    : workoutPlan?.days?.length
+      ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays)
+      : [];
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -5365,7 +5355,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 Re-runs when today's focus changes (Switch Day picker). */}
             {workoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
-              const todayScheduleItem = schedule?.[0];
+              // Find today by date — with the dated PlanWeek schedule,
+              // today is no longer guaranteed to live at index 0.
+              const todayScheduleItem = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0];
               const todaysFocus = todayScheduleItem?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
               return (
                 <TrainingReadinessCard
@@ -5757,16 +5749,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   return focusByDate.has(dk);
                 }
                 if (j >= schedule.length) return false;
-                if (j === 0) return true; // today is always pinned for adjacency
                 const it = schedule[j];
                 const dk = it?.date ? dateKey(it.date) : '';
+                // Today is always pinned for adjacency, regardless of
+                // its position in the schedule (with PlanWeek dates,
+                // today may not be index 0).
+                if (dk === todayKey()) return true;
                 return completedDates.has(dk) || skippedDates.has(dk);
               };
 
               return scheduleForRender.map((item, i) => {
               const key = dateKey(item.date);
-              const isToday     = i === 0;
-              const isCompleted = isToday && todayDone;
+              // Date-based today check — the schedule now includes
+              // yesterday/past days (when they're inside the active
+              // PlanWeek), so position-0 is no longer guaranteed to
+              // be today. This drives the "today selected" highlight.
+              const isToday     = key === todayKey();
+              // Completion is per-date, not per-position. Yesterday's
+              // finished session shows as completed when it falls in
+              // the active week.
+              const isCompleted = completedDates.has(key) || (isToday && todayDone);
               const isSkipped   = skippedDates.has(key);
 
               // Compute per-option warnings (don't filter — let user pick
@@ -5895,7 +5897,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   isCompleted={isCompleted}
                   isSkipped={isSkipped}
                   skipReason={skipReasonsByDate[key]}
-                  completedSummary={isCompleted ? todaySummary : null}
+                  // Per-date summary lookup. Past completed days in the
+                  // PlanWeek (e.g. Mon when today is Wed) need their own
+                  // stored summary, not today's. Falls back to the live
+                  // `todaySummary` for today since it's freshest right
+                  // after a workout finishes (before the summary file
+                  // has been re-read).
+                  completedSummary={
+                    isCompleted
+                      ? (workoutHistorySummaries.find((s: any) => typeof s?.date === 'string' && s.date.startsWith(key)) ?? (isToday ? todaySummary : null))
+                      : null
+                  }
                   expanded={expandedDay === i}
                   onPress={() => {
                     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -6016,7 +6028,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const updatedPlan = { ...workoutPlan, days: updatedDays };
                       setWorkoutPlan(updatedPlan);
                       AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
-                      AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1').catch(() => {});
                       return;
                     }
 
@@ -6064,7 +6075,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const plan = active.plan_json;
                         setWorkoutPlan(plan);
                         await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(plan));
-                        await AsyncStorage.setItem(`freshDayGenerated_${todayKey()}`, '1');
                         console.log('[switchDay] done — focuses:', plan.days.map((d: any) => d.focus));
                       }
                       loadDayStatus();
@@ -6559,7 +6569,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                   {/* Workout-aware nutrition tip */}
                   {(() => {
-                    const todaySchedule = schedule[0];
+                    const todaySchedule = schedule.find(s => dateKey(s.date) === todayKey()) ?? schedule[0];
                     let tip = 'Training day — keep protein high for muscle recovery';
                     if (!todaySchedule || todaySchedule.isRest) tip = 'Rest day — prioritize protein and recovery nutrition';
                     else {
@@ -7725,7 +7735,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         })}
                       />
                       <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
-                        <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {humanizeToken(selectedExercise.primary_muscle)}</Text>
+                        {/* Primary muscle is now a tappable cross-link.
+                            Resolves the exercise's primary_muscle (e.g.
+                            'shoulders', 'back') against the Library entry
+                            (which uses 'deltoids', 'lats') via a tiny
+                            backend→library mapping. Falls back to a plain
+                            text label when no Library entry matches. */}
+                        {(() => {
+                          const muscleId = selectedExercise.primary_muscle;
+                          const libraryIdFor: Record<string, string> = {
+                            shoulders: 'deltoids', back: 'lats',
+                          };
+                          const libId = libraryIdFor[muscleId ?? ''] ?? muscleId;
+                          const muscleEntry = MUSCLE_LIBRARY.find(m => m.id === libId);
+                          const muscleLabel = humanizeToken(muscleId);
+                          if (muscleEntry) {
+                            return (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setSelectedExercise(null);
+                                  setLibraryActiveTab('muscles');
+                                  setSelectedMuscle(muscleEntry);
+                                }}
+                                activeOpacity={0.7}
+                                hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                              >
+                                <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>
+                                  {muscleEntry.emoji ? `${muscleEntry.emoji}  ` : ''}
+                                  Primary: <Text style={{ textDecorationLine: 'underline', fontWeight: '700' }}>{muscleLabel}</Text>
+                                  {' '}→
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          }
+                          return (
+                            <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {muscleLabel}</Text>
+                          );
+                        })()}
                         {selectedExercise.secondary_muscles?.length ? (
                           <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
@@ -7827,22 +7873,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                       </View>
 
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How To Perform It</Text>
-                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.howTo}</Text>
-                      </View>
+                      {/* How To Do It — single collapsible covering the
+                          three previously-separate sections (How To
+                          Perform It / Setup / Movement Cue) which were
+                          three slices of the same idea. Default-expanded
+                          because this is the primary "what do I do" surface. */}
+                      <CollapsibleSection
+                        title="How To Do It"
+                        defaultExpanded
+                        surfaceColor={themeColors.surfaceRaised}
+                        borderColor={themeColors.border}
+                        textPrimary={themeColors.textPrimary}
+                        textMuted={themeColors.textMuted}
+                        accentColor={workoutPalette.strong}
+                      >
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: workoutPalette.strong, letterSpacing: 0.6, marginBottom: 4 }}>
+                          OVERVIEW
+                        </Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                          {guide.howTo}
+                        </Text>
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: workoutPalette.strong, letterSpacing: 0.6, marginTop: 12, marginBottom: 4 }}>
+                          SETUP
+                        </Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                          {guide.setup}
+                        </Text>
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: workoutPalette.strong, letterSpacing: 0.6, marginTop: 12, marginBottom: 4 }}>
+                          MOVEMENT CUE
+                        </Text>
+                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                          {guide.movement}
+                        </Text>
+                      </CollapsibleSection>
 
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Setup</Text>
-                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.setup}</Text>
-                      </View>
-
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Movement Cue</Text>
-                        <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.movement}</Text>
-                      </View>
-
-                      {/* Muscle phase breakdown */}
+                      {/* Muscle phase breakdown — left as a prominent
+                          block (not collapsible) because the
+                          LIFTING / LOWERING split is the highest-leverage
+                          coaching content on the page. */}
                       <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
                         <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Muscle Phase Breakdown</Text>
                         <View style={styles.detailPhaseRow}>
@@ -7860,21 +7928,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                       </View>
 
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>What It Hits & Why</Text>
+                      <CollapsibleSection
+                        title="What It Hits & Why"
+                        surfaceColor={themeColors.surfaceRaised}
+                        borderColor={themeColors.border}
+                        textPrimary={themeColors.textPrimary}
+                        textMuted={themeColors.textMuted}
+                      >
                         <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.hits}</Text>
                         <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6 }]}>{guide.why}</Text>
-                      </View>
+                      </CollapsibleSection>
 
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How It Should Feel</Text>
+                      <CollapsibleSection
+                        title="How It Should Feel"
+                        surfaceColor={themeColors.surfaceRaised}
+                        borderColor={themeColors.border}
+                        textPrimary={themeColors.textPrimary}
+                        textMuted={themeColors.textMuted}
+                      >
                         <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.feel}</Text>
-                      </View>
+                      </CollapsibleSection>
 
-                      <View style={styles.detailSection}>
-                        <Text style={[styles.detailSectionTitle, { color: themeColors.error ?? '#FF4444' }]}>Common Mistake</Text>
+                      <CollapsibleSection
+                        title="Common Mistake"
+                        titleColor={themeColors.error ?? '#FF4444'}
+                        surfaceColor={themeColors.surfaceRaised}
+                        borderColor={themeColors.border}
+                        textPrimary={themeColors.textPrimary}
+                        textMuted={themeColors.textMuted}
+                      >
                         <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{guide.mistake}</Text>
-                      </View>
+                      </CollapsibleSection>
                     </>
                   );
                 })()}
@@ -7882,91 +7966,232 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             /* ── MUSCLE DETAIL ──────────────────────────────────────────────── */
             ) : selectedMuscle ? (
-              <ScrollView contentContainerStyle={styles.detailContent}>
-                <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55', alignItems: 'center' }]}>
-                  <View style={{ width: 64, height: 64, borderRadius: 16, backgroundColor: selectedMuscle.tagColor + '22', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
-                    <Ionicons name={(selectedMuscle.icon || 'body-outline') as any} size={32} color={selectedMuscle.tagColor} />
-                  </View>
-                  <Text style={[styles.detailMeta, { color: selectedMuscle.tagColor, fontWeight: '700', fontSize: 13 }]}>{selectedMuscle.commonName.toUpperCase()} · {selectedMuscle.bodyRegion}</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6 }]}>{selectedMuscle.shortDescription}</Text>
-                </View>
-
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Location</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.location}</Text>
-                </View>
-
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Structure</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.structure}</Text>
-                </View>
-
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Primary Function</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.primaryFunction}</Text>
-                </View>
-
-                {/* Phase breakdown */}
-                <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                  <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Contraction Phases</Text>
-                  <View style={styles.detailPhaseRow}>
-                    <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
-                      <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ CONCENTRIC</Text>
+              (() => {
+                // Map library IDs to BodyHeatMap muscle keys so we can
+                // render the anatomy diagram with this muscle highlighted.
+                const heatKeyFor: Record<string, HeatMuscleKey | null> = {
+                  biceps: 'biceps', triceps: 'triceps', chest: 'chest',
+                  lats: 'lats', traps: 'upper_back', deltoids: 'shoulders',
+                  quads: 'quads', hamstrings: 'hamstrings', glutes: 'glutes',
+                  core: 'abs', calves: 'calves',
+                };
+                const heatKey = heatKeyFor[selectedMuscle.id] ?? null;
+                // Real fatigue value for THIS muscle so the anatomy
+                // diagram shows the user's current state, not a flat
+                // "100% recovered" placeholder.
+                const fatigueKeyFor: Record<string, string> = {
+                  lats: 'back', traps: 'back', deltoids: 'shoulders',
+                };
+                const fatigueKey = fatigueKeyFor[selectedMuscle.id] ?? selectedMuscle.id;
+                const fatigueRaw = readinessScore?.muscleFatigue?.[fatigueKey];
+                const recovery = fatigueRaw == null ? 100
+                  : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
+                const heatRecovery = heatKey ? { [heatKey]: recovery } as any : {};
+                // Try to resolve "Barbell Curl — heaviest load…" into a
+                // matching exercise library entry by stripping the trailing
+                // explanation. Returns the entry or null.
+                const findExerciseForBullet = (bullet: string) => {
+                  const head = bullet.split(/[—–-]/, 1)[0]?.trim() ?? '';
+                  if (!head) return null;
+                  const lc = head.toLowerCase();
+                  return exerciseLibrary.find(e => e.name.toLowerCase() === lc)
+                    ?? exerciseLibrary.find(e => e.name.toLowerCase().includes(lc))
+                    ?? null;
+                };
+                return (
+                  <ScrollView contentContainerStyle={styles.detailContent}>
+                    {/* Hero card — emoji + region + short description.
+                        Keeps the entry-point summary above the fold so
+                        users get the gist without expanding any section. */}
+                    <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55', alignItems: 'center' }]}>
+                      <View style={{ width: 72, height: 72, borderRadius: 18, backgroundColor: selectedMuscle.tagColor + '22', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+                        {selectedMuscle.emoji ? (
+                          <Text style={{ fontSize: 38 }}>{selectedMuscle.emoji}</Text>
+                        ) : (
+                          <Ionicons name={(selectedMuscle.icon || 'body-outline') as any} size={32} color={selectedMuscle.tagColor} />
+                        )}
+                      </View>
+                      <Text style={[styles.detailMeta, { color: selectedMuscle.tagColor, fontWeight: '700', fontSize: 13, letterSpacing: 0.5 }]}>
+                        {selectedMuscle.commonName.toUpperCase()} · {selectedMuscle.bodyRegion}
+                      </Text>
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6, textAlign: 'center' }]}>
+                        {selectedMuscle.shortDescription}
+                      </Text>
                     </View>
-                    <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.concentric}</Text>
-                  </View>
-                  <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
-                  <View style={styles.detailPhaseRow}>
-                    <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
-                      <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ ECCENTRIC</Text>
-                    </View>
-                    <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.eccentric}</Text>
-                  </View>
-                  {selectedMuscle.phases.isometric && (
-                    <>
+
+                    {/* Anatomy diagram — the body figure with THIS muscle
+                        highlighted. Reuses the recovery card's BodyHeatMap
+                        but in spotlight mode (no toggle, no legend). */}
+                    {heatKey && (
+                      <View style={{ marginBottom: 14, alignItems: 'center', paddingTop: 4 }}>
+                        <BodyHeatMap
+                          recovery={heatRecovery}
+                          themeName={userProfile.themePreference}
+                          height={220}
+                          defaultSelected={heatKey}
+                          hideSideToggle
+                          hideLegend
+                        />
+                      </View>
+                    )}
+
+                    {/* Contraction phases — kept as a prominent block
+                        because it's the highest-value content here.
+                        Stays expanded by default. */}
+                    <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                      <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Contraction Phases</Text>
+                      <View style={styles.detailPhaseRow}>
+                        <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
+                          <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ CONCENTRIC</Text>
+                        </View>
+                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.concentric}</Text>
+                      </View>
                       <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
                       <View style={styles.detailPhaseRow}>
-                        <View style={[styles.detailPhaseBadge, { backgroundColor: aiPalette.strong + '22' }]}>
-                          <Text style={[styles.detailPhaseBadgeLabel, { color: aiPalette.strong }]}>■ ISOMETRIC</Text>
+                        <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
+                          <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ ECCENTRIC</Text>
                         </View>
-                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.isometric}</Text>
+                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.eccentric}</Text>
                       </View>
-                    </>
-                  )}
-                </View>
+                      {selectedMuscle.phases.isometric && (
+                        <>
+                          <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
+                          <View style={styles.detailPhaseRow}>
+                            <View style={[styles.detailPhaseBadge, { backgroundColor: aiPalette.strong + '22' }]}>
+                              <Text style={[styles.detailPhaseBadgeLabel, { color: aiPalette.strong }]}>■ ISOMETRIC</Text>
+                            </View>
+                            <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.isometric}</Text>
+                          </View>
+                        </>
+                      )}
+                    </View>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>How To Feel It</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.howToFeel}</Text>
-                </View>
+                    {/* Best Exercises — high value, default expanded.
+                        Each bullet is now a tappable row that opens the
+                        exercise's detail page when we can resolve it
+                        against the live library. */}
+                    <CollapsibleSection
+                      title="Best Exercises"
+                      defaultExpanded
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                      accentColor={selectedMuscle.tagColor}
+                    >
+                      {selectedMuscle.bestExercises.map((ex, i) => {
+                        const match = findExerciseForBullet(ex);
+                        const head = ex.split(/[—–-]/, 1)[0]?.trim() ?? ex;
+                        const tail = ex.replace(head, '').replace(/^[\s—–-]+/, '');
+                        return (
+                          <TouchableOpacity
+                            key={i}
+                            disabled={!match}
+                            activeOpacity={match ? 0.7 : 1}
+                            onPress={() => { if (match) { setSelectedMuscle(null); setSelectedExercise(match); } }}
+                            style={{
+                              flexDirection: 'row', alignItems: 'flex-start',
+                              paddingVertical: 6, gap: 6,
+                            }}
+                          >
+                            <Text style={{ color: themeColors.textMuted, fontSize: 13 }}>•</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 13, fontWeight: match ? '700' : '600', color: match ? selectedMuscle.tagColor : themeColors.textPrimary }}>
+                                {head}{match ? ' →' : ''}
+                              </Text>
+                              {tail ? (
+                                <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 1 }]}>
+                                  {tail}
+                                </Text>
+                              ) : null}
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </CollapsibleSection>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Mind-Muscle Connection</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.mindMuscleConnection}</Text>
-                </View>
+                    {/* Function & Anatomy — merged from the prior three
+                        sections (Primary Function + Location + Structure)
+                        which all described the same idea from three angles.
+                        Kept default-expanded so users see the function
+                        first; the deeper anatomy stays one tap away. */}
+                    <CollapsibleSection
+                      title="Function & Anatomy"
+                      defaultExpanded
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                    >
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                        {selectedMuscle.primaryFunction}
+                      </Text>
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
+                        {selectedMuscle.location}
+                      </Text>
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
+                        {selectedMuscle.structure}
+                      </Text>
+                    </CollapsibleSection>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Best Exercises</Text>
-                  {selectedMuscle.bestExercises.map((ex, i) => (
-                    <Text key={i} style={[styles.detailSectionText, { color: themeColors.textSecondary, marginBottom: 3 }]}>• {ex}</Text>
-                  ))}
-                </View>
+                    {/* Feel & Focus — merged howToFeel + mindMuscleConnection.
+                        Both speak to the same coaching idea: focus your
+                        attention on this muscle. Default-collapsed since
+                        most readers want anatomy + best exercises first. */}
+                    <CollapsibleSection
+                      title="Feel & Focus"
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                    >
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                        {selectedMuscle.howToFeel}
+                      </Text>
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
+                        {selectedMuscle.mindMuscleConnection}
+                      </Text>
+                    </CollapsibleSection>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.error ?? '#FF4444' }]}>Common Mistakes</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.commonMistakes}</Text>
-                </View>
+                    <CollapsibleSection
+                      title="Common Mistakes"
+                      titleColor={themeColors.error ?? '#FF4444'}
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                    >
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                        {selectedMuscle.commonMistakes}
+                      </Text>
+                    </CollapsibleSection>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Growth Tip</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.growthTip}</Text>
-                </View>
+                    <CollapsibleSection
+                      title="Growth Tip"
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                    >
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                        {selectedMuscle.growthTip}
+                      </Text>
+                    </CollapsibleSection>
 
-                <View style={styles.detailSection}>
-                  <Text style={[styles.detailSectionTitle, { color: themeColors.textPrimary }]}>Recovery</Text>
-                  <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>{selectedMuscle.recoveryNote}</Text>
-                </View>
-              </ScrollView>
+                    <CollapsibleSection
+                      title="Recovery"
+                      surfaceColor={themeColors.surfaceRaised}
+                      borderColor={themeColors.border}
+                      textPrimary={themeColors.textPrimary}
+                      textMuted={themeColors.textMuted}
+                    >
+                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                        {selectedMuscle.recoveryNote}
+                      </Text>
+                    </CollapsibleSection>
+                  </ScrollView>
+                );
+              })()
 
             /* ── EXERCISES LIST ──────────────────────────────────────────────── */
             ) : libraryActiveTab === 'exercises' ? (
@@ -8123,8 +8348,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                       )}
                       <View style={{ flex: 1 }}>
-                        <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
-                        <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
+                        <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]} numberOfLines={1}>{ex.name}</Text>
+                        <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]} numberOfLines={1}>
                           {humanizeToken(ex.primary_muscle)}
                           {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length
                             ? ` · also hits ${ex.secondary_muscles.map(humanizeToken).join(', ')}`
@@ -8173,25 +8398,71 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
                 {MUSCLE_LIBRARY
                   .filter(m => muscleRegionFilter === 'all' || m.bodyRegion.toLowerCase().includes(muscleRegionFilter.toLowerCase()))
-                  .map((muscle) => (
+                  .map((muscle) => {
+                    // Map library IDs to backend fatigue keys. Library
+                    // splits the back into lats/traps and shoulders into
+                    // deltoids; the fatigue API uses coarser buckets.
+                    const fatigueKeyFor: Record<string, string> = {
+                      lats: 'back', traps: 'back', deltoids: 'shoulders',
+                    };
+                    const fatigueKey = fatigueKeyFor[muscle.id] ?? muscle.id;
+                    const fatigueRaw = readinessScore?.muscleFatigue?.[fatigueKey];
+                    const recovery = fatigueRaw == null
+                      ? null
+                      : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
+                    const fatigueLabel = recovery == null ? null
+                      : recovery >= 70 ? 'Fresh'
+                      : recovery >= 40 ? 'Moderate'
+                      : 'Fatigued';
+                    const fatigueColor = recovery == null ? themeColors.textMuted
+                      : recovery >= 70 ? themeColors.success
+                      : recovery >= 40 ? themeColors.warning
+                      : themeColors.error;
+                    return (
                     <TouchableOpacity
                       key={muscle.id}
                       style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}
                       activeOpacity={0.8}
                       onPress={() => setSelectedMuscle(muscle)}>
                       <View style={styles.muscleItemRow}>
-                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 12 }]}>
-                          <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
+                        {/* Emoji as the lead visual — bigger, more
+                            personality. Falls back to the legacy icon
+                            for any muscle whose data omits an emoji. */}
+                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 14, width: 52, height: 52 }]}>
+                          {muscle.emoji ? (
+                            <Text style={{ fontSize: 28 }}>{muscle.emoji}</Text>
+                          ) : (
+                            <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
+                          )}
                         </View>
                         <View style={styles.muscleItemBody}>
-                          <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{muscle.name}</Text>
-                          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]}>{muscle.commonName} · {muscle.bodyRegion}</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary, flexShrink: 1 }]} numberOfLines={1}>
+                              {muscle.commonName}
+                            </Text>
+                            {/* Live fatigue pill — ties the educational
+                                page to the user's current training state.
+                                Only renders when we have real data. */}
+                            {fatigueLabel && (
+                              <View style={{
+                                paddingHorizontal: 7, paddingVertical: 2,
+                                borderRadius: 8, backgroundColor: fatigueColor + '22',
+                              }}>
+                                <Text style={{ fontSize: 10, fontWeight: '800', color: fatigueColor, letterSpacing: 0.4 }}>
+                                  {fatigueLabel.toUpperCase()}
+                                </Text>
+                              </View>
+                            )}
+                          </View>
+                          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]} numberOfLines={1}>
+                            {muscle.name} · {muscle.bodyRegion}
+                          </Text>
                           <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]} numberOfLines={2}>{muscle.shortDescription}</Text>
                         </View>
                       </View>
-                      <Text style={[styles.libraryItemLink, { color: themeColors.accent }]}>Tap to learn →</Text>
                     </TouchableOpacity>
-                  ))}
+                    );
+                  })}
               </ScrollView>
             )}
           </View>
@@ -9615,7 +9886,18 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const workoutPalette = theme.sections.workout;
-  const dow     = isToday ? 'Today' : DAY_NAMES[item.date.getDay()];
+  // Friendly day labels for the PlanWeek strip. "Today", "Yesterday",
+  // and "Tomorrow" beat the bare day-of-week name when the user is
+  // glancing at adjacent days; further-out days fall back to "Mon",
+  // "Tue", etc.
+  const _yesterdayDate = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })();
+  const _tomorrowDate  = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d; })();
+  const _itemKey = dateKey(item.date);
+  const dow = isToday
+    ? 'Today'
+    : _itemKey === dateKey(_yesterdayDate) ? 'Yesterday'
+    : _itemKey === dateKey(_tomorrowDate)  ? 'Tomorrow'
+    : DAY_NAMES[item.date.getDay()];
   const dateStr = `${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`;
 
   // Rest day — uses `workoutPalette.strong` so the today highlight

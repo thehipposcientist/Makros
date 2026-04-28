@@ -3036,6 +3036,80 @@ export async function postWeekCheckin(
   });
 }
 
+// ── Plan Week (persisted 7-day plan) ──────────────────────────────
+//
+// One PlanWeek per user with 7 dated PlanDay rows. Replaces the
+// legacy cycling-array model: the plan stays stable for 7 days and
+// only renews via /plans/week/auto-renew when needs_new_week=true.
+
+export interface PlanDayResponse {
+  /** ISO date string (YYYY-MM-DD). */
+  day_date: string;
+  /** 0..6 — index within the week. */
+  day_index: number;
+  /** 'pending' | 'in_progress' | 'completed' | 'skipped'. */
+  status: string;
+  is_rest: boolean;
+  locked: boolean;
+  lock_reason: string | null;
+  /** WorkoutDay-shaped JSON (focus/exercises/...). Null on rest days. */
+  workout: any | null;
+  /** DailyNutritionPlan-shaped JSON. Null when no template assigned. */
+  nutrition: any | null;
+  generation_source: string;
+}
+
+export interface PlanWeekResponse {
+  id: number;
+  start_date: string;
+  end_date: string;
+  status: string;
+  needs_new_week: boolean;
+  planner_version: string;
+  goal: string;
+  days_per_week: number;
+  preferred_split: string | null;
+  days: PlanDayResponse[];
+}
+
+/** Returns the active 7-day plan, or null if none exists yet (caller
+ *  should then POST /plans/start-new-week to generate one). */
+export async function getActivePlanWeek(token: string): Promise<PlanWeekResponse | null> {
+  return request<PlanWeekResponse | null>('/plans/week/active', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Force-create a new 7-day plan starting today. Used on first run
+ *  and when needs_new_week is true. */
+export async function startNewPlanWeek(token: string, force: boolean = false): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/start-new-week', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  });
+}
+
+export interface AutoRenewPlanWeekResponse {
+  plan_week: PlanWeekResponse | null;
+  review_headline: string;
+  review_summary: Record<string, any>;
+  auto_applied: Array<Record<string, any>>;
+  needs_review: Array<Record<string, any>>;
+  explanation: string;
+}
+
+/** Auto-generate the next 7-day week when the active PlanWeek has
+ *  expired (end_date < today). Idempotent: a no-op when the current
+ *  week is still active. */
+export async function autoRenewPlanWeek(token: string): Promise<AutoRenewPlanWeekResponse> {
+  return request<AutoRenewPlanWeekResponse>('/plans/week/auto-renew', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // ── Readiness (server-side canonical compute) ─────────────────────
 //
 // The phone calls this and renders the response directly — no
