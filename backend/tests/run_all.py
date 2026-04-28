@@ -64,6 +64,8 @@ _TEST_MODULES = (
     # Weekly calorie budget smoothing — formula, caps, macro redistribution.
     "tests.test_weekly_calorie_budget",
     "tests.test_plan_week",
+    # Mid-week regeneration: done-day protection + split/dpw/equipment changes.
+    "tests.test_plan_week_midweek_regen",
     # Change Day Type — conflict detection + smart adjust reconciliation.
     "tests.test_change_day_type",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.
