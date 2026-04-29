@@ -230,6 +230,7 @@ struct ContentView: View {
                 }
             case .completed, .skipped:
                 watchStartPending = false
+                ActiveWorkoutState.clearPersistedStore()
                 if active {
                     active = false
                     heartRate.end()

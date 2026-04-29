@@ -125,7 +125,7 @@ Coverage: lower_back, knee, shoulder, hip, hamstring, ankle, achilles, elbow, te
 - **Math**: `set_e1rm = w * (1 + (reps + actual_rir) / 30)` (Epley), recency-weighted `exp(-days_since * ln(2) / 14)` (14-day half-life), weighted median across last 6–10 usable sets.
 - **Filters**: completed=True, not warmup, role-aware rep band (compound 3–10 / isolation 6–15), RIR in [0,4], weight > 0.
 - **Returns**: `E1RMEstimate(e1rm_lbs, sample_count, confidence)` — confidence: high/med/low. `None` if <3 usable sets.
-- **Status**: Column and helper implemented. UI capture of actual_rir during log-set not yet wired.
+- **Status**: Column, helper, and UI capture are shipped. `ActiveWorkoutScreen` now asks for `actual_rir` only on meaningful overshoots (currently `top of target rep range + 2` or more), and next-set recommendations no longer wait on the removed bottom "How did it feel?" prompt.
 
 ## Change Focus / Day Type
 

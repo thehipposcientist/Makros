@@ -1,6 +1,6 @@
 # Roadmap + Next Improvements
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 > See `docs/product/backlog-review.md` for items whose shipped status is ambiguous.
 
@@ -14,6 +14,7 @@ Last updated: 2026-04-28
   removed. Auto-renew at week end. Past days render as done / skipped
   from history; today highlighted by date match. See
   `docs/architecture/plan-persistence.md`.
+- **Active workout recommendation cleanup (Apr 29, 2026)** — rest-time recommendations now refresh without waiting on a bottom "How did it feel?" prompt, that prompt was removed, RIR is only asked on significant overshoots, and the refreshed recommendation is pushed to Apple Watch during the rest window.
 
 ---
 
@@ -79,7 +80,7 @@ These fields are written to the DB on every session but are never queried or sho
 
 - **Cardio metric field context**: MetricField options exist for treadmill/bike/row but no conditional rendering tells the user which fields apply to which exercise. A `"Fill in what's relevant"` hint with equipment-aware defaults would reduce cognitive load.
 
-- **Set recommendation flow clarity**: the in-workout recommendation card only appears after RIR is logged, but this dependency is invisible. Users may skip the RIR question and never see recommendations. Consider showing the recommendation prompt only on the third set or when the user taps "how much should I lift?".
+- **RIR signal is still underused**: recommendations no longer block on the RIR prompt, which fixed the main UX issue. The remaining gap is using `actual_rir` more directly inside same-session deterministic load logic instead of mostly as a review/input signal.
 
 - **Plateau detection → actionable response**: `plateau_detection.py` correctly identifies stalls and suggests deload/volume/swap. The UI loads plateau data into a modal state but responds with a "Got it" alert instead of routing to the weekly check-in or directly applying a recommendation. Wire plateau detection into the check-in modal's recommendation step.
 
@@ -92,7 +93,7 @@ These are built on the backend or partially built on the frontend but not connec
 | Feature | Status | What's Missing |
 |---|---|---|
 | **In-workout 1RM display** | Backend done (`rolling_e1rm`, `performance.py`) | Small UI chip on active exercise card |
-| **RIR → load suggestion** | Data collected, review service done | Rule: RIR ≥ 3 → suggest weight bump on next set note |
+| **RIR → load suggestion** | Data collected, prompt flow cleaned up | Use `actual_rir` directly in the deterministic same-session load note instead of only as an overshoot/review signal |
 | **Plateau detection response** | Detection done, modal state tracked | Wire to check-in recommendation instead of "Got it" alert |
 | **Quick-intent action auto-apply** | Coach returns structured action | Apply on confirm instead of showing "Got it" |
 | **Readiness-based auto-deload** | Readiness computed, deload logic exists | Trigger when readiness < threshold for 3+ consecutive days |
@@ -104,7 +105,7 @@ These are built on the backend or partially built on the frontend but not connec
 
 ## Feature Work (not yet shipped)
 
-- **actual_rir capture on log-set screen** — column and helper exist; UI capture missing. Unlocks smarter progression + real-effort signal.
+- **actual_rir trend surfacing** — per-set capture now exists; the next step is trend/history UI and clearer progress coaching based on the stored effort signal.
 - **Watch complication build pass** — finish SharedDefaults wiring + entitlements (#110).
 - **Siri intent build pass** — Intents extension target + deep-link handler (#111).
 - **Pre/post-workout time-aware fueling card** — fires when planned workout is in next 2–3h or just finished.

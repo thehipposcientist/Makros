@@ -35,6 +35,8 @@ from app.services.workout.core_programmer import (
     _core_exercise_count,
     _is_session_dense,
     build_core_slot,
+    core_slot_accepts_exercise,
+    core_slot_score_bonus,
     program_core_across_week,
     _NEVER_CORE_ARCHETYPES,
     CAT_ANTI_EXTENSION,
@@ -405,6 +407,96 @@ def test_decide_core_rotates_categories():
     _ok(f"rotated: {cat1} → {d2.category}")
 
 
+def test_build_core_slot_uses_true_flexion_pattern():
+    """Lower-ab slots should target trunk flexion, not generic isolation."""
+    print("\n[test] core: lower-ab slot uses flexion pattern")
+    slot = build_core_slot(CAT_FLEXION)
+    assert slot.movement_pattern == "flexion", slot.movement_pattern
+    _ok("Core — Lower Ab emits movement_pattern='flexion'")
+
+
+def test_core_slot_accepts_only_true_anti_extension_exercises():
+    """Anti-extension should reject back/posterior-chain lookalikes."""
+    print("\n[test] core: anti-extension rejects non-core lookalikes")
+    slot = build_core_slot(CAT_ANTI_EXTENSION)
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "dead_bug",
+        "name": "Dead Bug",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
+    assert not core_slot_accepts_exercise(slot, {
+        "slug": "superman_hold",
+        "name": "Superman Hold",
+        "primary_muscle": "back",
+        "movement_pattern": "anti_extension",
+    })
+    assert not core_slot_accepts_exercise(slot, {
+        "slug": "copenhagen_plank",
+        "name": "Copenhagen Plank",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
+    _ok("anti-extension accepts dead bug, rejects superman/Copenhagen")
+
+
+def test_core_slot_accepts_lateral_only_side_plank_family():
+    """Lateral stability should stay in the side-plank family."""
+    print("\n[test] core: lateral stability stays side-plank family")
+    slot = build_core_slot(CAT_LATERAL_STABILITY)
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "side_plank",
+        "name": "Side Plank",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "copenhagen_plank",
+        "name": "Copenhagen Plank",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
+    assert not core_slot_accepts_exercise(slot, {
+        "slug": "dead_bug",
+        "name": "Dead Bug",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
+    assert core_slot_score_bonus(slot, {
+        "slug": "side_plank",
+        "name": "Side Plank",
+    }) > core_slot_score_bonus(slot, {
+        "slug": "copenhagen_plank",
+        "name": "Copenhagen Plank",
+    })
+    _ok("lateral slot narrows to side plank / Copenhagen")
+
+
+def test_core_slot_accepts_flexion_family_only():
+    """Lower-ab slots should admit real flexion exercises."""
+    print("\n[test] core: lower-ab slot accepts flexion family")
+    slot = build_core_slot(CAT_FLEXION)
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "reverse_crunch",
+        "name": "Reverse Crunch",
+        "primary_muscle": "core",
+        "movement_pattern": "flexion",
+    })
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "captains_chair_leg_raise",
+        "name": "Captain's Chair Leg Raise",
+        "primary_muscle": "core",
+        "movement_pattern": "flexion",
+    })
+    assert not core_slot_accepts_exercise(slot, {
+        "slug": "cable_tricep_pushdown",
+        "name": "Cable Tricep Pushdown",
+        "primary_muscle": "triceps",
+        "movement_pattern": "isolation",
+    })
+    _ok("lower-ab slot stays on core flexion exercises")
+
+
 def test_program_core_across_week_budget_honored():
     """Core slots added across week <= default budget."""
     print("\n[test] core: program_core_across_week respects budget")
@@ -475,6 +567,10 @@ cases = [
     test_decide_core_skips_short_session_non_metabolic,
     test_decide_core_allows_short_session_fat_loss,
     test_decide_core_rotates_categories,
+    test_build_core_slot_uses_true_flexion_pattern,
+    test_core_slot_accepts_only_true_anti_extension_exercises,
+    test_core_slot_accepts_lateral_only_side_plank_family,
+    test_core_slot_accepts_flexion_family_only,
     test_program_core_across_week_budget_honored,
 ]
 

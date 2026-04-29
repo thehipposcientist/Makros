@@ -1,6 +1,6 @@
 # Test Suite
 
-Last synced from CLAUDE.md: 2026-04-27
+Last synced from test run: 2026-04-29
 
 ## Running Tests
 
@@ -9,7 +9,18 @@ docker exec thallo-backend python -m tests.run_all
 make test
 ```
 
-21 known pre-existing failures. New failures after a change = regression, must fix.
+Current observed baseline: 8 known pre-existing failures in `make test` as of 2026-04-29. New failures after a change = regression, must fix.
+
+Baseline failing tests on 2026-04-29:
+
+- `test_fatigue_override_mid_band_minus_5pct`
+- `test_fatigue_override_high_band_minus_10pct`
+- `test_fatigue_override_very_high_band_minus_15pct_low_confidence`
+- `test_ai_first_time_no_muscle_sessions_returns_none`
+- `test_ai_first_time_three_sessions_hits_ai_and_stamps_fields`
+- `test_full_week_reports_sessions_volume_and_adherence`
+- `test_missed_watch_summary_recommends_watch`
+- `test_user_scenario_wife_forgot_watch_full_flow`
 
 ## Test Modules (`backend/tests/`)
 

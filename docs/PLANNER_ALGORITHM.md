@@ -1,12 +1,12 @@
 # Workout Planner Algorithm
 
-Last updated: 2026-04-18
+Last updated: 2026-04-29
 
 ## Overview
 
 The workout planner is fully deterministic. Given the same inputs, it produces the same plan every time. No AI is involved in exercise selection, split logic, weekly recipe generation, or prescription.
 
-AI is used separately for nutrition plans, the coach chat, food/exercise search fallback, and optional plan review — but never for the core workout programming. In-workout set recommendations are deterministic first, with AI review only when the deterministic result is flagged as suspicious.
+AI is used separately for nutrition plans, the coach chat, text fallback search, and dedicated image-analysis endpoints — but never for the core workout programming. Legacy AI plan review is effectively disabled (`PLAN_REVIEW_ENABLED=0` is a no-op). In-workout set recommendations are deterministic first, with AI review only when the deterministic result is flagged as suspicious.
 
 ## Pipeline
 
@@ -274,10 +274,11 @@ Workout completion upsert key: `(user_id, workout_date, focus_label)` — not `(
 | Focus auto-correction | No | — | Muscle-to-focus inference |
 | Nutrition plan generation | Yes | gpt-4o-mini | Structured JSON prompts |
 | AI coach chat | Yes | gpt-4o-mini | Unified workout + nutrition |
-| Food photo scan | Yes | gpt-4o-mini | HEIC-safe via _fix_image_mime |
+| Food photo scan | Yes | gpt-5.4-mini | HEIC-safe via _fix_image_mime |
 | Food search (fallback) | Yes | gpt-4o-mini | USDA primary |
 | Exercise search (fallback) | Yes | gpt-4o-mini | wger primary |
-| Plan review (optional) | Yes | gpt-4o-mini | Post-generation validation |
+| Supplement / equipment / form / body photo scans | Yes | gpt-5.4-mini | Dedicated image-analysis routes |
+| Plan review (legacy path) | No | — | Permanently disabled in current app path |
 | In-workout set review | Yes | gpt-4o-mini | Only when deterministic result is suspicious |
 | Food enrichment | Yes | gpt-4o-mini | food_quality classification |
 | Injury assessment | Yes | gpt-4o-mini | Severity, muscle groups, recovery estimate |

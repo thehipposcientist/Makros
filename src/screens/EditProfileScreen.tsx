@@ -2070,6 +2070,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </TouchableOpacity>
           {equipmentExpanded && (meta.loading ? <ActivityIndicator color={tc.primary} /> : (
             <>
+              <Text style={styles.sectionHint}>
+                This is the equipment your workout plan uses for exercise selection and load targets. Adjustable dumbbells live here, not in Gear Tracker.
+              </Text>
               {meta.equipmentCategories.map(category => (
                 <View key={category.label} style={styles.chipGroup}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>

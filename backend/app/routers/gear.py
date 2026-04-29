@@ -6,7 +6,6 @@ and surfaces retirement recommendations when thresholds approach.
 """
 
 import base64
-import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -18,6 +17,13 @@ from app.models import (
     GEAR_RETIREMENT_DEFAULTS, User,
 )
 from app.routers.auth import get_current_user
+from app.routers.ai.utils import (
+    _build_chat_kwargs,
+    _chat_create,
+    _extract_json,
+    get_openai_api_key,
+    model_image,
+)
 
 router = APIRouter(prefix="/gear", tags=["gear"])
 
@@ -273,8 +279,8 @@ def identify_gear(
     body: GearIdentifyBody,
     current_user: User = Depends(get_current_user),
 ):
-    """Use GPT-4o vision to identify gear from one or more photos and estimate mileage."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    """Use the configured vision model to identify gear and estimate wear from photos."""
+    api_key = get_openai_api_key() or ""
     if not api_key:
         raise HTTPException(status_code=503, detail="AI identification unavailable")
     if not body.images:
@@ -290,7 +296,6 @@ def identify_gear(
             raise HTTPException(status_code=400, detail="Invalid base64 image")
         validated.append(img_data)
 
-    import json
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
@@ -342,25 +347,26 @@ def identify_gear(
         ),
     })
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+    kwargs = _build_chat_kwargs(
+        model_image(),
+        messages,
         max_tokens=300,
+        timeout_secs=30,
+    )
+    resp = _chat_create(
+        client,
+        **kwargs,
     )
 
     raw = resp.choices[0].message.content or "{}"
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        # Strip markdown fences if present
-        clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        try:
-            parsed = json.loads(clean)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=502, detail="AI returned unparseable response")
+        parsed = _extract_json(raw)
+    except Exception:
+        raise HTTPException(status_code=502, detail="AI returned unparseable response")
 
     return GearIdentifyResult(
         name=str(parsed.get("name", "Unknown gear")),

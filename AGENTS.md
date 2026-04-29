@@ -6,7 +6,7 @@ Thallo is a premium fitness + nutrition app. React Native (Expo) frontend, FastA
 ## Tech Stack
 - **Frontend**: React Native 0.81.5 / Expo SDK ~54 / expo-router v6 / TypeScript
 - **Backend**: FastAPI + SQLModel + PostgreSQL 16 (Docker)
-- **AI**: OpenAI `gpt-4o-mini` — meal skeletons, coach chat, food scanning, in-workout set review, food classification fallback, first-time weight rec. **Workout planner is fully deterministic.**
+- **AI**: OpenAI `gpt-4o-mini` for text flows (meal skeletons, coach chat, in-workout set review, food classification fallback, first-time weight rec) and `gpt-5.4-mini` for dedicated image-analysis endpoints (food/supplement/equipment/form/body-photo scans). **Workout planner is fully deterministic.**
 - **External data**: USDA FoodData Central (nutrition, incl. added sugars #1235), wger.de (exercise images/search)
 
 ## Core Invariants
@@ -44,6 +44,7 @@ USDA_FDC_API_KEY=...
 MODEL_CHAT=gpt-4o-mini
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
+MODEL_IMAGE=gpt-5.4-mini
 PLAN_REVIEW_ENABLED=0       # no-op — AI plan review permanently disabled
 NUTRITION_REVIEW_ENABLED=0  # no-op
 ```
@@ -67,7 +68,7 @@ backend/
       nutrition/              # nutrition_score, gut_health, food_classifier, recovery_flags, ...
       coach/                  # checkin_ai, decision_rules, apply_action
       social/                 # digest (pure-function, no DB writes)
-  tests/                      # run_all.py — 21 known pre-existing failures are acceptable baseline
+  tests/                      # run_all.py — 8 known pre-existing failures observed on 2026-04-29 are the current baseline
 targets/thallo-watch/         # Apple Watch SwiftUI app
 modules/thallo-watch-bridge/  # WCSession phone bridge
 modules/thallo-healthkit/     # Apple Health read/write

@@ -1,6 +1,6 @@
 # Full Codebase Review — Thallo
 
-Last updated: 2026-04-19
+Last updated: 2026-04-29
 
 ---
 
@@ -10,14 +10,14 @@ Last updated: 2026-04-19
 
 **Biggest risks**:
 1. Readiness score recalculated with wrong formula in 3 places — produces incorrect recovery data
-2. Non-existent AI model ID (`gpt-5-mini`) as default — all food scanning breaks without env override
+2. Historical item resolved: model defaults no longer point at a broken scan path
 3. Silent data loss on AsyncStorage failures — users lose workout logs and meal edits with no warning
 4. CORS wildcard with credentials — security + functionality issue for production
 5. Nutrition averages computed over logged days only — inflates intake for inconsistent trackers
 
 **Biggest quick wins**:
 1. Fix readiness formula mismatches (copy from canonical source)
-2. Fix model ID default
+2. Keep model-routing docs in sync with the current scan defaults
 3. Add `useMemo` to NutritionCard and WorkoutCard
 4. Fix rolling average denominator
 5. Remove dead code / stale aliases
@@ -31,10 +31,10 @@ Last updated: 2026-04-19
 
 ## Critical Issues
 
-### C1. Non-Existent Default AI Model ID
+### C1. Resolved: scan-model defaults are no longer broken
 **Category:** AI Integration | **Files:** `backend/app/routers/ai/utils.py:49`
-`model_meal_parsing()` defaults to `"gpt-5-mini"` which doesn't exist. All food photo scanning, barcode lookup, supplement lookup, and exercise search will fail unless `MODEL_MEAL_PARSING` is set in `.env`. Currently `.env` has `gpt-4o-mini` set, but any fresh deploy without the env file will break.
-**Fix:** Change default to `"gpt-4o-mini"`.
+This issue was fixed after the original review. Current defaults are `MODEL_MEAL_PARSING=gpt-4o-mini` for text parsing/search and `MODEL_IMAGE=gpt-5.4-mini` for dedicated image-analysis routes, so fresh deploys no longer inherit the broken `gpt-5-mini` parsing default described in the original snapshot.
+**Follow-up:** Keep deployment/setup docs aligned with the current model-routing split so future env changes do not reintroduce drift.
 
 ### C2. Readiness Score Recalculated With Wrong Formula (3 locations)
 **Category:** Bug | **Files:** `workouts.py:321`, `workouts.py:775`, `workouts.py:704`

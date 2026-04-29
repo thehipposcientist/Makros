@@ -412,6 +412,11 @@ def filter_candidates(
         if slot.role == "isolation" and slot.primary_muscle_hint:
             if ex.get("primary_muscle") != slot.primary_muscle_hint:
                 continue
+        if slot.role == "core":
+            from .core_programmer import core_slot_accepts_exercise
+
+            if not core_slot_accepts_exercise(slot, ex):
+                continue
         # Muscle-family enforcement: on push/pull/legs/upper/lower days,
         # every strength slot must use exercises whose primary muscle
         # belongs to the day's family. Without this, a Pull day's
@@ -524,6 +529,9 @@ def score_candidate(
     elif role == "core":
         # Core slot is fine with whatever the slot's pattern accepts.
         score += 1.0
+        from .core_programmer import core_slot_score_bonus
+
+        score += core_slot_score_bonus(slot, exercise)
 
     # 3. Difficulty match against experience.
     diff = exercise.get("difficulty", "intermediate")

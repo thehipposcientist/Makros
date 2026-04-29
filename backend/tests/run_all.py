@@ -167,6 +167,9 @@ _TEST_MODULES = (
     # (the active-workout coach can now see a snapped photo and answer
     # follow-up questions without re-stating context).
     "tests.test_coach_chat_photos",
+    # Gear tracker: photo identification should use the shared vision-model
+    # selector and multipart image payloads.
+    "tests.test_gear_tracking",
     # Social: privacy fix (soft-deleted users hidden) + digest perf
     # (batched queries instead of per-friend N+1).
     "tests.test_social_perf_and_privacy",

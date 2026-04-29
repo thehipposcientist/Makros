@@ -130,9 +130,10 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `MODEL_FOOD_ENRICHMENT` | `gpt-4o-mini` |
 | `MODEL_PLAN_GENERATION` | `gpt-4o-mini` |
 | `MODEL_PLAN_UPDATE` | `gpt-4o-mini` |
-| `MODEL_MEAL_PARSING` | `gpt-5-mini` |
-| `PLAN_REVIEW_ENABLED` | `1` |
-| `NUTRITION_REVIEW_ENABLED` | `1` |
+| `MODEL_MEAL_PARSING` | `gpt-4o-mini` |
+| `MODEL_IMAGE` | `gpt-5.4-mini` |
+| `PLAN_REVIEW_ENABLED` | `0` |
+| `NUTRITION_REVIEW_ENABLED` | `0` |
 | `LOG_LEVEL` | `INFO` |
 
 **Do NOT set `DEV_PASSWORD_RESET`.** Omitting it disables the dev-mode password reset endpoint in prod.

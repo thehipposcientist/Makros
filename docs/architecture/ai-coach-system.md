@@ -1,10 +1,16 @@
 # AI Coach System — Architecture
 
-Last synced from CLAUDE.md: 2026-04-27
+Last synced from app state: 2026-04-29
 
 ## Overview
 
 Three coaches + one deterministic intent router. No AI in workout plan generation.
+
+## Model Routing
+
+- `MODEL_CHAT` defaults to `gpt-4o-mini` for trainer chat, in-workout coach, and most structured text flows.
+- `MODEL_IMAGE` defaults to `gpt-5.4-mini`, but only for the dedicated image-analysis routes in `routers/ai/scanning.py`.
+- This means the 2026-04-29 image-model cost increase is scoped to scan/photo-analysis features, not the main coach-chat surfaces.
 
 ## 1. Home Trainer (unified workout + nutrition)
 
@@ -20,11 +26,12 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 
 - **Trigger**: chat drawer on ActiveWorkoutScreen (Pro-gated).
 - **Endpoint**: `POST /ai/workout-question`.
-- **Model**: gpt-4o-mini.
+- **Model**: `MODEL_CHAT` (default `gpt-4o-mini`).
 - **Context** (narrow): current workout + activeExerciseName + currentSetNumber + loggedSets.
 - **Scope**: form cues, load/rep adjustment, pain caution, immediate substitutions. Redirects nutrition/lifestyle to Home Trainer.
 - **Response**: `{answer, quick_cues, adjustment, safety_note}`.
 - **Persistence**: none — display-only.
+- **Nuance**: this endpoint can accept an attached image, but it still uses `MODEL_CHAT` today rather than `MODEL_IMAGE`.
 
 ## 3. Check-in Coach (daily/weekly)
 

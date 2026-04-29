@@ -212,6 +212,34 @@ def test_weekly_core_actually_injects_core_for_fat_loss() -> None:
     _ok(f"{len(core_exs)} core exercises across the week")
 
 
+def test_generated_core_slots_match_their_slot_category() -> None:
+    """Generated core rows should match the intent of their slot label."""
+    print("\n[test] generated core exercises match slot category")
+    inputs = _make_inputs(goal="fat_loss", days_per_week=4)
+    plan = generate_workout_plan(inputs, SEED_EXERCISES)
+    core_exs = [
+        ex for ex in _all_exercises(plan)
+        if ex.get("_role") == "core"
+    ]
+    assert core_exs, "expected at least one generated core exercise"
+
+    for ex in core_exs:
+        slot = ex.get("_slot", "")
+        name = (ex.get("name") or "").lower()
+        primary = ex.get("_primary_muscle")
+        if "Anti-Extension" in slot:
+            assert primary == "core", f"anti-extension picked non-core row: {ex}"
+            assert "superman" not in name, f"anti-extension picked posterior-chain hold: {ex}"
+            assert "copenhagen" not in name, f"anti-extension picked lateral drill: {ex}"
+        if "Lateral Stability" in slot:
+            assert "side plank" in name or "copenhagen" in name, f"lateral slot picked wrong drill: {ex}"
+        if "Lower Ab" in slot:
+            assert any(
+                term in name for term in ("raise", "crunch", "sit-up", "v-up", "toes-to-bar")
+            ), f"lower-ab slot picked non-flexion drill: {ex}"
+    _ok(f"{len(core_exs)} generated core rows match their slot labels")
+
+
 # ── Patch rehydration ─────────────────────────────────────────────
 
 def _sample_plan() -> dict:
@@ -1211,6 +1239,7 @@ cases = [
     test_build_planner_exercise_shape,
     test_weekly_core_injection_does_not_crash,
     test_weekly_core_actually_injects_core_for_fat_loss,
+    test_generated_core_slots_match_their_slot_category,
     test_swap_exercise_rebuilds_derived_fields,
     test_add_exercise_builds_derived_fields,
     test_change_sets_reps_refreshes_set_scheme,

@@ -1162,42 +1162,65 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {oneRepMaxLifts.length > 0 && (
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
-              <View style={{
-                backgroundColor: tc.surfaceRaised,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: tc.border,
-                padding: 14,
-                gap: 10,
-              }}>
-                {oneRepMaxLifts.map(lift => (
-                  <View key={lift.slug} style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
+              {(() => {
+                const maxOneRepMax = Math.max(...oneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
+                return (
+                  <View style={{
+                    backgroundColor: tc.surfaceRaised,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    padding: 14,
+                    gap: 10,
                   }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
-                        {lift.name}
-                      </Text>
-                      <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                        Top set: {lift.topWeightLbs} lb × {lift.topReps}
-                        {' · '}{lift.sessionCount} session{lift.sessionCount !== 1 ? 's' : ''}
-                      </Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
-                        {Math.round(lift.oneRepMaxLbs)}
-                      </Text>
-                      <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: -2 }}>lb 1RM</Text>
-                    </View>
+                    {oneRepMaxLifts.map(lift => {
+                      const fillPct = Math.max(0.18, lift.oneRepMaxLbs / maxOneRepMax);
+                      return (
+                        <View key={lift.slug} style={{ gap: 6 }}>
+                          <View style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 12,
+                          }}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+                                {lift.name}
+                              </Text>
+                              <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                                Top set: {lift.topWeightLbs} lb × {lift.topReps}
+                                {' · '}{lift.sessionCount} session{lift.sessionCount !== 1 ? 's' : ''}
+                              </Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end' }}>
+                              <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
+                                {Math.round(lift.oneRepMaxLbs)}
+                              </Text>
+                              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: -2 }}>lb 1RM</Text>
+                            </View>
+                          </View>
+                          <View style={{
+                            height: 10,
+                            borderRadius: 999,
+                            backgroundColor: tc.surface,
+                            overflow: 'hidden',
+                          }}>
+                            <View style={{
+                              width: `${Math.round(fillPct * 100)}%`,
+                              height: '100%',
+                              borderRadius: 999,
+                              backgroundColor: tc.primary,
+                            }} />
+                          </View>
+                        </View>
+                      );
+                    })}
+                    <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 2 }}>
+                      Epley estimates from your recent logged sets. Gets sharper as you log more sessions.
+                    </Text>
                   </View>
-                ))}
-                <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 2 }}>
-                  Epley estimates from your recent logged sets. Gets sharper as you log more sessions.
-                </Text>
-              </View>
+                );
+              })()}
             </View>
           )}
 

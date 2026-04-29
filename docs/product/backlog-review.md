@@ -1,12 +1,12 @@
 # Backlog Review — Contradictions & Stale Notes
 
-Last reviewed: 2026-04-28
+Last reviewed: 2026-04-29
 
 Items where the old CLAUDE.md had conflicting or ambiguous information. Verify current code state before acting.
 
 ---
 
-## 1. actual_rir + Rolling e1RM — Partially shipped
+## 1. actual_rir + Rolling e1RM — Shipped end-to-end
 
 **Topic**: `ExerciseSet.actual_rir` column and `rolling_e1rm.py` helper.
 
@@ -14,9 +14,9 @@ Items where the old CLAUDE.md had conflicting or ambiguous information. Verify c
 - Implementation section (former CLAUDE.md §"actual_rir + Rolling e1RM") describes the column, migration `_ensure_exercise_set_actual_rir_column`, and `compute_rolling_e1rm` helper as fully implemented, with tests in `tests.test_rolling_e1rm`.
 - Roadmap "Future feature wins" listed "Actual RIR persistence" and "Rolling e1RM" as not yet shipped.
 
-**Why it's likely stale**: The implementation section is detailed and specific (file paths, function signatures, math), and `tests.test_rolling_e1rm` confirms the helper is tested. The roadmap entry was not updated when the backend was written.
+**Why it was stale**: The implementation section was detailed and specific (file paths, function signatures, math), and `tests.test_rolling_e1rm` confirmed the helper was tested. The roadmap entry was not updated when the backend first landed.
 
-**Recommended follow-up**: The DB column and computation helper are shipped. What's missing is **UI capture** — the log-set screen doesn't yet collect actual RIR from the user. Roadmap should say "wire actual_rir input to log-set UI" not "add the column."
+**Current state**: The DB column, rolling helper, and live-workout UI capture are all shipped. The remaining product gap is not capture, it's surfacing: historical RIR trends, same-session recommendation use, and progress-screen visibility.
 
 ---
 

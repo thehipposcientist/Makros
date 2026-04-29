@@ -545,6 +545,9 @@ function GearFormModal({
               </TouchableOpacity>
             ))}
           </ScrollView>
+          <Text style={[styles.hint, { color: tc.textMuted, marginTop: -4 }]}>
+            This tracks gear that wears out over miles or sessions. Adjustable dumbbells and other workout-planning equipment live in your workout equipment profile.
+          </Text>
 
           {/* Wear fields — different unit per gear class. Mile-tracked gear
               (running shoes, bikes) gets miles; session-tracked gear (gloves,
@@ -810,12 +813,19 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
             </View>
           )}
 
+          <View style={[styles.infoBanner, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+            <Ionicons name="information-circle-outline" size={16} color={tc.textSecondary} />
+            <Text style={[styles.infoText, { color: tc.textSecondary }]}>
+              Gear Tracker is for wear-based items like shoes, bikes, belts, wraps, and gloves. Workout equipment like adjustable dumbbells belongs in your workout equipment profile.
+            </Text>
+          </View>
+
           {gear.length === 0 ? (
             <View style={styles.empty}>
               <Ionicons name="walk-outline" size={48} color={tc.textMuted} />
               <Text style={[styles.emptyTitle, { color: tc.textPrimary }]}>No gear yet</Text>
               <Text style={[styles.emptySubtitle, { color: tc.textSecondary }]}>
-                Add your running shoes, bike, or other equipment to track mileage and get retirement alerts.
+                Add your running shoes, bike, lifting belt, wraps, or other wear gear to track usage and get retirement alerts.
               </Text>
               <TouchableOpacity
                 onPress={() => { setEditTarget(null); setShowForm(true); }}
@@ -884,6 +894,16 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   alertText: { flex: 1, fontSize: 13, fontWeight: '600' },
+  infoBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  infoText: { flex: 1, fontSize: 12, lineHeight: 18 },
   card: {
     borderRadius: radius.md,
     borderWidth: 1,

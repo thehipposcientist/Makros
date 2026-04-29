@@ -226,24 +226,25 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
             }
             // Circuit block
             const sets = Number(group.exercises[0].ex.sets) || 3;
+            const restSeconds = Number((group.exercises[0].ex as any).restSeconds ?? (group.exercises[0].ex as any).rest_seconds) || 0;
             return (
               <FadeInView key={`circuit-${gi}`} delay={group.exercises[0].originalIndex * 40} duration={260} slideDistance={6}>
-                <View style={{
-                  borderRadius: 12, borderWidth: 1.5,
-                  borderColor: s.strong + '55', marginBottom: 10,
-                  overflow: 'hidden',
-                }}>
-                  <View style={{
-                    flexDirection: 'row', alignItems: 'center', gap: 6,
-                    backgroundColor: s.soft, paddingHorizontal: 12, paddingVertical: 7,
-                  }}>
-                    <Ionicons name="repeat" size={13} color={s.strong} />
-                    <Text style={{ fontSize: 11, fontWeight: '800', color: s.strong, letterSpacing: 0.5 }}>
-                      CORE CIRCUIT · {sets} ROUNDS
-                    </Text>
-                    <Text style={{ fontSize: 11, color: s.strong + '88', marginLeft: 'auto' }}>
-                      Minimal rest between exercises
-                    </Text>
+                <View style={styles.circuitCard}>
+                  <View style={styles.circuitHeader}>
+                    <View style={styles.circuitTitleRow}>
+                      <Ionicons name="repeat" size={13} color={s.strong} />
+                      <Text style={styles.circuitTitle}>Core Circuit</Text>
+                    </View>
+                    <View style={styles.circuitMetaRow}>
+                      <View style={[styles.circuitMetaChip, { backgroundColor: s.strong + '12', borderColor: s.strong + '28' }]}>
+                        <Text style={[styles.circuitMetaText, { color: s.strong }]}>{sets} rounds</Text>
+                      </View>
+                      <View style={[styles.circuitMetaChip, { backgroundColor: c.surface, borderColor: c.border }]}>
+                        <Text style={[styles.circuitMetaText, { color: c.textSecondary }]}>
+                          {restSeconds > 0 ? `${restSeconds}s after each round` : 'Move exercise to exercise'}
+                        </Text>
+                      </View>
+                    </View>
                   </View>
                   {group.exercises.map(({ ex, originalIndex }, ei) => (
                     <View key={originalIndex} style={ei < group.exercises.length - 1 ? {
@@ -260,6 +261,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
                         onSwap={onSwapExercise}
                         onView={onViewExercise}
                         circuitMode
+                        circuitStep={ei + 1}
                       />
                     </View>
                   ))}
@@ -291,7 +293,7 @@ function StatItem({ icon, value, color }: {
 
 // ── ExerciseRow ───────────────────────────────────────────────────────────────
 
-function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView, circuitMode }: {
+function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView, circuitMode, circuitStep }: {
   index: number;
   exercise: WorkoutDay['exercises'][number];
   isLast: boolean;
@@ -302,6 +304,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   onSwap?: (exerciseIndex: number, exerciseName: string) => void;
   onView?: (name: string) => void;
   circuitMode?: boolean;
+  circuitStep?: number;
 }) {
   return (
     <View style={[styles.exRow, !isLast && !circuitMode && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
@@ -383,7 +386,10 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
 
       {/* Info */}
       <View style={styles.exInfo}>
-        <Text style={[styles.exName, { color: c.textPrimary }]}>{exercise.name}</Text>
+        <Text style={[styles.exName, { color: c.textPrimary }]}>
+          {circuitMode && circuitStep ? `A${circuitStep}. ` : ''}
+          {exercise.name}
+        </Text>
         {exercise.equipment ? (
           <Text style={[styles.exEquipment, { color: c.textMuted }]}>{formatEquipmentLabel(exercise.equipment)}</Text>
         ) : null}
@@ -392,13 +398,12 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
         <View style={styles.exChips}>
           <Chip
             icon="repeat-outline"
-            // Append "hold" on the preview chip for bodyweight/stretch
-            // rows where the reps value is a duration — makes it obvious
-            // at a glance that "60s" is a hold, not a rep count.
             label={
-              shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(String(exercise.reps ?? ''))
-                ? `${exercise.sets} × ${exercise.reps} hold`
-                : `${exercise.sets} × ${exercise.reps}`
+              circuitMode
+                ? formatCircuitWorkLabel(exercise)
+                : shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(String(exercise.reps ?? ''))
+                  ? `${exercise.sets} × ${exercise.reps} hold`
+                  : `${exercise.sets} × ${exercise.reps}`
             }
             strong={section.strong}
             soft={section.soft}
@@ -481,6 +486,15 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
       </View>
     </View>
   );
+}
+
+function formatCircuitWorkLabel(exercise: WorkoutDay['exercises'][number]): string {
+  const reps = String(exercise.reps ?? '').trim();
+  if (!reps) return 'Each round';
+  if (shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(reps)) {
+    return `${reps} hold`;
+  }
+  return reps;
 }
 
 // ── Chip ──────────────────────────────────────────────────────────────────────
@@ -572,6 +586,41 @@ const createStyles = (
   exName:      { ...typography.cardTitle, lineHeight: 19 },
   exEquipment: { ...typography.micro, marginBottom: 6 },
   exChips:     { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  circuitCard: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: s.strong + '45',
+    marginBottom: 10,
+    overflow: 'hidden',
+    backgroundColor: c.surface,
+  },
+  circuitHeader: {
+    gap: 8,
+    backgroundColor: s.soft,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: s.strong + '1f',
+  },
+  circuitTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  circuitTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: s.strong,
+    letterSpacing: 0.2,
+  },
+  circuitMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  circuitMetaChip: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  circuitMetaText: {
+    ...typography.micro,
+    fontWeight: '700',
+  },
 
   videoChip: {
     flexDirection: 'row',

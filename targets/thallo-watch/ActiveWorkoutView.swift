@@ -32,6 +32,7 @@ final class ActiveWorkoutState: ObservableObject {
     // when dialing in the next set's weight.
     @Published var lastLoggedWeight: Double? = nil { didSet { persist() } }
     @Published var lastLoggedReps: Int? = nil { didSet { persist() } }
+    @Published var currentRecommendation: String? = nil { didSet { persist() } }
 
     private var cancellables: Set<AnyCancellable> = []
     // Defaults key — persists across watch-app background / kill so
@@ -47,9 +48,19 @@ final class ActiveWorkoutState: ObservableObject {
         NotificationCenter.default.publisher(for: .watchProgressUpdate)
             .sink { [weak self] note in
                 guard let self, let info = note.userInfo else { return }
-                if let idx = info["exerciseIndex"] as? Int { self.exerciseIndex = idx }
+                if let idx = info["exerciseIndex"] as? Int {
+                    if idx != self.exerciseIndex {
+                        self.currentRecommendation = nil
+                    }
+                    self.exerciseIndex = idx
+                }
                 if let setN = info["setNumber"] as? Int { self.setNumber = setN }
                 if let rest = info["restRemainingSec"] as? Int { self.restRemaining = rest }
+                if let rec = info["recommendation"] as? String {
+                    self.currentRecommendation = rec
+                } else if info.keys.contains("recommendation") {
+                    self.currentRecommendation = nil
+                }
             }
             .store(in: &cancellables)
     }
@@ -70,6 +81,7 @@ final class ActiveWorkoutState: ObservableObject {
             "pendingReps": pendingReps,
             "lastLoggedWeight": lastLoggedWeight as Any,
             "lastLoggedReps": lastLoggedReps as Any,
+            "currentRecommendation": currentRecommendation as Any,
         ]
         UserDefaults.standard.set(blob, forKey: Self.kPersistKey)
     }
@@ -85,12 +97,18 @@ final class ActiveWorkoutState: ObservableObject {
         if let v = blob["pendingReps"] as? Int { pendingReps = v }
         if let v = blob["lastLoggedWeight"] as? Double { lastLoggedWeight = v }
         if let v = blob["lastLoggedReps"] as? Int { lastLoggedReps = v }
+        if let v = blob["currentRecommendation"] as? String { currentRecommendation = v }
         hydrating = false
     }
 
     /// Wipe persisted state — call on workout end / cancel so the
     /// next workout starts from a clean slate.
     func clearPersisted() {
+        currentRecommendation = nil
+        Self.clearPersistedStore()
+    }
+
+    static func clearPersistedStore() {
         UserDefaults.standard.removeObject(forKey: Self.kPersistKey)
     }
 
@@ -156,8 +174,14 @@ struct ActiveWorkoutView: View {
                     workout: workout,
                     state: state,
                     hr: hr,
-                    onEndWorkout: onEndWorkout,
-                    onCancelWorkout: onCancelWorkout,
+                    onEndWorkout: {
+                        state.clearPersisted()
+                        onEndWorkout()
+                    },
+                    onCancelWorkout: {
+                        state.clearPersisted()
+                        onCancelWorkout()
+                    },
                 )
                 HeartRateTab(hr: hr)
             }
@@ -548,7 +572,7 @@ private struct ExerciseTab: View {
                         .cornerRadius(4)
                 }
             }
-            if let rec = ex.recommendation {
+            if let rec = (state.currentRecommendation ?? ex.recommendation) {
                 Text(rec)
                     .font(.system(size: 11))
                     .foregroundColor(theme.primary)
@@ -814,13 +838,17 @@ private struct ExerciseTab: View {
         // Ship the log to the phone so history + recommendations stay
         // aligned. Phone handler parses and feeds the deterministic
         // weight-rec engine for the next set.
-        conn.sendCommand("log_set", payload: [
+        var payload: [String: Any] = [
             "exerciseIndex": state.exerciseIndex,
             "setNumber": state.setNumber,
             "weightLbs": state.pendingWeight,
             "reps": state.pendingReps,
             "exerciseName": ex.name,
-        ])
+        ]
+        if let durationSeconds = plannedDurationSeconds(for: ex) {
+            payload["durationSeconds"] = durationSeconds
+        }
+        conn.sendCommand("log_set", payload: payload)
         state.lastLoggedWeight = state.pendingWeight
         state.lastLoggedReps = state.pendingReps
 
@@ -858,6 +886,25 @@ private struct ExerciseTab: View {
     private func skipRest() {
         state.restRemaining = nil
         WKInterfaceDevice.current().play(.click)
+    }
+
+    private func plannedDurationSeconds(for ex: WatchExercise) -> Int? {
+        let reps = ex.reps.lowercased()
+        let name = ex.name.lowercased()
+        let timedName = name.range(of: "treadmill|bike|row|elliptical|stair|run|jog|cycling|swim|cardio|plank|dead.?hang|wall.?sit|hollow.?hold|carry|walk|yoga|mobility|stretch", options: .regularExpression) != nil
+        let hasDurationUnit = reps.range(of: "s(ec|econds?)?\\b|m(in|inutes?)?\\b", options: .regularExpression) != nil
+        guard timedName || hasDurationUnit else { return nil }
+        let regex = try? NSRegularExpression(pattern: "\\d+(?:\\.\\d+)?")
+        let nsRange = NSRange(reps.startIndex..<reps.endIndex, in: reps)
+        let values = regex?.matches(in: reps, range: nsRange).compactMap { match -> Double? in
+            guard let range = Range(match.range, in: reps) else { return nil }
+            return Double(String(reps[range]))
+        } ?? []
+        guard let first = values.first else { return nil }
+        let planned = values.count >= 2 && reps.contains("-") ? (first + values[1]) / 2 : first
+        let unitIsMinutes = reps.range(of: "m(in|inutes?)?\\b", options: .regularExpression) != nil
+            || name.range(of: "treadmill|bike|row|elliptical|stair|run|jog|cycling|swim|cardio|walk|yoga|mobility|stretch", options: .regularExpression) != nil
+        return max(1, Int((unitIsMinutes ? planned * 60 : planned).rounded()))
     }
 
     private func togglePause() {

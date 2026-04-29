@@ -1,13 +1,13 @@
 # Apple Watch — Architecture
 
-Last synced from CLAUDE.md: 2026-04-27
+Last synced from app state: 2026-04-29
 
 ## Bidirectional Sync via WCSession
 
 - **Bridge**: `modules/thallo-watch-bridge/` (phone) ↔ `targets/thallo-watch/ConnectivityStore.swift` (watch).
 
 **Outbound (phone → watch):**
-`pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). All routed through `applicationContext` with fallback to `transferUserInfo` on duplicate-payload errors.
+`pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` now carries both rest-timer deltas and the latest live recommendation text so the watch can refresh next-set guidance during rest. All routed through `applicationContext` with fallback to `transferUserInfo` on duplicate-payload errors.
 
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `toggle_meal`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
@@ -23,17 +23,18 @@ Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange
 
 TabView: **Today** (workout) / **Meals** / **Supps**. Page dots always visible.
 
-**Active workout**: Digital Crown + −/+ steppers, rest timer, HR persistent chip, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip-exercise menu.
+**Active workout**: Digital Crown + −/+ steppers, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip-exercise menu.
 
 **Phone-side HK write**: `saveWorkoutToHealth` via `modules/thallo-healthkit/ios/...::saveWorkout` wraps `HKWorkoutBuilder`. Watch-started sessions write via `HKLiveWorkoutBuilder.finishWorkout` from watch target.
 
 ## Active-State Persistence (#148) — IMPLEMENTED
 
-`targets/thallo-watch/ActiveWorkoutView.swift::ActiveWorkoutState` persists `exerciseIndex` / `setNumber` / `restRemaining` / `paused` / `pendingWeight` / `pendingReps` / `lastLoggedWeight` / `lastLoggedReps` to UserDefaults via `didSet` on every `@Published`.
+`targets/thallo-watch/ActiveWorkoutView.swift::ActiveWorkoutState` persists `exerciseIndex` / `setNumber` / `restRemaining` / `paused` / `pendingWeight` / `pendingReps` / `lastLoggedWeight` / `lastLoggedReps` / `currentRecommendation` to UserDefaults via `didSet` on every `@Published`.
 
 - `hydrate()` runs in `init` — backgrounded watch app re-mounts to exact state.
 - `clearPersisted()` called on workout end/cancel.
 - Hydrate guard (`hydrating = true`) prevents restore from re-triggering `persist()`.
+- Recommendation hydration uses `state.currentRecommendation ?? ex.recommendation`, so the watch prefers fresh phone-pushed guidance during a live rest window and falls back to the static exercise recommendation when no live override exists.
 
 ## Watch Complication Scaffold (#110 — NOT YET SHIPPED)
 

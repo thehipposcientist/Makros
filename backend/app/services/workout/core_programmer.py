@@ -42,7 +42,7 @@ CAT_ANTI_EXTENSION      = "anti_extension"       # dead bug, plank, rollout
 CAT_ANTI_ROTATION       = "anti_rotation"        # pallof, anti-rotation holds
 CAT_LATERAL_STABILITY   = "lateral_stability"    # side plank, Copenhagen
 CAT_FLEXION             = "flexion_lower_ab"     # reverse crunch, hanging leg/knee raise
-CAT_POSTERIOR_BRACING   = "carry_bracing"        # carries, back extension, bird dog
+CAT_POSTERIOR_BRACING   = "carry_bracing"        # loaded carries / bracing
 
 ALL_CORE_CATEGORIES = [
     CAT_ANTI_EXTENSION,
@@ -68,9 +68,12 @@ DEFAULT_ROTATION = [
 _CATEGORY_TO_MOVEMENT: dict[str, str] = {
     CAT_ANTI_EXTENSION:     "anti_extension",
     CAT_ANTI_ROTATION:      "anti_rotation",
-    CAT_LATERAL_STABILITY:  "anti_rotation",     # side plank is tagged anti_rotation in seed
-    CAT_FLEXION:            "isolation",         # hanging leg raise + cable crunch live here
-    CAT_POSTERIOR_BRACING:  "carry",             # farmer / suitcase carry
+    # The seed library currently tags side-plank-style drills under
+    # anti_extension, so lateral slots route through that pattern and
+    # are narrowed to true lateral-stability candidates later.
+    CAT_LATERAL_STABILITY:  "anti_extension",
+    CAT_FLEXION:            "flexion",
+    CAT_POSTERIOR_BRACING:  "carry",
 }
 
 # Human-readable slot label per category.
@@ -285,6 +288,106 @@ def build_core_slot(category: str) -> Slot:
         primary_muscle_hint="core",
         role="core",
     )
+
+
+def _category_from_slot_label(label: str | None) -> Optional[str]:
+    text = (label or "").lower()
+    if "anti-extension" in text:
+        return CAT_ANTI_EXTENSION
+    if "anti-rotation" in text:
+        return CAT_ANTI_ROTATION
+    if "lateral stability" in text:
+        return CAT_LATERAL_STABILITY
+    if "lower ab" in text or "flexion" in text:
+        return CAT_FLEXION
+    if "carry" in text or "bracing" in text:
+        return CAT_POSTERIOR_BRACING
+    return None
+
+
+def core_slot_accepts_exercise(slot: Slot, exercise: dict) -> bool:
+    """Reject broad movement-pattern matches that don't fit the core slot."""
+    category = _category_from_slot_label(getattr(slot, "label", None))
+    if category is None:
+        return (exercise.get("primary_muscle") or "").lower() == "core"
+
+    primary = (exercise.get("primary_muscle") or "").lower()
+    movement = (exercise.get("movement_pattern") or "").lower()
+    name = (exercise.get("name") or "").lower()
+    slug = (exercise.get("slug") or "").lower()
+
+    if category == CAT_POSTERIOR_BRACING:
+        if movement != "carry":
+            return False
+        return primary in {"core", "full_body"} or "carry" in name
+
+    if primary != "core":
+        return False
+
+    if category == CAT_ANTI_EXTENSION:
+        if movement != "anti_extension":
+            return False
+        banned_terms = ("side plank", "copenhagen", "superman", "back extension")
+        return not any(term in name for term in banned_terms)
+
+    if category == CAT_ANTI_ROTATION:
+        return movement == "anti_rotation"
+
+    if category == CAT_LATERAL_STABILITY:
+        return slug in {"side_plank", "copenhagen_plank"}
+
+    if category == CAT_FLEXION:
+        return movement == "flexion"
+
+    return False
+
+
+def core_slot_score_bonus(slot: Slot, exercise: dict) -> float:
+    """Nudge valid core candidates toward the most natural category fit."""
+    category = _category_from_slot_label(getattr(slot, "label", None))
+    if category is None:
+        return 0.0
+
+    name = (exercise.get("name") or "").lower()
+    slug = (exercise.get("slug") or "").lower()
+    tracking = (exercise.get("default_tracking_mode") or "").lower()
+
+    if category == CAT_ANTI_EXTENSION:
+        if any(term in name for term in ("dead bug", "plank", "rollout", "fallout", "hollow", "stir-the-pot", "body saw")):
+            return 2.5
+        if tracking == "time":
+            return 1.0
+        return 0.0
+
+    if category == CAT_ANTI_ROTATION:
+        if "pallof" in name:
+            return 2.5
+        if "shoulder tap" in name:
+            return 1.5
+        if tracking == "time":
+            return 1.0
+        return 0.0
+
+    if category == CAT_LATERAL_STABILITY:
+        if slug == "side_plank":
+            return 3.0
+        if slug == "copenhagen_plank":
+            return 2.5
+        return 0.0
+
+    if category == CAT_FLEXION:
+        if any(term in name for term in ("leg raise", "knee raise", "reverse crunch", "sit-up", "v-up", "toes-to-bar")):
+            return 2.5
+        return 1.0
+
+    if category == CAT_POSTERIOR_BRACING:
+        if "suitcase carry" in name:
+            return 3.0
+        if "farmer carry" in name or "sandbag carry" in name:
+            return 2.0
+        return 0.5
+
+    return 0.0
 
 
 @dataclass

@@ -68,6 +68,11 @@ function parseTargetRepMax(raw: string | number | null | undefined): number | nu
   return n ? parseInt(n[1], 10) : null;
 }
 
+function shouldPromptRir(actualReps: number, targetReps: string | number | null | undefined): boolean {
+  const targetMax = parseTargetRepMax(targetReps);
+  return targetMax != null && actualReps >= targetMax + 2;
+}
+
 /** Shared display helper for equipment strings. Splits on commas so
  *  multi-equipment values like "barbell, flat_bench" become
  *  "Barbell, Flat Bench" instead of the raw planner output. */
@@ -93,26 +98,11 @@ interface WorkoutCoachMessage {
   content: string;
 }
 
-type SetFeedback = 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
-
-// Feedback buttons gate next-set recommendations so the live coach can
-// combine reps, feel, and optional RIR instead of reacting to half the signal.
-
 const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: string) => string }> = [
   { label: 'Form question', template: (name) => `Form check on ${name}: what 2-3 cues should I focus on next set?` },
   { label: 'Injury/pain', template: (name) => `I feel pain/discomfort during ${name}. What should I adjust right now?` },
   { label: 'Not feeling target', template: (name) => `I am not feeling ${name} in the target muscle. How should I fix setup and execution?` },
   { label: 'Lacking intensity', template: (name) => `This ${name} set feels too easy. Should I adjust reps, tempo, rest, or load?` },
-];
-
-const SET_FEEDBACK_OPTIONS: Array<{ value: SetFeedback; label: string }> = [
-  { value: 'easy', label: 'Easy' },
-  { value: 'good', label: 'Good' },
-  { value: 'grind', label: 'Grind' },
-  { value: 'hard', label: 'Hard' },
-  { value: 'failure', label: 'Failure' },
-  { value: 'pain', label: 'Pain' },
-  { value: 'form_breakdown', label: 'Form broke' },
 ];
 
 interface ExerciseLibraryItem {
@@ -684,6 +674,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     finish: () => void;
     cancel: () => void;
   }>({ finish: () => {}, cancel: () => {} });
+  const watchLogSetChainRef = useRef<Promise<void>>(Promise.resolve());
   // handlersRef is updated further down once handleFinish / onCancel
   // are in scope (see the `watchHandlersRef.current = ...` assignment
   // below the handleFinish definition).
@@ -717,21 +708,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const weight = payload?.weightLbs;
             const reps = payload?.reps;
-            if (exIdx < 0 || !Number.isFinite(exIdx)) return;
-            const exs = exercisesRef.current;
-            if (!exs[exIdx]) return;
-            // Slot = next unfilled set slot for this exercise.
-            const slot = exs[exIdx].sets.length;
-            handleLogSetInlineRef.current(
-              exIdx,
-              slot,
-              true, // silent — no Alerts, watch already confirmed
-              undefined,
-              weight != null ? String(weight) : undefined,
-              reps != null ? String(reps) : undefined,
-            );
+            const durationSeconds = Number(payload?.durationSeconds ?? NaN);
+            watchLogSetChainRef.current = watchLogSetChainRef.current
+              .catch(() => undefined)
+              .then(async () => {
+                if (exIdx < 0 || !Number.isFinite(exIdx)) return;
+                const exs = exercisesRef.current;
+                if (!exs[exIdx]) return;
+                // Slot = next unfilled set slot for this exercise.
+                const slot = exs[exIdx].sets.length;
+                await handleLogSetInlineRef.current(
+                  exIdx,
+                  slot,
+                  true, // silent — no Alerts, watch already confirmed
+                  Number.isFinite(durationSeconds) && durationSeconds > 0
+                    ? formatDurationForInput(durationSeconds)
+                    : undefined,
+                  weight != null ? String(weight) : undefined,
+                  reps != null ? String(reps) : undefined,
+                );
+              });
+            watchLogSetChainRef.current.catch(() => undefined);
           } else if (command === 'end_workout') {
-            watchHandlersRef.current.finish();
+            (async () => {
+              await watchLogSetChainRef.current.catch(() => undefined);
+              await new Promise(resolve => setTimeout(resolve, 250));
+              await watchLogSetChainRef.current.catch(() => undefined);
+              watchHandlersRef.current.finish();
+            })();
           } else if (command === 'cancel_workout') {
             watchHandlersRef.current.cancel();
           }
@@ -854,16 +858,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [authToken, workout.focus]);
 
   const setExercises = useCallback((updater: SessionExercise[] | ((prev: SessionExercise[]) => SessionExercise[])) => {
-    setExercisesRaw(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      // Auto-save session state so it survives app backgrounding/kill
-      AsyncStorage.setItem('activeWorkoutSets', JSON.stringify(
-        next.map(ex => ({ name: ex.name, sets: ex.sets }))
-      )).catch(() => {});
-      // Also debounce-sync to the backend so per-set detail isn't local-only.
-      syncPartialToBackend(next);
-      return next;
-    });
+    const prev = exercisesRef.current;
+    const next = typeof updater === 'function'
+      ? (updater as (prev: SessionExercise[]) => SessionExercise[])(prev)
+      : updater;
+    exercisesRef.current = next;
+    // Auto-save session state so it survives app backgrounding/kill.
+    AsyncStorage.setItem('activeWorkoutSets', JSON.stringify(
+      next.map(ex => ({ name: ex.name, sets: ex.sets }))
+    )).catch(() => {});
+    // Also debounce-sync to the backend so per-set detail isn't local-only.
+    syncPartialToBackend(next);
+    setExercisesRaw(next);
   }, [syncPartialToBackend]);
 
   useEffect(() => {
@@ -879,10 +885,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       try {
         const saved: Array<{ name: string; sets: any[] }> = JSON.parse(raw);
         if (!saved?.length) return;
-        setExercisesRaw(prev => prev.map(ex => {
-          const match = saved.find(s => s.name === ex.name);
-          return match && match.sets.length > 0 ? { ...ex, sets: match.sets } : ex;
-        }));
+        setExercisesRaw(prev => {
+          const next = prev.map(ex => {
+            const match = saved.find(s => s.name === ex.name);
+            return match && match.sets.length > 0 ? { ...ex, sets: match.sets } : ex;
+          });
+          exercisesRef.current = next;
+          return next;
+        });
         console.log(`[ActiveWorkout] restored ${saved.filter(s => s.sets.length > 0).length} exercises with logged sets`);
       } catch {}
     }).catch(() => {});
@@ -945,7 +955,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
         });
         if (Object.keys(updates).length === 0) return;
-        setExercisesRaw(prev => prev.map((ex, i) =>
+        setExercises(prev => prev.map((ex, i) =>
           i in updates
             ? { ...ex, targetWeightLbs: updates[i], weightRecommendationSource: 'ai_first_time' }
             : ex,
@@ -1162,9 +1172,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     return Math.max(base + extras - removed, minCount);
   }, [exercises, extraSetCounts, removedSetCounts]);
 
-  const clearLiveRecommendationState = useCallback((exIdx: number) => {
+  const clearLiveRecommendationState = useCallback((exIdx: number, opts?: { preserveNextTarget?: boolean }) => {
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
-    setRestNextTarget(null);
+    if (!opts?.preserveNextTarget) setRestNextTarget(null);
     setRestCue(null);
     setAiErrorIdx(null);
   }, [setExercises]);
@@ -1614,8 +1624,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const updatedSets = ex.sets.map((s, si) =>
         si === setIdx ? { ...s, weightLbs: newWeight, reps: newReps } : s
       );
-      const targetMax = parseTargetRepMax(ex.targetReps);
-      if (setIdx === updatedSets.length - 1 && targetMax != null && newReps >= targetMax && updatedSets[setIdx]?.rir == null) {
+      if (setIdx === updatedSets.length - 1 && shouldPromptRir(newReps, ex.targetReps) && updatedSets[setIdx]?.rir == null) {
         setPendingRir({ exIdx, setIdx });
       } else if (pendingRir?.exIdx === exIdx && pendingRir.setIdx === setIdx) {
         setPendingRir(null);
@@ -1625,8 +1634,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       ));
       setEditingSetKey(null);
       setEditDraft({});
-      clearLiveRecommendationState(exIdx);
-      maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
+      clearLiveRecommendationState(exIdx, { preserveNextTarget: true });
+      if (!shouldPromptRir(newReps, ex.targetReps)) {
+        maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
+      }
     }, 800);
   }, [clearLiveRecommendationState, editDraft, exercises, pendingRir]);
 
@@ -1643,8 +1654,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const updatedSets = ex?.sets.map((s, si) =>
       si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
     ) ?? [];
-    const targetMax = parseTargetRepMax(ex?.targetReps);
-    if (ex && editSetIdx === updatedSets.length - 1 && targetMax != null && r >= targetMax && updatedSets[editSetIdx]?.rir == null) {
+    if (ex && editSetIdx === updatedSets.length - 1 && shouldPromptRir(r, ex.targetReps) && updatedSets[editSetIdx]?.rir == null) {
       setPendingRir({ exIdx: editSetExIdx, setIdx: editSetIdx });
     } else if (pendingRir?.exIdx === editSetExIdx && pendingRir.setIdx === editSetIdx) {
       setPendingRir(null);
@@ -1654,8 +1664,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return { ...e, sets: updatedSets };
     }));
     setEditSetVisible(false);
-    clearLiveRecommendationState(editSetExIdx);
-    maybeRefreshRecommendationForExerciseRef.current?.(editSetExIdx, updatedSets);
+    clearLiveRecommendationState(editSetExIdx, { preserveNextTarget: true });
+    if (!shouldPromptRir(r, ex?.targetReps)) {
+      maybeRefreshRecommendationForExerciseRef.current?.(editSetExIdx, updatedSets);
+    }
   }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, pendingRir]);
 
   // Log a specific set slot inline (no modal).
@@ -1672,7 +1684,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   ) => {
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
-    const ex = exercises[exIdx];
+    const currentExercises = exercisesRef.current.length > 0 ? exercisesRef.current : exercises;
+    const ex = currentExercises[exIdx];
+    if (!ex) return;
     const timed = isTimedExercise(ex?.name ?? '', ex?.targetReps);
 
     // Watch-originated logs pass weight / reps directly as overrides
@@ -1755,7 +1769,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restEndedAtRef.current = 0;
     setPostRestIdleSecs(0);
 
-    const updatedExercises = exercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
+    const updatedExercises = currentExercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
     setExercises(updatedExercises);
     setAiErrorIdx(null);
 
@@ -1812,7 +1826,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       (async () => {
         try {
           const { pushProgressToWatch } = await import('../utils/watchSync');
-          await pushProgressToWatch({ restRemainingSec: restSeconds });
+          await pushProgressToWatch({ restRemainingSec: restSeconds, recommendation: nextSetLabel });
         } catch { /* watch bridge optional */ }
       })();
       await rescheduleRestNotificationsRef.current({
@@ -1828,14 +1842,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     const setsLogged = cleanSets.length;
     if (!timed && setsLogged < effectiveTotal) {
-      const targetMax = parseTargetRepMax(ex.targetReps);
-      if (targetMax != null && newSet.reps >= targetMax) {
+      if (shouldPromptRir(newSet.reps, ex.targetReps)) {
         setPendingRir({ exIdx, setIdx: cleanSets.length - 1 });
       } else if (pendingRir?.exIdx === exIdx) {
         setPendingRir(null);
       }
-      clearLiveRecommendationState(exIdx);
-      console.log('[AI] Recommendation deferred until user rates the set.');
+      clearLiveRecommendationState(exIdx, { preserveNextTarget: true });
+      if (shouldPromptRir(newSet.reps, ex.targetReps)) {
+        console.log('[AI] Recommendation deferred until significant-overage RIR is logged.');
+      } else {
+        maybeRefreshRecommendationForExerciseRef.current?.(exIdx, cleanSets);
+      }
     } else if (pendingRir?.exIdx === exIdx) {
       setPendingRir(null);
     }
@@ -2390,11 +2407,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setAiErrorIdx(null);
     console.log('[LOG_SET] Cleared AI error index');
 
-    // Over-target: prompt for RIR so progression has a real signal for
-    // "how hard was that really?" Under-target stays as-is — hitting
-    // failure is already a clear signal.
-    const targetMax = parseTargetRepMax(ex.targetReps);
-    if (targetMax != null && repsNum >= targetMax) {
+    // Only ask for RIR when the user clearly overshoots the target range.
+    if (shouldPromptRir(repsNum, ex.targetReps)) {
       setPendingRir({ exIdx, setIdx: updatedSets.length - 1 });
     } else {
       setPendingRir(null);
@@ -2410,6 +2424,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
       startRestTimer(restSeconds, ex.name, { nextTarget: nextSetLabel, cue: undefined });
+      (async () => {
+        try {
+          const { pushProgressToWatch } = await import('../utils/watchSync');
+          await pushProgressToWatch({ restRemainingSec: restSeconds, recommendation: nextSetLabel });
+        } catch { /* watch bridge optional */ }
+      })();
       await rescheduleRestNotifications({
         seconds: restSeconds,
         exerciseName: ex.name,
@@ -2421,25 +2441,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       clearRestState();
     }
 
-    // ── Next-set recommendation is gated on feel ──────────────────
-    // Previously we fired /recommend-weight immediately after logging
-    // a set, which meant the AI card populated before the user had a
-    // chance to tell the app how the set felt — and the rec was
-    // working off half the signal. Now the fetch fires in
-    // `handleSetFeedback` (after the user taps easy/good/hard/etc),
-    // so the backend gets the feel field and the AI-reviewer layer
-    // can flag feel-vs-reps conflicts properly.
-    //
-    // Clear any stale AI tip from a prior set so the cue stays hidden
-    // until the user rates this one. Keep restNextTarget — it holds the
-    // plain "Set N: X lbs x Y reps" label set when rest started.
+    // Clear any stale AI tip from a prior set, but keep the next-set
+    // target label visible during the rest timer while we refresh the cue.
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
     setRestCue(null);
     const setsLogged = updatedSets.length;
     if (setsLogged >= targetSetCount) {
       console.log('[AI] Skipping recommendation - all sets completed for this exercise');
+    } else if (shouldPromptRir(repsNum, ex.targetReps)) {
+      console.log('[AI] Recommendation deferred until significant-overage RIR is logged.');
     } else {
-      console.log('[AI] Recommendation deferred until user taps a feel chip');
+      await maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
     }
   };
 
@@ -2509,6 +2521,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           themeColorHex: theme.colors.primary,
         }).catch(() => undefined);
       }
+      import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+        pushProgressToWatch({ recommendation: baseTip.replace(/^Set \d+:\s*/, '') })
+      ).catch(() => undefined);
       return;
     }
 
@@ -2547,6 +2562,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           themeColorHex: theme.colors.primary,
         }).catch(() => undefined);
       }
+      import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+        pushProgressToWatch({ recommendation: `${rec.weightLbs} lbs x ${rec.reps} - ${rec.tip}` })
+      ).catch(() => undefined);
 
       if (restRemaining > 0 && restForExercise === ex.name) {
         await rescheduleRestNotifications({
@@ -2581,35 +2599,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       && pendingRir?.exIdx === exIdx
       && pendingRir.setIdx === lastSetIdx
       && lastSet.rir == null;
-    if (rirStillPending || !lastSet.feedback) {
-      clearLiveRecommendationState(exIdx);
+    if (rirStillPending) {
+      clearLiveRecommendationState(exIdx, { preserveNextTarget: true });
       return;
     }
 
     await refreshRecommendationForExercise(exIdx, setsForExercise);
   }, [clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, pendingRir, refreshRecommendationForExercise]);
   maybeRefreshRecommendationForExerciseRef.current = maybeRefreshRecommendationForExercise;
-
-  const handleSetFeedback = useCallback(async (exIdx: number, feedback: SetFeedback) => {
-    let nextSets: CompletedSet[] = [];
-    setExercises(prev => prev.map((item, i) => {
-      if (i !== exIdx || item.sets.length === 0) return item;
-      nextSets = item.sets.map((set, setIdx) => (
-        setIdx === item.sets.length - 1 ? { ...set, feedback } : set
-      ));
-      return { ...item, sets: nextSets };
-    }));
-
-    if (feedback === 'pain') {
-      setRestCue('Pain flagged. Reduce load, shorten range if needed, and ask coach if it feels sharp or unstable.');
-      setCoachModalVisible(true);
-      setCoachChat(prev => prev.length > 0 ? prev : [{ role: 'assistant', content: 'Pain flagged on the last set. Tell me where you feel it and what exercise you are doing, and I will help you adjust.' }]);
-    }
-
-    if (nextSets.length > 0) {
-      await maybeRefreshRecommendationForExercise(exIdx, nextSets);
-    }
-  }, [maybeRefreshRecommendationForExercise]);
 
   const handleSubmitFeedback = async (skip = false) => {
     // Close immediately — the user doesn't need a two-step confirmation
@@ -2717,16 +2714,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (finishedSession) onFinish(finishedSession);
   };
 
+  const cancelActiveWorkoutFromWatch = useCallback(() => {
+    clearRestState();
+    setActiveWatchSessionId(null);
+    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+    AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+    AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
+    import('../utils/watchSync')
+      .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, {
+        dateISO: dateKey(new Date()),
+        status: 'skipped',
+        sessionId: watchSessionId.current,
+      }).catch(() => {}))
+      .catch(() => {});
+    onCancel();
+  }, [clearRestState, onCancel, workout]);
+
   // Kept in sync on every render so the watch command listener always
   // dispatches to the current finish / cancel closures.
   watchHandlersRef.current = {
     finish: () => { handleFinish(); },
-    cancel: () => { onCancel(); },
+    cancel: () => { cancelActiveWorkoutFromWatch(); },
   };
 
   const handleFinish = async () => {
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
+    setActiveWatchSessionId(null);
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -2738,14 +2753,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const now = new Date();
     const startedAtIso = new Date(startTime.current).toISOString();
     const endedAtIso = now.toISOString();
+    const finalExercises = exercisesRef.current.length > 0 ? exercisesRef.current : exercises;
+    const actualDurationSeconds = Math.max(elapsed, Math.floor((now.getTime() - startTime.current) / 1000));
     const session: WorkoutSession = {
       id: `${Date.now()}`,
       date: now.toISOString(),
       focus: workout.focus,
-      durationSeconds: elapsed,
+      durationSeconds: actualDurationSeconds,
       startedAt: startedAtIso,
       endedAt: endedAtIso,
-      exercises,
+      exercises: finalExercises,
       completed: true,
     };
     await saveWorkoutSession(session);
@@ -2841,7 +2858,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         });
         const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(workout.focus);
         const pureCardioFocus = /^(cardio|conditioning|zone\s*2|short intervals|long intervals|tempo)$/i.test(workout.focus.trim());
-        const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
+        const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, {
           category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
@@ -4244,38 +4261,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     );
                   })()}
 
-                  {!timed && ex.sets.length > 0 && ex.sets.length < totalSetCount && (
-                    <View style={[styles.feedbackCard, { marginTop: 10 }]}>
-                      <Text style={styles.feedbackTitle}>
-                        {pendingRir?.exIdx === i ? 'How did that set feel after that effort?' : 'How did that set feel?'}
-                      </Text>
-                      <View style={styles.feedbackRow}>
-                        {SET_FEEDBACK_OPTIONS.map(option => {
-                          const active = ex.sets[ex.sets.length - 1]?.feedback === option.value;
-                          const isPain = option.value === 'pain';
-                          return (
-                            <TouchableOpacity
-                              key={option.value}
-                              style={[
-                                styles.feedbackChip,
-                                isPain && styles.feedbackChipPain,
-                                active && (isPain ? styles.feedbackChipPainActive : styles.feedbackChipActive),
-                              ]}
-                              onPress={() => handleSetFeedback(i, option.value)}>
-                              <Text style={[
-                                styles.feedbackChipText,
-                                isPain && styles.feedbackChipTextPain,
-                                active && !isPain && styles.feedbackChipTextActive,
-                              ]}>
-                                {option.label}
-                              </Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    </View>
-                  )}
-
                   {(() => {
                     const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
                     const unitLabel = timedInterval ? 'Interval' : 'Set';
@@ -5646,27 +5631,6 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   setNum:  { fontSize: 12, color: tc.textMuted, width: 44 },
   setData: { flex: 1, fontSize: 13, fontWeight: '600', color: tc.textPrimary },
   setCheck:{ fontSize: 12, color: tc.primary, fontWeight: '700' },
-  feedbackCard: {
-    flexDirection: 'column',
-    gap: 6,
-  },
-  feedbackTitle: { fontSize: 11, fontWeight: '600', color: tc.textMuted },
-  feedbackRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  feedbackChip: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: tc.border,
-    backgroundColor: tc.surface,
-  },
-  feedbackChipActive:     { borderColor: tc.primary, backgroundColor: tc.primary + '20' },
-  feedbackChipPain:       { borderColor: tc.error + '80' },
-  feedbackChipPainActive: { borderColor: tc.error, backgroundColor: tc.error + '20' },
-  feedbackChipText:       { fontSize: 12, fontWeight: '600', color: tc.textSecondary },
-  feedbackChipTextActive: { color: tc.primary },
-  feedbackChipTextPain:   { color: tc.error },
-
   // `aiBubble` is reused by the RIR prompt — keep it. The other AI-tip
   // style entries (label/text/loading/error variant) were dropped along
   // with the in-card AI tip block; the rest-timer surface now owns the

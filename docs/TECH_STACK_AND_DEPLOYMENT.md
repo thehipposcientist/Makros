@@ -22,7 +22,8 @@
 ### AI / External Services
 | Service | Purpose | Cost |
 |---------|---------|------|
-| **OpenAI gpt-4o-mini** | Nutrition plans, coach chat, food scanning | ~$0.15/1M input tokens |
+| **OpenAI gpt-4o-mini** | Nutrition plans, coach chat, text parsing/search fallback | Low-cost text model |
+| **OpenAI gpt-5.4-mini** | Dedicated image-analysis endpoints (food, supplement, equipment, form, body scans) | $0.75/1M input, $4.50/1M output |
 | **USDA FoodData Central** | Food nutrition search (primary) | Free (1000 req/hr) |
 | **wger.de** | Exercise images + exercise search | Free |
 | **OpenFoodFacts** | Barcode lookup for packaged foods | Free |
@@ -160,13 +161,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES=10080
 OPENAI_API_KEY=<your key>
 USDA_FDC_API_KEY=<your key from fdc.nal.usda.gov>
 
-# Use faster models in production, same cost
+# Current production defaults
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_CHAT=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
+MODEL_IMAGE=gpt-5.4-mini
 
-PLAN_REVIEW_ENABLED=1
-NUTRITION_REVIEW_ENABLED=1
+PLAN_REVIEW_ENABLED=0
+NUTRITION_REVIEW_ENABLED=0
 ```
 
 ### Production app.json additions needed

@@ -1010,6 +1010,39 @@ function getScheduleFromPlanWeek(
   });
 }
 
+function planDayDate(dayDate: string): Date {
+  const [y, m, d] = dayDate.split('-').map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1);
+}
+
+function resolveTodayScheduleItem(
+  schedule: ScheduleItem[] | null | undefined,
+  workoutPlan: WorkoutPlan | null | undefined,
+  planWeek: import('../services/api').PlanWeekResponse | null | undefined,
+): ScheduleItem | null {
+  const todayISO = todayKey();
+  const fromSchedule = (schedule ?? []).find(item => dateKey(item.date) === todayISO)
+    ?? (schedule ?? [])[0]
+    ?? null;
+  if (fromSchedule) return fromSchedule;
+
+  const fromPlanWeek = planWeek?.days?.find(d => d.day_date === todayISO)
+    ?? planWeek?.days?.[0]
+    ?? null;
+  if (fromPlanWeek) {
+    return {
+      date: planDayDate(fromPlanWeek.day_date),
+      workout: (fromPlanWeek.workout ?? null) as WorkoutDay | null,
+      isRest: !!fromPlanWeek.is_rest,
+    };
+  }
+
+  const firstWorkout = workoutPlan?.days?.[0] ?? null;
+  return firstWorkout
+    ? { date: new Date(), workout: firstWorkout, isRest: false }
+    : null;
+}
+
 // humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
@@ -1880,7 +1913,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // Find today by date in the schedule — with the PlanWeek model,
         // today may be at any index (e.g., index 1 if the week started
         // yesterday). Falls back to position 0 only if no date match.
-        const todayItem = (schedule as any[])?.find((s: any) => dateKey(s.date) === todayISO) ?? (schedule as any[])?.[0] ?? null;
+        const todayItem = resolveTodayScheduleItem(schedule, workoutPlan, planWeek);
         // Fall back to workoutPlan.days[0] when schedule[0].workout is null —
         // happens when the schedule mapping hasn't fully resolved yet but the
         // raw plan exists. Without this fallback the watch shows "Open Thallo"
@@ -2100,6 +2133,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     readinessScore: null as any,
     nutritionScoreData: null as any,
     workoutPlan: null as any,
+    planWeek: null as import('../services/api').PlanWeekResponse | null,
   });
   useEffect(() => {
     rePushStateRef.current = {
@@ -2112,6 +2146,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       readinessScore,
       nutritionScoreData,
       workoutPlan,
+      planWeek,
     };
   });
 
@@ -2188,7 +2223,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // Find today by date — with the dated PlanWeek the today card
           // is no longer guaranteed to live at index 0 (e.g. it sits at
           // index 1 when the week started Monday and today is Tuesday).
-          const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
+          const todayItem = resolveTodayScheduleItem(s.schedule, s.workoutPlan, s.planWeek);
           const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
 
           // Workout payload waits on the AsyncStorage in-progress check
@@ -2497,7 +2532,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 } = watchSync;
                 const s = rePushStateRef.current;
                 const todayISO = todayKey();
-                const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
+                const todayItem = resolveTodayScheduleItem(s.schedule, s.workoutPlan, s.planWeek);
                 const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
                 // Detect in-progress workout BEFORE computing status —
                 // ActiveWorkoutScreen writes activeWorkoutStartTime on
@@ -2605,9 +2640,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // closure-captured value — the listener is registered once
             // and the ref carries the freshest schedule + plan.
             const refState = rePushStateRef.current;
-            const liveSchedule = refState.schedule as any[];
-            const todayISO = todayKey();
-            const todayScheduleItem = liveSchedule?.find((s: any) => dateKey(s.date) === todayISO);
+            const todayScheduleItem = resolveTodayScheduleItem(refState.schedule, refState.workoutPlan, refState.planWeek);
             const today = todayScheduleItem?.workout ?? refState.workoutPlan?.days?.[0];
             console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) {
@@ -2640,9 +2673,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           } else if (command === 'skip_workout') {
             const refState = rePushStateRef.current;
-            const liveSchedule = refState.schedule as any[];
-            const todayISOSkip = todayKey();
-            const todayScheduleItemSkip = liveSchedule?.find((s: any) => dateKey(s.date) === todayISOSkip);
+            const todayScheduleItemSkip = resolveTodayScheduleItem(refState.schedule, refState.workoutPlan, refState.planWeek);
             const today = todayScheduleItemSkip?.workout ?? refState.workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'watch_log') {

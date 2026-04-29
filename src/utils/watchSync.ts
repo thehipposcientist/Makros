@@ -65,6 +65,26 @@ function localDateISO(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(/[^\d.-]/g, ''));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = finiteNumber(value);
+  if (parsed == null || parsed <= 0) return fallback;
+  return Math.max(1, Math.floor(parsed));
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
 async function getStoredUserId(): Promise<string | null> {
   return AsyncStorage.getItem('last_user_id').catch(() => null);
 }
@@ -83,6 +103,7 @@ export type WatchExerciseClient = {
   equipment?: string | null;
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
+  slotRole?: string | null;
 };
 
 /** Build the compact watch payload from the day AND its current
@@ -129,17 +150,23 @@ export function buildWatchWorkoutPayload(
   // badges it so users know to dial intensity down).
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => ({
     name: String(e.name || 'Exercise'),
-    sets: Number(e.sets || 3),
-    reps: String(e.reps || ''),
-    restSeconds: Number(e.restSeconds || e.rest_seconds || 60),
-    equipment: e.equipment ?? null,
-    plannedTargetWeightLbs: e.plannedTargetWeightLbs ?? e.weight ?? null,
-    recommendation: e.recommendation ?? null,
-    slotRole: e.slot_role ?? e.slotRole ?? null,
+    sets: positiveInt(e.sets, 3),
+    reps: String(e.reps ?? ''),
+    restSeconds: positiveInt(e.restSeconds ?? e.rest_seconds, 60),
+    equipment: nullableString(e.equipment),
+    plannedTargetWeightLbs: finiteNumber(
+      e.plannedTargetWeightLbs
+        ?? e.targetWeightLbs
+        ?? e.recommendedWeightLbs
+        ?? e.weight,
+    ),
+    recommendation: nullableString(e.recommendation),
+    slotRole: nullableString(e.slot_role ?? e.slotRole),
   }));
+  const durationMinutes = positiveInt((day as any).durationMinutes ?? (day as any).duration, 60);
   return {
     focus: String(day.focus || 'Workout'),
-    durationMinutes: Number((day as any).durationMinutes ?? (day as any).duration ?? 60),
+    durationMinutes,
     dateISO: opts.dateISO || localDateISO(),
     status: opts.status,
     sessionId: opts.sessionId ?? null,
