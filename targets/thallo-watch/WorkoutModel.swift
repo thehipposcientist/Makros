@@ -180,9 +180,10 @@ struct WatchSleepSnapshot: Codable, Equatable {
     let remMin: Int?
     let deepMin: Int?
     /// Resting heart rate (latest 7-day average from HealthKit).
-    let restingHr: Int?
+    /// Stored as Double because HealthKit returns fractional values (e.g. 62.5).
+    let restingHr: Double?
     /// Average HRV over recent days (ms); nil if HRV not authorised.
-    let hrvMs: Int?
+    let hrvMs: Double?
     /// Short label: "Excellent" / "Good" / "OK" / "Low".
     let label: String?
     /// Brief one-line takeaway phrased like a coach's note.

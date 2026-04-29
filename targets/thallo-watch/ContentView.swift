@@ -995,10 +995,10 @@ private struct SleepView: View {
                         // Vital tiles — RHR + HRV.
                         HStack(spacing: 8) {
                             if let rhr = s.restingHr {
-                                vitalTile(label: "RHR", value: "\(rhr)", unit: "bpm")
+                                vitalTile(label: "RHR", value: "\(Int(rhr.rounded()))", unit: "bpm")
                             }
                             if let hrv = s.hrvMs {
-                                vitalTile(label: "HRV", value: "\(hrv)", unit: "ms")
+                                vitalTile(label: "HRV", value: "\(Int(hrv.rounded()))", unit: "ms")
                             }
                         }
                         // Stage breakdown if available.

@@ -2480,7 +2480,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   await import('../utils/watchSync');
                 const s = rePushStateRef.current;
                 const todayISO = new Date().toISOString().slice(0, 10);
-                const todayItem = (s.schedule as any[])?.[0] ?? null;
+                const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
                 const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
                 // Detect in-progress workout BEFORE computing status —
                 // ActiveWorkoutScreen writes activeWorkoutStartTime on
@@ -2655,19 +2655,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 await AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
               } catch { /* non-fatal */ }
               // Push explicit skipped status so watch exits active state immediately.
+              const skipISO = new Date().toISOString().slice(0, 10);
+              const skipSchedule = rePushStateRef.current.schedule as any[];
+              const skipTodayItem = skipSchedule?.find((it: any) => dateKey(it.date) === skipISO) ?? skipSchedule?.[0] ?? null;
               try {
                 const { pushWorkoutToWatch } = await import('../utils/watchSync');
-                const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
-                const todayWorkout = todayItem?.workout ?? rePushStateRef.current.workoutPlan?.days?.[0] ?? null;
-                await pushWorkoutToWatch(todayWorkout, {
-                  dateISO: new Date().toISOString().slice(0, 10),
+                const skipWorkout = skipTodayItem?.workout ?? rePushStateRef.current.workoutPlan?.days?.[0] ?? null;
+                await pushWorkoutToWatch(skipWorkout, {
+                  dateISO: skipISO,
                   status: 'skipped',
                   sessionId: null,
                 });
               } catch { /* non-fatal */ }
               try {
-                const todayItem = (rePushStateRef.current.schedule as any[])?.[0] ?? null;
-                const focus = String(todayItem?.workout?.focus || todayItem?.focus || 'workout');
+                const focus = String(skipTodayItem?.workout?.focus || skipTodayItem?.focus || 'workout');
                 watchCmdHandlersRef.current.skip(focus);
               } catch { /* non-fatal */ }
             })();
@@ -7218,12 +7219,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
               <Text style={[styles.profileAvatarText, { color: themeColors.primary }]}>
-                {(username?.[0] ?? userProfile.goal?.[0] ?? 'U').toUpperCase()}
+                {(userProfile.firstName?.[0] ?? username?.[0] ?? userProfile.goal?.[0] ?? 'U').toUpperCase()}
               </Text>
             </View>
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
-                {username || 'Your Profile'}
+                {userProfile.firstName || username || 'Your Profile'}
               </Text>
               <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
                 {ps?.weightLbs ? `${ps.weightLbs} lb` : '—'}  ·  {heightStr}  ·  age {ps?.age ?? '—'}
