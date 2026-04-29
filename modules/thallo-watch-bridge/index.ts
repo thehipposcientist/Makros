@@ -155,6 +155,7 @@ export type WatchProgress = {
 // minimal means no parser gymnastics, and the public `WatchBridge`
 // object below provides the type-safe surface callers actually use.
 const native: any = requireOptionalNativeModule('ThalloWatchBridgeModule');
+let commandListenerCount = 0;
 
 export const WatchBridge = {
   isAvailable: (): boolean => !!native?.isAvailable?.(),
@@ -231,7 +232,19 @@ export const WatchBridge = {
       }
     };
     const sub = native.addListener('command', handler);
+    try {
+      commandListenerCount += 1;
+      if (commandListenerCount === 1) native.beginCommandListener?.();
+      const queued = native.drainQueuedCommands?.() ?? [];
+      if (Array.isArray(queued)) {
+        queued.forEach((evt) => handler(evt));
+      }
+    } catch {}
     return () => {
+      try {
+        commandListenerCount = Math.max(0, commandListenerCount - 1);
+        if (commandListenerCount === 0) native.endCommandListener?.();
+      } catch {}
       try { sub?.remove?.(); } catch { /* no-op */ }
     };
   },

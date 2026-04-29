@@ -33,6 +33,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private let session: WCSession?
     private static let userIdKey = "thallo.watchUserId"
+    private var queuedCommands: [[String: Any]] = []
 
     private override init() {
         self.session = WCSession.isSupported() ? WCSession.default : nil
@@ -99,6 +100,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         DispatchQueue.main.async {
             self.isReachable = session.isReachable
+            if activationState == .activated {
+                self.flushQueuedCommands()
+            }
             // Hydrate whatever's already queued in applicationContext
             // (survives cold start on both sides).
             self.absorbContext(session.receivedApplicationContext)
@@ -143,6 +147,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
         DispatchQueue.main.async { self.absorbMessage(message) }
         replyHandler(["ok": true])
+    }
+
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        DispatchQueue.main.async { self.absorbMessage(userInfo) }
     }
 
     // ─── Message routing ────────────────────────────────────────────
@@ -386,16 +394,39 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         // calls back into `sendCommand("watch_log", ...)` which would
         // recurse forever. The unified-log entries are still visible
         // in Console.app — just not forwarded to the phone.
-        guard let session, session.activationState == .activated else {
-            print("[watch] sendCommand(\(command)) FAILED — session not activated")
-            HeartRateStore.saveDiag("→ \(command) FAIL: not activated")
-            lastError = "Watch session not active — open the iPhone app once to pair."
+        guard let session else {
+            print("[watch] sendCommand(\(command)) FAILED — WCSession unavailable")
+            HeartRateStore.saveDiag("→ \(command) FAIL: unavailable")
+            lastError = "Watch session unavailable."
             return
         }
         var body = payload
         body["kind"] = "command"
         body["command"] = command
         body["tsMs"] = Date().timeIntervalSince1970 * 1000
+        guard session.activationState == .activated else {
+            if command != "watch_log" {
+                print("[watch] sendCommand(\(command)) — not activated, queueing")
+                HeartRateStore.saveDiag("→ \(command) queued: not activated")
+            }
+            queuedCommands.append(body)
+            session.activate()
+            return
+        }
+        sendCommandBody(body, command: command, session: session)
+    }
+
+    private func flushQueuedCommands() {
+        guard let session, session.activationState == .activated, !queuedCommands.isEmpty else { return }
+        let pending = queuedCommands
+        queuedCommands.removeAll()
+        for body in pending {
+            let command = body["command"] as? String ?? "<unknown>"
+            sendCommandBody(body, command: command, session: session)
+        }
+    }
+
+    private func sendCommandBody(_ body: [String: Any], command: String, session: WCSession) {
         if session.isReachable {
             // Skip the chatty per-message log for forwarded `watch_log`
             // commands so the unified log doesn't double-up every line.

@@ -40,6 +40,18 @@ public class ThalloWatchBridgeModule: Module {
             self.sessionHolder.setUserId(userId)
         }
 
+        Function("beginCommandListener") {
+            self.sessionHolder.beginCommandListener()
+        }
+
+        Function("endCommandListener") {
+            self.sessionHolder.endCommandListener()
+        }
+
+        Function("drainQueuedCommands") { () -> [[String: Any]] in
+            return self.sessionHolder.drainQueuedCommands()
+        }
+
         // Query helpers — the JS API wraps these as booleans.
         Function("isAvailable") { () -> Bool in
             WCSession.isSupported()
@@ -120,8 +132,26 @@ public class ThalloWatchBridgeModule: Module {
 private class _SessionHolder: NSObject, WCSessionDelegate {
     private var dispatchEvent: ((String, [String: Any]) -> Void)?
     private var userId: String?
+    private var commandListenerCount = 0
+    private var queuedCommands: [[String: Any]] = []
+    private var pendingContext: [String: Any] = [:]
+    private var pendingMessages: [[String: Any]] = []
 
     func setUserId(_ id: String?) { self.userId = id }
+
+    func beginCommandListener() {
+        commandListenerCount += 1
+    }
+
+    func endCommandListener() {
+        commandListenerCount = max(0, commandListenerCount - 1)
+    }
+
+    func drainQueuedCommands() -> [[String: Any]] {
+        let queued = queuedCommands
+        queuedCommands.removeAll()
+        return queued
+    }
 
     func activate(sendEvent: @escaping (String, [String: Any]) -> Void) {
         self.dispatchEvent = sendEvent
@@ -194,8 +224,18 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     func sendContext(_ dict: [String: Any]) -> Bool {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
-        guard s.activationState == .activated else { return false }
         let cleaned = Self.stripNulls(dict)
+        guard s.activationState == .activated else {
+            for (k, v) in cleaned { pendingContext[k] = v }
+            s.activate()
+            return true
+        }
+        flushPendingOutbound()
+        return sendContextActivated(cleaned, session: s)
+    }
+
+    @discardableResult
+    private func sendContextActivated(_ cleaned: [String: Any], session s: WCSession) -> Bool {
         do {
             var merged = s.applicationContext
             for (k, v) in cleaned { merged[k] = v }
@@ -223,9 +263,20 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     func sendMessage(_ dict: [String: Any]) -> Bool {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
-        guard s.activationState == .activated else { return false }
-        var cleaned = Self.stripNulls(dict)
-        stampUserId(&cleaned)
+        let cleaned = Self.stripNulls(dict)
+        guard s.activationState == .activated else {
+            pendingMessages.append(cleaned)
+            s.activate()
+            return true
+        }
+        var stamped = cleaned
+        stampUserId(&stamped)
+        flushPendingOutbound()
+        return sendMessageActivated(stamped, session: s)
+    }
+
+    @discardableResult
+    private func sendMessageActivated(_ cleaned: [String: Any], session s: WCSession) -> Bool {
         if s.isReachable {
             s.sendMessage(cleaned, replyHandler: nil) { err in
                 os_log("[wc-bridge] sendMessage failed: %{public}@", log: wcLog, type: .error, err.localizedDescription)
@@ -236,12 +287,35 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         return true
     }
 
+    private func flushPendingOutbound() {
+        guard WCSession.isSupported() else { return }
+        let s = WCSession.default
+        guard s.activationState == .activated else { return }
+        if !pendingContext.isEmpty {
+            let context = pendingContext
+            pendingContext.removeAll()
+            _ = sendContextActivated(context, session: s)
+        }
+        if !pendingMessages.isEmpty {
+            let messages = pendingMessages
+            pendingMessages.removeAll()
+            for message in messages {
+                var stamped = message
+                stampUserId(&stamped)
+                _ = sendMessageActivated(stamped, session: s)
+            }
+        }
+    }
+
     // MARK: WCSessionDelegate
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         logDiag("activationDidComplete", [
             "completedState": activationState.rawValue,
             "error": error?.localizedDescription ?? "",
         ])
+        if activationState == .activated {
+            flushPendingOutbound()
+        }
         // Fire a reachability event on activation too so the JS side
         // can push a fresh snapshot even if reachability was already
         // true by the time the listener wired up.
@@ -328,8 +402,18 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         payload.removeValue(forKey: "kind")
         payload.removeValue(forKey: "command")
         os_log("[wc-bridge] dispatching command=%{public}@ to JS", log: wcLog, type: .default, cmd)
+        let event: [String: Any] = ["command": cmd, "payload": payload]
         DispatchQueue.main.async { [weak self] in
-            self?.dispatchEvent?("command", ["command": cmd, "payload": payload])
+            guard let self else { return }
+            if self.commandListenerCount > 0 {
+                self.dispatchEvent?("command", event)
+            } else {
+                self.queuedCommands.append(event)
+                if self.queuedCommands.count > 50 {
+                    self.queuedCommands.removeFirst(self.queuedCommands.count - 50)
+                }
+                os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
+            }
         }
     }
 }

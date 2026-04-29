@@ -1531,6 +1531,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showSettings, setShowSettings] = useState(false);
   const [settingsFirstName, setSettingsFirstName] = useState('');
   const [settingsLastName, setSettingsLastName] = useState('');
+  const [nameSaved, setNameSaved] = useState(false);
   const [showGearScreen, setShowGearScreen] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
@@ -2706,7 +2707,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const text = String(payload?.text || '').trim();
                 if (!text || !authToken) return;
                 const { parseMealText } = await import('../services/api');
-                const { WatchBridge } = await import('../../../modules/thallo-watch-bridge');
+                const { WatchBridge } = await import('../../modules/thallo-watch-bridge');
                 const result = await parseMealText(authToken, text).catch(() => null);
                 if (!result?.items?.length) return;
                 await WatchBridge.syncMealParsePreview(result.items);
@@ -9469,7 +9470,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <TextInput
                       style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
                       value={settingsFirstName}
-                      onChangeText={setSettingsFirstName}
+                      onChangeText={(t) => { setSettingsFirstName(t); setNameSaved(false); }}
                       placeholder="First name"
                       placeholderTextColor={themeColors.textMuted}
                       autoCapitalize="words"
@@ -9481,13 +9482,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           const { updateName } = await import('../services/api');
                           await updateName(authToken, fn, ln).catch(() => {});
                           onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
+                          setNameSaved(true);
+                          setTimeout(() => setNameSaved(false), 2000);
                         }
                       }}
                     />
                     <TextInput
                       style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
                       value={settingsLastName}
-                      onChangeText={setSettingsLastName}
+                      onChangeText={(t) => { setSettingsLastName(t); setNameSaved(false); }}
                       placeholder="Last name"
                       placeholderTextColor={themeColors.textMuted}
                       autoCapitalize="words"
@@ -9499,11 +9502,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           const { updateName } = await import('../services/api');
                           await updateName(authToken, fn, ln).catch(() => {});
                           onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
+                          setNameSaved(true);
+                          setTimeout(() => setNameSaved(false), 2000);
                         }
                       }}
                     />
                   </View>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Used to personalize your daily motto and greetings</Text>
+                  <Text style={{ fontSize: 11, color: nameSaved ? themeColors.success : themeColors.textMuted }}>
+                    {nameSaved ? 'Saved' : 'Used to personalize your daily motto and greetings'}
+                  </Text>
                 </View>
 
                 {/* Account + Sign out */}

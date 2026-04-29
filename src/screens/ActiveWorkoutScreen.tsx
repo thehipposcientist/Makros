@@ -685,10 +685,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Refs so the once-mounted WC listener can always reach the latest
   // handlers without re-subscribing on every render (re-subscribing
   // churns WatchConnectivity and can drop in-flight messages).
-  const handleLogSetInlineRef = useRef(handleLogSetInline);
-  useEffect(() => { handleLogSetInlineRef.current = handleLogSetInline; }, [handleLogSetInline]);
-  const exercisesRef = useRef(exercises);
-  useEffect(() => { exercisesRef.current = exercises; }, [exercises]);
+  const handleLogSetInlineRef = useRef<(
+    exIdx: number,
+    setSlot: number,
+    silent?: boolean,
+    overrideDuration?: string,
+    overrideWeight?: string,
+    overrideReps?: string,
+  ) => Promise<void> | void>(() => {});
+  const exercisesRef = useRef<SessionExercise[]>([]);
+  const startRestTimerRef = useRef<(seconds: number, exerciseName: string) => void>(() => {});
+  const clearRestStateRef = useRef<() => void>(() => {});
+  const rescheduleRestNotificationsRef = useRef<(params: {
+    seconds: number;
+    exerciseName: string;
+    nextSetLabel: string;
+    aiCue?: string | null;
+    includeStartAlert?: boolean;
+  }) => Promise<void>>(async () => {});
   const watchHandlersRef = useRef<{
     finish: () => void;
     cancel: () => void;
@@ -822,6 +836,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       weightRecommendationSource: (ex as any).weightRecommendationSource ?? null,
     }));
   });
+  exercisesRef.current = exercises;
   // Debounced backend sync of the in-progress workout. Fires 1.5s after the
   // last set-update to avoid spamming the server mid-rapid-logging. Writes
   // to WorkoutSession + per-exercise tables so per-set detail survives a
@@ -937,7 +952,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             {
               targetSets: typeof ex.targetSets === 'number' ? ex.targetSets : undefined,
               targetReps: ex.targetReps,
-              experienceLevel: userProfile?.experienceLevel as any,
+              experienceLevel: 'intermediate',
               exerciseSlug: ex.slug ?? undefined,
               equipment: ex.equipment,
               primaryMuscle: ex.primaryMuscle ?? undefined,
@@ -1821,7 +1836,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestRemaining(restSeconds);
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
-      startRestTimer(restSeconds, ex.name);
+      startRestTimerRef.current(restSeconds, ex.name);
       // Push rest seconds to watch so its rest-timer view reflects the
       // phone's timer without running a second independent clock.
       (async () => {
@@ -1830,7 +1845,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           await pushProgressToWatch({ restRemainingSec: restSeconds });
         } catch { /* watch bridge optional */ }
       })();
-      await rescheduleRestNotifications({
+      await rescheduleRestNotificationsRef.current({
         seconds: restSeconds,
         exerciseName: ex.name,
         nextSetLabel,
@@ -1838,7 +1853,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         includeStartAlert: true,
       });
     } else {
-      clearRestState();
+      clearRestStateRef.current();
     }
 
     // AI tip for next set (skip for timed/cardio exercises)
@@ -1891,7 +1906,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setAiLoadingIdx(null);
       }
     }
-  }, [setInputs, exercises, authToken, goal, workout.focus, startRestTimer, rescheduleRestNotifications, clearRestState, extraSetCounts, removedSetCounts]);
+  }, [setInputs, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
+  handleLogSetInlineRef.current = handleLogSetInline;
 
   const loadWorkoutSuggestions = useCallback(async () => {
     if (!authToken) return;
@@ -2219,6 +2235,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     }, 500); // 500ms tick for smooth countdown without drift
   }, [theme.colors.primary, workout.focus]);
+  startRestTimerRef.current = startRestTimer;
 
   // Force-update timers when app returns from background. Also re-persist
   // the rest snapshot on background transition: if iOS evicts the app from
@@ -2332,6 +2349,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       liveActivityIdRef.current = null;
     }
   }, []);
+  clearRestStateRef.current = clearRestState;
 
   const rescheduleRestNotifications = useCallback(async (params: {
     seconds: number;
@@ -2343,6 +2361,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = await scheduleRestNotifications(params);
   }, []);
+  rescheduleRestNotificationsRef.current = rescheduleRestNotifications;
 
   const handleRemoveExercise = useCallback((exIdx: number) => {
     if (exercises.length <= 1) {

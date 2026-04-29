@@ -346,9 +346,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     profile.subscriptionTier ?? 'pro',
   );
 
-  const [firstName, setFirstName] = useState(profile.firstName ?? '');
-  const [lastName, setLastName]   = useState(profile.lastName ?? '');
-
   // Physical stats
   const [currentWeight, setCurrentWeight] = useState<string>(
     profile.physicalStats.weightLbs ? String(profile.physicalStats.weightLbs) : ''
@@ -1252,12 +1249,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
 
   const doHandleSave = async () => {
-    const fn = firstName.trim();
-    const ln = lastName.trim();
-    if (fn !== (profile.firstName ?? '') || ln !== (profile.lastName ?? '')) {
-      const { updateName } = await import('../services/api');
-      await updateName(authToken, fn, ln).catch(() => {});
-    }
     const newWeight = currentWeight ? parseFloat(currentWeight) : profile.physicalStats.weightLbs;
     if (newWeight !== profile.physicalStats.weightLbs && newWeight > 0) {
       const { saveWeightEntry } = await import('../utils/weightHistory');
@@ -1287,8 +1278,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
     onSave({
       ...profile,
-      firstName: firstName.trim() || undefined,
-      lastName: lastName.trim() || undefined,
       goal: selectedGoal,
       goalSelection: goalSel,
       priorityRegion: selectedRegion,
@@ -1434,33 +1423,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       )}
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={[styles.content, noHeader && { paddingBottom: 16 }]} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
-
-        {/* ── Name — only in profile / goal / workout modes, not mealplan ── */}
-        {mode !== 'mealplan' && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Name</Text>
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TextInput
-                style={[styles.textField, { flex: 1 }]}
-                value={firstName}
-                onChangeText={setFirstName}
-                placeholder="First name"
-                placeholderTextColor={tc.textMuted}
-                autoCapitalize="words"
-                returnKeyType="next"
-              />
-              <TextInput
-                style={[styles.textField, { flex: 1 }]}
-                value={lastName}
-                onChangeText={setLastName}
-                placeholder="Last name"
-                placeholderTextColor={tc.textMuted}
-                autoCapitalize="words"
-                returnKeyType="done"
-              />
-            </View>
-          </View>
-        )}
 
         {mode === 'goal' && (
         <>
