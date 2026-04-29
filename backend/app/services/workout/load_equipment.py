@@ -77,6 +77,7 @@ def load_increment_lbs(
     user configured plates or adjustable dumbbells, we use the smallest
     loadable jump instead of pretending 2.5/5 lb is always possible.
     """
+    safe_fallback = max(1.0, fallback)
     if is_dumbbell_equipment(equipment):
         db = _dumbbell_settings(settings)
         increment = _as_float(_get_any(db, "incrementLbs", "increment_lbs", "stepLbs", "step_lbs"))
@@ -84,14 +85,14 @@ def load_increment_lbs(
             return increment
         if str(_get_any(db, "type", "kind") or "").lower() == "adjustable":
             return 2.5
-        return fallback
+        return safe_fallback
 
     if is_barbell_equipment(equipment):
         bb = _barbell_settings(settings)
         plates = _as_float_list(_get_any(bb, "platePairsLbs", "plate_pairs_lbs", "platesLbs", "plates_lbs"))
         if plates:
             return max(1.0, min(plates) * 2.0)
-    return fallback
+    return safe_fallback
 
 
 def snap_load_lbs(
@@ -113,6 +114,8 @@ def snap_load_lbs(
 
     if is_dumbbell_equipment(equipment):
         db = _dumbbell_settings(settings)
+        if not db:
+            return round(weight, 1)
         increment = load_increment_lbs(equipment, settings, fallback=fallback_increment)
         min_lbs = _as_float(_get_any(db, "minLbs", "min_lbs"), 0.0) or 0.0
         max_lbs = _as_float(_get_any(db, "maxLbs", "max_lbs"))

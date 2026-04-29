@@ -158,6 +158,8 @@ def test_strength_load_settings_snap_to_available_weights() -> None:
     assert load_increment_lbs("Dumbbells", dumbbell_settings, fallback=2.5) == 5
     assert snap_load_lbs(52.5, "Dumbbells", dumbbell_settings, fallback_increment=5) == 50
     assert snap_load_lbs(17, "Dumbbells", dumbbell_settings, fallback_increment=5) == 15
+    assert snap_load_lbs(27.8, "Dumbbells", None, fallback_increment=2.5) == 27.8
+    assert load_increment_lbs("Dumbbells", None, fallback=0) == 1.0
 
     plate_settings = {"barbell": {"barWeightLbs": 45, "platePairsLbs": [10]}}
     assert load_increment_lbs("Barbell", plate_settings, fallback=5) == 20
