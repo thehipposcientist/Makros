@@ -156,6 +156,38 @@ _MUSCLE_ROLLUP: dict[str, str] = {
     "lats": "back", "rear_delt": "shoulders",
 }
 
+_SORENESS_FATIGUE: dict[str, dict[str, float]] = {
+    "neck": {"shoulders": 0.08, "back": 0.05},
+    "shoulders": {"shoulders": 0.12},
+    "chest": {"chest": 0.12},
+    "upper_back": {"back": 0.12},
+    "lower_back": {"back": 0.10, "core": 0.08},
+    "elbows": {"biceps": 0.06, "triceps": 0.06},
+    "wrists": {"biceps": 0.05},
+    "hips": {"glutes": 0.08, "quads": 0.05, "hamstrings": 0.05},
+    "knees": {"quads": 0.10, "hamstrings": 0.05, "calves": 0.04},
+    "ankles": {"calves": 0.10},
+    "quads": {"quads": 0.12},
+    "hamstrings": {"hamstrings": 0.12},
+    "glutes": {"glutes": 0.12},
+    "calves": {"calves": 0.12},
+    "core": {"core": 0.10},
+}
+
+
+def _resolve_soreness_fatigue(areas: object) -> dict[str, float]:
+    """Convert post-workout soreness tags into a small next-day fatigue bump."""
+    if not isinstance(areas, list):
+        return {}
+    out: dict[str, float] = {}
+    for raw in areas:
+        if not isinstance(raw, str):
+            continue
+        key = raw.strip().lower().replace(" ", "_").replace("-", "_")
+        for muscle, value in _SORENESS_FATIGUE.get(key, {}).items():
+            out[muscle] = min(0.2, out.get(muscle, 0.0) + value)
+    return out
+
 
 def _age_fatigue_multiplier(age: int | None) -> float:
     """Older lifters accumulate fatigue faster and recover slower from the
@@ -533,6 +565,13 @@ def compute_rolling_fatigue(
                 intensity=c.get("activity_intensity") or "moderate",
                 duration_minutes=dur,
             )
+        else:
+            resolved = dict(resolved)
+        soreness = _resolve_soreness_fatigue(c.get("soreness_areas"))
+        if soreness:
+            for muscle, value in soreness.items():
+                if muscle in FATIGUE_MUSCLES:
+                    resolved[muscle] = min(1.0, float(resolved.get(muscle, 0.0) or 0.0) + value)
         parsed.append((wd, decay, resolved, c))
 
     # Pass 1: positive fatigue only (workouts, cardio, etc.)
@@ -558,6 +597,7 @@ def compute_rolling_fatigue(
             "duration_minutes": max(1, (c.get("duration_seconds") or 0) // 60),
             "kind": "recovery" if (has_negative and not has_positive) else "training",
             "muscles": {k: round(v * decay, 2) for k, v in resolved.items() if v > 0},
+            "soreness_areas": c.get("soreness_areas") or [],
         })
 
     # Pass 2: recovery bonus (negative values), max one per day.

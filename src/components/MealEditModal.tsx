@@ -314,6 +314,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
   const [barcodeScanning, setBarcodeScanning] = useState(false);
+  const [barcodeFallback, setBarcodeFallback] = useState<string | null>(null);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; source?: 'usda' | 'ai' }>>([]);
   // Track which item is currently showing the unit picker popover.
@@ -702,6 +703,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       const { lookupBarcode } = await import('../services/api');
       const result = await lookupBarcode(authToken, barcode.trim());
       if (result && result.name) {
+        setBarcodeFallback(null);
         addAiFood({
           name: result.name,
           serving: result.serving,
@@ -711,10 +713,12 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           fat: result.fat,
         });
       } else {
-        Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Try searching by name instead.`);
+        setBarcodeFallback(barcode.trim());
+        Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Search by product name, scan the front label, or describe the food out loud.`);
       }
     } catch (e: any) {
-      Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Try searching by name instead.`);
+      setBarcodeFallback(barcode.trim());
+      Alert.alert('Product not found', `No nutrition data found for barcode ${barcode}. Search by product name, scan the front label, or describe the food out loud.`);
     } finally {
       setScanLoading(false);
       barcodeLock.current = false;
@@ -1313,11 +1317,41 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               </>
             )}
 
+            {barcodeFallback && (
+              <View style={{
+                backgroundColor: colors.warning + '14',
+                borderWidth: 1,
+                borderColor: colors.warning + '55',
+                borderRadius: 10,
+                padding: 10,
+                marginBottom: 10,
+              }}>
+                <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textPrimary }}>
+                  Barcode not in the database
+                </Text>
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 3 }}>
+                  {barcodeFallback} was not found. Search the product name, scan the front nutrition label, or use voice and Thallo will estimate it for review.
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                  <TouchableOpacity
+                    onPress={() => pickAndScan('camera')}
+                    style={{ flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surface }}>
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary }}>Scan label</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => setBarcodeFallback(null)}
+                    style={{ flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surface }}>
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: colors.textSecondary }}>Type search</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
             <View style={s.searchRow}>
               <TextInput
                 style={[s.searchInput, { flex: 1, marginBottom: 0 }]}
                 value={search}
-                onChangeText={(t) => { setSearch(t); setAiResults([]); }}
+                onChangeText={(t) => { setSearch(t); setAiResults([]); if (barcodeFallback) setBarcodeFallback(null); }}
                 placeholder="Search foods..."
                 placeholderTextColor={colors.textMuted}
                 returnKeyType="search"

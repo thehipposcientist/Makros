@@ -15,6 +15,7 @@ import NutritionInsightCard from './NutritionInsightCard';
 import SwipeableRow, { SwipeAction } from './SwipeableRow';
 import AnimatedNumber from './AnimatedNumber';
 import FadeInView from './FadeInView';
+import { dynamicCompactTextProps } from '../utils/dynamicType';
 
 interface NutritionCardProps {
   title?: string;
@@ -990,6 +991,8 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   const [itemsExpanded, setItemsExpanded] = useState(true);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(meal.meal);
+  const isRoutineBacked = !!(meal as any)._routineId || !!meal.isRoutine;
+  const isProtectedMeal = isRoutineBacked || !!(meal as any)._localId;
   useEffect(() => { if (!editingName) setNameDraft(meal.meal); }, [meal.meal, editingName]);
 
   // Meal-row animation values:
@@ -1144,10 +1147,28 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                   borderWidth: 1, borderColor: isSaved ? mealAccent.strong + '44' : colors.border,
                 }}
               >
-                <Text style={{ fontSize: 10, fontWeight: '700', color: isSaved ? mealAccent.strong : colors.textMuted }}>
+                <Text {...dynamicCompactTextProps} style={{ fontSize: 10, fontWeight: '700', color: isSaved ? mealAccent.strong : colors.textMuted }}>
                   {isSaved ? 'Saved' : 'Save'}
                 </Text>
               </TouchableOpacity>
+            )}
+            {isProtectedMeal && (
+              <View style={[
+                styles.protectedBadge,
+                {
+                  backgroundColor: mealAccent.strong + '16',
+                  borderColor: mealAccent.strong + '55',
+                },
+              ]}>
+                <Ionicons
+                  name={isRoutineBacked ? 'repeat-outline' : 'shield-checkmark-outline'}
+                  size={10}
+                  color={mealAccent.strong}
+                />
+                <Text {...dynamicCompactTextProps} style={[styles.protectedBadgeText, { color: mealAccent.strong }]}>
+                  {isRoutineBacked ? 'Routine' : 'Protected'}
+                </Text>
+              </View>
             )}
             {/* Inline routine badge — small, beside the title, taps to
                 toggle. No more dedicated row. */}
@@ -1158,15 +1179,15 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                 activeOpacity={0.7}
                 style={[
                   styles.routineBadge,
-                  meal.isRoutine
+                  isRoutineBacked
                     ? { backgroundColor: mealAccent.strong + '22', borderColor: mealAccent.strong + '66' }
                     : { backgroundColor: 'transparent', borderColor: colors.border },
                 ]}>
-                <Text style={[
+                <Text {...dynamicCompactTextProps} style={[
                   styles.routineBadgeText,
-                  { color: meal.isRoutine ? mealAccent.strong : colors.textMuted },
+                  { color: isRoutineBacked ? mealAccent.strong : colors.textMuted },
                 ]}>
-                  {meal.isRoutine ? 'Routine' : '+ Pin'}
+                  {isRoutineBacked ? 'Pinned' : '+ Pin'}
                 </Text>
               </TouchableOpacity>
             )}
@@ -1397,6 +1418,20 @@ const createStyles = (
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  protectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  protectedBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.25,
   },
 
   // Trailing icon strip — reorder + actions, all icon-only, single row.

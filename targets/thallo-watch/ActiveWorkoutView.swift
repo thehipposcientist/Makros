@@ -72,17 +72,17 @@ final class ActiveWorkoutState: ObservableObject {
     /// background terminations can happen between any two writes.
     private func persist() {
         if hydrating { return }
-        let blob: [String: Any] = [
+        var blob: [String: Any] = [
             "exerciseIndex": exerciseIndex,
             "setNumber": setNumber,
-            "restRemaining": restRemaining as Any,
             "paused": paused,
             "pendingWeight": pendingWeight,
             "pendingReps": pendingReps,
-            "lastLoggedWeight": lastLoggedWeight as Any,
-            "lastLoggedReps": lastLoggedReps as Any,
-            "currentRecommendation": currentRecommendation as Any,
         ]
+        if let restRemaining { blob["restRemaining"] = restRemaining }
+        if let lastLoggedWeight { blob["lastLoggedWeight"] = lastLoggedWeight }
+        if let lastLoggedReps { blob["lastLoggedReps"] = lastLoggedReps }
+        if let currentRecommendation { blob["currentRecommendation"] = currentRecommendation }
         UserDefaults.standard.set(blob, forKey: Self.kPersistKey)
     }
 
@@ -201,11 +201,28 @@ struct ActiveWorkoutView: View {
         .onAppear {
             HeartRateStore.saveDiag("ActiveView.onAppear")
             state.startTick()
-            if let ex = workout.exercises.first {
-                state.seed(for: ex)
-            }
+            seedCurrentExerciseIfNeeded()
         }
+        .onChange(of: workout.exercises) { _, _ in seedCurrentExerciseIfNeeded() }
+        .onChange(of: state.exerciseIndex) { _, _ in seedCurrentExerciseIfNeeded() }
         .onDisappear { state.stopTick() }
+    }
+
+    private func seedCurrentExerciseIfNeeded() {
+        guard !workout.exercises.isEmpty else { return }
+        if !workout.exercises.indices.contains(state.exerciseIndex) {
+            state.exerciseIndex = 0
+            state.setNumber = 1
+            state.restRemaining = nil
+            state.pendingWeight = 0
+            state.pendingReps = 0
+            state.lastLoggedWeight = nil
+            state.lastLoggedReps = nil
+            state.currentRecommendation = nil
+        }
+        if workout.exercises.indices.contains(state.exerciseIndex) {
+            state.seed(for: workout.exercises[state.exerciseIndex])
+        }
     }
 }
 

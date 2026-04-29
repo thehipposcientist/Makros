@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
@@ -32,6 +32,7 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
@@ -71,6 +72,39 @@ function parseTargetRepMax(raw: string | number | null | undefined): number | nu
 function shouldPromptRir(actualReps: number, targetReps: string | number | null | undefined): boolean {
   const targetMax = parseTargetRepMax(targetReps);
   return targetMax != null && actualReps >= targetMax + 2;
+}
+
+function buildRirNextSetSuggestion(
+  ex: SessionExercise,
+  loggedSet: CompletedSet,
+  rir: number,
+  nextSetNumber: number,
+): { nextTarget: string; cue: string; watchText: string; fullText: string } | null {
+  const weight = Number(loggedSet.weightLbs);
+  if (!Number.isFinite(weight) || weight <= 0) return null;
+  const increment = (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5;
+  const targetReps = ex.targetReps || `${loggedSet.reps}`;
+  const rounded = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
+  let nextWeight = weight;
+  let cue = '';
+  if (rir <= 1) {
+    cue = 'You were close to failure. Repeat the load and protect form.';
+  } else if (rir === 2) {
+    cue = 'Strong set. Repeat this load and aim to own the same rep range.';
+  } else if (rir === 3) {
+    nextWeight = weight + increment;
+    cue = 'You had room in reserve. Add a small jump if setup feels locked in.';
+  } else {
+    nextWeight = weight + increment;
+    cue = 'That was clearly under target effort. Add load on the next set.';
+  }
+  const nextTarget = `Set ${nextSetNumber}: ${rounded(nextWeight)} lbs x ${targetReps}`;
+  return {
+    nextTarget,
+    cue,
+    watchText: `${rounded(nextWeight)} lbs x ${targetReps} - ${cue}`,
+    fullText: `${nextTarget} — ${cue}`,
+  };
 }
 
 /** Shared display helper for equipment strings. Splits on commas so
@@ -532,6 +566,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // user to open Thallo on the watch. Auto-hides the moment the watch
   // reports reachable (i.e., the user opened it).
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
+  const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
   const watchSessionId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   // Write session ID synchronously to the module-level store so HomeScreen's
   // pull_state / reachability handlers can read it immediately without waiting
@@ -619,12 +654,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // there's no watch at all (isPaired=false) so users without
         // an Apple Watch never see this modal.
         try {
-          if (WatchBridge.isPaired() && !WatchBridge.isReachable()) {
+          const paired = WatchBridge.isPaired();
+          const reachable = isWatchReachable();
+          setWatchStatus({ paired, reachable });
+          if (paired && !reachable) {
             setShowOpenWatchPrompt(true);
           }
         } catch { /* bridge optional */ }
         // Re-push whenever the watch becomes reachable. Idempotent.
         const unsub = onWatchReachabilityChange((info) => {
+          setWatchStatus({ paired: info.paired, reachable: info.reachable });
           if (info.reachable) {
             console.log('[watch] reachable — re-pushing active workout');
             pushActive();
@@ -846,6 +885,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             reps: s.reps,
             weight_lbs: s.weightLbs,
             duration_seconds: s.durationSeconds ?? null,
+            comfort_rating: s.comfortRating ?? null,
             feedback: s.feedback ?? null,
             rir: s.rir ?? null,
             heart_rate_avg: s.heartRateAvg ?? null,
@@ -2846,6 +2886,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 reps: s.reps ?? 0,
                 weight_lbs: s.weightLbs ?? 0,
                 duration_seconds: s.durationSeconds ?? null,
+                comfort_rating: s.comfortRating ?? null,
                 feedback: s.feedback ?? null,
                 rir: s.rir ?? null,
                 heart_rate_avg: s.heartRateAvg ?? null,
@@ -3341,7 +3382,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         <LinearGradient
           colors={[themeColors.surfaceRaised, themeColors.surface]}
           style={styles.headerCard}>
-          <View style={styles.headerFocusRow}>
+          <View style={styles.headerControlRow}>
+            <View style={[styles.headerWorkoutTimer, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '44' }]}>
+              <Ionicons name="time-outline" size={13} color={workoutPalette.strong} />
+              <Text style={[styles.headerWorkoutTimerText, { color: workoutPalette.strong }]}>{formatTime(elapsed)}</Text>
+            </View>
             <View style={styles.headerTitleBlock}>
               <Text style={styles.focusLabel} numberOfLines={1}>{workout.focus}</Text>
               <Text style={styles.headerMetaText} numberOfLines={1}>
@@ -3360,52 +3405,90 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </TouchableOpacity>
             </View>
           </View>
-          <View style={styles.headerMetricRow}>
-            <View style={styles.headerMetricTile}>
-              <Text style={styles.headerMetricLabel}>Workout</Text>
-              <Text style={[styles.headerMetricValue, { color: workoutPalette.strong }]}>{formatTime(elapsed)}</Text>
-            </View>
-            {restRemaining > 0 ? (
-              <View style={[styles.headerMetricTile, styles.headerRestTile, { borderColor: workoutPalette.strong + '55', backgroundColor: workoutPalette.soft }]}>
-                <Text style={[styles.headerMetricLabel, { color: workoutPalette.text }]}>Rest</Text>
-                <Text style={[styles.headerMetricValue, { color: restRemaining <= 10 ? themeColors.warning : workoutPalette.strong }]}>
-                  {formatTime(restRemaining)}
-                </Text>
+          {restRemaining > 0 && (() => {
+            const ringSize = 82;
+            const ringStroke = 7;
+            const ringRadius = (ringSize - ringStroke) / 2;
+            const ringCircumference = 2 * Math.PI * ringRadius;
+            const ringTotal = Math.max(restTotalSecondsRef.current || restDurationSeconds.current || restRemaining, restRemaining, 1);
+            const ringProgress = Math.max(0, Math.min(1, restRemaining / ringTotal));
+            const ringOffset = ringCircumference * (1 - ringProgress);
+            const recommendation = [restNextTarget, restCue].filter(Boolean).join(' · ');
+            return (
+              <View style={[styles.headerRestPanel, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '33' }]}>
+                <View style={styles.headerRestMainRow}>
+                  <View style={styles.headerRestCircle}>
+                    <Svg width={ringSize} height={ringSize} style={{ position: 'absolute' }}>
+                      <Circle
+                        cx={ringSize / 2}
+                        cy={ringSize / 2}
+                        r={ringRadius}
+                        stroke={themeColors.background + 'AA'}
+                        strokeWidth={ringStroke}
+                        fill="transparent"
+                      />
+                      <Circle
+                        cx={ringSize / 2}
+                        cy={ringSize / 2}
+                        r={ringRadius}
+                        stroke={restRemaining <= 10 ? themeColors.warning : workoutPalette.strong}
+                        strokeWidth={ringStroke}
+                        fill="transparent"
+                        strokeLinecap="round"
+                        strokeDasharray={`${ringCircumference} ${ringCircumference}`}
+                        strokeDashoffset={ringOffset}
+                        rotation="-90"
+                        originX={ringSize / 2}
+                        originY={ringSize / 2}
+                      />
+                    </Svg>
+                    <Text style={[styles.headerRestCircleLabel, { color: workoutPalette.text }]}>Rest</Text>
+                    <Text style={[styles.headerRestCircleValue, { color: restRemaining <= 10 ? themeColors.warning : workoutPalette.strong }]}>
+                      {formatTime(restRemaining)}
+                    </Text>
+                  </View>
+                  <View style={styles.headerRestCopy}>
+                    {restForExercise ? <Text style={styles.headerRestExercise} numberOfLines={1}>{restForExercise}</Text> : null}
+                    {recommendation ? (
+                      <View style={styles.headerRestRecommendation}>
+                        <Text style={styles.headerRestInfoLabel}>Recommendation</Text>
+                        <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]} numberOfLines={3}>{recommendation}</Text>
+                      </View>
+                    ) : null}
+                    {(() => {
+                      const paired = watchStatus?.paired ?? false;
+                      const reachable = watchStatus?.reachable ?? false;
+                      const watchText = paired
+                        ? reachable
+                          ? 'Watch synced'
+                          : 'Open Watch to mirror rest'
+                        : 'Watch not paired';
+                      const watchColor = paired && reachable ? themeColors.success : themeColors.textMuted;
+                      return (
+                        <View style={styles.headerRestWatchRow}>
+                          <Ionicons name="watch-outline" size={12} color={watchColor} />
+                          <Text style={[styles.headerRestWatchText, { color: watchColor }]} numberOfLines={1}>
+                            {watchText}
+                          </Text>
+                        </View>
+                      );
+                    })()}
+                  </View>
+                </View>
+                <View style={styles.headerRestActions}>
+                  <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(-15)}>
+                    <Text style={styles.headerRestBtnText}>-15</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
+                    <Text style={styles.headerRestBtnText}>+15</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={clearRestState}>
+                    <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-            ) : (
-              <View style={styles.headerMetricTile}>
-                <Text style={styles.headerMetricLabel}>Next</Text>
-                <Text style={styles.headerMetricValue}>{completedCount}/{exercises.length}</Text>
-              </View>
-            )}
-            <View style={styles.headerMetricTile}>
-              <Text style={styles.headerMetricLabel}>Done</Text>
-              <Text style={styles.headerMetricValue}>{setCompletionPct}%</Text>
-            </View>
-          </View>
-          {restRemaining > 0 && (
-            <View style={[styles.headerRestPanel, { borderColor: workoutPalette.strong + '33' }]}>
-              <View style={styles.headerRestCopy}>
-                {restForExercise ? <Text style={styles.headerRestExercise} numberOfLines={1}>{restForExercise}</Text> : null}
-                {restNextTarget ? <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]} numberOfLines={1}>{restNextTarget}</Text> : null}
-                {restCue ? <Text style={styles.headerRestCue} numberOfLines={2}>{restCue}</Text> : null}
-              </View>
-              <View style={styles.headerRestActions}>
-                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(-15)}>
-                  <Text style={styles.headerRestBtnText}>-15</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
-                  <Text style={styles.headerRestBtnText}>+15</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={clearRestState}>
-                  <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.headerRestBtn, styles.headerRestCancelBtn]} onPress={confirmCancelWorkout}>
-                  <Text style={[styles.headerRestBtnText, { color: themeColors.error }]}>Cancel</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
+            );
+          })()}
         </LinearGradient>
       </View>
 
@@ -3810,12 +3893,37 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 const updatedSets = exercises[i].sets.map((s, si) =>
                                   si === setIdx ? { ...s, rir } : s
                                 );
+                                const loggedSet = updatedSets[setIdx];
+                                const suggestion = loggedSet
+                                  ? buildRirNextSetSuggestion(
+                                      exercises[i],
+                                      loggedSet,
+                                      rir,
+                                      updatedSets.length + 1,
+                                    )
+                                  : null;
                                 setExercises(prev => prev.map((e, ei) => {
                                   if (ei !== i) return e;
                                   const sets = e.sets.slice();
                                   if (sets[setIdx]) sets[setIdx] = { ...sets[setIdx], rir };
-                                  return { ...e, sets };
+                                  return { ...e, sets, aiRecommendation: suggestion?.fullText ?? e.aiRecommendation };
                                 }));
+                                if (suggestion) {
+                                  setRestNextTarget(suggestion.nextTarget);
+                                  setRestCue(suggestion.cue);
+                                  import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+                                    pushProgressToWatch({ recommendation: suggestion.watchText })
+                                  ).catch(() => undefined);
+                                  if (liveActivityIdRef.current) {
+                                    updateRestActivity(liveActivityIdRef.current, {
+                                      setNumber: updatedSets.length,
+                                      totalSets: getEffectiveTargetSetCount(i, exercises[i], updatedSets.length),
+                                      nextSetRecommendation: suggestion.watchText,
+                                      exerciseName: exercises[i].name,
+                                      themeColorHex: theme.colors.primary,
+                                    }).catch(() => undefined);
+                                  }
+                                }
                                 setPendingRir(null);
                                 maybeRefreshRecommendationForExercise(i, updatedSets);
                               }}
@@ -4141,8 +4249,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             outputRange: [1, 2],
                           });
                           return (
+                            <Fragment key={slot}>
                             <Animated.View
-                              key={slot}
                               style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone, { backgroundColor: pulseBg }]}>
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
                               {!hideWeight && <AnimatedTextInput
@@ -4255,6 +4363,56 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 </TouchableOpacity>
                               )}
                             </Animated.View>
+                            {isLogged && hideWeight && hideReps && (
+                              <View style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 6,
+                                marginTop: -4,
+                                marginBottom: 8,
+                                paddingLeft: 30,
+                              }}>
+                                <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.textMuted, textTransform: 'uppercase' }}>
+                                  Comfort
+                                </Text>
+                                {[
+                                  { rating: 1, label: 'Tight' },
+                                  { rating: 3, label: 'OK' },
+                                  { rating: 5, label: 'Easy' },
+                                ].map(opt => {
+                                  const activeComfort = logged.comfortRating === opt.rating;
+                                  return (
+                                    <TouchableOpacity
+                                      key={opt.rating}
+                                      onPress={() => {
+                                        setExercises(prev => prev.map((e, ei) => {
+                                          if (ei !== i) return e;
+                                          const sets = e.sets.slice();
+                                          if (sets[slot]) sets[slot] = { ...sets[slot], comfortRating: opt.rating };
+                                          return { ...e, sets };
+                                        }));
+                                      }}
+                                      style={{
+                                        paddingHorizontal: 9,
+                                        paddingVertical: 5,
+                                        borderRadius: 999,
+                                        backgroundColor: activeComfort ? workoutPalette.strong : themeColors.surfaceRaised,
+                                        borderWidth: 1,
+                                        borderColor: activeComfort ? workoutPalette.strong : themeColors.border,
+                                      }}>
+                                      <Text style={{
+                                        fontSize: 10,
+                                        fontWeight: '800',
+                                        color: activeComfort ? '#fff' : themeColors.textSecondary,
+                                      }}>
+                                        {opt.label}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            )}
+                            </Fragment>
                           );
                         })}
                       </>
@@ -5349,11 +5507,11 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   warmupCoachBtnText: { fontSize: 13, fontWeight: '700' },
   container: { flex: 1, backgroundColor: tc.background },
 
-  header: { paddingHorizontal: 16, paddingTop: 48, paddingBottom: 8 },
+  header: { paddingHorizontal: 16, paddingTop: 48, paddingBottom: 6 },
   headerCard: {
     borderRadius: radius.lg,
     paddingHorizontal: 12,
-    paddingVertical: 9,
+    paddingVertical: 8,
     borderWidth: 1,
     borderColor: tc.border,
     shadowColor: tc.primary,
@@ -5362,58 +5520,67 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     shadowOffset: { width: 0, height: 6 },
     elevation: 3,
   },
-  headerFocusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerControlRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  headerWorkoutTimer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    flexShrink: 0,
+  },
+  headerWorkoutTimerText: { fontSize: 12, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
   headerTitleBlock: { flex: 1, minWidth: 0 },
-  focusLabel:   { fontSize: 14, fontWeight: '800', color: tc.textPrimary, marginBottom: 1 },
-  headerMetaText: { fontSize: 11, color: tc.textMuted, fontWeight: '700' },
+  focusLabel:   { fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 0 },
+  headerMetaText: { fontSize: 10, color: tc.textMuted, fontWeight: '700' },
   headerActionRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
   cancelBtn:    { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.border },
   cancelBtnText:{ fontSize: 11, color: tc.textSecondary, fontWeight: '800' },
   coachBtn: { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.primary },
   coachBtnText: { fontSize: 11, color: tc.primary, fontWeight: '800' },
-  headerMetricRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 8,
-  },
-  headerMetricTile: {
-    flex: 1,
-    minHeight: 48,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: radius.md,
-    backgroundColor: tc.background + '80',
-    borderWidth: 1,
-    borderColor: tc.border,
-    justifyContent: 'center',
-  },
-  headerRestTile: { borderWidth: 1.5 },
-  headerMetricLabel: { fontSize: 9, color: tc.textMuted, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 2 },
-  headerMetricValue: { fontSize: 18, color: tc.textPrimary, fontWeight: '900', fontVariant: ['tabular-nums'] as any, lineHeight: 21 },
   headerRestPanel: {
     marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
+    padding: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
   },
-  headerRestCopy: { minWidth: 0, marginBottom: 7 },
-  headerRestExercise: { fontSize: 10, color: tc.textMuted, fontWeight: '800' },
-  headerRestTarget: { fontSize: 12, fontWeight: '900', marginTop: 1 },
-  headerRestCue: { fontSize: 10, color: tc.textSecondary, lineHeight: 14, marginTop: 2 },
-  headerRestActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
-  headerRestBtn: {
-    minWidth: 38,
+  headerRestMainRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  headerRestCircle: {
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  headerRestCircleLabel: { fontSize: 8, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.5, opacity: 0.75 },
+  headerRestCircleValue: { fontSize: 19, fontWeight: '900', fontVariant: ['tabular-nums'] as any, lineHeight: 22 },
+  headerRestCopy: { flex: 1, minWidth: 0, gap: 5 },
+  headerRestExercise: { fontSize: 10, color: tc.textMuted, fontWeight: '900' },
+  headerRestRecommendation: {
+    paddingHorizontal: 10,
     paddingVertical: 7,
-    paddingHorizontal: 8,
+    borderRadius: radius.sm,
+    backgroundColor: tc.background + '80',
+    borderWidth: 1,
+    borderColor: tc.border + '66',
+  },
+  headerRestInfoLabel: { fontSize: 8, color: tc.textMuted, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 1 },
+  headerRestTarget: { fontSize: 12, fontWeight: '900', lineHeight: 16 },
+  headerRestWatchRow: { flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full, backgroundColor: tc.background + '66' },
+  headerRestWatchText: { fontSize: 10, fontWeight: '800' },
+  headerRestActions: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 7, paddingLeft: 94 },
+  headerRestBtn: {
+    minWidth: 44,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: tc.border,
     backgroundColor: tc.surface,
     alignItems: 'center',
-  },
-  headerRestCancelBtn: {
-    backgroundColor: tc.error + '10',
-    borderColor: tc.error + '30',
   },
   headerRestBtnText: { fontSize: 10, color: tc.textPrimary, fontWeight: '900' },
 

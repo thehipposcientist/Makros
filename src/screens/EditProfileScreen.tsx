@@ -37,6 +37,7 @@ import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
+import { tierOf } from '../utils/subscription';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -385,10 +386,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     profile.goalDetails.targetEvent ?? ''
   );
   const [themePreference, setThemePreference] = useState<AppThemeName>(resolveThemeName(profile.themePreference));
-  // Dev toggle for the free/pro tier. Default to whatever the profile has;
-  // undefined → pro so existing users keep the full feature set.
+  // Dev toggle for the free/pro tier. Missing tier defaults to free so
+  // local UI cannot silently unlock Pro when the server has no billing state.
   const [subscriptionTier, setSubscriptionTier] = useState<'free' | 'pro'>(
-    profile.subscriptionTier ?? 'pro',
+    tierOf(profile),
   );
 
   // Physical stats

@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
+import { tierOf } from '../src/utils/subscription';
 
 /** Keep the device awake while plan generation is in flight. iOS suspends
  *  JS execution ~30s after the app backgrounds or the screen locks, which
@@ -377,6 +378,7 @@ export default function Index() {
 
   const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
   const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
+  const startWorkoutInitialUrlHandledRef = useRef(false);
   const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
     setActiveWorkoutRaw(w);
     if (w) {
@@ -397,6 +399,44 @@ export default function Index() {
   const handleCancelActiveWorkout = useCallback(() => {
     setActiveWorkout(null);
   }, [setActiveWorkout]);
+  const handleStartWorkoutDeepLink = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem('aiWorkoutPlan');
+      const plan = raw ? JSON.parse(raw) : null;
+      const today = plan?.days?.[0] as WorkoutDay | undefined;
+      if (today) {
+        setActiveWorkout(today);
+      } else {
+        Alert.alert('Workout not ready', 'Open the Workout tab once so Thallo can load today’s plan.');
+      }
+    } catch {
+      Alert.alert('Workout not ready', 'Could not load today’s workout from the shortcut.');
+    }
+  }, [setActiveWorkout]);
+
+  useEffect(() => {
+    if (!authToken || !userProfile) return;
+    let consumedInitial = false;
+    const maybeHandleUrl = (url: string | null | undefined) => {
+      if (!url) return;
+      if (url.includes('start-workout')) {
+        handleStartWorkoutDeepLink().catch(() => {});
+      }
+    };
+    Linking.getInitialURL()
+      .then(url => {
+        if (consumedInitial || startWorkoutInitialUrlHandledRef.current) return;
+        consumedInitial = true;
+        startWorkoutInitialUrlHandledRef.current = true;
+        maybeHandleUrl(url);
+      })
+      .catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => maybeHandleUrl(url));
+    return () => {
+      consumedInitial = true;
+      sub.remove();
+    };
+  }, [authToken, userProfile, handleStartWorkoutDeepLink]);
   const [trainerNote, setTrainerNote]     = useState<string | null>(null);
   const [nutritionistNote, setNutritionistNote] = useState<string | null>(null);
   const [supplementStack, setSupplementStack] = useState<SupplementItem[]>([]);
@@ -1543,7 +1583,7 @@ export default function Index() {
       {userProfile && (
         <TutorialOverlay
           visible={showTutorial}
-          tier={userProfile.subscriptionTier === 'free' ? 'free' : 'pro'}
+          tier={tierOf(userProfile)}
           themeName={userProfile.themePreference}
           onUpgrade={handleUpgradeToPro ? () => handleUpgradeToPro(userProfile) : undefined}
           onClose={async ({ completed }) => {
@@ -2218,13 +2258,13 @@ function AccountInfoModal({
             </View>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               {(['free', 'pro'] as const).map(t => {
-                const active = (profile.subscriptionTier ?? 'pro') === t;
+                const active = tierOf(profile) === t;
                 return (
                   <TouchableOpacity
                     key={t}
                     activeOpacity={0.8}
                     onPress={async () => {
-                      const wasFree = (profile.subscriptionTier ?? 'pro') === 'free';
+                      const wasFree = tierOf(profile) === 'free';
                       const next: UserProfile = { ...profile, subscriptionTier: t };
                       try {
                         await AsyncStorage.setItem('userProfile', JSON.stringify(next));
@@ -2255,7 +2295,7 @@ function AccountInfoModal({
               })}
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
-              {(profile.subscriptionTier ?? 'pro') === 'free'
+              {tierOf(profile) === 'free'
                 ? 'Free: basic workout + meal logging. Upgrade for guided plans, coaching, insights, and analytics.'
                 : 'Pro: personalized training plans, coaching, nutrition insights, recovery tracking, and full analytics.'}
             </Text>

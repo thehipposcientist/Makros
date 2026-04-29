@@ -3,6 +3,9 @@ import { AppState, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { configureWorkoutNotifications } from '../src/utils/restNotifications';
+import { configureDynamicTypeDefaults } from '../src/utils/dynamicType';
+
+configureDynamicTypeDefaults();
 
 let GestureWrapper: React.ComponentType<{ style?: any; children: React.ReactNode }> = ({ style, children }) => (
   <View style={style}>{children}</View>

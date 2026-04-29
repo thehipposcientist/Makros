@@ -256,6 +256,7 @@ private struct TodayView: View {
     // payload. The meals day carries a `score: Int?` populated by
     // the phone's /meals/score endpoint.
     @EnvironmentObject var conn: ConnectivityStore
+    @State private var syncRequestedAt: Date? = nil
 
     var body: some View {
         ScrollView {
@@ -324,12 +325,13 @@ private struct TodayView: View {
             // land (transient WC drop, phone was backgrounded, etc).
             Button {
                 WKInterfaceDevice.current().play(.click)
+                syncRequestedAt = Date()
                 conn.requestPull()
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 10))
-                    Text("Sync from phone")
+                    Text(syncRequestedAt == nil ? "Sync from phone" : "Request sent")
                         .font(.system(size: 11, weight: .heavy))
                 }
                 .foregroundColor(theme.background)
@@ -340,6 +342,13 @@ private struct TodayView: View {
             }
             .buttonStyle(.plain)
             .padding(.top, 6)
+            if syncRequestedAt != nil {
+                Text("Keep the iPhone app open for a few seconds.")
+                    .font(.system(size: 9))
+                    .foregroundColor(theme.textMuted)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
             // Recent sync diagnostics — surfaces context arrival, decode
             // failures, and silent JSON-serialization failures right on
             // the wrist so the user (and Sawyer) doesn't need Console.app

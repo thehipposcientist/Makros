@@ -14,26 +14,20 @@
 // access to our React Native runtime, and starting a workout requires
 // the full app context anyway.
 //
-// IMPORTANT: This file is here as a reference scaffold. To actually
-// ship it requires:
+// IMPORTANT: This file is drop-in source for an App Intents target. To
+// ship it, make it a member of the Intents extension target generated
+// for the app. The JS deep-link handler for `thallo://start-workout`
+// is wired in app/index.tsx.
+//
+// Native target checklist:
 //   1. Adding an Intents extension target in Xcode (or a separate
 //      `expo-target` of type `app-intent` once @bacons supports it).
 //   2. Marking the file as a member of that target.
 //   3. Declaring the intent in the main app's Info.plist
 //      `NSUserActivityTypes` so the URL scheme handoff works.
 //   4. Adding `thallo://` to `LSApplicationQueriesSchemes` if needed.
-//
-// I'm leaving this commented-out as a stub so the user can wire it
-// up in Xcode without losing the design intent. Apple Intents
-// extensions still need manual native work that @bacons/apple-targets
-// doesn't fully automate.
-//
-// Cross-reference: the matching deep-link handler should live in
-// `app/_layout.tsx` (Expo Router) — listen for the `start-workout`
-// path and call setActiveWorkout(today) the same way the watch's
-// start_workout command does today.
 
-#if false  // toggle to true when the Intents target is wired up
+#if canImport(AppIntents)
 
 import AppIntents
 

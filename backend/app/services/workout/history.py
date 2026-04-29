@@ -487,6 +487,7 @@ def get_recent_completions_for_fatigue(
             "activity_intensity": getattr(row, "activity_intensity", None),
             "cardio_style": getattr(row, "cardio_style", None),
             "resolved_muscle_fatigue": getattr(row, "resolved_muscle_fatigue", None),
+            "soreness_areas": getattr(row, "soreness_areas", None),
         }
         for row in rows
     ]

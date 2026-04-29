@@ -146,6 +146,9 @@ _TEST_MODULES = (
     # Exercise seed/import equipment contracts — planner and swaps both
     # depend on canonical equipment slugs.
     "tests.test_exercise_seed_equipment",
+    # Seed-to-consumer integration — reference rows are idempotently
+    # inserted into a real DB and consumed by meta/hydration services.
+    "tests.test_seed_integration",
     # Session-duration slot injection — bonus isolations at 75/90 min,
     # PLUS_CARDIO/non-lift exclusions, density interaction, integration.
     "tests.test_session_duration_slots",

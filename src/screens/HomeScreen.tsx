@@ -39,7 +39,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -91,6 +91,8 @@ import GearScreen from './GearScreen';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
+import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
+import { tierOf } from '../utils/subscription';
 
 interface HomeScreenProps {
   authToken: string;
@@ -140,6 +142,21 @@ interface MealDay {
   key: string;
   date: Date;
 }
+
+type WeekStripState = 'planned' | 'done' | 'logged' | 'skipped' | 'rest' | 'today';
+
+interface WeekStripItem {
+  key: string;
+  date: Date;
+  title: string;
+  state: WeekStripState;
+}
+
+type HydrationSummary = {
+  date: string;
+  ounces: number;
+  target_ounces: number;
+};
 
 interface TrainerChatMessage {
   role: 'user' | 'assistant';
@@ -1337,7 +1354,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       the client-side pin-patch writes a plan to AsyncStorage that the backend
       DB doesn't have yet — fetching from the backend would overwrite the pin. */
   const skipBackendHydrationOnceRef = useRef(false);
-  const [expandedDay, setExpandedDay]     = useState<number>(-1);
+  const [expandedDay, setExpandedDay]     = useState<number>(-2);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
   // Which plan-day indices are currently regenerating after a Switch-Day tap.
   // Surfaced to the DayCard so it can render a shimmer overlay while the
@@ -1563,10 +1580,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Meal tracking
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
+  const [hydration, setHydration] = useState<HydrationSummary | null>(null);
+  const [hydrationLoading, setHydrationLoading] = useState(false);
   // Recipe modal target. Opened from the meal card's "🍳 Recipe" button.
   const [recipeTarget, setRecipeTarget] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
   const [currentDate, setCurrentDate] = useState(todayKey());
-  const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set());
+  const [selectedWorkoutDayKey, setSelectedWorkoutDayKey] = useState(todayKey());
+  const [selectedMealDayKey, setSelectedMealDayKey] = useState(todayKey());
+  const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(() => new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
   const [shufflingInfo, setShufflingInfo] = useState<{ date: string; mealKey: string } | null>(null);
 
@@ -1629,6 +1650,46 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (!plan) { setNutritionScoreData(null); return; }
     setNutritionScoreData(computeNutritionScore(plan, userProfile?.goal ?? 'body_recomp'));
   }, [nutritionPlansByDate, userProfile?.goal]);
+
+  const refreshHydration = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const result = await getHydration(authToken);
+      setHydration(result);
+    } catch {
+      // Hydration is additive context; keep the last visible value if the
+      // endpoint is temporarily unavailable.
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    if (activeTab === 'meals' && mealsSubTab === 'plan') {
+      refreshHydration().catch(() => {});
+    }
+  }, [activeTab, mealsSubTab, refreshHydration]);
+
+  const handleHydrationDelta = useCallback(async (deltaOz: number) => {
+    if (!authToken) return;
+    const current = hydration?.ounces ?? 0;
+    const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
+    setHydrationLoading(true);
+    setHydration(prev => prev
+      ? { ...prev, ounces: next }
+      : { date: todayKey(), ounces: next, target_ounces: 64 });
+    try {
+      const result = await logHydration(authToken, next);
+      setHydration(prev => ({
+        date: result.date,
+        ounces: result.ounces,
+        target_ounces: prev?.target_ounces ?? hydration?.target_ounces ?? 64,
+      }));
+    } catch {
+      setHydration(prev => prev ? { ...prev, ounces: current } : prev);
+      Alert.alert('Hydration not saved', 'Could not update water intake right now.');
+    } finally {
+      setHydrationLoading(false);
+    }
+  }, [authToken, hydration?.ounces, hydration?.target_ounces]);
 
   // Authoritative daily amounts from the server — collagen + probiotic
   // CFUs. Fetched alongside the score so NutritionCard can show real
@@ -1847,7 +1908,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // user's daily meal target (`mealsPerDay`) against the number of
     // meals they actually checked off yesterday. If they're below target,
     // nudge them to add more via the simpler "catch-up" prompt.
-    const isFree = (userProfile.subscriptionTier ?? 'pro') === 'free';
+    const isFree = tierOf(userProfile) === 'free';
     if (isFree) {
       const target = Math.max(1, userProfile.mealsPerDay ?? 3);
       const loggedCount = Object.values(checks).filter(Boolean).length;
@@ -3882,6 +3943,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }))
           : [],
         mealRoutine: userProfile.mealRoutine,
+        readiness: readinessScore ? {
+          score: readinessScore.score,
+          label: readinessScore.label,
+          topFatigued: readinessScore.topFatigued ?? [],
+          nutritionContext: readinessScore.nutritionContext ?? null,
+        } : null,
+        nutritionScore: nutritionScoreData ? {
+          score: nutritionScoreData.score,
+          confidence: nutritionScoreData.confidence,
+          improvements: nutritionScoreData.improvements?.slice(0, 3) ?? [],
+          wins: nutritionScoreData.wins?.slice(0, 3) ?? [],
+        } : null,
+        loggedToday: {
+          checkedMeals: Object.values(checkedMealsByDate[todayKey()] ?? {}).filter(Boolean).length,
+          plannedMeals: todayPlan?.meals?.length ?? 0,
+          hydrationOz: hydration?.ounces ?? null,
+          hydrationTargetOz: hydration?.target_ounces ?? null,
+        },
       };
 
       const slimProfile = {
@@ -4103,7 +4182,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setTrainerLoading(false);
     }
-  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, todayDone, skippedDates, workoutChat, workoutChat, coachMode, chatTopic, persistDayState]);
+  }, [trainerInput, attachedImage, authToken, userProfile, workoutPlan, nutritionPlansByDate, checkedMealsByDate, hydration, readinessScore, nutritionScoreData, todayDone, skippedDates, workoutChat, workoutChat, coachMode, chatTopic, persistDayState]);
 
   // ── Approval flow for plan changes ───────────────────────────────────────
   const applyPendingUpdate = useCallback(async () => {
@@ -5022,7 +5101,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // preserved/completed workouts are left untouched so the user's history
   // remains intact. When they upgrade to pro, the parent triggers a regen
   // that repopulates these days.
-  const isFreeTier = (userProfile.subscriptionTier ?? 'pro') === 'free';
+  const isFreeTier = tierOf(userProfile) === 'free';
 
   // (adaptiveMacroWeightEntries is declared above the early-return
   // because hooks must fire in the same order every render.)
@@ -5048,11 +5127,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const isLightTheme = isLightThemeName(userProfile.themePreference);
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
-  // Dark themes keep the atmospheric wash; light themes stay clean so
-  // they don't get a muddy/dark gradient creeping in behind the UI.
-  const gradientColors: [string, string, string] = isLightTheme
-    ? [themeColors.background, themeColors.background, themeColors.background]
-    : [themeColors.primary + '16', themeColors.surfaceRaised, themeColors.background];
   const headerGradientColors: [string, string] = isLightTheme
     ? [themeColors.surface, themeColors.surface]
     : [themeColors.primary + '18', themeColors.surfaceRaised];
@@ -5061,7 +5135,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : [themeColors.surfaceRaised + 'F4', themeColors.surface + 'EA'];
 
   return (
-    <LinearGradient colors={gradientColors} style={styles.container} locations={[0, 0.4, 1]}>
+    <View style={[styles.container, { backgroundColor: themeColors.background }]}>
       <StatusBar style={statusBarStyle} />
 
       {/* Header — very subtle top-to-bottom primary wash */}
@@ -5069,7 +5143,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         colors={headerGradientColors}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
-        style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: themeColors.border }]}>
+        style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: 'transparent' }]}>
         <Image
           source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
           style={{ height: 50, width: 160 }}
@@ -5198,30 +5272,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           is rendered underneath. Uses safe-area insets so it sits cleanly
           below the gradient header on any device. */}
       {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.background, borderColor: themeColors.border }]}>
+        <LinearGradient
+          colors={[headerGradientColors[1], themeColors.background]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
+          style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface + 'E8', borderColor: themeColors.border + '99' }]}>
             <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
             <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
             <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
           </View>
-        </View>
+        </LinearGradient>
       )}
 
       {/* Fixed meals sub-tab bar — same pattern. */}
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
-        <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.background, borderColor: themeColors.border }]}>
+        <LinearGradient
+          colors={[headerGradientColors[1], themeColors.background]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
+          style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface + 'E8', borderColor: themeColors.border + '99' }]}>
             <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
             <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            {/* "Supplements" is full-width; "Supps" read as cheap/
-                truncated. If this overflows on very small screens we
-                can fall back to "Stack" — checked iPhone SE and it
-                fits at 4 equal-width segments. */}
-            <SubTabBtn label="Supplements" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn label="Supps" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
             <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
           </View>
-        </View>
+        </LinearGradient>
       )}
 
       {/* Tab content. Each tab gets its own loading placeholder so
@@ -5410,11 +5488,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
 
                   {history.length === 0 ? (
-                    <View style={{ padding: 24, alignItems: 'center', backgroundColor: themeColors.surface, borderRadius: 12, borderWidth: 1, borderColor: themeColors.border }}>
-                      <Ionicons name="barbell-outline" size={36} color={themeColors.textMuted} />
-                      <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary, marginTop: 8 }}>No workouts yet</Text>
-                      <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 4, textAlign: 'center' }}>
-                        Finish a workout and it'll show up here.
+                    <View style={[styles.emptyStateCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                      <Ionicons name="barbell-outline" size={36} color={workoutPalette.strong} />
+                      <Text {...dynamicTextProps} style={[styles.emptyStateTitle, { color: themeColors.textPrimary }]}>No workouts yet</Text>
+                      <Text {...dynamicTextProps} style={[styles.emptyStateBody, { color: themeColors.textSecondary }]}>
+                        Start from Workouts → Plan or log a custom session. Finished sessions, skips, and streaks will collect here automatically.
                       </Text>
                     </View>
                   ) : (
@@ -5908,16 +5986,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return completedDates.has(dk) || skippedDates.has(dk);
               };
 
-              const _sortedSchedule = scheduleForRender
+              const _weekSchedule = scheduleForRender
                 .map((s, origIdx) => ({ s, origIdx }))
-                .sort((a, b) => {
-                  const aToday = dateKey(a.s.date) === todayKey();
-                  const bToday = dateKey(b.s.date) === todayKey();
-                  if (aToday !== bToday) return aToday ? -1 : 1;
-                  return a.s.date.getTime() - b.s.date.getTime();
-                });
-              const _todayAtTop = _sortedSchedule.length > 0 && dateKey(_sortedSchedule[0].s.date) === todayKey();
-              return _sortedSchedule.map(({ s: item, origIdx: i }, renderIdx) => {
+                .sort((a, b) => a.s.date.getTime() - b.s.date.getTime());
+              const _todayWeekEntry = _weekSchedule.find(entry => dateKey(entry.s.date) === todayKey());
+              const _selectedWorkoutKey = _weekSchedule.some(entry => dateKey(entry.s.date) === selectedWorkoutDayKey)
+                ? selectedWorkoutDayKey
+                : (_todayWeekEntry ? dateKey(_todayWeekEntry.s.date) : (_weekSchedule[0] ? dateKey(_weekSchedule[0].s.date) : todayKey()));
+              const _selectedEntry = _weekSchedule.find(entry => dateKey(entry.s.date) === _selectedWorkoutKey);
+              if (!_selectedEntry) return null;
+              const item = _selectedEntry.s;
+              const i = _selectedEntry.origIdx;
+              const renderIdx = 0;
               const key = dateKey(item.date);
               // Date-based today check — the schedule now includes
               // yesterday/past days (when they're inside the active
@@ -5928,7 +6008,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // finished session shows as completed when it falls in
               // the active week.
               const isCompleted = completedDates.has(key) || (isToday && todayDone);
-              const isSkipped   = skippedDates.has(key);
+              const isPastUnlogged = item.date < new Date(new Date().setHours(0, 0, 0, 0)) && !item.isRest && !isCompleted;
+              const isSkipped   = skippedDates.has(key) || isPastUnlogged;
+              const isWorkoutCardExpanded = expandedDay === i;
 
               // Compute per-option warnings (don't filter — let user pick
               // anything, but flag conflicts and low readiness so they
@@ -6046,75 +6128,41 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return conflictPenalty + readinessPenalty + recentPenalty + easyTie;
               };
               const sortedOptions = [...allOptions].sort((a, b) => optionRank(a) - optionRank(b));
+              const workoutWeekItems: WeekStripItem[] = _weekSchedule.map(({ s }) => {
+                const dayKey = dateKey(s.date);
+                const done = completedDates.has(dayKey) || (dayKey === todayKey() && todayDone);
+                const isPast = s.date < new Date(new Date().setHours(0, 0, 0, 0));
+                const skipped = skippedDates.has(dayKey) || (isPast && !s.isRest && !done);
+                return {
+                  key: dayKey,
+                  date: s.date,
+                  title: s.isRest ? 'Rest day' : (s.workout?.focus ?? 'Workout'),
+                  state: done ? 'done' : skipped ? 'skipped' : s.isRest ? 'rest' : dayKey === todayKey() ? 'today' : 'planned',
+                };
+              });
 
               return (
-                <React.Fragment key={i}>
-                  {renderIdx === 1 && _todayAtTop && (
-                    <>
-                      <View style={{ gap: 6, marginBottom: 8, marginTop: 4 }}>
-                        {trainerNote ? (
-                          <TouchableOpacity
-                            style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
-                            onPress={() => setShowTrainerNote(true)}
-                            activeOpacity={0.7}>
-                            <Ionicons name="information-circle-outline" size={14} color={workoutPalette.strong} />
-                            <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
-                              Why this plan
-                            </Text>
-                          </TouchableOpacity>
-                        ) : null}
-                        <View style={{ flexDirection: 'row', gap: 6 }}>
-                          <TouchableOpacity
-                            style={{
-                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                              borderColor: themeColors.primary + '55',
-                              backgroundColor: themeColors.primary + '0E',
-                            }}
-                            onPress={() => setShowLiveTracker(true)}
-                            activeOpacity={0.7}>
-                            <Ionicons name="flash" size={14} color={themeColors.primary} />
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={{
-                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                              borderColor: themeColors.primary + '33',
-                            }}
-                            onPress={() => setShowLogActivity(true)}
-                            activeOpacity={0.7}>
-                            <Ionicons name="add-circle" size={14} color={themeColors.primary} />
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={{
-                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                              borderColor: themeColors.border,
-                            }}
-                            onPress={() => setWorkoutSubTab('equipment')}
-                            activeOpacity={0.7}>
-                            <Ionicons name="settings-sharp" size={14} color={themeColors.textMuted} />
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 10 }}>
-                        <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' }}>This Week</Text>
-                        <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
-                      </View>
-                    </>
-                  )}
-                <FadeInView key={i} delay={renderIdx * 80}>
+                <React.Fragment>
+                  <WeekStrip
+                    items={workoutWeekItems}
+                    selectedKey={_selectedWorkoutKey}
+                    accent={workoutPalette.strong}
+                    colors={themeColors}
+                    label="Workout week"
+                    onSelect={(dayKey) => {
+                      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                      setSelectedWorkoutDayKey(dayKey);
+                      setSwitchDayIdx(-1);
+                    }}
+                  />
+                <FadeInView key={key} delay={renderIdx * 80}>
                 <DayCard
                   item={item}
                   themeName={userProfile.themePreference}
                   isToday={isToday}
                   isCompleted={isCompleted}
                   isSkipped={isSkipped}
-                  skipReason={skipReasonsByDate[key]}
+                  skipReason={skipReasonsByDate[key] ?? (isPastUnlogged ? 'No workout logged' : undefined)}
                   // Per-date summary lookup. Past completed days in the
                   // PlanWeek (e.g. Mon when today is Wed) need their own
                   // stored summary, not today's. Falls back to the live
@@ -6126,11 +6174,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       ? (workoutHistorySummaries.find((s: any) => typeof s?.date === 'string' && s.date.startsWith(key)) ?? (isToday ? todaySummary : null))
                       : null
                   }
-                  expanded={expandedDay === i}
+                  expanded={isWorkoutCardExpanded}
                   onPress={() => {
                     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
-                    const collapsing = expandedDay === i;
-                    setExpandedDay(collapsing ? -1 : i);
+                    const collapsing = isWorkoutCardExpanded;
+                    setExpandedDay(collapsing ? -2 : i);
                     // Collapse the Switch Day picker when the parent
                     // card collapses — otherwise re-expanding the card
                     // shows the picker already open, which reads as a
@@ -6307,9 +6355,46 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onReadinessTap={isToday ? () => setShowReadiness(true) : undefined}
                 />
                 </FadeInView>
+                <View style={{ gap: 6, marginBottom: 12, marginTop: -4 }}>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                        borderColor: themeColors.primary + '55',
+                        backgroundColor: themeColors.primary + '0E',
+                      }}
+                      onPress={() => setShowLiveTracker(true)}
+                      activeOpacity={0.7}>
+                      <Ionicons name="flash" size={14} color={themeColors.primary} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                        borderColor: themeColors.primary + '33',
+                      }}
+                      onPress={() => setShowLogActivity(true)}
+                      activeOpacity={0.7}>
+                      <Ionicons name="add-circle" size={14} color={themeColors.primary} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                        borderColor: themeColors.border,
+                      }}
+                      onPress={() => setWorkoutSubTab('equipment')}
+                      activeOpacity={0.7}>
+                      <Ionicons name="settings-sharp" size={14} color={themeColors.textMuted} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
                 </React.Fragment>
               );
-            });
             })()}
 
             {/* Readiness detail modal — centered fade-in popup, single card */}
@@ -6387,6 +6472,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={{ color: themeColors.textMuted, fontSize: 11, marginTop: 12, textAlign: 'center', paddingHorizontal: 30 }}>
                 Safe to switch apps or lock your screen. Tap the Workout tab to keep using the app.
               </Text>
+              <View style={[styles.planProtectionNotice, { borderColor: mealPalette.strong + '44', backgroundColor: mealPalette.soft }]}>
+                <Ionicons name="shield-checkmark-outline" size={16} color={mealPalette.strong} />
+                <View style={{ flex: 1 }}>
+                  <Text {...dynamicCompactTextProps} style={[styles.planProtectionTitle, { color: themeColors.textPrimary }]}>
+                    Routine and protected meals stay visible
+                  </Text>
+                  <Text {...dynamicTextProps} style={[styles.planProtectionBody, { color: themeColors.textSecondary }]}>
+                    Pinned routines, edited meals, and logged meals are reapplied after regeneration so the new plan does not erase your choices.
+                  </Text>
+                </View>
+              </View>
               {onCancelPlanGen && (
                 <TouchableOpacity
                   style={{ marginTop: 16, paddingVertical: 8, paddingHorizontal: 20, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border }}
@@ -6515,11 +6611,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 .slice(0, 14);
               if (sorted.length === 0) {
                 return (
-                  <View style={{ padding: 24, alignItems: 'center' }}>
-                    <Ionicons name="time-outline" size={36} color={themeColors.textMuted} />
-                    <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary, marginTop: 8 }}>No meal history yet</Text>
-                    <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 4, textAlign: 'center' }}>
-                      Your past days will show up here once you've logged meals.
+                  <View style={[styles.emptyStateCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                    <Ionicons name="restaurant-outline" size={36} color={mealPalette.strong} />
+                    <Text {...dynamicTextProps} style={[styles.emptyStateTitle, { color: themeColors.textPrimary }]}>No meal history yet</Text>
+                    <Text {...dynamicTextProps} style={[styles.emptyStateBody, { color: themeColors.textSecondary }]}>
+                      Check off meals on the Plan tab or log from Favorites. Past days will collect here with calories, macros, and score trends.
                     </Text>
                   </View>
                 );
@@ -6757,118 +6853,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {/* Free tier — replace the AI-generated meal list with a compact
-                manual-logging prompt. Logged meals still surface via the
-                existing meal-history + checked-meal paths; they just don't
-                come from an AI-built plan. */}
-            {/* Free tier banner — one-line reminder that AI plans are Pro.
-                Day cards below render empty meal frames the user fills
-                manually (routines auto-fill; everything else stays blank
-                until they add). */}
-            {mealsSubTab === 'plan' && isFreeTier && (
-              <FadeInView delay={0}>
-                <View style={{
-                  flexDirection: 'row', alignItems: 'center', gap: 10,
-                  backgroundColor: themeColors.surface,
-                  borderRadius: 12, padding: 12, marginBottom: 10,
-                  borderWidth: 1, borderColor: themeColors.border,
-                }}>
-                  <Ionicons name="restaurant-outline" size={18} color={themeColors.primary} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
-                      Manual meal logging
-                    </Text>
-                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
-                      Add meals yourself — or pin routines to auto-fill. Upgrade to Pro for AI plans.
-                    </Text>
-                  </View>
-                </View>
-              </FadeInView>
-            )}
-
-            {/* Incomplete-yesterday nudge — soft, dismissable, persists
-                dismissal per date so it doesn't re-prompt. Only shows when
-                yesterday has <50% of target calories logged. */}
-            {mealsSubTab === 'plan' && !isFreeTier && authToken && (() => {
-              const todayPlanForTarget = nutritionPlansByDate[mealDays[0]?.key];
-              const target = todayPlanForTarget?.targets?.calories ?? 0;
-              if (target <= 0) return null;
-              return (
-                <IncompleteDayBanner
-                  authToken={authToken}
-                  themeName={userProfile.themePreference}
-                  targetCalories={target}
-                  // Land on the History sub-tab (which lets the user
-                  // add meals to past days) — NOT Foods (the search /
-                  // library) which is what the user complained looked
-                  // like "settings." Foods is the wrong destination
-                  // for "fill in yesterday's missed meals."
-                  onFillIn={() => setMealsSubTab('history')}
-                />
-              );
-            })()}
-            {/* Fueling & Recovery Signals — hidden when all green. Mounted
-                above the day cards so amber/red flags catch attention before
-                the user scrolls into individual meals. */}
-            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
-              <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
-            )}
-            {/* Weekly adaptive-TDEE check-in — surfaces when enough
-                nutrition + weight data exists to recompute maintenance
-                and suggest a target adjustment. Deterministic. */}
-            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
-              <AdaptiveMacroCard
-                authToken={authToken}
-                themeName={userProfile.themePreference}
-                weightEntries={adaptiveMacroWeightEntries}
-                onAccept={(newTarget) => {
-                  // Persist via onProfileUpdate — the profile store
-                  // holds customMacros which the plan generator reads
-                  // on next regen. Keeps the mutation lightweight; a
-                  // full plan regen happens on next natural trigger.
-                  onProfileUpdate?.({
-                    customMacros: {
-                      ...(userProfile.customMacros ?? {}),
-                      calories: newTarget,
-                    },
-                  } as any, true);
-                  Alert.alert(
-                    'Target updated',
-                    `Your new calorie target is ${newTarget} kcal/day. The plan will pick this up on your next regeneration.`,
-                  );
-                }}
-              />
-            )}
-            {/* Favorites — one-tap repeat from saved meals. Lives at the
-                top of the Plan tab so the highest-frequency action (log a
-                meal you've already saved) is one tap, not three. The
-                SavedMealsSection renders empty-state guidance when the
-                user hasn't saved anything yet, which doubles as a feature
-                discovery hint. Hidden on free tier since saving meals is
-                a Pro feature. */}
-            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
-              <SavedMealsSection
-                authToken={authToken}
-                themeName={userProfile.themePreference}
-                onLogged={() => {
-                  loadDayStatus();
-                  if (userProfile) loadPlans(userProfile);
-                  reloadSavedMeals();
-                }}
-                onEditTemplate={(sm) => {
-                  setEditingSavedMeal({
-                    id: sm.id,
-                    name: sm.name,
-                    items: sm.items || [],
-                  });
-                }}
-              />
-            )}
             {mealsSubTab === 'plan' && (() => {
-              const _todayMealDay = mealDays.find(d => d.key === todayKey());
-              const _restMealDays = mealDays.filter(d => d.key !== todayKey());
-              const _orderedMealDays = _todayMealDay ? [_todayMealDay, ..._restMealDays] : mealDays;
-              return _orderedMealDays.map((d, idx) => {
+              const _weekMealDays = [...mealDays].sort((a, b) => a.date.getTime() - b.date.getTime());
+              const _todayMealDay = _weekMealDays.find(d => d.key === todayKey());
+              const _selectedMealKey = _weekMealDays.some(d => d.key === selectedMealDayKey)
+                ? selectedMealDayKey
+                : (_todayMealDay?.key ?? _weekMealDays[0]?.key ?? todayKey());
+              const _selectedMealDay = _weekMealDays.find(d => d.key === _selectedMealKey);
+              const _orderedMealDays = _selectedMealDay ? [_selectedMealDay] : [];
+              const mealWeekItems: WeekStripItem[] = _weekMealDays.map(day => {
+                const checks = checkedMealsByDate[day.key] ?? {};
+                const checkedCount = Object.values(checks).filter(Boolean).length;
+                const isPast = day.date < new Date(new Date().setHours(0, 0, 0, 0));
+                return {
+                  key: day.key,
+                  date: day.date,
+                  title: day.key === todayKey() ? 'Today’s meals' : `${DAY_NAMES[day.date.getDay()]} meals`,
+                  state: checkedCount > 0 ? 'logged' : isPast ? 'skipped' : day.key === todayKey() ? 'today' : 'planned',
+                };
+              });
+              return (
+                <React.Fragment>
+                  <WeekStrip
+                    items={mealWeekItems}
+                    selectedKey={_selectedMealKey}
+                    accent={MEALS_ACCENT}
+                    colors={themeColors}
+                    label="Meal week"
+                    onSelect={(dayKey) => {
+                      import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                      setSelectedMealDayKey(dayKey);
+                    }}
+                  />
+                  {_orderedMealDays.map((d, idx) => {
               // Prefer the locally-loaded plan (which has rich client-side
               // overlays — preserved meals, gut data, etc.). Fall back to
               // the PlanDay's persisted nutrition_json when the rolling
@@ -6906,6 +6923,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const dayChecks = checkedMealsByDate[d.key] ?? {};
               const checkedCount = Object.values(dayChecks).filter(Boolean).length;
               const isPastLogged = isPast && checkedCount > 0;
+              const isPastSkipped = isPast && checkedCount === 0;
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
               const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
@@ -6923,19 +6941,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 ? MEALS_ACCENT
                 : isPastLogged
                   ? MEALS_ACCENT + '55'
+                  : isPastSkipped
+                    ? themeColors.warning + '66'
                   : themeColors.border;
               const cardBorderWidth = isToday ? 2 : 1;
               const cardBorderStyle: 'solid' | 'dashed' = isPast && !isToday ? 'dashed' : 'solid';
               const cardOpacity = isPast && !isToday ? 0.78 : 1;
+              const hydrationOunces = Math.round(hydration?.ounces ?? 0);
+              const hydrationTarget = Math.max(1, Math.round(hydration?.target_ounces ?? 64));
+              const hydrationPct = Math.min(100, Math.round((hydrationOunces / hydrationTarget) * 100));
               return (
                 <React.Fragment key={d.key}>
-                  {idx === 1 && _todayMealDay && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 10 }}>
-                      <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
-                      <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' }}>This Week</Text>
-                      <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
-                    </View>
-                  )}
                 <FadeInView delay={idx * 70}>
                 <View style={[
                   styles.mealAccordionCard,
@@ -7000,6 +7016,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </Text>
                           </View>
                         )}
+                        {isPastSkipped && (
+                          <View style={{
+                            backgroundColor: themeColors.warning + '22',
+                            borderRadius: 4,
+                            paddingHorizontal: 5,
+                            paddingVertical: 1,
+                          }}>
+                            <Text style={{ fontSize: 9, fontWeight: '800', color: themeColors.warning, letterSpacing: 0.4 }}>
+                              SKIPPED
+                            </Text>
+                          </View>
+                        )}
                         {!isPast && !isToday && (
                           <View style={{ backgroundColor: themeColors.border, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
                             <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.4 }}>PLANNED</Text>
@@ -7045,6 +7073,62 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
 
+                  {isToday && authToken && (
+                    <View style={[
+                      styles.mealHydrationPanel,
+                      {
+                        backgroundColor: MEALS_ACCENT + '0F',
+                        borderColor: MEALS_ACCENT + '33',
+                      },
+                    ]}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <View style={{
+                          width: 32, height: 32, borderRadius: 16,
+                          backgroundColor: MEALS_ACCENT + '18',
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Ionicons name="water-outline" size={18} color={MEALS_ACCENT} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 12, fontWeight: '900', color: themeColors.textPrimary }}>Hydration</Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1 }}>
+                            {hydrationOunces} / {hydrationTarget} oz · {hydrationPct}% complete
+                          </Text>
+                        </View>
+                        {hydrationLoading && <ActivityIndicator size="small" color={MEALS_ACCENT} />}
+                      </View>
+                      <View style={{
+                        height: 6,
+                        borderRadius: 999,
+                        backgroundColor: themeColors.surface,
+                        overflow: 'hidden',
+                        marginTop: 10,
+                      }}>
+                        <View style={{ width: `${hydrationPct}%`, height: '100%', backgroundColor: MEALS_ACCENT }} />
+                      </View>
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                        {[8, 16, 24].map(oz => (
+                          <TouchableOpacity
+                            key={oz}
+                            onPress={() => handleHydrationDelta(oz)}
+                            disabled={hydrationLoading}
+                            activeOpacity={0.82}
+                            style={{
+                              flex: 1,
+                              paddingVertical: 8,
+                              borderRadius: 10,
+                              backgroundColor: themeColors.surface,
+                              borderWidth: 1,
+                              borderColor: MEALS_ACCENT + '3D',
+                              alignItems: 'center',
+                            }}>
+                            <Text style={{ fontSize: 12, fontWeight: '900', color: MEALS_ACCENT }}>+{oz} oz</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
                   <AnimatedCollapsible visible={isExpanded}>
                     <NutritionCard
                       themeName={userProfile.themePreference}
@@ -7083,9 +7167,85 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </AnimatedCollapsible>
                 </View>
                 </FadeInView>
+                {isToday && _todayMealDay && (
+                  <View style={{ marginTop: -4 }}>
+                    {isFreeTier ? (
+                      <FadeInView delay={20}>
+                        <View style={{
+                          flexDirection: 'row', alignItems: 'center', gap: 10,
+                          backgroundColor: themeColors.surface,
+                          borderRadius: 12, padding: 12, marginBottom: 10,
+                          borderWidth: 1, borderColor: themeColors.border,
+                        }}>
+                          <Ionicons name="restaurant-outline" size={18} color={themeColors.primary} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                              Manual meal logging
+                            </Text>
+                            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                              Add meals yourself — or pin routines to auto-fill. Upgrade to Pro for AI plans.
+                            </Text>
+                          </View>
+                        </View>
+                      </FadeInView>
+                    ) : authToken ? (
+                      <>
+                        <SavedMealsSection
+                          authToken={authToken}
+                          themeName={userProfile.themePreference}
+                          onLogged={() => {
+                            loadDayStatus();
+                            if (userProfile) loadPlans(userProfile);
+                            reloadSavedMeals();
+                          }}
+                          onEditTemplate={(sm) => {
+                            setEditingSavedMeal({
+                              id: sm.id,
+                              name: sm.name,
+                              items: sm.items || [],
+                            });
+                          }}
+                        />
+                        {(() => {
+                          const todayPlanForTarget = nutritionPlansByDate[_todayMealDay.key] ?? nutritionPlansByDate[mealDays[0]?.key];
+                          const target = todayPlanForTarget?.targets?.calories ?? 0;
+                          if (target <= 0) return null;
+                          return (
+                            <IncompleteDayBanner
+                              authToken={authToken}
+                              themeName={userProfile.themePreference}
+                              targetCalories={target}
+                              onFillIn={() => setMealsSubTab('history')}
+                            />
+                          );
+                        })()}
+                        <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
+                        <AdaptiveMacroCard
+                          authToken={authToken}
+                          themeName={userProfile.themePreference}
+                          weightEntries={adaptiveMacroWeightEntries}
+                          onAccept={(newTarget) => {
+                            onProfileUpdate?.({
+                              customMacros: {
+                                ...(userProfile.customMacros ?? {}),
+                                calories: newTarget,
+                              },
+                            } as any, true);
+                            Alert.alert(
+                              'Target updated',
+                              `Your new calorie target is ${newTarget} kcal/day. The plan will pick this up on your next regeneration.`,
+                            );
+                          }}
+                        />
+                      </>
+                    ) : null}
+                  </View>
+                )}
                 </React.Fragment>
               );
-            });
+            })}
+                </React.Fragment>
+              );
             })()}
           </>
           )
@@ -10185,7 +10345,98 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           />
         </LinearGradient>
       </Animated.View>
-    </LinearGradient>
+    </View>
+  );
+}
+
+function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: {
+  items: WeekStripItem[];
+  selectedKey: string;
+  accent: string;
+  colors: ReturnType<typeof getTheme>['colors'];
+  label: string;
+  onSelect: (key: string) => void;
+}) {
+  const selected = items.find(item => item.key === selectedKey) ?? items[0];
+  const statusLabel = (state: WeekStripState) => {
+    if (state === 'done') return 'Done';
+    if (state === 'logged') return 'Logged';
+    if (state === 'skipped') return 'Skipped';
+    if (state === 'rest') return 'Rest';
+    if (state === 'today') return 'Today';
+    return 'Planned';
+  };
+  const stateColor = (state: WeekStripState) => {
+    if (state === 'done' || state === 'logged' || state === 'today' || state === 'planned') return accent;
+    if (state === 'skipped') return tc.warning;
+    if (state === 'rest') return tc.textMuted;
+    return accent;
+  };
+
+  return (
+    <View style={styles.weekStripWrap}>
+      <View style={styles.weekStripHeader}>
+        <Text style={[styles.weekStripLabel, { color: tc.textMuted }]}>{label}</Text>
+        {selected ? (
+          <Text style={[styles.weekStripSelection, { color: tc.textSecondary }]} numberOfLines={1}>
+            {selected.title} · {statusLabel(selected.state)}
+          </Text>
+        ) : null}
+      </View>
+      <View style={styles.weekStripDays}>
+        {items.map(item => {
+          const active = item.key === selectedKey;
+          const isToday = item.key === todayKey();
+          const color = stateColor(item.state);
+          const showDot = item.state !== 'rest';
+          const markerIcon = item.state === 'done' || item.state === 'logged'
+            ? 'checkmark'
+            : item.state === 'skipped'
+              ? 'close'
+              : null;
+          return (
+            <TouchableOpacity
+              key={item.key}
+              onPress={() => onSelect(item.key)}
+              activeOpacity={0.82}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`${DAY_NAMES[item.date.getDay()]} ${item.date.getDate()}, ${item.title}`}
+              style={[
+                styles.weekDayChip,
+                {
+                  backgroundColor: active ? accent + '14' : tc.surface,
+                  borderColor: active ? accent : isToday ? accent + '66' : tc.border,
+                },
+              ]}>
+              <Text style={[
+                styles.weekDayName,
+                { color: active ? accent : isToday ? accent : tc.textMuted },
+              ]}>
+                {DAY_NAMES[item.date.getDay()]}
+              </Text>
+              <Text style={[
+                styles.weekDayDate,
+                { color: active ? accent : tc.textPrimary },
+              ]}>
+                {item.date.getDate()}
+              </Text>
+              <View style={[
+                styles.weekDayDot,
+                {
+                  backgroundColor: showDot ? color : 'transparent',
+                  opacity: showDot ? 1 : 0,
+                },
+              ]}>
+                {markerIcon ? (
+                  <Ionicons name={markerIcon as any} size={10} color="#fff" />
+                ) : null}
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
   );
 }
 
@@ -10229,12 +10480,12 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
         alignItems: 'center',
         justifyContent: 'center',
         }}>
-          <Text style={{
+          <Text {...dynamicCompactTextProps} style={{
             ...typography.label,
             fontWeight: active ? '800' : '600',
             color: active ? tint : mutedColor,
             opacity: active ? 1 : 0.68,
-          }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+          }} numberOfLines={2}>
             {label}
           </Text>
         </View>
@@ -10911,19 +11162,29 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                             : w.readiness >= 70 ? 'Fresh'
                             : w.readiness >= 40 ? 'Moderate'
                             : 'Tired';
-                          const warnMsg = hasConflict && lowReady
-                            ? 'Back-to-back same family + low readiness'
+                          const warnTitle = hasConflict && lowReady
+                            ? 'Stacked stress'
                             : hasConflict
-                              ? 'Same family as a fixed neighbor day'
+                              ? 'Adjacent overlap'
                               : lowReady
-                                ? `Low readiness (${w.readiness}%) — muscles still recovering`
+                                ? 'Low readiness'
                                 : null;
+                          const riskCopy = hasConflict && lowReady
+                            ? 'this repeats a similar muscle family near a fixed day while readiness is low, so soreness and under-recovery are more likely'
+                            : hasConflict
+                              ? 'this repeats a similar muscle family too close to a completed or fixed workout'
+                              : lowReady
+                                ? `readiness is ${w.readiness}%, which means the target muscles are probably still recovering`
+                                : null;
+                          const warnMsg = warnTitle && riskCopy
+                            ? `${warnTitle}: ${riskCopy}`
+                            : null;
                           const handlePick = () => {
                             const apply = () => { onChangeFocus(focus); };
                             if (warned && warnMsg) {
                               Alert.alert(
                                 `Switch to ${focus}?`,
-                                warnMsg + '. You can still proceed if you want.',
+                                `${warnMsg}.\n\nWhy this is risky: fatigue can stack faster than the planner expects if you override the week structure. You can still proceed if that trade-off is intentional.`,
                                 [
                                   { text: 'Cancel', style: 'cancel' },
                                   { text: 'Switch anyway', style: 'destructive', onPress: apply },
@@ -10996,9 +11257,21 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                                 {tierLabel}
                               </Text>
                               {warned && (
-                                <View style={{ position: 'absolute', top: 2, right: 2 }}>
-                                  <Ionicons name="warning" size={12} color={tc.warning} />
-                                </View>
+                                <>
+                                  <View style={{ position: 'absolute', top: 2, right: 2 }}>
+                                    <Ionicons name="warning" size={12} color={tc.warning} />
+                                  </View>
+                                  {warnTitle && riskCopy ? (
+                                    <View style={[styles.changeFocusRiskPill, { borderColor: tc.warning + '66', backgroundColor: tc.warning + '16' }]}>
+                                      <Text {...dynamicCompactTextProps} style={[styles.changeFocusRiskLabel, { color: tc.warning }]}>
+                                        Why risky
+                                      </Text>
+                                      <Text {...dynamicCompactTextProps} style={[styles.changeFocusRiskText, { color: tc.textSecondary }]} numberOfLines={3}>
+                                        {riskCopy}
+                                      </Text>
+                                    </View>
+                                  ) : null}
+                                </>
                               )}
                             </TouchableOpacity>
                           );
@@ -11080,6 +11353,18 @@ const styles = StyleSheet.create({
   },
   planLoadingTitle:    { fontSize: 20, fontWeight: '700', textAlign: 'center' },
   planLoadingSubtitle: { fontSize: 14, textAlign: 'center', lineHeight: 22, opacity: 0.7 },
+  planProtectionNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 14,
+    maxWidth: 320,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 12,
+  },
+  planProtectionTitle: { fontSize: 12, fontWeight: '800', marginBottom: 2 },
+  planProtectionBody: { fontSize: 11, lineHeight: 16 },
 
   tabPlanLoadingFull: {
     flex: 1, alignItems: 'center', justifyContent: 'center',
@@ -11213,6 +11498,60 @@ const styles = StyleSheet.create({
     paddingBottom: 110,
   },
 
+  weekStripWrap: {
+    marginBottom: 12,
+    gap: 8,
+  },
+  weekStripHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  weekStripLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  weekStripSelection: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  weekStripDays: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  weekDayChip: {
+    flex: 1,
+    minHeight: 58,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+  },
+  weekDayName: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  weekDayDate: {
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 1,
+  },
+  weekDayDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    marginTop: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   // ── Sub-tab bar (Plan / Exercises / Muscles, etc.) ──────────────────────
   subTabBar: {
     flexDirection: 'row',
@@ -11234,19 +11573,6 @@ const styles = StyleSheet.create({
   },
   askAiIcon: { width: 16, height: 16 },
   askAiText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.3, color: '#FFFFFF' },
-
-  // ── Compact "Why this plan?" link (replaces full-card explanation) ──────
-  planNoteLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    justifyContent: 'center',
-  },
-  planNoteLinkText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
 
   // ── Profile tab ─────────────────────────────────────────────────────────
   profileHero: {
@@ -11489,6 +11815,25 @@ const styles = StyleSheet.create({
   restHint:      { fontSize: 12, color: colors.textMuted, marginTop: 8 },
 
   expandedContent: { marginTop: 12 },
+  emptyStateCard: {
+    padding: 24,
+    alignItems: 'center',
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: 8,
+  },
+  emptyStateTitle: { fontSize: 15, fontWeight: '800', textAlign: 'center' },
+  emptyStateBody: { fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  changeFocusRiskPill: {
+    width: '100%',
+    marginTop: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  changeFocusRiskLabel: { fontSize: 8, fontWeight: '900', letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 2 },
+  changeFocusRiskText: { fontSize: 9, lineHeight: 12, textAlign: 'center' },
 
   completedBanner:     { backgroundColor: colors.success + '1A', borderRadius: radius.md, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: colors.success },
   completedBannerText: { fontSize: 14, fontWeight: '700', color: colors.success },
@@ -11537,6 +11882,14 @@ const styles = StyleSheet.create({
   mealAccordionTitle: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
   mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2, fontWeight: '500' },
   mealAccordionChevron: { fontSize: 11, color: colors.textMuted, marginLeft: 8 },
+  mealHydrationPanel: {
+    marginHorizontal: 14,
+    marginTop: 0,
+    marginBottom: 14,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+  },
 
   groceryCard: {
     backgroundColor: colors.surface,

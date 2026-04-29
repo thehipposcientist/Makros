@@ -6,16 +6,19 @@ Last updated: 2026-04-28
 
 ### Workout Tab
 - **Plan** — fixed 7-day **PlanWeek** schedule (Mon-Sun, anchored on the
-  most recent Monday). Renders all 7 dated `PlanDay` rows in chronological
-  order: past days show as completed / skipped from history, today is
-  highlighted, forward days remain queued. The 7 days are stable for the
-  full week — no mid-week regeneration. Each day card has per-exercise
-  Swap chip → `PlanSwapExerciseModal`.
+  most recent Monday). Renders a compact weekly selector in chronological
+  order, then one full selected-day card. Past days show as completed /
+  skipped in the selector, today is selected by default, and forward days remain
+  queued. The 7 days are stable for the full week — no mid-week regeneration.
+  Each selected day card has per-exercise Swap chip → `PlanSwapExerciseModal`.
 - **Library** — merged Exercises + Muscles browser.
 - **Settings** — equipment, injuries, preferences.
 
 ### Meals Tab
-- **Plan** — daily meal plan. `IncompleteDayBanner` + `FuelingRecoveryCard` mount above cards (both conditional).
+- **Plan** — daily meal plan. Renders a compact weekly selector, then one full
+  selected-day meal card. Today is selected by default, hydration is embedded inside
+  the Today card, and favorites/saved meals, catch-up nudges, fueling/recovery
+  signals, and adaptive macros sit below Today.
 - **Foods** — search + targets + "YOUR FAVORITES" horizontal scroll of common meals.
 - **Supps** — supplements.
 

@@ -1179,6 +1179,7 @@ export type LoggedSetPayload = {
   reps?: number;
   weight_lbs?: number;
   duration_seconds?: number | null;
+  comfort_rating?: number | null;
   feedback?: string | null;
   rir?: number | null;
   actual_distance?: number | null;

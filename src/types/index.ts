@@ -248,9 +248,8 @@ export interface UserProfile {
   allergies?: string[];           // allergen categories the user avoids
   dislikedExercises?: string[];  // exercise names excluded from plan generation
   /** Subscription tier. `free` = manual tracking only (no AI, no generators).
-   *  `pro` = full feature set. Persisted locally for MVP; server-of-record
-   *  once billing ships. Default `pro` for existing users so they keep
-   *  everything they've had; new signups should be created as `free`. */
+   *  `pro` = full feature set. Missing/unknown tiers must be treated as
+   *  `free` by clients so unlocked features only come from explicit state. */
   subscriptionTier?: 'free' | 'pro';
 }
 
@@ -650,6 +649,7 @@ export interface CompletedSet {
   reps: number;
   weightLbs: number;
   durationSeconds?: number; // for timed exercises (cardio, jump rope, etc.)
+  comfortRating?: number; // 1-5 for stretch/mobility comfort
   rir?: number;
   feedback?: 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
   actualDistance?: number;
@@ -741,6 +741,7 @@ export interface PostWorkoutFeedback {
 export interface BodyScanEntry {
   id: string;
   date: string;
+  photoUri?: string;
   bodyFatPct: number;
   bodyFatRange: string;
   muscleMass: string;

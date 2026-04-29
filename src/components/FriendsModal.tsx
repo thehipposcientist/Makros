@@ -15,6 +15,7 @@ import FadeInView from './FadeInView';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
+import { dynamicTextProps } from '../utils/dynamicType';
 import {
   acceptFriend,
   blockFriend,
@@ -466,9 +467,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               <View style={styles.section}>
                 <Text style={styles.sectionLabel}>FRIENDS{friends.length > 0 ? `  ·  ${friends.length}` : ''}</Text>
                 {friends.length === 0 ? (
-                  <Text style={styles.empty}>
-                    No friends yet. Search by username below to send a request.
-                  </Text>
+                  <View style={styles.emptyCard}>
+                    <View style={styles.emptyIconBubble}>
+                      <Ionicons name="people-outline" size={24} color={colors.primary} />
+                    </View>
+                    <Text {...dynamicTextProps} style={styles.emptyTitle}>No friends yet</Text>
+                    <Text {...dynamicTextProps} style={styles.emptyBody}>
+                      Add a friend by username to see shared workout activity, streaks, and weekly training summaries here.
+                    </Text>
+                  </View>
                 ) : (
                   friends.map((f) => (
                     <TouchableOpacity
@@ -797,6 +804,35 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       color: colors.textMuted,
       paddingVertical: spacing.sm,
       paddingHorizontal: spacing.sm,
+    },
+    emptyCard: {
+      alignItems: 'center',
+      gap: 8,
+      padding: spacing.lg,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+    },
+    emptyIconBubble: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.primary + '18',
+    },
+    emptyTitle: {
+      fontSize: 15,
+      fontWeight: '800',
+      color: colors.textPrimary,
+      textAlign: 'center',
+    },
+    emptyBody: {
+      fontSize: 12,
+      lineHeight: 18,
+      color: colors.textSecondary,
+      textAlign: 'center',
     },
     optInCard: {
       margin: spacing.lg,

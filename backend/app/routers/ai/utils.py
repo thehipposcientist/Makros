@@ -892,6 +892,26 @@ def _is_gpt5(model: str) -> bool:
     return model.startswith("gpt-5")
 
 
+def _default_reasoning_effort(model: str) -> str:
+    """Return a supported low-latency reasoning effort for the model."""
+    if model.startswith("gpt-5-pro"):
+        return "high"
+    if model.startswith("gpt-5.1") or model.startswith("gpt-5.4"):
+        return "low"
+    return "minimal"
+
+
+def _normalize_reasoning_effort(model: str, effort: str | None) -> str:
+    """Coerce unsupported legacy effort values onto a valid setting."""
+    if not effort:
+        return _default_reasoning_effort(model)
+    if model.startswith("gpt-5-pro"):
+        return "high"
+    if effort == "minimal" and (model.startswith("gpt-5.1") or model.startswith("gpt-5.4")):
+        return "low"
+    return effort
+
+
 def _chat_create(client: OpenAI, **kwargs) -> object:
     """
     Drop-in wrapper for client.chat.completions.create() that normalises params
@@ -900,7 +920,7 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
     gpt-5 family (reasoning models):
       - strip temperature and top_p (reasoning models reject these)
       - rename max_tokens -> max_completion_tokens
-      - add reasoning_effort="minimal" if not already set
+      - add a model-supported low-latency reasoning_effort if not already set
     All other models: params passed through unchanged.
     """
     model = kwargs.get("model", "")
@@ -917,8 +937,10 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
             r = kwargs.pop("reasoning")
             if isinstance(r, dict) and "effort" in r:
                 kwargs.setdefault("reasoning_effort", r["effort"])
-        if "reasoning_effort" not in kwargs:
-            kwargs["reasoning_effort"] = "minimal"
+        kwargs["reasoning_effort"] = _normalize_reasoning_effort(
+            model,
+            kwargs.get("reasoning_effort"),
+        )
     return client.chat.completions.create(**kwargs)
 
 
@@ -934,7 +956,7 @@ def _build_chat_kwargs(
 
     gpt-4o family  → response_format=json_object, max_tokens, temperature
     gpt-5 family   → max_completion_tokens (includes reasoning tokens),
-                     reasoning_effort="minimal" for fast responses,
+                     model-supported low-latency reasoning_effort,
                      NO temperature/top_p (reasoning models reject these).
                      response_format=json_schema when schema provided,
                      falls back to prompt-enforced JSON otherwise.
@@ -945,7 +967,7 @@ def _build_chat_kwargs(
         # do NOT pass temperature or top_p.
         if max_tokens is not None:
             kwargs["max_completion_tokens"] = max_tokens
-        kwargs["reasoning_effort"] = "minimal"
+        kwargs["reasoning_effort"] = _default_reasoning_effort(model)
         if json_schema:
             kwargs["response_format"] = {
                 "type": "json_schema",

@@ -32,8 +32,6 @@ import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, Pl
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
-import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
-import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
@@ -51,6 +49,7 @@ import { computeFitnessAge } from '../utils/fitnessAge';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint } from '../services/api';
 import { colors, elevations, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
+import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -199,9 +198,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
+  const [weightInputError, setWeightInputError] = useState('');
   const [measurementsModalVisible, setMeasurementsModalVisible] = useState(false);
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
-  const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
@@ -434,15 +433,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
   }, [userProfile.mealsPerDay, userProfile.physicalStats?.age]);
 
-  // Compute nutrition score from plan data
-  useEffect(() => {
-    if (!nutritionPlan) { setNutritionScore(null); return; }
-    import('../utils/nutritionScore').then(({ computeNutritionScore }) => {
-      const goal = userProfile?.goal ?? 'body_recomp';
-      setNutritionScore(computeNutritionScore(nutritionPlan, goal));
-    });
-  }, [nutritionPlan, userProfile?.goal]);
-
   const handleShareBodyScan = async () => {
     try {
       const ref = bodyScanShareRef.current as any;
@@ -514,6 +504,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       const entry: BodyScanEntry = {
         id: Date.now().toString(),
         date: new Date().toISOString(),
+        photoUri: asset.uri,
         bodyFatPct: scanResult.bodyFatPct,
         bodyFatRange: scanResult.bodyFatRange,
         muscleMass: scanResult.muscleMass,
@@ -550,7 +541,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // was removed because its pillars weren't grounded in anything — a
   // user could hit "100" by logging 20 random exercises without ever
   // getting stronger or doing cardio.
-  const [weeklyCheckinVisible, setWeeklyCheckinVisible] = useState(false);
   const [compositeFitness, setCompositeFitness] = useState<import('../services/api').FitnessCompositeScore | null>(null);
   // Track the composite-fitness fetch state so the Records tab can
   // show a skeleton while it's in flight instead of an empty flash.
@@ -591,7 +581,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const lostOrGained = Math.abs(currentWeight - startWeight);
   const direction = currentWeight <= startWeight ? 'down' : 'up';
   const remainingLbs = targetWeight != null ? Math.abs(currentWeight - targetWeight) : null;
-
   return (
     <View style={[styles.container, noHeader && styles.inlineContainer]}>
       {/* Top "← Back / Progress" header is hidden when rendered inline
@@ -1070,14 +1059,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               )}
               <View style={{ flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                 <TouchableOpacity
-                  onPress={() => setWeeklyCheckinVisible(true)}
-                  style={{
-                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
-                    backgroundColor: tc.primary,
-                  }}>
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.background }}>Review with Coach →</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
                   onPress={() => {
                     AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
                     setPlateauDismissed(true);
@@ -1428,7 +1409,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={styles.emptyBox}>
               <Ionicons name="calendar-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
               <Text style={styles.emptyTitle}>No workouts yet</Text>
-              <Text style={styles.emptyBody}>Start a workout from the home screen to build your history.</Text>
+              <Text style={styles.emptyBody}>Start from Workouts {'->'} Plan or log a custom activity. Your calendar, streak, and session details will appear here.</Text>
             </View>
           ) : (
             <>
@@ -2024,41 +2005,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {authToken && (
-            <WeeklyCheckinCard
-              authToken={authToken}
-              themeName={userProfile.themePreference}
-            />
-          )}
-          {authToken && (
-            <TouchableOpacity
-              onPress={() => setWeeklyCheckinVisible(true)}
-              activeOpacity={0.8}
-              style={{
-                flexDirection: 'row', alignItems: 'center', gap: 12,
-                backgroundColor: tc.surface, borderRadius: radius.md,
-                borderWidth: 1, borderColor: tc.primary + '60',
-                padding: 16, marginBottom: 4,
-              }}
-            >
-              <View style={{
-                width: 40, height: 40, borderRadius: 20,
-                backgroundColor: tc.primary + '20',
-                alignItems: 'center', justifyContent: 'center',
-              }}>
-                <Ionicons name="clipboard-outline" size={20} color={tc.primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>
-                  Week in Review
-                </Text>
-                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
-                  Scorecard · Coach notes · Next week adjustments
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
-            </TouchableOpacity>
-          )}
           {authToken && (() => {
             // Build the Z2 detection list once and feed both the
             // numeric total AND the per-workout diagnostic list to the
@@ -2185,8 +2131,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={styles.vitalsCard}>
                   <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                     <Ionicons name="heart-outline" size={36} color={tc.primary} />
-                    <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health</Text>
-                    <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
+                    <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health is optional</Text>
+                    <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
                       Optional sync for sleep, HRV, resting heart rate, steps, workouts, weight, and active energy. Thallo also writes completed workouts back to Apple Health.
                     </Text>
                     <TouchableOpacity
@@ -2208,9 +2154,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={styles.vitalsCard}>
                   <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                     <Ionicons name="cloud-offline-outline" size={32} color={tc.textMuted} />
-                    <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary, marginTop: 8 }}>Connected — no data yet</Text>
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4, marginBottom: 12 }}>
-                      Thallo still works without this data. When Apple Health has something to share, this card will fill in automatically.
+                    <Text {...dynamicTextProps} style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>Connected, but no Health data yet</Text>
+                    <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4, marginBottom: 12 }}>
+                      Thallo still works normally. If this stays empty, open iOS Settings and make sure Sleep, Heart, Activity, Workouts, and Weight are enabled for Thallo.
                     </Text>
                     <TouchableOpacity
                       style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 24 }}
@@ -2779,7 +2725,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                                   </View>
                                 )}
                                 {proteinBreakdown.plant.length === 0 && proteinBreakdown.animal.length === 0 && (
-                                  <Text style={{ fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}>No meals logged today yet.</Text>
+                                  <View style={{ marginTop: 4, padding: 10, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+                                    <Text {...dynamicTextProps} style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>No meals logged today yet</Text>
+                                    <Text {...dynamicTextProps} style={{ fontSize: 11, color: tc.textMuted, lineHeight: 15, marginTop: 2 }}>
+                                      Check off a meal or log from Favorites to unlock protein-source and gut-health signals.
+                                    </Text>
+                                  </View>
                                 )}
                               </>
                             ) : (
@@ -2956,6 +2907,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
                 onPress={() => {
                   setWeightInputValue(weightEntries.length > 0 ? String(weightEntries[weightEntries.length - 1].weightLbs) : '');
+                  setWeightInputError('');
                   setWeightInputVisible(true);
                 }}>
                 <Ionicons name="add" size={16} color="#fff" />
@@ -3176,7 +3128,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Ionicons name="body-outline" size={22} color={tc.primary} />
-              <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Measurements</Text>
+              <Text {...dynamicTextProps} style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Measurements</Text>
               <TouchableOpacity
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
                 onPress={() => setMeasurementsModalVisible(true)}>
@@ -3184,9 +3136,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={{ fontSize: 13, fontWeight: '600', color: '#fff' }}>Log</Text>
               </TouchableOpacity>
             </View>
-            <Text style={{ fontSize: 13, color: tc.textMuted, marginTop: 8 }}>
-              Track waist, chest, hips, arms, and more over time.
-            </Text>
+            <View style={{ marginTop: 10, padding: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+              <Text {...dynamicTextProps} style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                No measurement trend yet
+              </Text>
+              <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textMuted, marginTop: 3, lineHeight: 17 }}>
+                Log a baseline waist, chest, hips, arms, or body-fat estimate. Future logs will make body changes easier to see than scale weight alone.
+              </Text>
+            </View>
           </View>
 
           {/* Scan buttons */}
@@ -3279,6 +3236,60 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </TouchableOpacity>
             </>
           )}
+
+          {bodyScanHistory.length >= 2 && (() => {
+            const latest = bodyScanHistory[0];
+            const prior = bodyScanHistory[1];
+            if (!latest || !prior) return null;
+            const latestDate = new Date(latest.date);
+            const priorDate = new Date(prior.date);
+            const bfDelta = (Number(latest.bodyFatPct) || 0) - (Number(prior.bodyFatPct) || 0);
+            const deltaColor = bfDelta < 0 ? tc.primary : bfDelta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
+            const fmt = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+            const compareTile = (entry: BodyScanEntry, label: string, date: Date) => (
+              <View style={{ flex: 1 }}>
+                <View style={{
+                  height: 150,
+                  borderRadius: 14,
+                  overflow: 'hidden',
+                  backgroundColor: tc.surfaceRaised,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                  {entry.photoUri ? (
+                    <Image source={{ uri: entry.photoUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  ) : (
+                    <View style={{ alignItems: 'center', padding: 12 }}>
+                      <Ionicons name="body-outline" size={28} color={tc.textMuted} />
+                      <Text style={{ fontSize: 11, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>Photo not stored</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginTop: 6, textTransform: 'uppercase' }}>
+                  {label} · {fmt(date)}
+                </Text>
+                <Text style={{ fontSize: 16, fontWeight: '900', color: tc.textPrimary, marginTop: 2 }}>
+                  {entry.bodyFatPct}%
+                </Text>
+              </View>
+            );
+            return (
+              <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Before / After</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: deltaColor }}>
+                    {bfDelta > 0 ? '+' : ''}{bfDelta.toFixed(1)}% BF
+                  </Text>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  {compareTile(prior, 'Before', priorDate)}
+                  {compareTile(latest, 'After', latestDate)}
+                </View>
+              </View>
+            );
+          })()}
 
           {/* Timeline — body fat % chart over time. Renders only when 2+
               scans exist (a single point isn't a trend). Pure SVG, matches
@@ -3511,19 +3522,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 24, width: '80%', maxWidth: 320, borderWidth: 1, borderColor: tc.border }}>
             <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, marginBottom: 16, textAlign: 'center' }}>Log Weight</Text>
             <TextInput
+              {...dynamicInputProps}
               style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, padding: 14, fontSize: 18, color: tc.textPrimary, backgroundColor: tc.background, textAlign: 'center', fontWeight: '700' }}
               value={weightInputValue}
-              onChangeText={setWeightInputValue}
+              onChangeText={(v) => {
+                setWeightInputValue(v);
+                if (weightInputError) setWeightInputError('');
+              }}
               keyboardType="decimal-pad"
               placeholder="e.g. 175"
               placeholderTextColor={tc.textMuted}
               autoFocus
             />
             <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>lbs</Text>
+            {weightInputError ? (
+              <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.error, textAlign: 'center', marginTop: 8 }}>
+                {weightInputError}
+              </Text>
+            ) : null}
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
               <TouchableOpacity
                 style={{ flex: 1, paddingVertical: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
-                onPress={() => setWeightInputVisible(false)}>
+                onPress={() => {
+                  setWeightInputError('');
+                  setWeightInputVisible(false);
+                }}>
                 <Text style={{ fontSize: 15, fontWeight: '600', color: tc.textSecondary }}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -3531,7 +3554,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 onPress={async () => {
                   const val = parseFloat(weightInputValue);
                   if (!val || val < 50 || val > 700) {
-                    Alert.alert('Invalid weight', 'Please enter a weight between 50 and 700 lbs.');
+                    setWeightInputError('Please enter a weight between 50 and 700 lbs.');
                     return;
                   }
                   const { saveWeightEntry } = await import('../utils/weightHistory');
@@ -3552,17 +3575,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
         </View>
       )}
-      <WeeklyCheckinModal
-        visible={weeklyCheckinVisible}
-        authToken={authToken}
-        goal={userProfile.goal ?? 'body_recomp'}
-        themeName={userProfile.themePreference}
-        avgSleepHours={healthSummary?.lastNightSleepHours ?? null}
-        avgRestingHr={healthSummary?.restingHeartRate ?? null}
-        avgSteps={healthSummary?.avgSteps7d ?? null}
-        onClose={() => setWeeklyCheckinVisible(false)}
-        onComplete={() => setWeeklyCheckinVisible(false)}
-      />
       <BodyMeasurementsModal
         visible={measurementsModalVisible}
         authToken={authToken}

@@ -298,11 +298,11 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
   return (
     <View style={{
       borderRadius: radius.md,
-      paddingHorizontal: 10, paddingVertical: 8,
-      marginBottom: 8,
+      paddingHorizontal: 12, paddingVertical: 10,
+      marginBottom: 10,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
+      gap: 10,
     }}>
       {/* Flame + streak days — only when streak > 0 */}
       {data && data.current_streak > 0 && (
@@ -325,12 +325,14 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
         </View>
       )}
       {/* Daily personalized motto */}
-      <Text
-        style={{ flex: 1, fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}
-        numberOfLines={2}
-      >
-        {motto}
-      </Text>
+      <View style={{ flex: 1, borderLeftWidth: 2, borderLeftColor: tc.primary + '66', paddingLeft: 10 }}>
+        <Text
+          style={{ fontSize: 12, lineHeight: 17, color: tc.textSecondary, fontWeight: '600', fontStyle: 'italic' }}
+          numberOfLines={2}
+        >
+          “{motto}”
+        </Text>
+      </View>
     </View>
   );
 }

@@ -55,6 +55,7 @@ import {
   hasPlateLoadedEquipment,
   normalizeStrengthEquipmentSettings,
 } from '../utils/strengthEquipmentSettings';
+import { dynamicTextProps } from '../utils/dynamicType';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES,
   goalCategory,
@@ -383,6 +384,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // Step tracking
   const [currentStep, setCurrentStep] = useState(0);
+  const [stepError, setStepError] = useState('');
 
   // Step 1 — Goal selection (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState('build_muscle');
@@ -469,6 +471,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const steps = getSteps();
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
+  useEffect(() => { setStepError(''); }, [currentStepKey]);
 
   // ── Onboarding draft persistence ─────────────────────────────────────
   // Without this, closing the app mid-onboarding loses every step's input
@@ -700,7 +703,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const handleNext = () => {
     const error = validate();
-    if (error) { Alert.alert('One more thing', error); return; }
+    if (error) {
+      setStepError(error);
+      requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
+      return;
+    }
+    setStepError('');
 
     if (currentStep < totalSteps - 1) {
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -715,6 +723,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const handleBack = () => {
     if (currentStep > 0) {
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+      setStepError('');
       setCurrentStep(s => s - 1);
       requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
     }
@@ -2373,6 +2382,13 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           {renderStep()}
         </FadeInView>
 
+        {stepError ? (
+          <View style={styles.inlineErrorBox} accessibilityRole="alert">
+            <Ionicons name="alert-circle-outline" size={17} color={colors.error} />
+            <Text {...dynamicTextProps} style={styles.inlineErrorText}>{stepError}</Text>
+          </View>
+        ) : null}
+
         <View style={styles.buttons}>
           {currentStep > 0 ? (
             <View style={{ flex: 1 }}>
@@ -2425,6 +2441,24 @@ const styles = StyleSheet.create({
   stepContainer: { marginBottom: 24 },
   stepTitle: { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
   stepDescription: { fontSize: 15, color: colors.textSecondary, lineHeight: 22, marginBottom: 24 },
+  inlineErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.error + '66',
+    backgroundColor: colors.error + '14',
+    padding: 12,
+    marginBottom: 14,
+  },
+  inlineErrorText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.error,
+    fontWeight: '700',
+  },
 
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   goalCardWrap: { width: '48%' },
