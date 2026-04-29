@@ -4774,14 +4774,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     ) : null}
                     {summaryData?.motivation ? (
                       <>
-                        <Text style={[styles.summarySectionTitle, { marginTop: 10 }]}>💬  Note</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 10 }}>
+                          <Ionicons name="chatbubble-ellipses-outline" size={11} color={themeColors.textSecondary} />
+                          <Text style={styles.summarySectionTitle}>Note</Text>
+                        </View>
                         <Text style={styles.summaryItem}>{cleanAiText(summaryData.motivation)}</Text>
                       </>
                     ) : null}
                   </View>
                 ) : !summaryLoading && (summaryData?.recommendations?.length ?? 0) > 0 ? (
                   <View style={styles.summarySection}>
-                    <Text style={styles.summarySectionTitle}>🔄  Recovery Tips</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                      <Ionicons name="refresh-outline" size={11} color={themeColors.textSecondary} />
+                      <Text style={styles.summarySectionTitle}>Recovery Tips</Text>
+                    </View>
                     {summaryData!.recommendations.map((r, i) => (
                       <Text key={i} style={styles.summaryItem}>• {cleanAiText(r)}</Text>
                     ))}
@@ -4798,18 +4804,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     onPress={handleShareSummary}
                     disabled={shareLoading || summaryLoading}
                     activeOpacity={0.85}>
-                    <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                      {shareLoading ? 'Saving…' : '📤 Share'}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Ionicons name="share-outline" size={15} color={themeColors.textPrimary} />
+                      <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                        {shareLoading ? 'Saving…' : 'Share'}
+                      </Text>
+                    </View>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
                     onPress={handlePostToFriendsFeed}
                     disabled={postingToFeed || summaryLoading}
                     activeOpacity={0.85}>
-                    <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                      {postingToFeed ? 'Sharing…' : '👥 Friends'}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Ionicons name="people-outline" size={15} color={themeColors.textPrimary} />
+                      <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                        {postingToFeed ? 'Sharing…' : 'Friends'}
+                      </Text>
+                    </View>
                   </TouchableOpacity>
                 </View>
                 <TouchableOpacity onPress={dismissSummaryModal} style={styles.summarySkipBtn}>

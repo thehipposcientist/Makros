@@ -1157,7 +1157,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [friendFeedLoading, setFriendFeedLoading] = useState(false);
   const [expandedFeedItemId, setExpandedFeedItemId] = useState<number | null>(null);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
-  const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState<{ hapticsEnabled: boolean; soundsEnabled: boolean; vibrationEnabled: boolean; restNotificationSoundEnabled: boolean; restTimerSound: import('../utils/feedback').RestTimerSound }>({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false, restTimerSound: 'chime' });
@@ -1214,13 +1213,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken, newEmail]);
 
   useEffect(() => { import('../utils/feedback').then(f => f.loadSettings()).then(setFeedbackSettings).catch(() => {}); }, []);
-  useEffect(() => {
-    if (mealsSubTab === 'foods' && authToken) {
-      import('../services/api').then(({ getCommonMeals }) =>
-        getCommonMeals(authToken).then(r => setCommonMeals(r.meals || [])).catch(() => {})
-      );
-    }
-  }, [mealsSubTab, authToken]);
   // gutHealthToday fetch removed — NutritionCard computes from plan data
   // menuOpen state removed — the side menu modal is gone. Profile tab handles it.
   // Cached health score for the Profile tab. Loaded once on mount;
@@ -1501,6 +1493,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [currentDate, setCurrentDate] = useState(todayKey());
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
+  const [shufflingInfo, setShufflingInfo] = useState<{ date: string; mealKey: string } | null>(null);
 
   // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
   // (Mon-Sun anchor). Past days, today, and forward days are rendered
@@ -4406,152 +4399,119 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [persistDayState]);
 
   const handleShuffleMeal = useCallback(async (date: string, mealType: string, meal: MealSuggestion) => {
-    // Regenerate a single meal, TARGETING the day's macro envelope (not
-    // just calories). Computes how much cal/protein this meal should hit
-    // based on the day's total target minus what's already claimed by
-    // the OTHER meals. Then generates N candidates with different seeds
-    // and picks the one closest to (cal, protein) target.
     const idx = mealType.startsWith('meal_') ? parseInt(mealType.slice(5), 10) : -1;
-    console.log(`[shuffle] START date=${date} mealType=${mealType} idx=${idx} mealName=${meal.meal}`);
-    if (idx < 0 || !userProfile) {
-      console.log(`[shuffle] ABORT idx=${idx} hasProfile=${!!userProfile}`);
-      return;
-    }
+    if (idx < 0 || !userProfile) return;
 
-    const { generateMealSuggestion } = await import('../utils/planGenerator');
-    const foodList = meta.foods ?? [];
-    const foodMap: Record<string, any> = {};
-    for (const f of foodList) foodMap[f.name.toLowerCase()] = f;
-    for (const f of (userProfile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as any;
+    setShufflingInfo({ date, mealKey: mealType });
+    try {
+      const { generateMealSuggestion } = await import('../utils/planGenerator');
+      const foodList = meta.foods ?? [];
+      const foodMap: Record<string, any> = {};
+      for (const f of foodList) foodMap[f.name.toLowerCase()] = f;
+      for (const f of (userProfile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as any;
 
-    // Build a WIDE candidate list. `userProfile.foodsAvailable` is the
-    // user's narrow onboarding preference set (often <15 items) — if we
-    // only use that, per-role pools shrink to 2–3 items and the shuffle
-    // keeps picking the same foods. We layer in the full catalog so the
-    // generator has variety. User preferences + custom foods appear
-    // FIRST in the list, so the seededIndex biases toward them when
-    // pool sizes differ.
-    const prefNames = userProfile.foodsAvailable ?? [];
-    const customNames = (userProfile.customFoods ?? []).map(f => f.name);
-    const catalogNames = Object.keys(foodMap)
-      .filter(n => foodMap[n]) // skip any nulls
-      .map(n => foodMap[n].name);
-    // Dedup (case-insensitive) while preserving preference-first order.
-    const seen = new Set<string>();
-    const wideCandidates: string[] = [];
-    for (const n of [...prefNames, ...customNames, ...catalogNames]) {
-      const key = n.toLowerCase();
-      if (!seen.has(key) && foodMap[key]) {
-        seen.add(key);
-        wideCandidates.push(n);
-      }
-    }
-    console.log(`[shuffle] foodMap=${Object.keys(foodMap).length} prefs=${prefNames.length} custom=${customNames.length} wideCandidates=${wideCandidates.length}`);
+      // Exclude the current meal's foods so the shuffle always returns
+      // something different (otherwise the same seed-set can re-pick the
+      // same ingredients on a small preference pool).
+      const currentFoodsLower = new Set((meal.foods ?? []).map(f => f.toLowerCase()));
 
-    // Compute this meal's share of the day's macro envelope. Start from
-    // the day's targets, subtract every OTHER meal's contribution. What's
-    // left is how much this meal should carry. If day targets are missing
-    // (unusual but possible), fall back to using this meal's existing
-    // macros as the envelope so we at least preserve its current shape.
-    const currentDayPlan = nutritionPlansByDate[date];
-    const hasValidTargets = !!(currentDayPlan?.targets?.calories && currentDayPlan.targets.calories > 0);
-    const dayTargets = hasValidTargets
-      ? currentDayPlan!.targets!
-      : { calories: 0, protein: 0, carbs: 0, fat: 0 };
-    const otherMeals = (currentDayPlan?.meals ?? []).filter((_, i) => i !== idx);
-    const otherCal  = otherMeals.reduce((s, m) => s + (m.calories || 0), 0);
-    const otherPro  = otherMeals.reduce((s, m) => s + (m.protein  || 0), 0);
-    const otherCarb = otherMeals.reduce((s, m) => s + (m.carbs    || 0), 0);
-    const otherFat  = otherMeals.reduce((s, m) => s + (m.fat      || 0), 0);
+      const prefNames = userProfile.foodsAvailable ?? [];
+      const customNames = (userProfile.customFoods ?? []).map(f => f.name);
+      const catalogNames = Object.keys(foodMap).filter(n => foodMap[n]).map(n => foodMap[n].name);
 
-    // Target for this meal = day_target - others. If no valid day targets,
-    // fall back to the current meal's own macros so the shuffle at least
-    // preserves the meal's existing shape.
-    const mealCalTarget = hasValidTargets
-      ? Math.max(200, Math.round((dayTargets.calories || 0) - otherCal))
-      : Math.max(200, Math.round(meal.calories || 500));
-    const mealProTarget = hasValidTargets
-      ? Math.max(10, Math.round((dayTargets.protein || 0) - otherPro))
-      : Math.max(10, Math.round(meal.protein || 30));
-    const mealCarbTarget = hasValidTargets
-      ? Math.max(10, Math.round((dayTargets.carbs || 0) - otherCarb))
-      : Math.max(10, Math.round(meal.carbs || 40));
-    const mealFatTarget = hasValidTargets
-      ? Math.max(5, Math.round((dayTargets.fat || 0) - otherFat))
-      : Math.max(5, Math.round(meal.fat || 15));
-    console.log(`[shuffle] targets cal=${mealCalTarget} pro=${mealProTarget} carb=${mealCarbTarget} fat=${mealFatTarget} (day_has_targets=${hasValidTargets})`);
-
-    // Generate N candidates with different seeds; score each by how well
-    // it hits (cal, protein, carbs, fat) with protein shortfall treated
-    // as a hard penalty and whole-food candidates favored.
-    const { classifyFood: classifyFoodQuality } = await import('../utils/nutritionScore');
-    const CANDIDATES = 12;
-    let best: { meal: MealSuggestion; score: number } | null = null;
-    for (let i = 0; i < CANDIDATES; i++) {
-      const seed = `shuffle:${date}:${idx}:${Date.now()}:${i}:${Math.random()}`;
-      const candidate = generateMealSuggestion(
-        meal.meal || 'Meal',
-        mealCalTarget,
-        wideCandidates,
-        foodMap,
-        seed,
-      );
-      if (i === 0) {
-        console.log(`[shuffle] first candidate: foods=${candidate.foods.join(',')} cal=${candidate.calories} pro=${candidate.protein}`);
-      }
-
-      const dCal  = Math.abs(candidate.calories - mealCalTarget) / Math.max(1, mealCalTarget);
-      const dCarb = Math.abs((candidate.carbs || 0) - mealCarbTarget) / Math.max(1, mealCarbTarget);
-      const dFat  = Math.abs((candidate.fat || 0) - mealFatTarget) / Math.max(1, mealFatTarget);
-
-      // Protein: asymmetric penalty. Going UNDER target is a real problem
-      // (users undereat protein all the time); going OVER is fine — it
-      // just displaces carbs/fat which are less precious. Shortfall is
-      // heavily penalized; overage gets a small nudge so we don't chase
-      // 500g protein meals either.
-      const proShortfall = Math.max(0, mealProTarget - (candidate.protein || 0)) / Math.max(1, mealProTarget);
-      const proOverage   = Math.max(0, (candidate.protein || 0) - mealProTarget) / Math.max(1, mealProTarget);
-      const dPro = proShortfall * 3.5 + proOverage * 0.3;
-
-      // Whole-food bonus: count whole vs processed items in the picked
-      // foods. Each whole food subtracts from the score (bonus); each
-      // processed food adds (penalty). "unknown" is neutral.
-      let wholeBonus = 0;
-      for (const name of candidate.foods) {
-        const q = classifyFoodQuality(name);
-        if (q === 'whole') wholeBonus -= 0.20;
-        else if (q === 'processed') wholeBonus += 0.35;
-      }
-
-      // All four macros matter; protein-shortfall leads. Whole-food
-      // preference layered on as a score modifier.
-      const score = dPro + dCal * 1.5 + dCarb * 1.0 + dFat * 1.0 + wholeBonus;
-      if (!best || score < best.score) best = { meal: candidate, score };
-    }
-    const shuffled = best?.meal;
-    if (!shuffled) return;
-
-    let nextPlan: DailyNutritionPlan | null = null;
-    setNutritionPlansByDate(prev => {
-      const current = prev[date];
-      if (!current) return prev;
-      const meals = (current.meals ?? []).slice();
-      if (idx < 0 || idx >= meals.length) return prev;
-      // Preserve the meal's identity (name, routine pin) while swapping
-      // in the new ingredient list. Keep name if it's been user-renamed.
-      const existing = meals[idx];
-      meals[idx] = {
-        ...shuffled,
-        meal: existing.meal,
-        isRoutine: existing.isRoutine,
-        ...(existing as any)._routineId ? { _routineId: (existing as any)._routineId } : {},
+      // Dedup helper preserving insertion order.
+      const dedup = (names: string[]): string[] => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const n of names) {
+          const k = n.toLowerCase();
+          if (!seen.has(k) && foodMap[k] && !currentFoodsLower.has(k)) { seen.add(k); out.push(n); }
+        }
+        return out;
       };
-      nextPlan = { ...current, meals };
-      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
-    });
-    if (nextPlan) {
-      await saveNutritionPlan(date, nextPlan);
-      await persistDayState(date, { nutrition_plan: nextPlan });
+
+      // Two pools: preference-only (user's chosen foods + custom) and the
+      // full catalog. We use the pref pool for most candidates so the
+      // shuffle stays within foods the user actually likes. The catalog
+      // pool covers the minority of iterations to add variety when the
+      // pref pool is thin.
+      const prefPool  = dedup([...prefNames, ...customNames]);
+      const widePool  = dedup([...prefNames, ...customNames, ...catalogNames]);
+
+      const currentDayPlan = nutritionPlansByDate[date];
+      const hasValidTargets = !!(currentDayPlan?.targets?.calories && currentDayPlan.targets.calories > 0);
+      const dayTargets = hasValidTargets
+        ? currentDayPlan!.targets!
+        : { calories: 0, protein: 0, carbs: 0, fat: 0 };
+      const otherMeals = (currentDayPlan?.meals ?? []).filter((_, i) => i !== idx);
+      const otherCal  = otherMeals.reduce((s, m) => s + (m.calories || 0), 0);
+      const otherPro  = otherMeals.reduce((s, m) => s + (m.protein  || 0), 0);
+      const otherCarb = otherMeals.reduce((s, m) => s + (m.carbs    || 0), 0);
+      const otherFat  = otherMeals.reduce((s, m) => s + (m.fat      || 0), 0);
+
+      const mealCalTarget = hasValidTargets
+        ? Math.max(200, Math.round((dayTargets.calories || 0) - otherCal))
+        : Math.max(200, Math.round(meal.calories || 500));
+      // Cap protein at 40% of calories — unrealistic targets (e.g. after
+      // eating mostly fat today) produce protein-only meals.
+      const rawProTarget = hasValidTargets
+        ? Math.max(10, Math.round((dayTargets.protein || 0) - otherPro))
+        : Math.max(10, Math.round(meal.protein || 30));
+      const mealProTarget = Math.min(rawProTarget, Math.round(mealCalTarget * 0.40 / 4));
+      const mealCarbTarget = hasValidTargets
+        ? Math.max(10, Math.round((dayTargets.carbs || 0) - otherCarb))
+        : Math.max(10, Math.round(meal.carbs || 40));
+      const mealFatTarget = hasValidTargets
+        ? Math.max(5, Math.round((dayTargets.fat || 0) - otherFat))
+        : Math.max(5, Math.round(meal.fat || 15));
+
+      // Generate 20 candidates. First 15 use the preference pool (foods the
+      // user actually likes); last 5 draw from the full catalog for variety.
+      // Pick whichever scores best on macro proximity.
+      const CANDIDATES = 20;
+      const PREF_CUTOFF = 15;
+      let best: { meal: MealSuggestion; score: number } | null = null;
+      for (let i = 0; i < CANDIDATES; i++) {
+        const pool = i < PREF_CUTOFF && prefPool.length >= 3 ? prefPool : widePool;
+        const seed = `shuffle:${date}:${idx}:${Date.now()}:${i}:${Math.random()}`;
+        const candidate = generateMealSuggestion(meal.meal || 'Meal', mealCalTarget, pool, foodMap, seed);
+
+        const dCarb = Math.abs((candidate.carbs || 0) - mealCarbTarget) / Math.max(1, mealCarbTarget);
+        const dFat  = Math.abs((candidate.fat  || 0) - mealFatTarget)  / Math.max(1, mealFatTarget);
+        // Asymmetric protein penalty: shortfall is costly (users chronically
+        // undereat protein); overage is fine and only lightly penalized.
+        const proShortfall = Math.max(0, mealProTarget - (candidate.protein || 0)) / Math.max(1, mealProTarget);
+        const proOverage   = Math.max(0, (candidate.protein || 0) - mealProTarget) / Math.max(1, mealProTarget);
+        const dPro = proShortfall * 3.5 + proOverage * 0.3;
+
+        const score = dPro + dCarb * 1.0 + dFat * 1.0;
+        if (!best || score < best.score) best = { meal: candidate, score };
+      }
+      const shuffled = best?.meal;
+      if (!shuffled) return;
+
+      let nextPlan: DailyNutritionPlan | null = null;
+      setNutritionPlansByDate(prev => {
+        const current = prev[date];
+        if (!current) return prev;
+        const meals = (current.meals ?? []).slice();
+        if (idx < 0 || idx >= meals.length) return prev;
+        const existing = meals[idx];
+        meals[idx] = {
+          ...shuffled,
+          meal: existing.meal,
+          isRoutine: existing.isRoutine,
+          ...(existing as any)._routineId ? { _routineId: (existing as any)._routineId } : {},
+        };
+        nextPlan = { ...current, meals };
+        return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+      });
+      if (nextPlan) {
+        await saveNutritionPlan(date, nextPlan);
+        await persistDayState(date, { nutrition_plan: nextPlan });
+      }
+    } finally {
+      setShufflingInfo(null);
     }
   }, [userProfile, persistDayState, meta.foods, nutritionPlansByDate]);
 
@@ -4948,7 +4908,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // matches the workout strip dimension-for-dimension.
   const mealDays: MealDay[] = _activeWeekMealDays();
 
-  const isLightTheme = ['sunrise', 'parchment', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'rose'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'parchment', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'rose'].includes(userProfile.themePreference ?? 'slate');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -5095,7 +5055,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           below the gradient header on any device. */}
       {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.background, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
             <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
@@ -5107,7 +5067,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* Fixed meals sub-tab bar — same pattern. */}
       {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.background, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
             <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
             {/* "Supplements" is full-width; "Supps" read as cheap/
@@ -5240,14 +5200,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               });
               const totalMin = Math.round(thisWeek.reduce((a, w) => a + (w.durationSeconds || 0), 0) / 60);
               const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
-              const allDoneSet = new Set(history.filter(s => s.date && !s.skipped).map(s => toDateKey(s.date)));
+              // Use completedDates (history + summaries) so archived older
+              // workouts still count toward the streak. allDoneSet was
+              // history-only, which caused long streaks to truncate once
+              // sessions aged out of the rolling history window.
               let streak = 0;
               const checkDate = new Date();
               const todayStr = toDateKey(checkDate.toISOString());
-              if (!allDoneSet.has(todayStr)) checkDate.setDate(checkDate.getDate() - 1);
+              if (!completedDates.has(todayStr)) checkDate.setDate(checkDate.getDate() - 1);
               for (let j = 0; j < 90; j++) {
                 const ck = toDateKey(checkDate.toISOString());
-                if (allDoneSet.has(ck)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
+                if (completedDates.has(ck)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
                 else break;
               }
 
@@ -5955,39 +5918,39 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </Text>
                           </TouchableOpacity>
                         ) : null}
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <View style={{ flexDirection: 'row', gap: 6 }}>
                           <TouchableOpacity
                             style={{
-                              flex: 1, alignItems: 'center', paddingVertical: 10,
-                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
                               borderColor: themeColors.primary + '55',
                               backgroundColor: themeColors.primary + '0E',
                             }}
                             onPress={() => setShowLiveTracker(true)}
                             activeOpacity={0.7}>
-                            <Ionicons name="flash" size={20} color={themeColors.primary} />
+                            <Ionicons name="flash" size={14} color={themeColors.primary} />
                             <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={{
-                              flex: 1, alignItems: 'center', paddingVertical: 10,
-                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
                               borderColor: themeColors.primary + '33',
                             }}
                             onPress={() => setShowLogActivity(true)}
                             activeOpacity={0.7}>
-                            <Ionicons name="add-circle" size={20} color={themeColors.primary} />
+                            <Ionicons name="add-circle" size={14} color={themeColors.primary} />
                             <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={{
-                              flex: 1, alignItems: 'center', paddingVertical: 10,
-                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                              paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
                               borderColor: themeColors.border,
                             }}
                             onPress={() => setWorkoutSubTab('equipment')}
                             activeOpacity={0.7}>
-                            <Ionicons name="settings-sharp" size={20} color={themeColors.textMuted} />
+                            <Ionicons name="settings-sharp" size={14} color={themeColors.textMuted} />
                             <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
                           </TouchableOpacity>
                         </View>
@@ -6179,13 +6142,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         day_statuses: dayStatuses,
                       });
 
-                      // 2. Read back from DB — single source of truth
-                      const active = await getActiveWorkoutPlan(authToken);
-                      if (active?.plan_json?.days?.length) {
-                        const plan = active.plan_json;
-                        setWorkoutPlan(plan);
-                        await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(plan));
-                        console.log('[switchDay] done — focuses:', plan.days.map((d: any) => d.focus));
+                      // 2. Read back from DB — PlanWeek is the schedule source of truth
+                      const { getActivePlanWeek } = await import('../services/api');
+                      const freshWeek = await getActivePlanWeek(authToken);
+                      if (freshWeek) {
+                        planWeekRef.current = freshWeek;
+                        setPlanWeek(freshWeek);
+                        console.log('[switchDay] done — focuses:', freshWeek.days.map((d: any) => d.workout?.focus));
                       }
                       loadDayStatus();
                     } catch (e) {
@@ -6364,22 +6327,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           });
                         }}
                       />
-                    )}
-                    {commonMeals.length > 0 && (
-                      <>
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted, marginBottom: 6 }}>YOUR FAVORITES</Text>
-                        <Text style={{ fontSize: 10, color: themeColors.textMuted, marginBottom: 6 }}>
-                          Meals you've eaten 2+ times. Auto-detected — no need to save them.
-                        </Text>
-                        <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
-                          {commonMeals.map(m => (
-                            <View key={m.name} style={{ backgroundColor: themeColors.surface, borderRadius: 10, padding: 10, marginRight: 8, borderWidth: 1, borderColor: themeColors.border, minWidth: 120 }}>
-                              <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>{m.name}</Text>
-                              <Text style={{ fontSize: 10, color: themeColors.textMuted }}>{m.count}x · {Math.round(m.avg_calories)} cal · {Math.round(m.avg_protein_g)}g protein</Text>
-                            </View>
-                          ))}
-                        </ScrollView>
-                      </>
                     )}
                   </View>
                 )}
@@ -6951,6 +6898,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
                       onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
                       onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
+                      shufflingMealKey={shufflingInfo?.date === d.key ? shufflingInfo.mealKey : null}
                       onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
                       goal={userProfile.goal}
                       savedMealNames={savedMealNames}
@@ -7231,7 +7179,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </Text>
             </View>
             <TouchableOpacity
-              onPress={() => setShowSettings(true)}
+              onPress={() => { setShowSettings(true); }}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 4 }}
             >
@@ -9271,7 +9219,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
           const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
           const lightThemes = visibleThemes.filter(t => t.mode === 'light');
-          const currentTheme = userProfile.themePreference ?? 'midnight';
+          const currentTheme = userProfile.themePreference ?? 'slate';
           return (
             <View style={{ flex: 1, backgroundColor: themeColors.background }}>
               {/* Header */}
@@ -10028,29 +9976,28 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
   mutedColor: string;
   onPress: () => void;
 }) {
-  // Segmented-control-style tab: rounded pill segment that fills with
-  // the accent color when active. Reads as a filter/mode toggle, not
-  // a second navigation level stacked on the bottom tab bar.
   return (
     <TouchableOpacity
       onPress={onPress}
-      activeOpacity={0.75}
+      activeOpacity={0.7}
       hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
       style={{
         flex: 1,
-        paddingVertical: 5,
-        paddingHorizontal: 10,
-        borderRadius: 7,
-        backgroundColor: active ? tint : 'transparent',
+        paddingVertical: 6,
+        paddingHorizontal: 8,
+        borderRadius: 999,
+        backgroundColor: active ? tint + '22' : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
       }}>
       <Text style={{
-        fontSize: 12,
-        fontWeight: '600',
-        color: active ? '#fff' : mutedColor,
-        letterSpacing: 0.1,
-      }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+        fontSize: 10,
+        fontWeight: active ? '700' : '500',
+        color: active ? tint : mutedColor,
+        letterSpacing: 0.7,
+        textTransform: 'uppercase',
+        opacity: active ? 1 : 0.55,
+      }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
         {label}
       </Text>
     </TouchableOpacity>
@@ -10078,12 +10025,14 @@ function BottomTabButton({
       accessibilityRole="tab"
       accessibilityLabel={`${label} tab`}
       accessibilityState={{ selected: active }}>
+      {/* Thin top-edge accent line */}
+      <View style={[btStyles.activeIndicator, { backgroundColor: active ? tint : 'transparent' }]} />
       <View style={{ position: 'relative' }}>
         <Ionicons
           name={(active ? iconName.replace('-outline', '') : iconName) as any}
-          size={20}
+          size={22}
           color={active ? tint : mutedColor}
-          style={{ marginBottom: 2, opacity: active ? 1 : 0.7 }}
+          style={{ opacity: active ? 1 : 0.35 }}
         />
         {badge != null && badge > 0 && (
           <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 14, height: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
@@ -10091,8 +10040,8 @@ function BottomTabButton({
           </View>
         )}
       </View>
-      <Text style={[btStyles.label, { color: active ? tint : mutedColor }]} numberOfLines={1}>
-        {label}
+      <Text style={[btStyles.label, { color: active ? tint : mutedColor, opacity: active ? 1 : 0.35 }]} numberOfLines={1}>
+        {label.toUpperCase()}
       </Text>
     </TouchableOpacity>
   );
@@ -10103,11 +10052,20 @@ const btStyles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 6,
-    gap: 2,
+    paddingTop: 10,
+    paddingBottom: 4,
+    gap: 3,
+    position: 'relative',
   },
-  icon:  { fontSize: 18 },
-  label: { fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
+  activeIndicator: {
+    position: 'absolute',
+    top: 0,
+    width: 20,
+    height: 2,
+    borderRadius: 1,
+  },
+  icon:  { fontSize: 22 },
+  label: { fontSize: 9, fontWeight: '500', letterSpacing: 0.6 },
 });
 
 // ── FocusLabelCrossfade ─────────────────────────────────────────────────────
@@ -10395,23 +10353,22 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
             // triceps only. Pull = back/biceps. Legs = quads/hams/
             // glutes/calves. Upper = upper family. Full = anything.
             const PRIMARY_TO_LABEL: Record<string, string> = {
-              chest: 'Chest', back: 'Back', shoulders: 'Shoulders',
+              chest: 'Chest', back: 'Back', lats: 'Back', shoulders: 'Shoulders',
+              rear_delt: 'Shoulders',
               biceps: 'Arms', triceps: 'Arms',
               quads: 'Legs', hamstrings: 'Legs', calves: 'Legs',
               glutes: 'Glutes', core: 'Core', cardio: 'Cardio',
               full_body: 'Full Body',
             };
-            // Map for bro-split focuses that have slightly different muscle
-            // allowlists than FOCUS_MUSCLE_MAP (chest allows triceps but not shoulders for chip display)
             const CHIP_ALLOWED_MUSCLES: Record<string, string[]> = {
               push: ['chest', 'shoulders', 'triceps'],
               chest: ['chest', 'triceps'],
-              pull: ['back', 'biceps'],
-              back: ['back', 'biceps'],
+              pull: ['back', 'lats', 'biceps', 'rear_delt'],
+              back: ['back', 'lats', 'biceps', 'rear_delt'],
               legs: ['quads', 'hamstrings', 'glutes', 'calves'],
               lower: ['quads', 'hamstrings', 'glutes', 'calves'],
-              upper: ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
-              shoulders: ['shoulders'],
+              upper: ['chest', 'back', 'lats', 'shoulders', 'biceps', 'triceps'],
+              shoulders: ['shoulders', 'rear_delt'],
               arms: ['biceps', 'triceps'],
             };
             const focusKey = resolveFocusMuscleKey(focusLower);
@@ -10740,21 +10697,6 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   )}
                 </View>
               )}
-              {!isToday && (
-                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
-                  <PulseView active={false} intensity={0.02} duration={2000} style={{ flex: 2 }}>
-                    <PressableScale
-                      onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
-                      accessibilityRole="button"
-                      accessibilityLabel="Start workout">
-                      <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
-                        <Ionicons name="play-circle" size={22} color="#fff" />
-                        <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
-                      </View>
-                    </PressableScale>
-                  </PulseView>
-                </View>
-              )}
               <WorkoutCard
                 workout={item.workout!}
                 themeName={themeName}
@@ -10808,11 +10750,11 @@ const styles = StyleSheet.create({
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },
   headerLogoDark: { width: 280, height: 70 },
-  greeting:            { fontSize: 26, fontWeight: '700', color: colors.textPrimary, marginBottom: 6 },
+  greeting:            { fontSize: 26, fontWeight: '800', color: colors.textPrimary, marginBottom: 6, letterSpacing: -0.5 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
-  goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
-  goalBadgeText:   { fontSize: 12, color: colors.primary, fontWeight: '600' },
-  goalSubText:     { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
+  goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary },
+  goalBadgeText:   { fontSize: 11, color: colors.primary, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  goalSubText:     { fontSize: 11, color: colors.textSecondary, marginTop: 2, letterSpacing: 0.1 },
   planLoadingOverlay: {
     // Absolute + high zIndex so it covers the header, tabs, and everything
     // else. Previously this was `flex: 1` which made it a regular flex child
@@ -10850,10 +10792,9 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     flexDirection: 'row',
-    paddingTop: 8,
-    paddingBottom: 24,
+    paddingBottom: 20,
     paddingHorizontal: 4,
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
 
   // Placeholder content for the goals/progress/profile tabs until they
@@ -10891,17 +10832,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     zIndex: 6,
   },
-  // iOS-style segmented control wrap. Contains the SubTabBtn segments
-  // as equal-width flex children and gives them a rounded-pill
-  // container. Visually distinct from the bottom nav tabs so users
-  // read it as a mode filter, not a second nav level.
+  // Pill segmented control. Full-radius capsule container; active
+  // segments get a translucent tint fill rather than a solid fill so
+  // the selection reads as a glow instead of a block.
   segmentedWrap: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'stretch',
     padding: 3,
-    borderRadius: 10,
-    borderWidth: 1,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
     gap: 2,
   },
 
@@ -10917,7 +10857,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   checkinDot: { width: 6, height: 6, borderRadius: 3 },
-  checkinLabel: { flex: 1, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
+  checkinLabel: { flex: 1, fontSize: 10, fontWeight: '600', letterSpacing: 1.0, textTransform: 'uppercase' },
   checkinDots: { flexDirection: 'row', gap: 3 },
   checkinTick: { width: 4, height: 4, borderRadius: 2 },
 

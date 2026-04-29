@@ -271,19 +271,19 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           specific person's training. */}
       <View style={styles.tabStrip}>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
-          onPress={() => setActiveTab('friends')}
-        >
-          <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
-            Friends{friends.length > 0 ? `  ·  ${friends.length}` : ''}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
           style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
           onPress={() => setActiveTab('activity')}
         >
           <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
             Activity
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
+          onPress={() => setActiveTab('friends')}
+        >
+          <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
+            Friends{friends.length > 0 ? `  ·  ${friends.length}` : ''}
           </Text>
         </TouchableOpacity>
       </View>
@@ -543,7 +543,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   );
 
   if (inline) {
-    return <View style={{ flex: 1, backgroundColor: colors.background }}>{content}</View>;
+    return <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: spacing.sm }}>{content}</View>;
   }
 
   return (
@@ -582,21 +582,24 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
     title: { fontSize: 20, fontWeight: '800', color: colors.textPrimary },
     tabStrip: {
       flexDirection: 'row',
-      gap: 4,
+      gap: 2,
       marginBottom: spacing.md,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.border,
+      backgroundColor: colors.background,
+      borderRadius: 999,
+      padding: 3,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
     },
     tab: {
-      paddingVertical: 10,
-      paddingHorizontal: 16,
-      borderBottomWidth: 2,
-      borderBottomColor: 'transparent',
-      marginBottom: -1,
+      flex: 1,
+      paddingVertical: 6,
+      paddingHorizontal: 8,
+      borderRadius: 999,
+      alignItems: 'center',
     },
-    tabActive: { borderBottomColor: colors.primary },
-    tabText: { fontSize: 13, fontWeight: '600', color: colors.textMuted, letterSpacing: 0.3 },
-    tabTextActive: { color: colors.primary },
+    tabActive: { backgroundColor: colors.primary + '22' },
+    tabText: { fontSize: 10, fontWeight: '500', color: colors.textMuted, letterSpacing: 0.7, textTransform: 'uppercase', opacity: 0.55 },
+    tabTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
     card: {
       backgroundColor: colors.surface,
       borderColor: colors.border,

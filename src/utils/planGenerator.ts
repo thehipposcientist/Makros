@@ -479,9 +479,12 @@ const DEFAULT_MEAL_FOODS: Record<string, string[]> = {
 
 // Preferred food roles per meal — used to pick a balanced combo
 const MEAL_ROLE_PREFERENCES: Record<string, ('protein' | 'carb' | 'fat' | 'veg')[]> = {
-  Breakfast: ['protein', 'carb', 'veg'],
-  Lunch:     ['protein', 'carb', 'veg', 'fat'],
-  Dinner:    ['protein', 'carb', 'veg', 'fat'],
+  Breakfast:     ['protein', 'carb', 'veg'],
+  Lunch:         ['protein', 'carb', 'veg', 'fat'],
+  Dinner:        ['protein', 'carb', 'veg', 'fat'],
+  Snack:         ['protein', 'fat'],
+  'Pre-workout':  ['carb', 'protein'],
+  'Post-workout': ['protein', 'carb'],
 };
 
 function classifyFood(item: FoodItem): 'protein' | 'carb' | 'fat' | 'veg' {

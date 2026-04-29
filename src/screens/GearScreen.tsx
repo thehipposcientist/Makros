@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   StyleSheet,
+  Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,7 @@ import {
   updateGear,
   deleteGear,
   logGearMiles,
+  identifyGear,
   GearItem,
   GearItemCreate,
 } from '../services/api';
@@ -152,12 +154,14 @@ function GearFormModal({
   visible,
   initial,
   tc,
+  authToken,
   onSave,
   onCancel,
 }: {
   visible: boolean;
   initial: GearItem | null;
   tc: ReturnType<typeof getTheme>['colors'];
+  authToken: string;
   onSave: (body: GearItemCreate) => void;
   onCancel: () => void;
 }) {
@@ -167,6 +171,9 @@ function GearFormModal({
   const [threshold, setThreshold] = useState('');
   const [keywords, setKeywords] = useState('');
   const [notes, setNotes] = useState('');
+  const [aiScanning, setAiScanning] = useState(false);
+  const [aiPhoto, setAiPhoto] = useState<string | null>(null);
+  const [aiNote, setAiNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (visible) {
@@ -176,6 +183,8 @@ function GearFormModal({
       setThreshold(initial?.retirement_threshold_miles != null ? String(initial.retirement_threshold_miles) : '');
       setKeywords((initial?.auto_track_keywords ?? []).join(', '));
       setNotes(initial?.notes ?? '');
+      setAiPhoto(null);
+      setAiNote(null);
     }
   }, [visible, initial]);
 
@@ -188,6 +197,53 @@ function GearFormModal({
     if (!keywords) {
       const info = gearTypeInfo(type);
       setKeywords(info.defaultKeywords.join(', '));
+    }
+  };
+
+  const handleAIScan = async () => {
+    try {
+      const ImagePicker = await import('expo-image-picker');
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Allow photo access to scan your gear.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.6,
+        base64: true,
+        allowsEditing: true,
+        aspect: [4, 3],
+      });
+      if (result.canceled || !result.assets?.[0]?.base64) return;
+      const b64 = result.assets[0].base64!;
+      setAiPhoto(`data:image/jpeg;base64,${b64}`);
+      setAiScanning(true);
+      try {
+        const identified = await identifyGear(authToken, b64);
+        // Pre-fill form with AI results, but don't overwrite values the
+        // user already typed (only fill when the field is empty/default).
+        if (!name) setName(identified.name);
+        if (GEAR_TYPES.find(g => g.value === identified.gear_type)) {
+          handleGearTypeChange(identified.gear_type);
+        }
+        if (identified.estimated_miles != null && startingMiles === '0') {
+          setStartingMiles(String(Math.round(identified.estimated_miles)));
+        }
+        if (identified.retirement_threshold_miles != null && !threshold) {
+          setThreshold(String(Math.round(identified.retirement_threshold_miles)));
+        }
+        const conf = identified.confidence === 'high' ? '✓ High confidence'
+          : identified.confidence === 'medium' ? '~ Medium confidence'
+          : '? Low confidence — please verify';
+        setAiNote(`${conf}${identified.notes ? `\n${identified.notes}` : ''}`);
+      } catch {
+        setAiNote('AI identification failed — fill in manually.');
+      } finally {
+        setAiScanning(false);
+      }
+    } catch {
+      Alert.alert('Photo error', 'Could not open photo library.');
     }
   };
 
@@ -222,6 +278,44 @@ function GearFormModal({
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }}>
+          {/* AI scan — only show when adding new gear */}
+          {!initial && (
+            <View style={{ marginBottom: 20 }}>
+              <TouchableOpacity
+                onPress={handleAIScan}
+                disabled={aiScanning}
+                style={{
+                  flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: tc.primary + '18', borderRadius: 12, borderWidth: 1,
+                  borderColor: tc.primary + '55', padding: 14, gap: 8,
+                }}
+              >
+                {aiScanning
+                  ? <ActivityIndicator size="small" color={tc.primary} />
+                  : <Ionicons name="camera-outline" size={20} color={tc.primary} />}
+                <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 15 }}>
+                  {aiScanning ? 'Scanning…' : 'Scan Gear with AI'}
+                </Text>
+              </TouchableOpacity>
+              {aiPhoto && !aiScanning && (
+                <Image
+                  source={{ uri: aiPhoto }}
+                  style={{ width: '100%', height: 120, borderRadius: 10, marginTop: 10, resizeMode: 'cover' }}
+                />
+              )}
+              {aiNote && !aiScanning && (
+                <View style={{ backgroundColor: tc.surface, borderRadius: 8, padding: 10, marginTop: 8, borderWidth: 1, borderColor: tc.border }}>
+                  <Text style={{ color: tc.textSecondary, fontSize: 12, lineHeight: 18 }}>{aiNote}</Text>
+                </View>
+              )}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
+                <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
+                <Text style={{ color: tc.textMuted, fontSize: 11 }}>or fill in manually</Text>
+                <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
+              </View>
+            </View>
+          )}
+
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>NAME</Text>
           <TextInput
             style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
@@ -363,7 +457,7 @@ interface Props {
   onBack?: () => void;
 }
 
-export default function GearScreen({ authToken, themeName = 'midnight', onBack }: Props) {
+export default function GearScreen({ authToken, themeName = 'slate', onBack }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -496,6 +590,7 @@ export default function GearScreen({ authToken, themeName = 'midnight', onBack }
         visible={showForm}
         initial={editTarget}
         tc={tc}
+        authToken={authToken}
         onSave={handleSave}
         onCancel={() => { setShowForm(false); setEditTarget(null); }}
       />

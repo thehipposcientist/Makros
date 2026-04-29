@@ -909,6 +909,41 @@ def generate_full_week(
         except Exception as e:
             logger.warning(f"[generate-week] plan persistence failed: {e}")
 
+        # Also patch the active PlanWeek's PlanDay rows so the schedule
+        # (which is driven by PlanWeek, not WorkoutPlan) reflects the change.
+        try:
+            from app.models import PlanWeek, PlanDay
+            pw = db.exec(
+                select(PlanWeek).where(
+                    PlanWeek.user_id == current_user.id,
+                    PlanWeek.status == "active",
+                )
+            ).first()
+            if pw:
+                # Training PlanDay rows in calendar order → recipe index k
+                training_days = sorted(
+                    [pd for pd in db.exec(
+                        select(PlanDay).where(PlanDay.plan_week_id == pw.id)
+                    ).all() if not pd.is_rest],
+                    key=lambda pd: pd.day_index,
+                )
+                now2 = datetime.now(timezone.utc)
+                for recipe_idx in cdt_result.changed_indices:
+                    if recipe_idx < len(training_days) and recipe_idx < len(result_days):
+                        pd_row = training_days[recipe_idx]
+                        if not pd_row.locked:
+                            pd_row.workout_json = result_days[recipe_idx]
+                            pd_row.generation_source = "change_focus"
+                            pd_row.updated_at = now2
+                            db.add(pd_row)
+                db.commit()
+                logger.info(
+                    f"[generate-week] patched PlanDay rows user={current_user.id} "
+                    f"changed={cdt_result.changed_indices}"
+                )
+        except Exception as e:
+            logger.warning(f"[generate-week] PlanDay patch failed (non-fatal): {e}")
+
         return {
             "days": result_days,
             "total_days_in_recipe": len(result_days),

@@ -1964,42 +1964,6 @@ function AccountInfoModal({
             </TouchableOpacity>
           </Modal>
 
-          {showHealthToggle && (
-            <View style={am.healthToggleRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={am.healthToggleLabel}>Apple Health</Text>
-                <Text style={am.healthToggleDesc}>Sync heart rate, steps, sleep, and workouts to enhance your fitness score and recovery tracking.</Text>
-              </View>
-              <Switch
-                value={healthEnabled}
-                onValueChange={async (val) => {
-                  if (val) {
-                    if (!isHealthKitAvailable()) {
-                      // Native module not loaded — need a custom dev build
-                      Alert.alert(
-                        'Dev Build Required',
-                        'Apple Health requires a custom Expo dev build. It is not available in Expo Go. Enable this setting once you have a dev build installed.',
-                      );
-                      // Still save the preference so it activates once they build
-                      setHealthEnabled(true);
-                      await setAppleHealthEnabled(true);
-                      return;
-                    }
-                    const granted = await requestHealthPermissions();
-                    if (!granted) {
-                      Alert.alert('Permission Required', 'Please enable Health access in Settings > Privacy > Health > Thallo.');
-                      return;
-                    }
-                  }
-                  setHealthEnabled(val);
-                  await setAppleHealthEnabled(val);
-                }}
-                trackColor={{ false: tc.border, true: tc.primary + '66' }}
-                thumbColor={healthEnabled ? tc.primary : tc.textMuted}
-              />
-            </View>
-          )}
-
           {/* DEV: Subscription tier toggle. Flips between free (manual tracking
               only) and pro (full AI features). Writes back to the profile
               immediately so gates take effect without navigating away. */}

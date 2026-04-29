@@ -3362,15 +3362,15 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   title:   { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
 
   tabs: {
-    flexDirection: 'row', gap: 3,
-    backgroundColor: colors.surface, borderRadius: radius.md,
-    padding: 3, borderWidth: 1, borderColor: colors.border,
+    flexDirection: 'row', gap: 2,
+    backgroundColor: colors.background, borderRadius: 999,
+    padding: 3, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
     marginHorizontal: 16, marginTop: 8, marginBottom: 4,
   },
-  tab:           { flex: 1, paddingVertical: 9, borderRadius: radius.sm, alignItems: 'center' },
-  tabActive:     { backgroundColor: colors.primary },
-  tabText:       { fontSize: 11, fontWeight: '600', color: colors.textSecondary },
-  tabTextActive: { color: colors.background },
+  tab:           { flex: 1, paddingVertical: 6, borderRadius: 999, alignItems: 'center' },
+  tabActive:     { backgroundColor: colors.primary + '22' },
+  tabText:       { fontSize: 10, fontWeight: '500', color: colors.textSecondary, letterSpacing: 0.7, textTransform: 'uppercase', opacity: 0.55 },
+  tabTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
 
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
   // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px +

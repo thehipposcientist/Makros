@@ -110,6 +110,36 @@ def detect_conflicts(
                         affected_days=[changed_idx, ni],
                     ))
 
+    # 1b. Upper/push/pull overlap: Upper covers all upper-body muscles
+    # (chest + shoulders + triceps + back + biceps + lats), so placing it
+    # next to a Push or Pull day means those muscles get hit two days in a
+    # row. Push+Pull adjacency is intentional PPL design and is NOT warned.
+    _UPPER_OVERLAP_PARTNERS = {"push", "pull", "chest", "back", "shoulders", "arms"}
+    new_raw_fam = _focus_family(new_focus)
+    if new_is_lift:
+        for offset in (-1, 1):
+            ni = changed_idx + offset
+            if 0 <= ni < len(week):
+                neighbor = week[ni]
+                if not neighbor.is_lifting:
+                    continue
+                nbr_fam = _focus_family(neighbor.focus)
+                label = "previous" if offset == -1 else "next"
+                if new_raw_fam == "upper" and nbr_fam in _UPPER_OVERLAP_PARTNERS - {"upper"}:
+                    conflicts.append(Conflict(
+                        kind="adjacency",
+                        severity="warn",
+                        message=f"Upper covers push+pull muscles — back-to-back with {label} {neighbor.focus} day hits the same muscles.",
+                        affected_days=[changed_idx, ni],
+                    ))
+                elif new_raw_fam in _UPPER_OVERLAP_PARTNERS - {"upper"} and nbr_fam == "upper":
+                    conflicts.append(Conflict(
+                        kind="adjacency",
+                        severity="warn",
+                        message=f"{new_focus} overlaps with {label} Upper day's muscles.",
+                        affected_days=[changed_idx, ni],
+                    ))
+
     # 2. Missing focus: a split-required family is absent
     if split and new_is_lift:
         cycle = _canonical_cycle_for_split(split)

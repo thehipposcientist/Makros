@@ -339,7 +339,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [targetEvent, setTargetEvent] = useState<string>(
     profile.goalDetails.targetEvent ?? ''
   );
-  const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'midnight');
+  const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'slate');
   // Dev toggle for the free/pro tier. Default to whatever the profile has;
   // undefined → pro so existing users keep the full feature set.
   const [subscriptionTier, setSubscriptionTier] = useState<'free' | 'pro'>(
@@ -1435,30 +1435,32 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={[styles.content, noHeader && { paddingBottom: 16 }]} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
 
-        {/* ── Name ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Name</Text>
-          <View style={{ flexDirection: 'row', gap: 10 }}>
-            <TextInput
-              style={[styles.textField, { flex: 1 }]}
-              value={firstName}
-              onChangeText={setFirstName}
-              placeholder="First name"
-              placeholderTextColor={tc.textMuted}
-              autoCapitalize="words"
-              returnKeyType="next"
-            />
-            <TextInput
-              style={[styles.textField, { flex: 1 }]}
-              value={lastName}
-              onChangeText={setLastName}
-              placeholder="Last name"
-              placeholderTextColor={tc.textMuted}
-              autoCapitalize="words"
-              returnKeyType="done"
-            />
+        {/* ── Name — only in profile / goal / workout modes, not mealplan ── */}
+        {mode !== 'mealplan' && (
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Name</Text>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TextInput
+                style={[styles.textField, { flex: 1 }]}
+                value={firstName}
+                onChangeText={setFirstName}
+                placeholder="First name"
+                placeholderTextColor={tc.textMuted}
+                autoCapitalize="words"
+                returnKeyType="next"
+              />
+              <TextInput
+                style={[styles.textField, { flex: 1 }]}
+                value={lastName}
+                onChangeText={setLastName}
+                placeholder="Last name"
+                placeholderTextColor={tc.textMuted}
+                autoCapitalize="words"
+                returnKeyType="done"
+              />
+            </View>
           </View>
-        </View>
+        )}
 
         {mode === 'goal' && (
         <>

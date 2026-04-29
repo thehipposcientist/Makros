@@ -169,21 +169,28 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
                 }
             }
-            if let data = try? JSONSerialization.data(withJSONObject: w),
-               let decoded = try? JSONDecoder().decode(WatchWorkout.self, from: data) {
-                // Reject only if userId is explicitly present AND wrong.
-                // Missing userId (legacy/transitional payloads) passes through.
-                let stored = currentUserId ?? ""
-                let wUserId = decoded.userId ?? ""
-                if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
-                    HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
-                } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
-                    HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil")")
-                    self.workout = decoded
-                } else {
-                    HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
+            if let data = try? JSONSerialization.data(withJSONObject: w) {
+                let decoder = JSONDecoder()
+                do {
+                    let decoded = try decoder.decode(WatchWorkout.self, from: data)
+                    // Reject only if userId is explicitly present AND wrong.
+                    // Missing userId (legacy/transitional payloads) passes through.
+                    let stored = currentUserId ?? ""
+                    let wUserId = decoded.userId ?? ""
+                    if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
+                        HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
+                    } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
+                        HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil")")
+                        self.workout = decoded
+                    } else {
+                        HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
+                    }
+                } catch {
+                    HeartRateStore.saveDiag("workout decode failed: \(error)")
                 }
             }
+        } else if ctx.keys.contains("workout") {
+            HeartRateStore.saveDiag("workout key present but not a dict: \(type(of: ctx["workout"]))")
         }
         if let m = ctx["meals"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: m),
@@ -233,7 +240,15 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     private func absorbMessage(_ msg: [String: Any]) {
-        guard let kind = msg["kind"] as? String else { return }
+        guard let kind = msg["kind"] as? String else {
+            // No kind key — this is a context-style push that arrived via
+            // sendMessage/transferUserInfo because updateApplicationContext
+            // failed (size limit, session state, etc.). Route straight into
+            // absorbContext so workout/meals/theme are processed normally.
+            HeartRateStore.saveDiag("absorbMessage: no kind — routing to absorbContext (keys=\(msg.keys.sorted().joined(separator: ",")))")
+            absorbContext(msg)
+            return
+        }
         // Forward userId from the message into the context dict so
         // absorbContext can process user switches on individual messages
         // (not just full applicationContext pushes).

@@ -14,6 +14,13 @@
 //
 // Privacy rule: never reads or displays kcal/macros/weight. Items
 // from soft-deleted users render as "unknown" (backend filter).
+//
+// De-duplication: one card per (user_id, workout_date). A single
+// workout can produce multiple DB rows — an auto `workout_completed`
+// event plus a manual `workout_post` share plus one `pr_achieved` per
+// new record. The feed groups them: workout_post beats
+// workout_completed for the headline card; PR items attach as inline
+// badges instead of separate blank cards.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -54,6 +61,8 @@ interface Props {
 // One bounded fetch — no pagination by design. The view is an "is
 // anything new?" check, not a content destination.
 const DEFAULT_MAX_ITEMS = 10;
+
+type GroupedItem = { workout: FeedItem; prs: FeedItem[] };
 
 function formatRelative(iso: string): string {
   if (!iso) return '';
@@ -98,13 +107,13 @@ export default function SocialFeedView({
     setLoading(true);
     try {
       const r = await getSocialFeed(authToken);
-      setItems(r.items.slice(0, cap));
+      setItems(r.items); // store all; deduplication happens in displayItems memo
     } catch {
       // Silent — empty-state handles "couldn't load" via UI signal.
     } finally {
       setLoading(false);
     }
-  }, [authToken, cap]);
+  }, [authToken]);
 
   useEffect(() => { loadInitial(); }, [loadInitial, refreshKey]);
 
@@ -112,10 +121,42 @@ export default function SocialFeedView({
     setRefreshing(true);
     try {
       const r = await getSocialFeed(authToken);
-      setItems(r.items.slice(0, cap));
+      setItems(r.items);
     } catch { /* keep current items on transient failure */ }
     finally { setRefreshing(false); }
-  }, [authToken, cap]);
+  }, [authToken]);
+
+  // Group into one card per (user_id, workout_date).
+  // Two passes so PR items (written after workout_completed, thus
+  // appearing earlier in the desc-sorted list) still attach correctly.
+  const displayItems = useMemo((): GroupedItem[] => {
+    const groups = new Map<string, GroupedItem>();
+
+    // Pass 1: build workout cards
+    for (const item of items) {
+      if (item.event_type !== 'workout_completed' && item.event_type !== 'workout_post') continue;
+      const date = item.payload.date ?? item.created_at.slice(0, 10);
+      const key = `${item.user_id}:${date}`;
+      const existing = groups.get(key);
+      if (!existing) {
+        groups.set(key, { workout: item, prs: [] });
+      } else if (item.event_type === 'workout_post' && existing.workout.event_type !== 'workout_post') {
+        // Prefer the intentional manual share over the auto-written event
+        existing.workout = item;
+      }
+    }
+
+    // Pass 2: attach PR badges to their parent workout card
+    for (const item of items) {
+      if (item.event_type !== 'pr_achieved') continue;
+      const date = item.payload.date ?? item.created_at.slice(0, 10);
+      const key = `${item.user_id}:${date}`;
+      const g = groups.get(key);
+      if (g) g.prs.push(item);
+    }
+
+    return Array.from(groups.values()).slice(0, cap);
+  }, [items, cap]);
 
   const handleLike = useCallback(async (item: FeedItem) => {
     // Optimistic flip.
@@ -143,11 +184,33 @@ export default function SocialFeedView({
     }
   }, [authToken]);
 
-  const renderItem = useCallback(({ item }: { item: FeedItem }) => {
+  const renderItem = useCallback(({ item: grouped }: { item: GroupedItem }) => {
+    const { workout: item, prs } = grouped;
     const author = item.display_name ?? item.username;
-    const summary = item.payload.workout_summary;
+
+    // workout_post has explicit workout_summary; workout_completed stores
+    // the same data at the top level of payload — normalise to one shape.
+    const summary = item.payload.workout_summary ?? (
+      item.event_type === 'workout_completed' ? {
+        focus: item.payload.focus ?? 'Workout',
+        duration_seconds: item.payload.duration_seconds ?? 0,
+        date: item.payload.date ?? '',
+        exercises: (item.payload.exercises ?? []).map((ex: any) => ({
+          name: ex.name,
+          sets: (ex.sets ?? []).map((s: any) => ({ reps: s.reps, weight_lbs: s.weight ?? 0 })),
+        })),
+        total_sets: (item.payload.exercises ?? [])
+          .reduce((t: number, ex: any) => t + (ex.sets?.length ?? 0), 0),
+        total_reps: (item.payload.exercises ?? [])
+          .reduce((t: number, ex: any) =>
+            t + (ex.sets ?? []).reduce((r: number, s: any) => r + (s.reps || 0), 0), 0),
+        training_rating: undefined as string | undefined,
+      } : null
+    );
+
     const caption = item.payload.caption;
     const photo = item.payload.photo_base64;
+
     return (
       <View style={styles.card}>
         <View style={styles.cardHeader}>
@@ -168,8 +231,6 @@ export default function SocialFeedView({
               </Text>
             </View>
           </TouchableOpacity>
-          {/* Show delete affordance only on own posts. The backend's
-              ownership check still gates the destructive call. */}
         </View>
 
         {caption ? (
@@ -220,6 +281,20 @@ export default function SocialFeedView({
           </View>
         ) : null}
 
+        {prs.length > 0 ? (
+          <View style={styles.prRow}>
+            {prs.map((pr, i) => (
+              <View key={i} style={styles.prBadge}>
+                <Ionicons name="trophy-outline" size={10} color={colors.warning ?? '#F59E0B'} />
+                <Text style={styles.prText} numberOfLines={1}>
+                  {pr.payload.exercise}
+                  {pr.payload.value != null ? `  ${pr.payload.value} ${pr.payload.unit ?? 'lbs'}` : ''}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
         <View style={styles.actionRow}>
           <TouchableOpacity
             onPress={() => handleLike(item)}
@@ -241,7 +316,7 @@ export default function SocialFeedView({
     );
   }, [styles, colors, pendingLikes, onViewAuthor, handleLike]);
 
-  const keyExtractor = useCallback((it: FeedItem) => String(it.id), []);
+  const keyExtractor = useCallback((it: GroupedItem) => String(it.workout.id), []);
 
   if (loading && items.length === 0) {
     return (
@@ -300,7 +375,7 @@ export default function SocialFeedView({
 
   return (
     <FlatList
-      data={items}
+      data={displayItems}
       keyExtractor={keyExtractor}
       renderItem={renderItem}
       contentContainerStyle={styles.listContent}
@@ -313,9 +388,6 @@ export default function SocialFeedView({
         />
       }
       ListEmptyComponent={
-        // Calmer empty state — no "be the first?" performative prompt.
-        // Recent Activity is "what's new since you checked," not a
-        // content destination, so emptiness is normal, not a fail state.
         <View style={styles.empty}>
           <Ionicons name="checkmark-circle-outline" size={28} color={colors.textMuted} />
           <Text style={styles.emptyTitle}>You're all caught up</Text>
@@ -325,10 +397,7 @@ export default function SocialFeedView({
         </View>
       }
       ListFooterComponent={
-        // Soft "you're caught up" footer at the end of a non-empty
-        // list, so the bounded view doesn't read as "broken" or
-        // "incomplete." Only shown when at the cap.
-        items.length >= cap ? (
+        displayItems.length >= cap ? (
           <View style={{ paddingVertical: 14, alignItems: 'center' }}>
             <Text style={{ fontSize: 11, color: colors.textMuted }}>
               Showing latest {cap}. Older activity lives on each friend's profile.
@@ -384,6 +453,14 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     summaryStat: { fontSize: 12, color: c.textSecondary },
     summaryStatNum: { fontWeight: '700', color: c.textPrimary },
     summaryStatDot: { fontSize: 12, color: c.textMuted },
+    prRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    prBadge: {
+      flexDirection: 'row', alignItems: 'center', gap: 4,
+      paddingHorizontal: 8, paddingVertical: 3,
+      backgroundColor: c.surface,
+      borderRadius: 10, borderWidth: 1, borderColor: c.border,
+    },
+    prText: { fontSize: 11, fontWeight: '600', color: c.textSecondary, maxWidth: 160 },
     actionRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingTop: 4 },
     likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
     likeCount: { fontSize: 12, color: c.textSecondary, fontWeight: '600', minWidth: 12 },

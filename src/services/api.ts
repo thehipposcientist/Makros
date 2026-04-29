@@ -3705,3 +3705,20 @@ export async function getGearRecommendations(token: string): Promise<GearItem[]>
   });
 }
 
+export interface GearIdentifyResult {
+  name: string;
+  gear_type: string;
+  estimated_miles: number | null;
+  retirement_threshold_miles: number | null;
+  confidence: 'high' | 'medium' | 'low';
+  notes: string | null;
+}
+
+export async function identifyGear(token: string, imageBase64: string): Promise<GearIdentifyResult> {
+  return request<GearIdentifyResult>('/gear/identify', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ image_base64: imageBase64 }),
+  });
+}
+

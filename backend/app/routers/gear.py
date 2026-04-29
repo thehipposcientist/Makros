@@ -5,8 +5,11 @@ auto-accumulates miles from workout completions based on keyword matching,
 and surfaces retirement recommendations when thresholds approach.
 """
 
+import base64
+import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -155,8 +158,6 @@ class MileageLogBody(GearItemCreate):
         pass
 
 
-from pydantic import BaseModel
-
 class LogMilesBody(BaseModel):
     miles: float = 0.0
     sessions: int = 1
@@ -184,6 +185,106 @@ def log_miles(
     db.commit()
     db.refresh(item)
     return _compute_fields(item)
+
+
+# ─── AI gear identification ──────────────────────────────────────────────────
+
+class GearIdentifyBody(BaseModel):
+    image_base64: str  # data URI or raw base64 JPEG/PNG
+
+class GearIdentifyResult(BaseModel):
+    name: str
+    gear_type: str
+    estimated_miles: float | None = None
+    retirement_threshold_miles: float | None = None
+    confidence: str  # "high" | "medium" | "low"
+    notes: str | None = None
+
+
+@router.post("/identify", response_model=GearIdentifyResult)
+def identify_gear(
+    body: GearIdentifyBody,
+    current_user: User = Depends(get_current_user),
+):
+    """Use GPT-4o vision to identify gear from a photo and estimate mileage."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI identification unavailable")
+
+    # Strip data URI prefix if present
+    img_data = body.image_base64
+    if "," in img_data:
+        img_data = img_data.split(",", 1)[1]
+
+    # Validate it's real base64
+    try:
+        base64.b64decode(img_data, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image")
+
+    import json
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
+    system = (
+        "You are a fitness gear expert. The user will show you a photo of their "
+        "athletic gear (running shoes, trail shoes, road bike, mountain bike, "
+        "gym shoes, weightlifting shoes, etc.). Identify it and estimate its "
+        "current mileage and remaining lifespan based on visible wear. "
+        "Respond ONLY with a JSON object — no markdown, no commentary.\n"
+        "JSON shape:\n"
+        "{\n"
+        '  "name": "Brand Model Name (e.g. Nike Pegasus 40)",\n'
+        '  "gear_type": one of ["running_shoe","trail_shoe","road_bike",'
+        '"mountain_bike","gym_shoe","weightlifting_shoe","other"],\n'
+        '  "estimated_miles": float or null (miles already on the gear based on wear),\n'
+        '  "retirement_threshold_miles": float or null (expected total lifespan),\n'
+        '  "confidence": "high"|"medium"|"low",\n'
+        '  "notes": "Short note about visible wear or identification confidence"\n'
+        "}"
+    )
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_data}",
+                            "detail": "low",
+                        },
+                    },
+                    {"type": "text", "text": "Identify this gear and estimate its mileage."},
+                ],
+            },
+        ],
+        max_tokens=300,
+    )
+
+    raw = resp.choices[0].message.content or "{}"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # Strip markdown fences if present
+        clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            parsed = json.loads(clean)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=502, detail="AI returned unparseable response")
+
+    return GearIdentifyResult(
+        name=str(parsed.get("name", "Unknown gear")),
+        gear_type=str(parsed.get("gear_type", "other")),
+        estimated_miles=parsed.get("estimated_miles"),
+        retirement_threshold_miles=parsed.get("retirement_threshold_miles"),
+        confidence=str(parsed.get("confidence", "low")),
+        notes=parsed.get("notes"),
+    )
 
 
 # ─── Retirement recommendations ───────────────────────────────────────────────

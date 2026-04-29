@@ -860,10 +860,10 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
 
 };
 
-export const colors = APP_THEMES.midnight.colors;
+export const colors = APP_THEMES.slate.colors;
 
 export function getTheme(themeName?: AppThemeName | string): AppTheme {
-  return (APP_THEMES as Record<string, AppTheme>)[themeName ?? 'midnight'] ?? APP_THEMES.midnight;
+  return (APP_THEMES as Record<string, AppTheme>)[themeName ?? 'slate'] ?? APP_THEMES.slate;
 }
 
 export const radius = {

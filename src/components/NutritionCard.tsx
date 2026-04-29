@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager, Animated } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager, Animated, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -37,6 +37,9 @@ interface NutritionCardProps {
   /** Regenerate a single meal with a fresh seed, preserving calorie/macro targets.
    *  Shuffles ingredients within the same nutrient envelope. */
   onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
+  /** When set to a meal key, that meal row shows a loading spinner while
+   *  the shuffle async operation is in flight. */
+  shufflingMealKey?: string | null;
   goal?: string;
   /** Lowercase names of the user's Favorites. Used to show a
    *  "Saved" state on meal rows whose name already lives in the
@@ -94,6 +97,7 @@ export default function NutritionCard({
   onRenameMeal,
   onMoveMeal,
   onShuffleMeal,
+  shufflingMealKey,
   onToggleSave,
   goal,
   savedMealNames,
@@ -854,6 +858,7 @@ export default function NutritionCard({
               onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
               onRenameMeal={onRenameMeal}
               onShuffle={onShuffleMeal ? () => onShuffleMeal(key, meal) : undefined}
+              isShuffling={shufflingMealKey === key}
               onToggleSave={onToggleSave}
               colors={colors}
               styles={styles}
@@ -957,7 +962,7 @@ function MacroTracker({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, onToggleSave, colors, styles, mealAccent, isSaved }: {
+function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, isShuffling, onToggleSave, colors, styles, mealAccent, isSaved }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -972,6 +977,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   onMoveUp?: () => void;
   onMoveDown?: () => void;
   onShuffle?: () => void;
+  isShuffling?: boolean;
   onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
@@ -1169,6 +1175,9 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
             it reads as a secondary action, not the primary CTA. The
             primary action on a meal row is the check box on the left. */}
         <View style={styles.iconStrip}>
+          {isShuffling && (
+            <ActivityIndicator size="small" color={mealAccent.strong} style={{ marginRight: 4 }} />
+          )}
           {onEdit && (
             <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel={`Edit ${meal.meal}`}>
               <Ionicons name="pencil-outline" size={16} color={colors.textMuted} />
